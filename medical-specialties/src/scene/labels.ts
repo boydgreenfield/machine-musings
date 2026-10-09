@@ -15,7 +15,7 @@ interface LabelState {
   priority: number;
 }
 
-const FONT_SIZE: Record<string, number> = { root: 4.6, specialty: 2.7, subspecialty: 1.55, fellowship: 1.35 };
+const FONT_SIZE: Record<string, number> = { root: 3.6, specialty: 2.7, subspecialty: 1.55, fellowship: 1.35 };
 
 /**
  * Billboarded SDF text labels. Visibility blends tier, label density, camera
@@ -80,7 +80,7 @@ export class Labels {
         default: base = density >= 0.9 ? 1 : density >= 0.66 ? near : 0;
       }
       if (focus.has(i)) base = 1;
-      else if (hasFocus) base *= 0.12;
+      else if (hasFocus) base *= s.node.tier === 'specialty' ? 0.12 : 0;
       s.want = base * vis[i] * (0.25 + 0.75 * emph[i]);
       s.text.position.set(x, y + s.node.radius * (vis[i] + 0.0001) + 0.5, z);
       s.text.quaternion.copy(camera.quaternion);

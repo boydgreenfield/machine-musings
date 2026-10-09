@@ -9,7 +9,7 @@ function esc(s: string) {
 }
 
 /** Subsequence match with a preference for word starts and contiguous runs. */
-function fuzzy(query: string, text: string): { score: number; ranges: [number, number][] } | null {
+export function fuzzy(query: string, text: string): { score: number; ranges: [number, number][] } | null {
   const q = query.toLowerCase();
   const t = text.toLowerCase();
   if (!q) return { score: 0, ranges: [] };
@@ -21,14 +21,17 @@ function fuzzy(query: string, text: string): { score: number; ranges: [number, n
   // Subsequence
   let ti = 0, score = 0, run = 0;
   const ranges: [number, number][] = [];
+  const sep = /[\s\-–&/(]/;
   for (let qi = 0; qi < q.length; qi++) {
     const c = q[qi];
     if (c === ' ') continue;
-    const at = t.indexOf(c, ti);
+    // Each character must either continue the current run or start a new word,
+    // so "pem" matches "Pediatric Emergency Medicine" but "onco" cannot match "urOgyNeCOlogy".
+    let at = -1;
+    if (t[ti] === c) at = ti;
+    else for (let k = t.indexOf(c, ti); k >= 0; k = t.indexOf(c, k + 1)) { if (k === 0 || sep.test(t[k - 1])) { at = k; break; } }
     if (at < 0) return null;
-    const wordStart = at === 0 || /[\s\-–&/(]/.test(t[at - 1]);
-    // Only accept characters that start a word or continue a run, so "onco" cannot match "urOgyNeCOlogy".
-    if (!wordStart && at !== ti) return null;
+    const wordStart = at === 0 || sep.test(t[at - 1]);
     run = at === ti ? run + 1 : 0;
     score += (wordStart ? 8 : 1) + run * 3 - (at - ti) * 0.3;
     const last = ranges[ranges.length - 1];

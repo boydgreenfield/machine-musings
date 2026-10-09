@@ -115,7 +115,7 @@ export class Atlas {
     this.labels = new Labels(graph, fontUrl);
     this.stars = new Stars();
     this.guides = new Guides(fontUrl);
-    this.scene.add(this.stars.points, this.edges.lines, this.edges.flow, this.nodes.mesh, this.nodes.halos, this.labels.group, this.guides.group);
+    this.scene.add(this.stars.points, this.edges.lines, this.edges.flow, this.nodes.mesh, this.nodes.halos, this.nodes.rings, this.labels.group, this.guides.group);
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -263,8 +263,8 @@ export class Atlas {
     const node = this.nodeTarget(n);
     const aspect = this.camera.aspect || 1.6;
     const portrait = aspect < 1.3;
-    let dist = n.tier === 'specialty' ? 30 + n.radius * 6 : 14 + n.radius * 7;
-    if (portrait) dist *= Math.pow(1.3 / aspect, 0.6);
+    let dist = n.tier === 'specialty' ? 50 + n.radius * 14 : 38 + n.radius * 14;
+    if (portrait) dist *= Math.min(3, Math.pow(1.6 / aspect, 0.9));
     // Keep the current viewing direction, lifted a little, so the flight feels like a zoom.
     const dir = this.camera.position.clone().sub(this.controls.target);
     if (dir.lengthSq() < 1e-3) dir.set(0, 0.4, 1);
@@ -290,7 +290,7 @@ export class Atlas {
     const target = new Vector3(...meta.camera.target);
     const position = new Vector3(...meta.camera.position);
     const aspect = this.camera.aspect || 1.6;
-    const fit = aspect < 1.3 ? Math.pow(1.3 / aspect, 0.75) : 1;
+    const fit = aspect < 1.4 ? Math.min(3, Math.pow(1.4 / aspect, 0.85)) : 1;
     position.sub(target).multiplyScalar(fit).add(target);
     return { position, target };
   }
@@ -421,6 +421,7 @@ export class Atlas {
     if (this.pointerDirty && !this.flight) { this.pointerDirty = false; this.pick(); }
     if (this.hovered) this.events.onHover(this.hovered, this.pointerClient.x, this.pointerClient.y);
 
+    this.nodes.setBillboard(this.camera.quaternion);
     this.nodes.update(this.posDisplay, dt, this.time);
     this.edges.update(this.posDisplay, this.nodes.colorCurrent, this.nodes.visCurrent, dt, this.time, s.flow);
     this.labels.update(this.posDisplay, this.nodes.visCurrent, this.nodes.emphCurrent, this.focus, !!s.selected, s.labelDensity, this.camera, this.canvas.clientHeight, dt);

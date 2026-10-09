@@ -507,7 +507,7 @@ const subs: NodeDef[] = [
   // ── Thoracic Surgery ───────────────────────────────────────────────────────
   N({ id: 'congenital-cardiac-surgery', name: 'Congenital Cardiac Surgery', tier: 'subspecialty', parents: ['thoracic-surgery'], category: 'surgical', domain: 'heart', credential: 'subspecialty', boards: ['ABTS'], fellowship: 1, workforce: 300,
     description: 'Surgical repair of heart defects in newborns, children, and adults.',
-    note: 'Fewer than 150 surgeons in the United States perform the majority of these operations.' }),
+    note: 'Only a few hundred surgeons practise it in the United States, concentrated in a few dozen centres.' }),
 
   // ── Orthopaedic Surgery ────────────────────────────────────────────────────
   N({ id: 'orthopaedic-sports-medicine', name: 'Orthopaedic Sports Medicine', short: 'Ortho Sports', tier: 'subspecialty', parents: ['orthopaedic-surgery'], category: 'surgical', domain: 'bone', credential: 'subspecialty', boards: ['ABOS'], fellowship: 1, workforce: 2500,
@@ -594,7 +594,7 @@ const subs: NodeDef[] = [
     description: 'Diagnosis of leukaemia, lymphoma, and other diseases of blood and bone marrow.' }),
   N({ id: 'forensic-pathology', name: 'Forensic Pathology', tier: 'subspecialty', parents: ['pathology'], category: 'diagnostic', domain: 'image', credential: 'subspecialty', boards: ['ABPath'], fellowship: 1, workforce: 700,
     description: 'Determining cause and manner of death for the medical examiner and the courts.',
-    note: 'A national shortage: roughly 750 full-time forensic pathologists serve a country that needs about twice as many.' }),
+    note: 'A national shortage: fewer than a thousand practise full-time in the United States, roughly half the number needed.' }),
   N({ id: 'neuropathology', name: 'Neuropathology', tier: 'subspecialty', parents: ['pathology'], category: 'diagnostic', domain: 'brain', credential: 'subspecialty', boards: ['ABPath'], fellowship: 2, workforce: 600,
     description: 'Microscopic diagnosis of brain tumours, neurodegeneration, and muscle and nerve disease.' }),
   N({ id: 'medical-microbiology', name: 'Medical Microbiology', tier: 'subspecialty', parents: ['pathology'], category: 'diagnostic', domain: 'immune', credential: 'subspecialty', boards: ['ABPath'], fellowship: 1, workforce: 400,
@@ -666,7 +666,7 @@ const subs: NodeDef[] = [
     description: 'Health and safety of workers and the effects of workplace and environmental exposures.' }),
   N({ id: 'aerospace-medicine', name: 'Aerospace Medicine', tier: 'specialty', parents: ['preventive-medicine'], category: 'population', domain: 'pop', credential: 'board', boards: ['ABPM'], fellowship: 0, workforce: 500,
     description: 'Human health in flight and space: pilots, astronauts, and air travellers.',
-    note: 'Every NASA flight surgeon trains in this specialty.' }),
+    note: "NASA's flight surgeons are drawn from this specialty." }),
   N({ id: 'addiction-medicine', name: 'Addiction Medicine', tier: 'subspecialty', parents: ['preventive-medicine'], category: 'population', domain: 'mind', credential: 'subspecialty', boards: ['ABPM'], fellowship: 1, workforce: 3000,
     description: 'Prevention and treatment of substance use disorders by physicians of any specialty. Administered by ABPM but open to all ABMS boards; certified since 2017.' }),
 
