@@ -9,9 +9,9 @@ TypeScript and Vite.
 
 ## What it shows
 
-The atlas is a graph of **197 nodes**: Medicine at the centre, nine broad
+The atlas is a graph of **200 nodes**: Medicine at the centre, nine broad
 domains, 32 specialties with their own residency and primary board certificate,
-and 156 subspecialties reached by fellowship. Subspecialties that can be entered
+and 159 subspecialties reached by fellowship. Subspecialties that can be entered
 from more than one specialty (Sleep Medicine, Hospice & Palliative Medicine,
 Pain Medicine, Critical Care, Hand Surgery…) are drawn once, under their home
 board, with dashed **cross-board pathways** to every other board that certifies

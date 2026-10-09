@@ -292,6 +292,42 @@ export const INTERNAL_MEDICINE: SpecialtyInput[] = [
       'Kidney disease, dialysis, kidney transplantation, hypertension and the physiology of fluids, electrolytes and acid–base balance.',
   },
   {
+    id: 'transplant-nephrology',
+    name: 'Transplant Nephrology',
+    level: 'subspecialty',
+    domain: 'internal',
+    parents: ['nephrology'],
+    certification: 'fellowship',
+    years: 1,
+    system: 'renal',
+    description:
+      'Selection, immunosuppression and long-term care of kidney transplant recipients and living donors.',
+  },
+  {
+    id: 'interventional-nephrology',
+    name: 'Interventional Nephrology',
+    level: 'subspecialty',
+    domain: 'internal',
+    parents: ['nephrology'],
+    certification: 'fellowship',
+    years: 1,
+    system: 'renal',
+    description:
+      'Procedures that keep dialysis possible: placement and maintenance of dialysis access, catheter insertion and kidney biopsy under ultrasound.',
+  },
+  {
+    id: 'cardio-oncology',
+    name: 'Cardio-Oncology',
+    level: 'subspecialty',
+    domain: 'internal',
+    parents: ['cardiovascular-disease'],
+    certification: 'fellowship',
+    years: 1,
+    system: 'cardiovascular',
+    description:
+      'Protecting the hearts of cancer patients: cardiotoxicity of chemotherapy and radiation, and cardiovascular care before, during and after cancer treatment.',
+  },
+  {
     id: 'pulmonary-disease',
     name: 'Pulmonary Disease',
     short: 'Pulm',

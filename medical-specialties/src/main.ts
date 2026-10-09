@@ -2,6 +2,7 @@ import './style.css';
 import { buildGraph } from './data/graph';
 import { SceneApp } from './scene/app';
 import { Store } from './state';
+import { LAYOUTS, type LayoutId } from './graph/layouts';
 import { setupHelp } from './ui/help';
 import { setupHud } from './ui/hud';
 import { setupKeyboard } from './ui/keyboard';
@@ -44,17 +45,38 @@ store.on('select', (s) => {
   announce.textContent = n ? `${n.name}. ${n.description}` : 'Selection cleared.';
 });
 
-// Deep links: #/<node-id> selects a node on load and keeps the hash in sync.
-const applyHash = () => {
-  const id = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
+// Deep links: #/<node-id>?layout=<id> selects a node and layout on load and
+// keeps the hash in sync afterwards.
+const LAYOUT_IDS = new Set(LAYOUTS.map((l) => l.id));
+const readHash = () => {
+  const raw = location.hash.replace(/^#\/?/, '');
+  const [idPart, query = ''] = raw.split('?');
+  const params = new URLSearchParams(query);
+  const layout = params.get('layout');
+  return { id: decodeURIComponent(idPart ?? ''), layout: layout && LAYOUT_IDS.has(layout as LayoutId) ? (layout as LayoutId) : null };
+};
+const writeHash = () => {
+  const { selected, layout } = store.state;
+  const parts: string[] = [];
+  if (selected) parts.push(selected);
+  const query = layout === 'constellation' ? '' : `?layout=${layout}`;
+  const next = parts.length || query ? `#/${parts.join('')}${query}` : '';
+  if (location.hash !== next) history.replaceState(null, '', next || location.pathname + location.search);
+};
+const apply = ({ id, layout }: ReturnType<typeof readHash>) => {
+  if (layout) store.setLayout(layout);
   if (id && graph.byId.has(id)) store.select(id);
 };
-store.on('select', (s) => {
-  const next = s.selected ? `#/${s.selected}` : '';
-  if (location.hash !== next) history.replaceState(null, '', next || location.pathname + location.search);
-});
-window.addEventListener('hashchange', applyHash);
-window.setTimeout(applyHash, reducedMotion ? 0 : 1800);
+// Read the initial hash once: the layout applies immediately, the selection
+// after the intro, and only then does the hash start tracking state.
+const initial = readHash();
+if (initial.layout) store.setLayout(initial.layout);
+window.setTimeout(() => {
+  apply(initial);
+  store.on('select', writeHash);
+  store.on('layout', writeHash);
+  window.addEventListener('hashchange', () => apply(readHash()));
+}, reducedMotion ? 0 : 1800);
 
 // Expose for debugging and tests in the console.
 declare global {
