@@ -10,7 +10,14 @@ const { songs, albums } = catalog;
 const studioOrder = albums.filter((a) => a.kind === 'album').slice().sort((a, b) => a.timelineYear - b.timelineYear);
 
 const canvas = document.getElementById('stage');
-const stage = new Stage(canvas);
+let stage;
+try {
+  stage = new Stage(canvas);
+} catch (err) {
+  document.getElementById('intro-sub').textContent = 'This needs WebGL, which your browser could not start.';
+  document.getElementById('enter').remove();
+  throw err;
+}
 const marks = new SongMarks(songs);
 stage.scene.add(marks.mesh);
 const labels = new LabelSet();
@@ -29,6 +36,9 @@ function writeHash() {
   history.replaceState(null, '', `#${parts.join('/')}`);
 }
 const nowS = () => performance.now() / 1000;
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (reduceMotion) { marks.dur = 0.01; }
+const T = (d) => (reduceMotion ? 0.01 : d);
 
 // ------------------------------------------------------------ filtering & highlight
 function applyState() {
@@ -62,12 +72,12 @@ function setMode(name, animate = true) {
   stage.controls.autoRotate = name === 'galaxy' && !state.interacted;
   if (state.selected) {
     const f = layout.focus(state.selected);
-    stage.flyTo(f.pos, f.target, animate ? 2.2 : 0.01, nowS());
+    stage.flyTo(f.pos, f.target, animate ? T(2.2) : 0.01, nowS());
   } else if (state.selectedAlbum) {
     const f = layout.albumFocus(state.selectedAlbum);
-    stage.flyTo(f.pos, f.target, animate ? 2.2 : 0.01, nowS());
+    stage.flyTo(f.pos, f.target, animate ? T(2.2) : 0.01, nowS());
   } else {
-    stage.flyTo(layout.camera.pos, layout.camera.target, animate ? 2.2 : 0.01, nowS());
+    stage.flyTo(layout.camera.pos, layout.camera.target, animate ? T(2.2) : 0.01, nowS());
   }
   writeHash();
 }
@@ -78,7 +88,7 @@ function selectSong(song, fly = true) {
   state.selectedAlbum = null;
   labels.emphasis = song.album.index;
   ui.showSong(song);
-  if (fly) { const f = layouts[state.mode].focus(song); stage.flyTo(f.pos, f.target, 1.6, nowS()); }
+  if (fly) { const f = layouts[state.mode].focus(song); stage.flyTo(f.pos, f.target, T(1.6), nowS()); }
   stage.controls.autoRotate = false;
   applyState();
   writeHash();
@@ -88,7 +98,7 @@ function selectAlbum(album, fly = true) {
   state.selected = null;
   labels.emphasis = album.index;
   ui.showAlbum(album);
-  if (fly) { const f = layouts[state.mode].albumFocus(album); stage.flyTo(f.pos, f.target, 2.0, nowS()); }
+  if (fly) { const f = layouts[state.mode].albumFocus(album); stage.flyTo(f.pos, f.target, T(2.0), nowS()); }
   stage.controls.autoRotate = false;
   applyState();
   writeHash();
@@ -218,9 +228,9 @@ function enter() {
   intro.classList.add('gone');
   document.body.classList.add('started');
   const l = layouts[state.mode];
-  if (state.selected) { const f = l.focus(state.selected); stage.flyTo(f.pos, f.target, 3.2, nowS()); }
-  else if (state.selectedAlbum) { const f = l.albumFocus(state.selectedAlbum); stage.flyTo(f.pos, f.target, 3.2, nowS()); }
-  else stage.flyTo(l.camera.pos, l.camera.target, 3.2, nowS());
+  if (state.selected) { const f = l.focus(state.selected); stage.flyTo(f.pos, f.target, T(3.2), nowS()); }
+  else if (state.selectedAlbum) { const f = l.albumFocus(state.selectedAlbum); stage.flyTo(f.pos, f.target, T(3.2), nowS()); }
+  else stage.flyTo(l.camera.pos, l.camera.target, T(3.2), nowS());
 }
 document.getElementById('enter').addEventListener('click', enter);
 addEventListener('keydown', (e) => { if (!state.started && (e.key === 'Enter' || e.key === ' ')) enter(); }, { once: false });
@@ -261,9 +271,10 @@ function loop() {
   }
   if (pointerDirty && state.started) {
     pointerDirty = false;
-    const hit = pick(false);
+    const hit = pick(true);
     const s = hit ? hit.song : null;
-    if (s !== state.hovered) { state.hovered = s; applyState(); canvas.style.cursor = s ? 'pointer' : ''; }
+    if (s !== state.hovered) { state.hovered = s; applyState(); }
+    canvas.style.cursor = hit ? 'pointer' : '';
     ui.tooltip(s, px, py);
   }
   stage.update(now, dt);
