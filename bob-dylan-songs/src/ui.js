@@ -113,6 +113,53 @@ export function setupUI(catalog, on) {
     return `${head}<h2>${esc(a.title)}</h2><div class="meta">${meta}</div>${a.note ? `<p class="note">${esc(a.note)}</p>` : ''}<ul class="tracklist">${list}</ul>`;
   };
 
+  const eraMeta = (e) => {
+    const list = albums.filter((a) => a.era === e.key);
+    const es = songs.filter((x) => x.era === e.key);
+    const originals = es.filter((x) => !x.cover).length;
+    const sec = es.reduce((n, x) => n + x.sec, 0);
+    return `<span class="era-tag" style="color:${e.color}"><i style="background:${e.color}"></i>${esc(e.years)}</span>
+      <h2>${esc(e.name)}</h2>
+      <div class="meta"><b>${es.length}</b> songs · <b>${originals}</b> originals · <b>${fmtHours(sec)}</b><br>${es.length - list.reduce((n, a) => n + a.tracks.length, 0)} of them never on an album</div>
+      <p class="note">${esc(e.blurb)}</p>
+      <ul class="tracklist">${list.map((a) => `<li data-album="${a.index}"><span class="n">${a.year}</span><span>${esc(a.title)}</span><span class="d">${a.tracks.length} tracks</span></li>`).join('')}</ul>`;
+  };
+
+  const numbers = () => {
+    const byYear = new Map();
+    songs.forEach((x) => byYear.set(x.year, (byYear.get(x.year) || 0) + 1));
+    const [bestYear, bestN] = [...byYear.entries()].sort((a, b) => b[1] - a[1])[0];
+    const studio = albums.filter((a) => a.kind === 'album');
+    const longestAlbum = studio.reduce((a, b) => (b.duration > a.duration ? b : a));
+    const shortestAlbum = studio.reduce((a, b) => (b.duration < a.duration ? b : a));
+    const mostCovers = studio.map((a) => [a, a.tracks.filter((t) => t.cover).length]).sort((a, b) => b[1] - a[1])[0];
+    const allOriginal = studio.filter((a) => a.tracks.every((t) => !t.cover)).length;
+    const avg = songs.reduce((n, x) => n + x.sec, 0) / songs.length;
+    const over10 = songs.filter((x) => x.sec >= 600);
+    return [
+      ['Longest song', `${stats.longest.title} · ${fmtDuration(stats.longest.sec)}`],
+      ['Shortest song', `${stats.shortest.title} · ${fmtDuration(stats.shortest.sec)}`],
+      ['Over ten minutes', `${over10.length} songs: ${over10.map((x) => x.title).join(', ')}`],
+      ['Average length', fmtDuration(avg)],
+      ['Busiest year', `${bestYear}, with ${bestN} songs`],
+      ['Longest album', `${longestAlbum.title} · ${fmtDuration(longestAlbum.duration)}`],
+      ['Shortest album', `${shortestAlbum.title} · ${fmtDuration(shortestAlbum.duration)}`],
+      ['Most covers', `${mostCovers[0].title} · ${mostCovers[1]} of ${mostCovers[0].tracks.length}`],
+      ['All-original albums', `${allOriginal} of ${studio.length}`],
+    ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  };
+  $('#numbers').innerHTML = numbers();
+
+  let toastTimer = null;
+  const toast = (msg) => {
+    const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+  };
+  $('#share').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(location.href); toast('Link copied'); }
+    catch { toast(location.href); }
+  });
+
   const openPanel = (html) => {
     panel.innerHTML = `<button class="close" aria-label="close">×</button>${html}`;
     panel.classList.add('open');
@@ -135,6 +182,8 @@ export function setupUI(catalog, on) {
       [...legend.children].forEach((b) => b.classList.toggle('on', set.has(b.dataset.era)));
     },
     showSong(s) { openPanel(songMeta(s)); },
+    showEra(key) { openPanel(eraMeta(ERA_BY_KEY[key])); },
+    toast,
     showAlbum(a, current) {
       openPanel(albumMeta(a));
       if (current) {

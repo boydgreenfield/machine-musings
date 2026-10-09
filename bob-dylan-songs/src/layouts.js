@@ -152,6 +152,19 @@ export function highwayLayout(catalog) {
       color: '#8f8aa3', kind: 'year', small: true,
     });
   }
+  const gates = [];
+  for (let y = 1970; y <= 2020; y += 10) {
+    const d = distForYear(y);
+    const { p, t } = frame(d);
+    const gate = new THREE.Mesh(
+      new THREE.TorusGeometry(6.5, 0.06, 6, 96, Math.PI),
+      new THREE.MeshBasicMaterial({ color: 0xbfb6d8, transparent: true, opacity: 0.28, depthWrite: false }),
+    );
+    gate.position.copy(p);
+    gate.lookAt(p.clone().add(t));
+    gate.userData.baseOpacity = 0.28;
+    gates.push(gate);
+  }
 
   // Guide geometry: the road, its centre line, a ground haze.
   const guide = new THREE.Group();
@@ -181,6 +194,7 @@ export function highwayLayout(catalog) {
     sl.userData.baseOpacity = 0.35;
     guide.add(sl);
   });
+  gates.forEach((g) => guide.add(g));
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(L * 1.6, 420),
     new THREE.ShaderMaterial({
@@ -222,7 +236,7 @@ export function highwayLayout(catalog) {
     return { pos, target };
   };
 
-  return { name: 'highway', targets, scales, labels, camera, guide, focus, albumFocus, curveLen };
+  return { name: 'highway', targets, scales, labels, camera, guide, focus, albumFocus, curveLen, road: { frame, length: L, slots, distForYear } };
 }
 
 // ---------------------------------------------------------------- RECORDS

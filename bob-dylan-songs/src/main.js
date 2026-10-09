@@ -62,6 +62,7 @@ function applyState() {
 // ------------------------------------------------------------ modes
 function setMode(name, animate = true) {
   if (state.mode === name) return;
+  if (state.tour && state.tour.drive) stopTour();
   state.mode = name;
   const layout = layouts[name];
   marks.setTargets(layout.targets, layout.scales, nowS(), animate);
@@ -129,17 +130,67 @@ function stepAlbum(dir) {
 }
 
 // ------------------------------------------------------------ tour
+// In the Highway layout the tour is a drive down the road; elsewhere it hops album to album.
+const hud = document.getElementById('hud');
+function stopTour() {
+  if (!state.tour) return;
+  if (state.tour.timer) clearInterval(state.tour.timer);
+  state.tour = null;
+  hud.classList.remove('on');
+  ui.setTour(false);
+}
 function toggleTour() {
-  if (state.tour) { clearInterval(state.tour.timer); state.tour = null; ui.setTour(false); return; }
+  if (state.tour) { stopTour(); return; }
+  stage.controls.autoRotate = false;
+  if (state.mode === 'highway') {
+    state.tour = { drive: true, d: 0, passed: new Set() };
+    stage.camTween = null;
+    hud.classList.add('on');
+    ui.setTour(true);
+    return;
+  }
   let i = -1;
   const next = () => {
     i += 1;
-    if (i >= studioOrder.length) { toggleTour(); return; }
+    if (i >= studioOrder.length) { stopTour(); return; }
     selectAlbum(studioOrder[i]);
   };
   state.tour = { timer: setInterval(next, 6500) };
   ui.setTour(true);
   next();
+}
+const _dp = new THREE.Vector3(), _dt = new THREE.Vector3();
+function updateDrive(dt) {
+  const tour = state.tour;
+  const road = layouts.highway.road;
+  const SPEED = reduceMotion ? 60 : 22;
+  tour.d = Math.min(road.length - 1, tour.d + dt * SPEED);
+  const a = road.frame(tour.d), b = road.frame(Math.min(road.length - 1, tour.d + 26));
+  _dp.set(a.p.x - a.n.x * 13 + a.t.x * -6, a.p.y + 9, a.p.z - a.n.z * 13 + a.t.z * -6);
+  _dt.set(b.p.x + b.n.x * 2.5, b.p.y + 3, b.p.z + b.n.z * 2.5);
+  // ease the camera toward the moving vantage so the ride feels like suspension, not rails
+  const k = 1 - Math.exp(-dt * 3.5);
+  stage.camera.position.lerp(_dp, k);
+  stage.controls.target.lerp(_dt, k);
+  // which album are we passing?
+  const ahead = tour.d + 16;
+  for (const sl of road.slots) {
+    if (ahead >= sl.start && !tour.passed.has(sl.album)) {
+      tour.passed.add(sl.album);
+      selectAlbum(sl.album, false);
+    }
+  }
+  // year readout from the inverse of the year→distance map
+  let year = 1961;
+  const knotsY = [1961, ...road.slots.map((sl) => sl.album.timelineYear), 2021];
+  const knotsD = [2, ...road.slots.map((sl) => sl.center), road.length - 6];
+  for (let i = 0; i < knotsY.length - 1; i++) {
+    if (ahead <= knotsD[i + 1]) { year = knotsY[i] + ((ahead - knotsD[i]) / Math.max(1e-6, knotsD[i + 1] - knotsD[i])) * (knotsY[i + 1] - knotsY[i]); break; }
+    year = 2020;
+  }
+  document.getElementById('hud-year').textContent = String(Math.floor(Math.max(1961, Math.min(2020, year))));
+  document.getElementById('hud-album').textContent = state.selectedAlbum ? state.selectedAlbum.title : '';
+  if (tour.d >= road.length - 1.5) stopTour();
 }
 
 // ------------------------------------------------------------ UI
@@ -150,6 +201,8 @@ const ui = setupUI(catalog, {
     else if (additive) state.eras.add(key);
     else { state.eras.clear(); state.eras.add(key); }
     applyState();
+    if (state.eras.size === 1) { state.selected = null; state.selectedAlbum = null; labels.emphasis = null; ui.showEra([...state.eras][0]); applyState(); }
+    else if (!state.selected && !state.selectedAlbum) ui.hidePanel();
   },
   search: (q) => { state.query = q; applyState(); },
   select: (s) => selectSong(s),
@@ -166,7 +219,10 @@ const ray = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let pointerDirty = false, px = 0, py = 0, downAt = null;
 canvas.addEventListener('pointermove', (e) => { px = e.clientX; py = e.clientY; pointer.set((px / innerWidth) * 2 - 1, -(py / innerHeight) * 2 + 1); pointerDirty = true; });
-canvas.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; state.interacted = true; stage.controls.autoRotate = false; stage.camTween = null; });
+let lastInteraction = nowS();
+const touched = () => { lastInteraction = nowS(); state.interacted = true; stage.controls.autoRotate = false; };
+canvas.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; touched(); stage.camTween = null; if (state.tour && state.tour.drive) stopTour(); });
+addEventListener('keydown', () => { lastInteraction = nowS(); });
 canvas.addEventListener('pointerup', (e) => {
   if (!downAt) return;
   const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
@@ -178,7 +234,7 @@ canvas.addEventListener('pointerup', (e) => {
   else if (hit && hit.album) selectAlbum(hit.album);
   else if (state.selected || state.selectedAlbum) clearSelection();
 });
-canvas.addEventListener('wheel', () => { state.interacted = true; stage.controls.autoRotate = false; }, { passive: true });
+canvas.addEventListener('wheel', () => { touched(); if (state.tour && state.tour.drive) stopTour(); }, { passive: true });
 
 function pick(includeLabels = false) {
   ray.setFromCamera(pointer, stage.camera);
@@ -215,7 +271,7 @@ addEventListener('keydown', (e) => {
   else if (e.key === '?') ui.toggleHelp();
   else if (e.key === 'Escape') {
     if (!document.getElementById('help').classList.contains('hidden')) { ui.toggleHelp(); return; }
-    if (state.tour) toggleTour();
+    if (state.tour) stopTour();
     state.eras.clear(); state.query = ''; ui.clearSearch(); clearSelection();
   }
 });
@@ -269,6 +325,9 @@ function loop() {
       if (l.guide.children[0] && l.guide.children[0].material.uniforms && l.guide.children[0].material.uniforms.uPixelRatio) l.guide.children[0].material.uniforms.uPixelRatio.value = stage.renderer.getPixelRatio();
     }
   }
+  if (state.tour && state.tour.drive) updateDrive(dt);
+  // after a long idle in the galaxy with nothing selected, drift again
+  if (state.started && state.mode === 'galaxy' && !state.selected && !state.selectedAlbum && !state.tour && now - lastInteraction > 50) stage.controls.autoRotate = true;
   if (pointerDirty && state.started) {
     pointerDirty = false;
     const hit = pick(true);

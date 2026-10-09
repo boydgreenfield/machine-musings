@@ -90,7 +90,11 @@ export class SongMarks {
       this.pos0[i] = this.cur[i]; this.scl0[i] = this.curS[i];
       this.pos1[i] = targets[i]; this.scl1[i] = scales[i];
     }
-    for (let i = 0; i < this.n; i++) this.stagger[i] = Math.random() * 0.45;
+    // Sweep the morph across the scene from left to right, with a little jitter.
+    let minX = Infinity, maxX = -Infinity;
+    for (let i = 0; i < this.n; i++) { const x = targets[i * 3]; if (x < minX) minX = x; if (x > maxX) maxX = x; }
+    const span = Math.max(1e-6, maxX - minX);
+    for (let i = 0; i < this.n; i++) this.stagger[i] = 0.5 * ((targets[i * 3] - minX) / span) + Math.random() * 0.12;
     this.t0 = animate ? now : -1e9;
     if (!animate) { this.cur.set(targets); this.curS.set(scales); }
   }

@@ -4,16 +4,16 @@ Every song Bob Dylan released between 1961 and 2020, as an explorable three.js u
 
 534 songs. 39 studio albums (including *The Basement Tapes*) plus 84 originals that never made an album: singles, B-sides, soundtrack songs and Bootleg Series outtakes. 38 hours of music.
 
-Every mark is one song. **Colour** is the era. **Size** is the song's length. Dimmer marks are covers and traditionals; the brightest are Dylan originals. The same 535 marks morph between four layouts:
+Every mark is one song. **Colour** is the era. **Size** is the song's length. Dimmer marks are covers and traditionals; the brightest are Dylan originals. The same 534 marks morph between four layouts:
 
 | | |
 |---|---|
-| ![Galaxy](docs/galaxy.png) | ![Highway](docs/highway.png) |
+| ![Galaxy](docs/galaxy.jpg) | ![Highway](docs/highway.jpg) |
 | **Galaxy** — a spiral of time, 1961 at the centre. Each album is a cluster of stars on the arm; non-album songs drift in the halo. | **Highway** — Highway 61, album by album. Each song stands on the roadside; height is its length. Singles and outtakes line the far shoulder at the year they were recorded. |
-| ![Records](docs/records.png) | ![Lexicon](docs/lexicon.png) |
+| ![Records](docs/records.jpg) | ![Lexicon](docs/lexicon.jpg) |
 | **Records** — a wall of vinyl. Each album is a record; a song's arc of the groove is its share of the running time, starting at twelve o'clock. | **Lexicon** — the sixteen words Dylan put in titles most often, with the songs that carry them. |
 
-![A song in focus](docs/song-highway.png)
+![A song in focus](docs/song-highway.jpg)
 
 Click any song for its story: album, track, length, who wrote it, and a note for the ones with a tale to tell. Click an album label for the album and its tracklist. Search, filter by era, take the tour, or roll the dice.
 
