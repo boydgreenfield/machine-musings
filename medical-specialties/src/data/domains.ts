@@ -73,27 +73,28 @@ export const DOMAINS: Domain[] = [
 
 export const DOMAIN_BY_ID: Record<string, Domain> = Object.fromEntries(DOMAINS.map((d) => [d.id, d]));
 
+/** Ordered so that neighbouring systems on the ring are related. */
 export const SYSTEMS: OrganSystem[] = [
   { id: 'general', name: 'Whole-person care', blurb: 'Generalist and undifferentiated care across organ systems.' },
-  { id: 'cardiovascular', name: 'Heart & vessels', blurb: 'Cardiac and vascular medicine, surgery and anesthesia.' },
-  { id: 'respiratory', name: 'Lungs & airway', blurb: 'Pulmonary medicine and thoracic surgery.' },
-  { id: 'digestive', name: 'Digestive system & liver', blurb: 'Gastroenterology, hepatology and abdominal surgery.' },
+  { id: 'children', name: 'Children & adolescents', blurb: 'General and hospital pediatrics.' },
+  { id: 'reproductive', name: 'Reproductive & pelvic health', blurb: 'Obstetrics, gynecology and reproductive medicine.' },
   { id: 'renal', name: 'Kidneys & urinary tract', blurb: 'Nephrology and urology.' },
+  { id: 'digestive', name: 'Digestive system & liver', blurb: 'Gastroenterology, hepatology and abdominal surgery.' },
   { id: 'endocrine', name: 'Hormones & metabolism', blurb: 'Endocrine glands, diabetes and metabolic disease.' },
   { id: 'hemeonc', name: 'Blood & cancer', blurb: 'Hematology, oncology and cancer surgery.' },
   { id: 'immune', name: 'Immunity & infection', blurb: 'Infectious disease, allergy, immunology and rheumatology.' },
-  { id: 'nervous', name: 'Brain, spine & nerves', blurb: 'Neurology, neurosurgery and the neurosciences.' },
-  { id: 'mental', name: 'Mind & behaviour', blurb: 'Psychiatry and behavioural health.' },
-  { id: 'musculoskeletal', name: 'Bones, joints & muscles', blurb: 'Orthopaedics, hand surgery and sports medicine.' },
-  { id: 'skin', name: 'Skin', blurb: 'Dermatology and dermatologic surgery.' },
-  { id: 'senses', name: 'Eyes, ears, nose & throat', blurb: 'Ophthalmology and otolaryngology.' },
-  { id: 'reproductive', name: 'Reproductive & pelvic health', blurb: 'Obstetrics, gynecology and reproductive medicine.' },
-  { id: 'children', name: 'Children & adolescents', blurb: 'General and hospital pediatrics.' },
+  { id: 'respiratory', name: 'Lungs & airway', blurb: 'Pulmonary medicine and thoracic surgery.' },
+  { id: 'cardiovascular', name: 'Heart & vessels', blurb: 'Cardiac and vascular medicine, surgery and anesthesia.' },
   { id: 'critical', name: 'Emergency, critical & perioperative', blurb: 'Resuscitation, intensive care and anesthesia.' },
   { id: 'imaging', name: 'Imaging & radiation', blurb: 'Diagnostic imaging, interventional and radiation therapy.' },
   { id: 'laboratory', name: 'Laboratory & genetics', blurb: 'Pathology, laboratory medicine and genomics.' },
   { id: 'population', name: 'Population & environment', blurb: 'Public, occupational, aerospace and preventive health.' },
   { id: 'rehab', name: 'Rehabilitation, pain & palliative', blurb: 'Function, comfort and quality of life.' },
+  { id: 'musculoskeletal', name: 'Bones, joints & muscles', blurb: 'Orthopaedics, hand surgery and sports medicine.' },
+  { id: 'skin', name: 'Skin', blurb: 'Dermatology and dermatologic surgery.' },
+  { id: 'senses', name: 'Eyes, ears, nose & throat', blurb: 'Ophthalmology and otolaryngology.' },
+  { id: 'nervous', name: 'Brain, spine & nerves', blurb: 'Neurology, neurosurgery and the neurosciences.' },
+  { id: 'mental', name: 'Mind & behaviour', blurb: 'Psychiatry and behavioural health.' },
 ];
 
 export const SYSTEM_BY_ID: Record<string, OrganSystem> = Object.fromEntries(SYSTEMS.map((s) => [s.id, s]));

@@ -102,7 +102,7 @@ export interface SpecialtyInput {
   aliases?: string[];
 }
 
-export interface SpecialtyNode extends SpecialtyInput {
+export interface SpecialtyNode extends Omit<SpecialtyInput, 'level'> {
   level: Exclude<Level, 'root'> | 'root';
   parents: string[];
   certification: Certification;
