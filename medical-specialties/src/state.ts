@@ -10,6 +10,8 @@ export type LabelMode = 'auto' | 'all' | 'none';
 export interface AppState {
   layout: LayoutId;
   hovered: string | null;
+  /** Domain highlighted from the legend, if any. */
+  hoveredDomain: DomainId | null;
   selected: string | null;
   hiddenDomains: Set<DomainId>;
   showCross: boolean;
@@ -37,6 +39,7 @@ export class Store {
   readonly state: AppState = {
     layout: 'constellation',
     hovered: null,
+    hoveredDomain: null,
     selected: null,
     hiddenDomains: new Set(),
     showCross: false,
@@ -73,6 +76,12 @@ export class Store {
   setHovered(id: string | null): void {
     if (this.state.hovered === id) return;
     this.state.hovered = id;
+    this.emit('hover');
+  }
+
+  setHoveredDomain(id: DomainId | null): void {
+    if (this.state.hoveredDomain === id) return;
+    this.state.hoveredDomain = id;
     this.emit('hover');
   }
 
@@ -183,6 +192,9 @@ export class Store {
       } else if (hoverSet?.has(n.id)) {
         emphasis = Math.max(emphasis, 1.1);
         labelPinned = labelPinned || !state.matches;
+      }
+      if (state.hoveredDomain && !state.matches && !focusSet && n.level !== 'root') {
+        emphasis = n.domain === state.hoveredDomain ? Math.max(emphasis, 1.1) : Math.min(emphasis, 0.3);
       }
       out.set(n.id, { visible, emphasis, labelPinned });
     }

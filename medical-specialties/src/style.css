@@ -747,6 +747,48 @@ body[data-layout='timeline'] #legend {
   margin-top: 18px;
 }
 
+/* vignette over the canvas */
+#gl-container::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(7, 10, 20, 0) 55%, rgba(7, 10, 20, 0.55) 100%);
+}
+
+/* hover tooltip */
+.tooltip {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  max-width: 280px;
+  padding: 8px 11px;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.4;
+  transform: translate(14px, 14px);
+}
+.tooltip .t-name {
+  font-weight: 600;
+  color: #fff;
+  font-size: 13px;
+}
+.tooltip .t-meta {
+  color: var(--ink-2);
+}
+.tooltip .t-board {
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+@media (hover: none) {
+  .tooltip {
+    display: none !important;
+  }
+}
+
 /* tour */
 .tour-card {
   position: absolute;

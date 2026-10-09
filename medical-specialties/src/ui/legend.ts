@@ -19,6 +19,8 @@ export function setupLegend(graph: Graph, store: Store): void {
       if (ev.shiftKey || ev.metaKey || ev.ctrlKey) store.toggleDomain(d.id);
       else store.soloDomain(d.id);
     });
+    li.addEventListener('mouseenter', () => store.setHoveredDomain(d.id));
+    li.addEventListener('mouseleave', () => store.setHoveredDomain(null));
     li.addEventListener('dblclick', () => {
       const domainNode = graph.nodes.find((n) => n.level === 'domain' && n.domain === d.id);
       if (domainNode) store.select(domainNode.id);

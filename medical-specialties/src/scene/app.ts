@@ -16,7 +16,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { Graph } from '../data/graph';
-import { neighbours, subtree } from '../data/graph';
+import { subtree } from '../data/graph';
 import type { SpecialtyNode } from '../data/types';
 import { computeLayout, LAYOUT_BY_ID, type LayoutId, type Positions, systemClusters, timelineLanes, timelineTicks } from '../graph/layouts';
 import type { Store } from '../state';
@@ -25,6 +25,8 @@ import { EdgeLines } from './edges';
 import { NodeLabels } from './labels';
 import { NodeCloud } from './nodes';
 import { createStarfield } from './starfield';
+import { SelectionRing } from './ring';
+import { baseRadius } from './nodes';
 import { TimelineAxis } from './axis';
 import { SunburstGuides } from './guides';
 
@@ -49,6 +51,7 @@ export class SceneApp {
   readonly labels: NodeLabels;
   readonly axis: TimelineAxis;
   readonly guides: SunburstGuides;
+  readonly ring = new SelectionRing();
   readonly tweens = new TweenManager();
 
   private readonly graph: Graph;
@@ -114,7 +117,7 @@ export class SceneApp {
     this.axis = new TimelineAxis(timelineTicks(graph), timelineLanes());
     this.labels.setClusters(systemClusters(graph));
     this.guides = new SunburstGuides();
-    this.scene.add(this.guides, this.edges, this.cloud, this.labels, this.axis);
+    this.scene.add(this.guides, this.edges, this.cloud, this.labels, this.axis, this.ring);
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -339,7 +342,8 @@ export class SceneApp {
     const target = (targetOverride ?? this.layoutTargets.get(id) ?? this.cloud.positionOf(id))!.clone();
     // Frame the node together with its home subtree and direct neighbours.
     let extent = 0;
-    const around = new Set<string>([...subtree(this.graph, id), ...neighbours(this.graph, id)]);
+    const around = subtree(this.graph, id);
+    if (node.parents[0]) around.add(node.parents[0]);
     for (const other of around) {
       const p = this.layoutTargets.get(other);
       if (p) extent = Math.max(extent, p.distanceTo(target));
@@ -353,6 +357,12 @@ export class SceneApp {
     dir.normalize();
     const outward = target.lengthSq() > 1 ? target.clone().normalize() : new Vector3(0, 0.2, 1);
     dir.lerp(outward, node.level === 'root' ? 0 : 0.45).normalize();
+    // Keep a comfortable elevation so the oblate tree is never seen edge-on.
+    const minY = this.store.state.layout === 'sunburst' ? 0.85 : 0.42;
+    if (dir.y < minY) {
+      dir.y = minY;
+      dir.normalize();
+    }
     const camPos = target.clone().addScaledVector(dir, distance);
     // With the detail panel open on wide screens, shift the view so the node
     // sits left of centre instead of underneath the panel.
@@ -424,6 +434,17 @@ export class SceneApp {
         this.cloud.scales[i] = damp(this.cloud.scales[i]!, 1, 6, dt);
       }
     }
+
+    const sel = this.store.state.selected;
+    if (sel) {
+      const p = this.cloud.positionOf(sel);
+      const n = this.graph.byId.get(sel);
+      if (p && n) {
+        this.ring.position.copy(p);
+        this.ring.show(baseRadius(n) * (n.level === 'root' ? 1.2 : 1.6));
+      }
+    } else this.ring.hide();
+    this.ring.update(now / 1000);
 
     const cameraDistance = this.camera.position.distanceTo(this.controls.target);
     // Bloom and halos are tamed as the camera closes in so clusters do not overexpose.

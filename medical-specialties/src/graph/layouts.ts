@@ -110,7 +110,7 @@ interface AngularRect {
 export function constellationLayout(graph: Graph): Positions {
   const pos: Positions = new Map();
   const weights = leafWeights(graph);
-  const radiusByDepth = [0, 30, 47, 60, 70, 78];
+  const radiusByDepth = [0, 33, 49, 61, 71, 79];
   const LAT_LIMIT = 42 * DEG;
 
   const place = (id: string, rect: AngularRect, depth: number) => {

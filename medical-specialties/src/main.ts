@@ -9,6 +9,7 @@ import { setupLegend } from './ui/legend';
 import { setupPanel } from './ui/panel';
 import { setupSearch } from './ui/search';
 import { setupTour } from './ui/tour';
+import { setupTooltip } from './ui/tooltip';
 import { renderFallback } from './ui/fallback';
 
 const graph = buildGraph();
@@ -28,6 +29,7 @@ try {
 }
 
 setupPanel(graph, store);
+setupTooltip(graph, store, document.getElementById('gl-container')!);
 setupLegend(graph, store);
 const search = setupSearch(graph, store);
 setupHud(graph, store, app);
