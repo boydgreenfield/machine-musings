@@ -1,87 +1,547 @@
-{"note":"Dylan originals that never appeared on a studio album: singles, B-sides, soundtrack songs, and outtakes first released on Biograph or The Bootleg Series. The year is when the song was recorded; 'source' is its first official release.","tracks":[
-{"t":"Hard Times in New York Town","y":1961,"d":"2:21","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Man on the Street","y":1961,"d":"1:56","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Talkin' Bear Mountain Picnic Massacre Blues","y":1962,"d":"3:54","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Let Me Die in My Footsteps","y":1962,"d":"3:32","source":"The Bootleg Series Vol. 1–3 (1991)","note":"Cut from Freewheelin' at the last minute, along with three other songs."},
-{"t":"Rambling, Gambling Willie","y":1962,"d":"4:14","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Talkin' Hava Negeilah Blues","y":1962,"d":"0:52","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Quit Your Low Down Ways","y":1962,"d":"2:25","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Worried Blues","y":1962,"d":"2:38","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Kingsport Town","y":1962,"d":"3:38","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Walkin' Down the Line","y":1962,"d":"3:24","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Mixed-Up Confusion","y":1962,"d":"2:30","source":"Single (1962)","note":"His first single, and his first electric recording, withdrawn within weeks."},
-{"t":"Tomorrow Is a Long Time","y":1963,"d":"3:02","source":"Bob Dylan's Greatest Hits Vol. II (1971)","note":"Elvis Presley recorded it in 1966, which Dylan called the cover he treasured most."},
-{"t":"Talkin' John Birch Paranoid Blues","y":1963,"d":"4:04","source":"The Bootleg Series Vol. 1–3 (1991)","note":"CBS refused to let him sing it on the Ed Sullivan Show, so he walked off."},
-{"t":"Who Killed Davey Moore?","y":1963,"d":"3:38","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Only a Hobo","y":1963,"d":"2:56","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Moonshiner","y":1963,"d":"5:05","source":"The Bootleg Series Vol. 1–3 (1991)","w":"Traditional"},
-{"t":"Seven Curses","y":1963,"d":"3:48","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Walls of Red Wing","y":1963,"d":"5:12","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Paths of Victory","y":1963,"d":"3:26","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Lay Down Your Weary Tune","y":1963,"d":"4:36","source":"Biograph (1985)"},
-{"t":"Percy's Song","y":1963,"d":"7:36","source":"Biograph (1985)","note":"Fairport Convention made it famous."},
-{"t":"Eternal Circle","y":1963,"d":"3:34","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Last Thoughts on Woody Guthrie","y":1963,"d":"7:26","source":"The Bootleg Series Vol. 1–3 (1991)","note":"A poem, recited at Town Hall in April 1963."},
-{"t":"Mama, You Been on My Mind","y":1964,"d":"2:52","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"I'll Keep It with Mine","y":1965,"d":"3:51","source":"Biograph (1985)","note":"Given to Nico, who recorded it on 'Chelsea Girl'."},
-{"t":"Farewell, Angelina","y":1965,"d":"5:28","source":"The Bootleg Series Vol. 1–3 (1991)","note":"Joan Baez made it the title track of her 1965 album."},
-{"t":"If You Gotta Go, Go Now","y":1965,"d":"2:42","source":"Single, Benelux (1967)"},
-{"t":"Sitting on a Barbed Wire Fence","y":1965,"d":"3:55","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Positively 4th Street","y":1965,"d":"3:54","source":"Single (1965)","note":"The nastiest kiss-off in pop, released as the follow-up to 'Like a Rolling Stone' and a Top 10 hit."},
-{"t":"Can You Please Crawl Out Your Window?","y":1965,"d":"3:32","source":"Single (1965)"},
-{"t":"Jet Pilot","y":1965,"d":"0:50","source":"Biograph (1985)"},
-{"t":"I Wanna Be Your Lover","y":1965,"d":"3:11","source":"Biograph (1985)"},
-{"t":"She's Your Lover Now","y":1966,"d":"6:09","source":"The Bootleg Series Vol. 1–3 (1991)","note":"The take collapses just before the last verse. Still one of his most savage songs."},
-{"t":"Tell Me, Momma","y":1966,"d":"4:50","source":"The Bootleg Series Vol. 4 (1998)","note":"Only ever performed live, opening the electric sets of the 1966 world tour."},
-{"t":"I Shall Be Released","y":1967,"d":"3:04","source":"Bob Dylan's Greatest Hits Vol. II (1971)","note":"A Basement Tapes song that became an anthem in The Band's version."},
-{"t":"Quinn the Eskimo (The Mighty Quinn)","y":1967,"d":"2:14","source":"Biograph (1985)","note":"A UK No. 1 for Manfred Mann."},
-{"t":"I'm Not There","y":1967,"d":"5:05","source":"I'm Not There soundtrack (2007)","note":"A half-formed Basement Tapes mystery that gave Todd Haynes's film its title."},
-{"t":"Sign on the Cross","y":1967,"d":"7:22","source":"The Bootleg Series Vol. 11 (2014)"},
-{"t":"Santa-Fe","y":1967,"d":"2:10","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Wanted Man","y":1969,"d":"3:04","source":"The Bootleg Series Vol. 15 (2019)","note":"Written for Johnny Cash, who recorded it at San Quentin."},
-{"t":"Watching the River Flow","y":1971,"d":"3:34","source":"Single (1971)","note":"Cut with Leon Russell. 'What's the matter with me? I don't have much to say.'"},
-{"t":"When I Paint My Masterpiece","y":1971,"d":"3:23","source":"Bob Dylan's Greatest Hits Vol. II (1971)","note":"The Band recorded it first, on 'Cahoots'."},
-{"t":"George Jackson","y":1971,"d":"5:38","source":"Single (1971)","note":"His first protest song in years, written days after the Black Panther was shot in San Quentin."},
-{"t":"Wallflower","y":1971,"d":"2:42","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Nobody 'Cept You","y":1973,"d":"2:50","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Up to Me","y":1974,"d":"6:17","source":"Biograph (1985)","note":"A Blood on the Tracks outtake many fans rank with the album's best."},
-{"t":"Call Letter Blues","y":1974,"d":"4:28","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Abandoned Love","y":1975,"d":"4:32","source":"Biograph (1985)","note":"Played once in public, at the Other End in July 1975, and never again."},
-{"t":"Golden Loom","y":1975,"d":"3:42","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Catfish","y":1975,"d":"6:02","source":"The Bootleg Series Vol. 1–3 (1991)","w":"Bob Dylan / Jacques Levy","note":"A blues for Yankees pitcher Catfish Hunter."},
-{"t":"Rita May","y":1975,"d":"3:13","source":"Single B-side (1976)","w":"Bob Dylan / Jacques Levy"},
-{"t":"Sign Language","y":1976,"d":"3:38","source":"Eric Clapton, 'No Reason to Cry' (1976)","note":"Sung as a duet with Clapton."},
-{"t":"Seven Days","y":1976,"d":"5:32","source":"The Bootleg Series Vol. 1–3 (1991)","note":"Ron Wood released it first."},
-{"t":"Coming from the Heart (The Road Is Long)","y":1978,"d":"2:48","source":"The Bootleg Series Vol. 1–3 (1991)","w":"Bob Dylan / Helena Springs"},
-{"t":"Legionnaire's Disease","y":1978,"d":"3:28","source":"The Bootleg Series Vol. 16 (2021)"},
-{"t":"Trouble in Mind","y":1979,"d":"5:54","source":"Single B-side (1979)"},
-{"t":"Ye Shall Be Changed","y":1979,"d":"4:58","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Ain't Gonna Go to Hell for Anybody","y":1980,"d":"3:53","source":"The Bootleg Series Vol. 13 (2017)"},
-{"t":"City of Gold","y":1980,"d":"3:39","source":"The Bootleg Series Vol. 13 (2017)"},
-{"t":"Yonder Comes Sin","y":1980,"d":"5:37","source":"The Bootleg Series Vol. 13 (2017)"},
-{"t":"Let's Keep It Between Us","y":1980,"d":"5:48","source":"The Bootleg Series Vol. 13 (2017)","note":"Given to Bonnie Raitt."},
-{"t":"Caribbean Wind","y":1981,"d":"5:54","source":"Biograph (1985)"},
-{"t":"Angelina","y":1981,"d":"6:56","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Need a Woman","y":1981,"d":"5:34","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"You Changed My Life","y":1981,"d":"5:12","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Blind Willie McTell","y":1983,"d":"5:52","source":"The Bootleg Series Vol. 1–3 (1991)","note":"Left off Infidels; widely considered the greatest song he ever shelved. 'Nobody can sing the blues like Blind Willie McTell.'"},
-{"t":"Foot of Pride","y":1983,"d":"5:54","source":"The Bootleg Series Vol. 1–3 (1991)","note":"Lou Reed sang it at the 30th anniversary concert."},
-{"t":"Lord Protect My Child","y":1983,"d":"3:55","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Tell Me","y":1983,"d":"4:24","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Someone's Got a Hold of My Heart","y":1983,"d":"4:53","source":"The Bootleg Series Vol. 1–3 (1991)"},
-{"t":"Julius and Ethel","y":1983,"d":"4:03","source":"The Bootleg Series Vol. 16 (2021)"},
-{"t":"New Danville Girl","y":1984,"d":"11:08","source":"The Bootleg Series Vol. 16 (2021)","w":"Bob Dylan / Sam Shepard","note":"The earlier, quieter version of 'Brownsville Girl'."},
-{"t":"Band of the Hand (It's Hell Time Man!)","y":1986,"d":"4:38","source":"Band of the Hand soundtrack (1986)","note":"Recorded with Tom Petty and the Heartbreakers in Sydney."},
-{"t":"Night After Night","y":1987,"d":"3:45","source":"Hearts of Fire soundtrack (1987)"},
-{"t":"Series of Dreams","y":1989,"d":"6:03","source":"The Bootleg Series Vol. 1–3 (1991)","note":"Lanois fought to keep it on Oh Mercy and lost."},
-{"t":"Dignity","y":1989,"d":"5:58","source":"Bob Dylan's Greatest Hits Vol. 3 (1994)","note":"Another Oh Mercy outtake, released five years later with a Brendan O'Brien overdub."},
-{"t":"Red River Shore","y":1997,"d":"7:36","source":"The Bootleg Series Vol. 8 (2008)","note":"The great lost song of the Time Out of Mind sessions."},
-{"t":"Marchin' to the City","y":1997,"d":"6:36","source":"The Bootleg Series Vol. 8 (2008)"},
-{"t":"Dreamin' of You","y":1997,"d":"5:51","source":"The Bootleg Series Vol. 8 (2008)"},
-{"t":"Things Have Changed","y":1999,"d":"5:08","source":"Wonder Boys soundtrack (2000)","note":"Won the Academy Award for Best Original Song. The Oscar statuette toured with him for years, sitting on an amp."},
-{"t":"Waitin' for You","y":2002,"d":"4:21","source":"Divine Secrets of the Ya-Ya Sisterhood soundtrack (2002)"},
-{"t":"'Cross the Green Mountain","y":2002,"d":"8:15","source":"Gods and Generals soundtrack (2003)","note":"A Civil War elegy; the closest he has come to a sequel to 'Blind Willie McTell'."},
-{"t":"Tell Ol' Bill","y":2005,"d":"5:24","source":"North Country soundtrack (2005)"},
-{"t":"Can't Escape from You","y":2005,"d":"5:22","source":"The Bootleg Series Vol. 8 (2008)"},
-{"t":"Huck's Tune","y":2006,"d":"4:10","source":"Lucky You soundtrack (2007)"}
-]}
+{
+"note": "Dylan originals that never appeared on a studio album: singles, B-sides, soundtrack songs, and outtakes first released on Biograph or The Bootleg Series. The year is when the song was recorded; 'source' is its first official release.",
+"tracks": [
+{
+"t": "Hard Times in New York Town",
+"y": 1961,
+"d": "2:21",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Man on the Street",
+"y": 1961,
+"d": "1:56",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Talkin' Bear Mountain Picnic Massacre Blues",
+"y": 1962,
+"d": "3:54",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Let Me Die in My Footsteps",
+"y": 1962,
+"d": "3:32",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "Cut from Freewheelin' at the last minute, along with three other songs."
+},
+{
+"t": "Rambling, Gambling Willie",
+"y": 1962,
+"d": "4:14",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Talkin' Hava Negeilah Blues",
+"y": 1962,
+"d": "0:52",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Quit Your Low Down Ways",
+"y": 1962,
+"d": "2:25",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Worried Blues",
+"y": 1962,
+"d": "2:38",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Kingsport Town",
+"y": 1962,
+"d": "3:38",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Walkin' Down the Line",
+"y": 1962,
+"d": "3:24",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Mixed-Up Confusion",
+"y": 1962,
+"d": "2:30",
+"source": "Single (1962)",
+"note": "His first single, and his first electric recording, withdrawn within weeks."
+},
+{
+"t": "Tomorrow Is a Long Time",
+"y": 1963,
+"d": "3:02",
+"source": "Bob Dylan's Greatest Hits Vol. II (1971)",
+"note": "Elvis Presley recorded it in 1966, which Dylan called the cover he treasured most."
+},
+{
+"t": "Talkin' John Birch Paranoid Blues",
+"y": 1963,
+"d": "4:04",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "CBS refused to let him sing it on the Ed Sullivan Show, so he walked off."
+},
+{
+"t": "Who Killed Davey Moore?",
+"y": 1963,
+"d": "3:38",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Only a Hobo",
+"y": 1963,
+"d": "2:56",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Moonshiner",
+"y": 1963,
+"d": "5:05",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"w": "Traditional"
+},
+{
+"t": "Seven Curses",
+"y": 1963,
+"d": "3:48",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Walls of Red Wing",
+"y": 1963,
+"d": "5:12",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Paths of Victory",
+"y": 1963,
+"d": "3:26",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Lay Down Your Weary Tune",
+"y": 1963,
+"d": "4:36",
+"source": "Biograph (1985)"
+},
+{
+"t": "Percy's Song",
+"y": 1963,
+"d": "7:36",
+"source": "Biograph (1985)",
+"note": "Fairport Convention made it famous."
+},
+{
+"t": "Eternal Circle",
+"y": 1963,
+"d": "3:34",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Last Thoughts on Woody Guthrie",
+"y": 1963,
+"d": "7:26",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "A poem, recited at Town Hall in April 1963."
+},
+{
+"t": "Mama, You Been on My Mind",
+"y": 1964,
+"d": "2:52",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "I'll Keep It with Mine",
+"y": 1965,
+"d": "3:51",
+"source": "Biograph (1985)",
+"note": "Given to Nico, who recorded it on 'Chelsea Girl'."
+},
+{
+"t": "Farewell, Angelina",
+"y": 1965,
+"d": "5:28",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "Joan Baez made it the title track of her 1965 album."
+},
+{
+"t": "If You Gotta Go, Go Now",
+"y": 1965,
+"d": "2:42",
+"source": "Single, Benelux (1967)"
+},
+{
+"t": "Sitting on a Barbed Wire Fence",
+"y": 1965,
+"d": "3:55",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Positively 4th Street",
+"y": 1965,
+"d": "3:54",
+"source": "Single (1965)",
+"note": "The nastiest kiss-off in pop, released as the follow-up to 'Like a Rolling Stone' and a Top 10 hit."
+},
+{
+"t": "Can You Please Crawl Out Your Window?",
+"y": 1965,
+"d": "3:32",
+"source": "Single (1965)"
+},
+{
+"t": "Jet Pilot",
+"y": 1965,
+"d": "0:50",
+"source": "Biograph (1985)"
+},
+{
+"t": "I Wanna Be Your Lover",
+"y": 1965,
+"d": "3:11",
+"source": "Biograph (1985)"
+},
+{
+"t": "She's Your Lover Now",
+"y": 1966,
+"d": "6:09",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "The take collapses just before the last verse. Still one of his most savage songs."
+},
+{
+"t": "Tell Me, Momma",
+"y": 1966,
+"d": "4:50",
+"source": "The Bootleg Series Vol. 4 (1998)",
+"note": "Only ever performed live, opening the electric sets of the 1966 world tour."
+},
+{
+"t": "I Shall Be Released",
+"y": 1967,
+"d": "3:04",
+"source": "Bob Dylan's Greatest Hits Vol. II (1971)",
+"note": "A Basement Tapes song that became an anthem in The Band's version."
+},
+{
+"t": "Quinn the Eskimo (The Mighty Quinn)",
+"y": 1967,
+"d": "2:14",
+"source": "Biograph (1985)",
+"note": "A UK No. 1 for Manfred Mann."
+},
+{
+"t": "I'm Not There",
+"y": 1967,
+"d": "5:05",
+"source": "I'm Not There soundtrack (2007)",
+"note": "A half-formed Basement Tapes mystery that gave Todd Haynes's film its title."
+},
+{
+"t": "Sign on the Cross",
+"y": 1967,
+"d": "7:22",
+"source": "The Bootleg Series Vol. 11 (2014)"
+},
+{
+"t": "Santa-Fe",
+"y": 1967,
+"d": "2:10",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Wanted Man",
+"y": 1969,
+"d": "3:04",
+"source": "The Bootleg Series Vol. 15 (2019)",
+"note": "Written for Johnny Cash, who recorded it at San Quentin."
+},
+{
+"t": "Watching the River Flow",
+"y": 1971,
+"d": "3:34",
+"source": "Single (1971)",
+"note": "Cut with Leon Russell. 'What's the matter with me? I don't have much to say.'"
+},
+{
+"t": "When I Paint My Masterpiece",
+"y": 1971,
+"d": "3:23",
+"source": "Bob Dylan's Greatest Hits Vol. II (1971)",
+"note": "The Band recorded it first, on 'Cahoots'."
+},
+{
+"t": "George Jackson",
+"y": 1971,
+"d": "5:38",
+"source": "Single (1971)",
+"note": "His first protest song in years, written days after the Black Panther was shot in San Quentin."
+},
+{
+"t": "Wallflower",
+"y": 1971,
+"d": "2:42",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Nobody 'Cept You",
+"y": 1973,
+"d": "2:50",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Up to Me",
+"y": 1974,
+"d": "6:17",
+"source": "Biograph (1985)",
+"note": "A Blood on the Tracks outtake many fans rank with the album's best."
+},
+{
+"t": "Call Letter Blues",
+"y": 1974,
+"d": "4:28",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Abandoned Love",
+"y": 1975,
+"d": "4:32",
+"source": "Biograph (1985)",
+"note": "Played once in public, at the Other End in July 1975, and never again."
+},
+{
+"t": "Golden Loom",
+"y": 1975,
+"d": "3:42",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Catfish",
+"y": 1975,
+"d": "6:02",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"w": "Bob Dylan / Jacques Levy",
+"note": "A blues for Yankees pitcher Catfish Hunter."
+},
+{
+"t": "Rita May",
+"y": 1975,
+"d": "3:13",
+"source": "Single B-side (1976)",
+"w": "Bob Dylan / Jacques Levy"
+},
+{
+"t": "Sign Language",
+"y": 1976,
+"d": "3:38",
+"source": "Eric Clapton, 'No Reason to Cry' (1976)",
+"note": "Sung as a duet with Clapton."
+},
+{
+"t": "Seven Days",
+"y": 1976,
+"d": "5:32",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "Ron Wood released it first."
+},
+{
+"t": "Coming from the Heart (The Road Is Long)",
+"y": 1978,
+"d": "2:48",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"w": "Bob Dylan / Helena Springs"
+},
+{
+"t": "Trouble in Mind",
+"y": 1979,
+"d": "5:54",
+"source": "Single B-side (1979)"
+},
+{
+"t": "Ye Shall Be Changed",
+"y": 1979,
+"d": "4:58",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Ain't Gonna Go to Hell for Anybody",
+"y": 1980,
+"d": "3:53",
+"source": "The Bootleg Series Vol. 13 (2017)"
+},
+{
+"t": "City of Gold",
+"y": 1980,
+"d": "3:39",
+"source": "The Bootleg Series Vol. 13 (2017)"
+},
+{
+"t": "Yonder Comes Sin",
+"y": 1980,
+"d": "5:37",
+"source": "The Bootleg Series Vol. 13 (2017)"
+},
+{
+"t": "Let's Keep It Between Us",
+"y": 1980,
+"d": "5:48",
+"source": "The Bootleg Series Vol. 13 (2017)",
+"note": "Given to Bonnie Raitt."
+},
+{
+"t": "Caribbean Wind",
+"y": 1981,
+"d": "5:54",
+"source": "Biograph (1985)"
+},
+{
+"t": "Angelina",
+"y": 1981,
+"d": "6:56",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Need a Woman",
+"y": 1981,
+"d": "5:34",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "You Changed My Life",
+"y": 1981,
+"d": "5:12",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Blind Willie McTell",
+"y": 1983,
+"d": "5:52",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "Left off Infidels; widely considered the greatest song he ever shelved. 'Nobody can sing the blues like Blind Willie McTell.'"
+},
+{
+"t": "Foot of Pride",
+"y": 1983,
+"d": "5:54",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "Lou Reed sang it at the 30th anniversary concert."
+},
+{
+"t": "Lord Protect My Child",
+"y": 1983,
+"d": "3:55",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Tell Me",
+"y": 1983,
+"d": "4:24",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Someone's Got a Hold of My Heart",
+"y": 1983,
+"d": "4:53",
+"source": "The Bootleg Series Vol. 1–3 (1991)"
+},
+{
+"t": "Julius and Ethel",
+"y": 1983,
+"d": "4:03",
+"source": "The Bootleg Series Vol. 16 (2021)"
+},
+{
+"t": "New Danville Girl",
+"y": 1984,
+"d": "11:08",
+"source": "The Bootleg Series Vol. 16 (2021)",
+"w": "Bob Dylan / Sam Shepard",
+"note": "The earlier, quieter version of 'Brownsville Girl'."
+},
+{
+"t": "Band of the Hand (It's Hell Time Man!)",
+"y": 1986,
+"d": "4:38",
+"source": "Band of the Hand soundtrack (1986)",
+"note": "Recorded with Tom Petty and the Heartbreakers in Sydney."
+},
+{
+"t": "Night After Night",
+"y": 1987,
+"d": "3:45",
+"source": "Hearts of Fire soundtrack (1987)"
+},
+{
+"t": "Series of Dreams",
+"y": 1989,
+"d": "6:03",
+"source": "The Bootleg Series Vol. 1–3 (1991)",
+"note": "Lanois fought to keep it on Oh Mercy and lost."
+},
+{
+"t": "Dignity",
+"y": 1989,
+"d": "5:58",
+"source": "Bob Dylan's Greatest Hits Vol. 3 (1994)",
+"note": "Another Oh Mercy outtake, released five years later with a Brendan O'Brien overdub."
+},
+{
+"t": "Red River Shore",
+"y": 1997,
+"d": "7:36",
+"source": "The Bootleg Series Vol. 8 (2008)",
+"note": "The great lost song of the Time Out of Mind sessions."
+},
+{
+"t": "Marchin' to the City",
+"y": 1997,
+"d": "6:36",
+"source": "The Bootleg Series Vol. 8 (2008)"
+},
+{
+"t": "Dreamin' of You",
+"y": 1997,
+"d": "5:51",
+"source": "The Bootleg Series Vol. 8 (2008)"
+},
+{
+"t": "Things Have Changed",
+"y": 1999,
+"d": "5:08",
+"source": "Wonder Boys soundtrack (2000)",
+"note": "Won the Academy Award for Best Original Song. The Oscar statuette toured with him for years, sitting on an amp."
+},
+{
+"t": "Waitin' for You",
+"y": 2002,
+"d": "4:21",
+"source": "Divine Secrets of the Ya-Ya Sisterhood soundtrack (2002)"
+},
+{
+"t": "'Cross the Green Mountain",
+"y": 2002,
+"d": "8:15",
+"source": "Gods and Generals soundtrack (2003)",
+"note": "A Civil War elegy; the closest he has come to a sequel to 'Blind Willie McTell'."
+},
+{
+"t": "Tell Ol' Bill",
+"y": 2005,
+"d": "5:24",
+"source": "North Country soundtrack (2005)"
+},
+{
+"t": "Can't Escape from You",
+"y": 2005,
+"d": "5:22",
+"source": "The Bootleg Series Vol. 8 (2008)"
+},
+{
+"t": "Huck's Tune",
+"y": 2006,
+"d": "4:10",
+"source": "Lucky You soundtrack (2007)"
+}
+]
+}

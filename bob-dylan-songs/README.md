@@ -2,7 +2,7 @@
 
 Every song Bob Dylan released between 1961 and 2020, as an explorable three.js universe.
 
-535 songs. 39 studio albums (including *The Basement Tapes*) plus 85 originals that never made an album: singles, B-sides, soundtrack songs and Bootleg Series outtakes. 38 hours of music.
+534 songs. 39 studio albums (including *The Basement Tapes*) plus 84 originals that never made an album: singles, B-sides, soundtrack songs and Bootleg Series outtakes. 38 hours of music.
 
 Every mark is one song. **Colour** is the era. **Size** is the song's length. Dimmer marks are covers and traditionals; the brightest are Dylan originals. The same 535 marks morph between four layouts:
 
@@ -44,7 +44,7 @@ The URL hash remembers the layout and the selected song, so any view can be shar
 
 ## How it is built
 
-- **three.js** with a single `InstancedMesh` for all 535 songs and a small custom shader (per-instance colour, rim light, filter dimming and highlight), so every layout change is a staggered CPU morph of 535 transforms.
+- **three.js** with a single `InstancedMesh` for all 534 songs and a small custom shader (per-instance colour, rim light, filter dimming and highlight), so every layout change is a staggered CPU morph of 534 transforms.
 - **Layouts** are pure functions in `src/layouts.js` that return positions, scales, labels, a camera, a static guide group (the road, the rings, the galactic dust) and focus vantages for songs and albums.
 - **Labels** are canvas sprites with screen-constant size, word wrapping and greedy overlap culling each frame, so the galaxy never becomes a wall of text.
 - **Post-processing**: Unreal bloom, ACES tone mapping, then a grade pass for vignette and grain.
@@ -54,4 +54,4 @@ The URL hash remembers the layout and the selected song, so any view can be shar
 
 The catalogue covers the 39 official studio albums from *Bob Dylan* (1962) to *Rough and Rowdy Ways* (2020). *The Basement Tapes* appears at 1967, when it was recorded, and only Dylan's songs from it are included; The Band's own tracks are omitted. *Shot of Love* includes "The Groom's Still Waiting at the Altar", added to the album in 1985. Live albums, compilations and *Shadow Kingdom* are not included because they re-record songs already in the catalogue.
 
-The 85 non-album songs are Dylan originals (and a few co-writes) chosen from singles and the Bootleg Series. The year is when the song was recorded; the source is its first official release. Track lengths are the standard album timings; a few seconds either way should be expected.
+The 84 non-album songs are Dylan originals (and a few co-writes) chosen from singles and the Bootleg Series. The year is when the song was recorded; the source is its first official release. Track lengths are the standard album timings; a few seconds either way should be expected.
