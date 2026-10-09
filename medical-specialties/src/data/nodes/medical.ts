@@ -1,0 +1,113 @@
+import type { SpecialtyInput } from '../types';
+
+/** Dermatology, Allergy & Immunology, and Physical Medicine & Rehabilitation. */
+export const MEDICAL_SPECIALTIES: SpecialtyInput[] = [
+  {
+    id: 'medical',
+    name: 'Skin, Allergy & Rehabilitation',
+    level: 'domain',
+    domain: 'medical',
+    system: 'general',
+    description:
+      'Three non-surgical specialties that sit outside the internal medicine tree: dermatology, allergy and immunology, and physical medicine and rehabilitation.',
+  },
+  {
+    id: 'dermatology',
+    name: 'Dermatology',
+    short: 'Derm',
+    level: 'specialty',
+    domain: 'medical',
+    parents: ['medical'],
+    board: 'American Board of Dermatology',
+    certification: 'abms-primary',
+    years: 4,
+    yearsNote: 'One internship year followed by three years of dermatology.',
+    system: 'skin',
+    description:
+      'Diseases of the skin, hair and nails: eczema, psoriasis, skin cancer, autoimmune skin disease and cutaneous surgery.',
+  },
+  {
+    id: 'pediatric-dermatology',
+    name: 'Pediatric Dermatology',
+    level: 'subspecialty',
+    domain: 'medical',
+    parents: ['dermatology'],
+    board: 'American Board of Dermatology',
+    certification: 'abms-sub',
+    years: 1,
+    system: 'children',
+    description:
+      'Skin disease in infants and children, including birthmarks, vascular anomalies, genodermatoses and severe atopic dermatitis.',
+  },
+  {
+    id: 'micrographic-dermatologic-surgery',
+    name: 'Micrographic Dermatologic Surgery',
+    short: 'Mohs',
+    level: 'subspecialty',
+    domain: 'medical',
+    parents: ['dermatology'],
+    board: 'American Board of Dermatology',
+    certification: 'abms-sub',
+    years: 1,
+    system: 'skin',
+    description:
+      'Mohs micrographic surgery for skin cancer, with the surgeon acting as pathologist, and the reconstruction that follows. Certified since 2021.',
+    aliases: ['Mohs surgery', 'Dermatologic surgery'],
+  },
+  {
+    id: 'allergy-immunology',
+    name: 'Allergy & Immunology',
+    short: 'A&I',
+    level: 'specialty',
+    domain: 'medical',
+    parents: ['internal-medicine', 'pediatrics'],
+    board: 'American Board of Allergy and Immunology',
+    certification: 'abms-primary',
+    years: 2,
+    yearsNote: 'A two-year fellowship after internal medicine or pediatrics, leading to a primary certificate from a conjoint board.',
+    system: 'immune',
+    description:
+      'Asthma, allergic rhinitis, food and drug allergy, anaphylaxis, urticaria and primary immunodeficiency in adults and children. Its own ABMS board, entered from either internal medicine or pediatrics.',
+  },
+  {
+    id: 'physical-medicine-rehabilitation',
+    name: 'Physical Medicine & Rehabilitation',
+    short: 'PM&R',
+    level: 'specialty',
+    domain: 'medical',
+    parents: ['medical'],
+    board: 'American Board of Physical Medicine and Rehabilitation',
+    certification: 'abms-primary',
+    years: 4,
+    system: 'rehab',
+    description:
+      'Restoring function and quality of life after injury, illness or disability: stroke, spinal cord and brain injury, amputation, musculoskeletal pain and the rehabilitation team.',
+    aliases: ['Physiatry', 'Physiatrist', 'Rehabilitation medicine'],
+  },
+  {
+    id: 'spinal-cord-injury-medicine',
+    name: 'Spinal Cord Injury Medicine',
+    level: 'subspecialty',
+    domain: 'medical',
+    parents: ['physical-medicine-rehabilitation'],
+    board: 'American Board of Physical Medicine and Rehabilitation',
+    certification: 'abms-sub',
+    years: 1,
+    system: 'rehab',
+    description:
+      'Acute and lifelong care of people with spinal cord injury and disease: bladder, bowel, skin, spasticity and mobility.',
+  },
+  {
+    id: 'pediatric-rehabilitation-medicine',
+    name: 'Pediatric Rehabilitation Medicine',
+    level: 'subspecialty',
+    domain: 'medical',
+    parents: ['physical-medicine-rehabilitation'],
+    board: 'American Board of Physical Medicine and Rehabilitation',
+    certification: 'abms-sub',
+    years: 2,
+    system: 'children',
+    description:
+      'Rehabilitation of children with cerebral palsy, spina bifida, brain and spinal cord injury and neuromuscular disease.',
+  },
+];
