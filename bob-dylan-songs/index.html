@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Bob Dylan · Every Song</title>
+  <meta name="description" content="Every song Bob Dylan released, 1961–2020, as an explorable three.js universe: a highway, a wall of records, a galaxy and a lexicon." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2307060b' stroke='%23f2d479' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23ff4757'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="intro" class="intro">
+    <div class="intro-inner">
+      <div class="eyebrow">Every song, 1961 – 2020</div>
+      <h1>Bob Dylan</h1>
+      <p class="intro-sub" id="intro-sub">loading the catalogue…</p>
+      <button id="enter" class="btn primary">Enter</button>
+      <p class="intro-hint">drag to orbit · scroll to zoom · click a song</p>
+    </div>
+  </div>
+
+  <header id="masthead" class="ui">
+    <div class="brand">
+      <div class="eyebrow">Every song</div>
+      <h1>Bob Dylan</h1>
+      <div class="stats" id="stats"></div>
+    </div>
+  </header>
+
+  <nav id="modes" class="ui modes" aria-label="Layouts">
+    <button data-mode="galaxy" class="mode"><span class="k">1</span>Galaxy<small>a spiral of time</small></button>
+    <button data-mode="highway" class="mode"><span class="k">2</span>Highway<small>album by album</small></button>
+    <button data-mode="records" class="mode"><span class="k">3</span>Records<small>a wall of vinyl</small></button>
+    <button data-mode="lexicon" class="mode"><span class="k">4</span>Lexicon<small>words in titles</small></button>
+  </nav>
+
+  <div id="legend" class="ui legend" aria-label="Eras"></div>
+
+  <div id="search-wrap" class="ui search-wrap">
+    <input id="search" type="search" placeholder="search songs  /" autocomplete="off" spellcheck="false" />
+    <ul id="results" class="results"></ul>
+  </div>
+
+  <aside id="panel" class="ui panel" aria-live="polite"></aside>
+
+  <div id="tooltip" class="tooltip"></div>
+
+  <footer id="foot" class="ui foot">
+    <button id="random" class="btn" title="a song at random (R)">⚄ Random</button>
+    <button id="tour" class="btn" title="fly through the albums in order (T)">▶ Tour</button>
+    <button id="help-btn" class="btn ghost">?</button>
+    <div class="foot-note" id="mode-note"></div>
+  </footer>
+
+  <div id="help" class="help hidden">
+    <div class="help-inner">
+      <h2>How to read this</h2>
+      <p>Every mark is one song: <b>450</b> studio album tracks plus <b>85</b> originals that never made an album. Colour is the era. Size is the song's length. Dimmer marks are covers and traditionals; the brightest marks are Dylan originals.</p>
+      <dl>
+        <dt>Galaxy</dt><dd>A spiral of time. Each album is a cluster of stars on the arm; non-album songs drift in the halo.</dd>
+        <dt>Highway</dt><dd>Highway 61, album by album. Each song stands on the roadside; height is its length. Singles and outtakes line the far shoulder at the year they were recorded.</dd>
+        <dt>Records</dt><dd>A wall of vinyl. Each album is a record; each song's arc of the groove is proportional to its share of the running time.</dd>
+        <dt>Lexicon</dt><dd>The sixteen words Dylan put in titles most often, with the songs that carry them.</dd>
+      </dl>
+      <h3>Keys</h3>
+      <dl class="keys">
+        <dt>1 – 4</dt><dd>switch layout</dd>
+        <dt>/</dt><dd>search</dd>
+        <dt>← →</dt><dd>previous / next song</dd>
+        <dt>↑ ↓</dt><dd>previous / next album</dd>
+        <dt>T</dt><dd>start or stop the tour</dd>
+        <dt>R</dt><dd>a song at random</dd>
+        <dt>Esc</dt><dd>clear selection and filters</dd>
+      </dl>
+      <p class="fine">Data compiled from the official studio albums (1962–2020, including The Basement Tapes) and the Bootleg Series. Track lengths are the standard album timings. Built with three.js.</p>
+      <button id="help-close" class="btn">Close</button>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

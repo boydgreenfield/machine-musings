@@ -1,0 +1,21 @@
+{
+  "name": "bob-dylan-songs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Every song Bob Dylan released, as an explorable three.js universe",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "node scripts/check-data.mjs",
+    "shots": "node scripts/screenshots.mjs"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.0",
+    "vite": "^8.3.4"
+  }
+}

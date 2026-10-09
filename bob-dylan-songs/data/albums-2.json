@@ -1,0 +1,1731 @@
+[
+{
+"id": "desire",
+"title": "Desire",
+"released": "1976-01-05",
+"era": "blood",
+"label": "Columbia",
+"producer": "Don DeVito",
+"note": "Co-written largely with theater director Jacques Levy, with Scarlet Rivera's gypsy violin and Emmylou Harris's harmonies. The Rolling Thunder Revue's studio record.",
+"tracks": [
+{
+"n": 1,
+"t": "Hurricane",
+"d": "8:33",
+"w": "Bob Dylan / Jacques Levy",
+"note": "A plea for boxer Rubin Carter, re-recorded after Columbia's lawyers objected to the first version's lyrics."
+},
+{
+"n": 2,
+"t": "Isis",
+"d": "6:58",
+"w": "Bob Dylan / Jacques Levy",
+"note": "A marriage, a tomb, a treasure hunt. He played it in whiteface on the Rolling Thunder tour."
+},
+{
+"n": 3,
+"t": "Mozambique",
+"d": "3:00",
+"w": "Bob Dylan / Jacques Levy"
+},
+{
+"n": 4,
+"t": "One More Cup of Coffee (Valley Below)",
+"d": "3:43",
+"note": "Written after a visit to a gypsy festival in Saintes-Maries-de-la-Mer on his 34th birthday."
+},
+{
+"n": 5,
+"t": "Oh, Sister",
+"d": "4:05",
+"w": "Bob Dylan / Jacques Levy"
+},
+{
+"n": 6,
+"t": "Joey",
+"d": "11:05",
+"w": "Bob Dylan / Jacques Levy",
+"note": "A ballad for the mobster Joey Gallo, which Lester Bangs called 'repellent romanticist bullshit'."
+},
+{
+"n": 7,
+"t": "Romance in Durango",
+"d": "5:50",
+"w": "Bob Dylan / Jacques Levy"
+},
+{
+"n": 8,
+"t": "Black Diamond Bay",
+"d": "7:30",
+"w": "Bob Dylan / Jacques Levy",
+"note": "An island, a volcano and a Panama hat; the narrator learns of it all on the evening news."
+},
+{
+"n": 9,
+"t": "Sara",
+"d": "5:29",
+"note": "Sung to his wife, who was in the studio, as their marriage was ending."
+}
+]
+},
+{
+"id": "street-legal",
+"title": "Street-Legal",
+"released": "1978-06-15",
+"era": "blood",
+"label": "Columbia",
+"producer": "Don DeVito",
+"note": "Big-band Dylan: horns, backing singers, apocalyptic imagery. Trashed at the time, rehabilitated since.",
+"tracks": [
+{
+"n": 1,
+"t": "Changing of the Guards",
+"d": "7:04"
+},
+{
+"n": 2,
+"t": "New Pony",
+"d": "4:28"
+},
+{
+"n": 3,
+"t": "No Time to Think",
+"d": "8:19"
+},
+{
+"n": 4,
+"t": "Baby, Stop Crying",
+"d": "5:19",
+"note": "A Top 20 hit in the UK."
+},
+{
+"n": 5,
+"t": "Is Your Love in Vain?",
+"d": "4:30"
+},
+{
+"n": 6,
+"t": "Señor (Tales of Yankee Power)",
+"d": "5:42"
+},
+{
+"n": 7,
+"t": "True Love Tends to Forget",
+"d": "4:14"
+},
+{
+"n": 8,
+"t": "We Better Talk This Over",
+"d": "4:04"
+},
+{
+"n": 9,
+"t": "Where Are You Tonight? (Journey Through Dark Heat)",
+"d": "6:16"
+}
+]
+},
+{
+"id": "slow-train",
+"title": "Slow Train Coming",
+"released": "1979-08-20",
+"era": "gospel",
+"label": "Columbia",
+"producer": "Jerry Wexler, Barry Beckett",
+"note": "Recorded at Muscle Shoals with Mark Knopfler on guitar, after Dylan's born-again conversion. It won him his first solo Grammy.",
+"tracks": [
+{
+"n": 1,
+"t": "Gotta Serve Somebody",
+"d": "5:22",
+"note": "Won the Grammy for Best Male Rock Vocal. John Lennon answered it with 'Serve Yourself'."
+},
+{
+"n": 2,
+"t": "Precious Angel",
+"d": "6:27"
+},
+{
+"n": 3,
+"t": "I Believe in You",
+"d": "5:02"
+},
+{
+"n": 4,
+"t": "Slow Train",
+"d": "5:55"
+},
+{
+"n": 5,
+"t": "Gonna Change My Way of Thinking",
+"d": "5:25"
+},
+{
+"n": 6,
+"t": "Do Right to Me Baby (Do Unto Others)",
+"d": "3:50"
+},
+{
+"n": 7,
+"t": "When You Gonna Wake Up",
+"d": "5:25"
+},
+{
+"n": 8,
+"t": "Man Gave Names to All the Animals",
+"d": "4:23",
+"note": "A reggae nursery rhyme that stops before it names the snake."
+},
+{
+"n": 9,
+"t": "When He Returns",
+"d": "4:30",
+"note": "Dylan alone with Barry Beckett's piano, singing a guide vocal he decided to keep."
+}
+]
+},
+{
+"id": "saved",
+"title": "Saved",
+"released": "1980-06-23",
+"era": "gospel",
+"label": "Columbia",
+"producer": "Jerry Wexler, Barry Beckett",
+"note": "Full gospel, cut in five days with his touring band and backing singers. His lowest-charting album since 1964.",
+"tracks": [
+{
+"n": 1,
+"t": "A Satisfied Mind",
+"d": "1:53",
+"w": "Red Hayes / Jack Rhodes"
+},
+{
+"n": 2,
+"t": "Saved",
+"d": "4:00",
+"w": "Bob Dylan / Tim Drummond"
+},
+{
+"n": 3,
+"t": "Covenant Woman",
+"d": "6:02"
+},
+{
+"n": 4,
+"t": "What Can I Do for You?",
+"d": "5:52"
+},
+{
+"n": 5,
+"t": "Solid Rock",
+"d": "3:55"
+},
+{
+"n": 6,
+"t": "Pressing On",
+"d": "5:11"
+},
+{
+"n": 7,
+"t": "In the Garden",
+"d": "5:58"
+},
+{
+"n": 8,
+"t": "Saving Grace",
+"d": "5:02"
+},
+{
+"n": 9,
+"t": "Are You Ready?",
+"d": "4:41"
+}
+]
+},
+{
+"id": "shot-of-love",
+"title": "Shot of Love",
+"released": "1981-08-10",
+"era": "gospel",
+"label": "Columbia",
+"producer": "Chuck Plotkin, Bob Dylan",
+"note": "The last of the gospel trilogy, with the religion loosening its grip and 'Every Grain of Sand' at the end.",
+"tracks": [
+{
+"n": 1,
+"t": "Shot of Love",
+"d": "4:18"
+},
+{
+"n": 2,
+"t": "Heart of Mine",
+"d": "4:29",
+"note": "Ringo Starr and Ronnie Wood sat in on the take."
+},
+{
+"n": 3,
+"t": "Property of Jesus",
+"d": "4:33"
+},
+{
+"n": 4,
+"t": "Lenny Bruce",
+"d": "4:32",
+"note": "An elegy for the comedian, written years after his death. 'He was an outlaw, that's for sure.'"
+},
+{
+"n": 5,
+"t": "Watered-Down Love",
+"d": "4:10"
+},
+{
+"n": 6,
+"t": "The Groom's Still Waiting at the Altar",
+"d": "4:03",
+"note": "Originally a B-side, added to the album in 1985."
+},
+{
+"n": 7,
+"t": "Dead Man, Dead Man",
+"d": "3:58"
+},
+{
+"n": 8,
+"t": "In the Summertime",
+"d": "3:34"
+},
+{
+"n": 9,
+"t": "Trouble",
+"d": "4:32"
+},
+{
+"n": 10,
+"t": "Every Grain of Sand",
+"d": "6:12",
+"note": "A hymn out of William Blake. Sung at Johnny Cash's funeral by Emmylou Harris and Sheryl Crow."
+}
+]
+},
+{
+"id": "infidels",
+"title": "Infidels",
+"released": "1983-10-27",
+"era": "wilderness",
+"label": "Columbia",
+"producer": "Bob Dylan, Mark Knopfler",
+"note": "With Knopfler, Mick Taylor and the rhythm section of Sly and Robbie. Famous as much for what it left off: 'Blind Willie McTell' and 'Foot of Pride'.",
+"tracks": [
+{
+"n": 1,
+"t": "Jokerman",
+"d": "6:12",
+"note": "'Standing on the waters casting your bread.' Revisited on the first Bootleg Series with an entirely different lyric."
+},
+{
+"n": 2,
+"t": "Sweetheart Like You",
+"d": "5:55"
+},
+{
+"n": 3,
+"t": "Neighborhood Bully",
+"d": "4:33"
+},
+{
+"n": 4,
+"t": "License to Kill",
+"d": "3:31",
+"note": "Performed on Late Night with David Letterman in 1984 with a punk band, the Plugz."
+},
+{
+"n": 5,
+"t": "Man of Peace",
+"d": "6:27"
+},
+{
+"n": 6,
+"t": "Union Sundown",
+"d": "5:21"
+},
+{
+"n": 7,
+"t": "I and I",
+"d": "5:36"
+},
+{
+"n": 8,
+"t": "Don't Fall Apart on Me Tonight",
+"d": "5:54"
+}
+]
+},
+{
+"id": "empire",
+"title": "Empire Burlesque",
+"released": "1985-06-10",
+"era": "wilderness",
+"label": "Columbia",
+"producer": "Bob Dylan",
+"note": "Mixed by Arthur Baker in the full gated-reverb style of 1985. Lyrics woven with lines lifted from Humphrey Bogart films.",
+"tracks": [
+{
+"n": 1,
+"t": "Tight Connection to My Heart (Has Anybody Seen My Love)",
+"d": "5:21",
+"note": "Rebuilt from the Infidels outtake 'Someone's Got a Hold of My Heart'."
+},
+{
+"n": 2,
+"t": "Seeing the Real You at Last",
+"d": "4:21"
+},
+{
+"n": 3,
+"t": "I'll Remember You",
+"d": "4:14"
+},
+{
+"n": 4,
+"t": "Clean Cut Kid",
+"d": "4:17"
+},
+{
+"n": 5,
+"t": "Never Gonna Be the Same Again",
+"d": "3:09"
+},
+{
+"n": 6,
+"t": "Trust Yourself",
+"d": "3:29"
+},
+{
+"n": 7,
+"t": "Emotionally Yours",
+"d": "4:30"
+},
+{
+"n": 8,
+"t": "When the Night Comes Falling from the Sky",
+"d": "7:29",
+"note": "An earlier take with Steve Van Zandt and Roy Bittan of the E Street Band surfaced on the Bootleg Series."
+},
+{
+"n": 9,
+"t": "Something's Burning, Baby",
+"d": "4:54"
+},
+{
+"n": 10,
+"t": "Dark Eyes",
+"d": "5:05",
+"note": "Acoustic, written overnight after the producer asked for one more song."
+}
+]
+},
+{
+"id": "knocked-out",
+"title": "Knocked Out Loaded",
+"released": "1986-07-14",
+"era": "wilderness",
+"label": "Columbia",
+"producer": "Bob Dylan",
+"note": "Thirty-five minutes of odds and ends, redeemed by one eleven-minute masterpiece written with Sam Shepard.",
+"tracks": [
+{
+"n": 1,
+"t": "You Wanna Ramble",
+"d": "3:15",
+"w": "Herman Parker"
+},
+{
+"n": 2,
+"t": "They Killed Him",
+"d": "4:04",
+"w": "Kris Kristofferson"
+},
+{
+"n": 3,
+"t": "Driftin' Too Far from Shore",
+"d": "3:42"
+},
+{
+"n": 4,
+"t": "Precious Memories",
+"d": "3:15",
+"w": "Traditional"
+},
+{
+"n": 5,
+"t": "Maybe Someday",
+"d": "3:19"
+},
+{
+"n": 6,
+"t": "Brownsville Girl",
+"d": "11:03",
+"w": "Bob Dylan / Sam Shepard",
+"note": "A half-remembered Gregory Peck western, a trip through Texas, and a Mexican backing choir. Reworked from 'New Danville Girl'."
+},
+{
+"n": 7,
+"t": "Got My Mind Made Up",
+"d": "2:53",
+"w": "Bob Dylan / Tom Petty"
+},
+{
+"n": 8,
+"t": "Under Your Spell",
+"d": "3:56",
+"w": "Bob Dylan / Carole Bayer Sager"
+}
+]
+},
+{
+"id": "groove",
+"title": "Down in the Groove",
+"released": "1988-05-30",
+"era": "wilderness",
+"label": "Columbia",
+"producer": "Bob Dylan",
+"note": "Covers, two co-writes with the Grateful Dead's Robert Hunter, and a guest list from Eric Clapton to Jerry Garcia. Dylan's commercial nadir.",
+"tracks": [
+{
+"n": 1,
+"t": "Let's Stick Together",
+"d": "3:09",
+"w": "Wilbert Harrison"
+},
+{
+"n": 2,
+"t": "When Did You Leave Heaven?",
+"d": "2:15",
+"w": "Walter Bullock / Richard Whiting"
+},
+{
+"n": 3,
+"t": "Sally Sue Brown",
+"d": "2:29",
+"w": "Arthur Alexander / Earl Montgomery / Tom Stafford"
+},
+{
+"n": 4,
+"t": "Death Is Not the End",
+"d": "5:10",
+"note": "An Infidels outtake. Nick Cave and the Bad Seeds covered it with Kylie Minogue and PJ Harvey."
+},
+{
+"n": 5,
+"t": "Had a Dream About You, Baby",
+"d": "2:53"
+},
+{
+"n": 6,
+"t": "Ugliest Girl in the World",
+"d": "3:32",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 7,
+"t": "Silvio",
+"d": "3:05",
+"w": "Bob Dylan / Robert Hunter",
+"note": "With the Grateful Dead on backing vocals. A live staple for the next fifteen years."
+},
+{
+"n": 8,
+"t": "Ninety Miles an Hour (Down a Dead End Street)",
+"d": "2:56",
+"w": "Hal Blair / Don Robertson"
+},
+{
+"n": 9,
+"t": "Shenandoah",
+"d": "3:38",
+"w": "Traditional"
+},
+{
+"n": 10,
+"t": "Rank Strangers to Me",
+"d": "2:57",
+"w": "Albert E. Brumley"
+}
+]
+},
+{
+"id": "oh-mercy",
+"title": "Oh Mercy",
+"released": "1989-09-18",
+"era": "wilderness",
+"label": "Columbia",
+"producer": "Daniel Lanois",
+"note": "Recorded in a New Orleans mansion with Daniel Lanois. The comeback, told at length in Dylan's 'Chronicles'.",
+"tracks": [
+{
+"n": 1,
+"t": "Political World",
+"d": "3:45"
+},
+{
+"n": 2,
+"t": "Where Teardrops Fall",
+"d": "2:32"
+},
+{
+"n": 3,
+"t": "Everything Is Broken",
+"d": "3:14"
+},
+{
+"n": 4,
+"t": "Ring Them Bells",
+"d": "3:00"
+},
+{
+"n": 5,
+"t": "Man in the Long Black Coat",
+"d": "4:30",
+"note": "Lanois's swamp noir; crickets recorded on the porch."
+},
+{
+"n": 6,
+"t": "Most of the Time",
+"d": "5:03",
+"note": "Used in 'High Fidelity'. 'I don't even notice she's gone, most of the time.'"
+},
+{
+"n": 7,
+"t": "What Good Am I?",
+"d": "4:45"
+},
+{
+"n": 8,
+"t": "Disease of Conceit",
+"d": "3:42"
+},
+{
+"n": 9,
+"t": "What Was It You Wanted",
+"d": "5:02"
+},
+{
+"n": 10,
+"t": "Shooting Star",
+"d": "3:12"
+}
+]
+},
+{
+"id": "red-sky",
+"title": "Under the Red Sky",
+"released": "1990-09-10",
+"era": "wilderness",
+"label": "Columbia",
+"producer": "Don Was, David Was, Bob Dylan",
+"note": "Nursery-rhyme songs dedicated to 'Gabby Goo Goo', his four-year-old daughter, with George Harrison, Elton John, Slash and Stevie Ray Vaughan dropping by.",
+"tracks": [
+{
+"n": 1,
+"t": "Wiggle Wiggle",
+"d": "2:09",
+"note": "Slash plays on it. Regularly listed among the worst Dylan songs, and performed anyway."
+},
+{
+"n": 2,
+"t": "Under the Red Sky",
+"d": "4:09",
+"note": "George Harrison on slide guitar."
+},
+{
+"n": 3,
+"t": "Unbelievable",
+"d": "4:06"
+},
+{
+"n": 4,
+"t": "Born in Time",
+"d": "3:39"
+},
+{
+"n": 5,
+"t": "T.V. Talkin' Song",
+"d": "3:02"
+},
+{
+"n": 6,
+"t": "10,000 Men",
+"d": "4:21"
+},
+{
+"n": 7,
+"t": "2 x 2",
+"d": "3:36",
+"note": "Elton John on piano."
+},
+{
+"n": 8,
+"t": "God Knows",
+"d": "3:02"
+},
+{
+"n": 9,
+"t": "Handy Dandy",
+"d": "4:03"
+},
+{
+"n": 10,
+"t": "Cat's in the Well",
+"d": "3:21"
+}
+]
+},
+{
+"id": "good-as",
+"title": "Good as I Been to You",
+"released": "1992-11-03",
+"era": "roots",
+"label": "Columbia",
+"producer": "Debbie Gold",
+"note": "Solo acoustic folk and blues, recorded in his garage. The first album of no originals since 'Dylan'. A reset.",
+"tracks": [
+{
+"n": 1,
+"t": "Frankie & Albert",
+"d": "3:50",
+"w": "Traditional"
+},
+{
+"n": 2,
+"t": "Jim Jones",
+"d": "3:52",
+"w": "Traditional"
+},
+{
+"n": 3,
+"t": "Blackjack Davey",
+"d": "5:47",
+"w": "Traditional"
+},
+{
+"n": 4,
+"t": "Canadee-i-o",
+"d": "4:20",
+"w": "Traditional"
+},
+{
+"n": 5,
+"t": "Sittin' on Top of the World",
+"d": "4:27",
+"w": "Traditional"
+},
+{
+"n": 6,
+"t": "Little Maggie",
+"d": "2:52",
+"w": "Traditional"
+},
+{
+"n": 7,
+"t": "Hard Times",
+"d": "4:31",
+"w": "Stephen Foster"
+},
+{
+"n": 8,
+"t": "Step It Up and Go",
+"d": "2:54",
+"w": "Traditional"
+},
+{
+"n": 9,
+"t": "Tomorrow Night",
+"d": "3:42",
+"w": "Sam Coslow / Will Grosz"
+},
+{
+"n": 10,
+"t": "Arthur McBride",
+"d": "6:20",
+"w": "Traditional"
+},
+{
+"n": 11,
+"t": "You're Gonna Quit Me",
+"d": "2:46",
+"w": "Traditional"
+},
+{
+"n": 12,
+"t": "Diamond Joe",
+"d": "3:14",
+"w": "Traditional"
+},
+{
+"n": 13,
+"t": "Froggie Went a-Courtin'",
+"d": "6:26",
+"w": "Traditional"
+}
+]
+},
+{
+"id": "world-gone-wrong",
+"title": "World Gone Wrong",
+"released": "1993-10-26",
+"era": "roots",
+"label": "Columbia",
+"producer": "Bob Dylan",
+"note": "More solo acoustic traditionals, with Dylan's own cranky, brilliant liner notes. Won the Grammy for Best Traditional Folk Album.",
+"tracks": [
+{
+"n": 1,
+"t": "World Gone Wrong",
+"d": "3:57",
+"w": "Mississippi Sheiks"
+},
+{
+"n": 2,
+"t": "Love Henry",
+"d": "4:24",
+"w": "Traditional"
+},
+{
+"n": 3,
+"t": "Ragged & Dirty",
+"d": "4:09",
+"w": "Willie Brown"
+},
+{
+"n": 4,
+"t": "Blood in My Eyes",
+"d": "5:04",
+"w": "Mississippi Sheiks"
+},
+{
+"n": 5,
+"t": "Broke Down Engine",
+"d": "3:22",
+"w": "Blind Willie McTell"
+},
+{
+"n": 6,
+"t": "Delia",
+"d": "5:41",
+"w": "Traditional"
+},
+{
+"n": 7,
+"t": "Stack a Lee",
+"d": "3:50",
+"w": "Traditional"
+},
+{
+"n": 8,
+"t": "Two Soldiers",
+"d": "5:38",
+"w": "Traditional"
+},
+{
+"n": 9,
+"t": "Jack-a-Roe",
+"d": "4:56",
+"w": "Traditional"
+},
+{
+"n": 10,
+"t": "Lone Pilgrim",
+"d": "2:44",
+"w": "Traditional"
+}
+]
+},
+{
+"id": "time-out-of-mind",
+"title": "Time Out of Mind",
+"released": "1997-09-30",
+"era": "late",
+"label": "Columbia",
+"producer": "Daniel Lanois",
+"note": "Seven years without new songs, then this: mortality, Miami heat, Lanois murk. Album of the Year at the Grammys.",
+"tracks": [
+{
+"n": 1,
+"t": "Love Sick",
+"d": "5:21",
+"note": "He was performing it at the Grammys when the 'Soy Bomb' dancer jumped onstage."
+},
+{
+"n": 2,
+"t": "Dirt Road Blues",
+"d": "3:36"
+},
+{
+"n": 3,
+"t": "Standing in the Doorway",
+"d": "7:43"
+},
+{
+"n": 4,
+"t": "Million Miles",
+"d": "5:52"
+},
+{
+"n": 5,
+"t": "Tryin' to Get to Heaven",
+"d": "5:21"
+},
+{
+"n": 6,
+"t": "'Til I Fell in Love with You",
+"d": "5:17"
+},
+{
+"n": 7,
+"t": "Not Dark Yet",
+"d": "6:29",
+"note": "'It's not dark yet, but it's getting there.'"
+},
+{
+"n": 8,
+"t": "Cold Irons Bound",
+"d": "7:15",
+"note": "Won the Grammy for Best Male Rock Vocal Performance."
+},
+{
+"n": 9,
+"t": "Make You Feel My Love",
+"d": "3:32",
+"note": "Billy Joel released it first; Garth Brooks and then Adele made it a standard."
+},
+{
+"n": 10,
+"t": "Can't Wait",
+"d": "5:47"
+},
+{
+"n": 11,
+"t": "Highlands",
+"d": "16:31",
+"note": "His longest studio recording until 'Murder Most Foul'. Features a conversation with a waitress in a Boston restaurant."
+}
+]
+},
+{
+"id": "love-and-theft",
+"title": "\"Love and Theft\"",
+"released": "2001-09-11",
+"era": "late",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "Released on September 11, 2001. Self-produced under the name Jack Frost, with his road band: jump blues, crooner ballads, rockabilly, and lines borrowed from a Japanese gangster memoir.",
+"tracks": [
+{
+"n": 1,
+"t": "Tweedle Dee & Tweedle Dum",
+"d": "4:46"
+},
+{
+"n": 2,
+"t": "Mississippi",
+"d": "5:21",
+"note": "Written for Time Out of Mind and abandoned there; Sheryl Crow recorded it first."
+},
+{
+"n": 3,
+"t": "Summer Days",
+"d": "4:52"
+},
+{
+"n": 4,
+"t": "Bye and Bye",
+"d": "3:16"
+},
+{
+"n": 5,
+"t": "Lonesome Day Blues",
+"d": "6:05"
+},
+{
+"n": 6,
+"t": "Floater (Too Much to Ask)",
+"d": "4:59"
+},
+{
+"n": 7,
+"t": "High Water (For Charley Patton)",
+"d": "4:04"
+},
+{
+"n": 8,
+"t": "Moonlight",
+"d": "3:23"
+},
+{
+"n": 9,
+"t": "Honest with Me",
+"d": "5:49"
+},
+{
+"n": 10,
+"t": "Po' Boy",
+"d": "3:05"
+},
+{
+"n": 11,
+"t": "Cry a While",
+"d": "5:05"
+},
+{
+"n": 12,
+"t": "Sugar Baby",
+"d": "6:40"
+}
+]
+},
+{
+"id": "modern-times",
+"title": "Modern Times",
+"released": "2006-08-29",
+"era": "late",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "His first No. 1 album in thirty years, making him, at 65, the oldest living artist to top the Billboard chart at the time.",
+"tracks": [
+{
+"n": 1,
+"t": "Thunder on the Mountain",
+"d": "5:55",
+"note": "Name-checks Alicia Keys in the second verse."
+},
+{
+"n": 2,
+"t": "Spirit on the Water",
+"d": "7:42"
+},
+{
+"n": 3,
+"t": "Rollin' and Tumblin'",
+"d": "6:01",
+"note": "Built on the Muddy Waters / Hambone Willie Newbern blues."
+},
+{
+"n": 4,
+"t": "When the Deal Goes Down",
+"d": "5:04"
+},
+{
+"n": 5,
+"t": "Someday Baby",
+"d": "4:55",
+"note": "Won the Grammy for Best Solo Rock Vocal Performance."
+},
+{
+"n": 6,
+"t": "Workingman's Blues #2",
+"d": "6:07",
+"note": "A sequel, in spirit, to Merle Haggard's 'Workin' Man Blues'."
+},
+{
+"n": 7,
+"t": "Beyond the Horizon",
+"d": "5:36"
+},
+{
+"n": 8,
+"t": "Nettie Moore",
+"d": "6:52"
+},
+{
+"n": 9,
+"t": "The Levee's Gonna Break",
+"d": "5:43"
+},
+{
+"n": 10,
+"t": "Ain't Talkin'",
+"d": "8:48"
+}
+]
+},
+{
+"id": "together",
+"title": "Together Through Life",
+"released": "2009-04-28",
+"era": "late",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "Tex-Mex accordion from David Hidalgo of Los Lobos; lyrics co-written with Robert Hunter. It began as a single song for a French film.",
+"tracks": [
+{
+"n": 1,
+"t": "Beyond Here Lies Nothin'",
+"d": "3:51",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 2,
+"t": "Life Is Hard",
+"d": "3:39",
+"w": "Bob Dylan / Robert Hunter",
+"note": "The song written for Olivier Dahan's 'My Own Love Song' that grew into the album."
+},
+{
+"n": 3,
+"t": "My Wife's Home Town",
+"d": "4:15",
+"w": "Bob Dylan / Robert Hunter / Willie Dixon"
+},
+{
+"n": 4,
+"t": "If You Ever Go to Houston",
+"d": "5:49",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 5,
+"t": "Forgetful Heart",
+"d": "3:42",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 6,
+"t": "Jolene",
+"d": "3:51",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 7,
+"t": "This Dream of You",
+"d": "5:54"
+},
+{
+"n": 8,
+"t": "Shake Shake Mama",
+"d": "3:37",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 9,
+"t": "I Feel a Change Comin' On",
+"d": "5:25",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 10,
+"t": "It's All Good",
+"d": "5:28",
+"w": "Bob Dylan / Robert Hunter"
+}
+]
+},
+{
+"id": "christmas",
+"title": "Christmas in the Heart",
+"released": "2009-10-13",
+"era": "late",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "Fifteen Christmas standards, sung in the full late-period rasp. All royalties go to food charities, in perpetuity.",
+"tracks": [
+{
+"n": 1,
+"t": "Here Comes Santa Claus",
+"d": "2:35",
+"w": "Gene Autry / Oakley Haldeman"
+},
+{
+"n": 2,
+"t": "Do You Hear What I Hear?",
+"d": "3:03",
+"w": "Noël Regney / Gloria Shayne"
+},
+{
+"n": 3,
+"t": "Winter Wonderland",
+"d": "1:53",
+"w": "Felix Bernard / Richard B. Smith"
+},
+{
+"n": 4,
+"t": "Hark the Herald Angels Sing",
+"d": "2:30",
+"w": "Traditional"
+},
+{
+"n": 5,
+"t": "I'll Be Home for Christmas",
+"d": "2:55",
+"w": "Kim Gannon / Walter Kent / Buck Ram"
+},
+{
+"n": 6,
+"t": "Little Drummer Boy",
+"d": "2:53",
+"w": "Katherine K. Davis"
+},
+{
+"n": 7,
+"t": "The Christmas Blues",
+"d": "2:55",
+"w": "Sammy Cahn / David Holt"
+},
+{
+"n": 8,
+"t": "O' Come All Ye Faithful (Adeste Fideles)",
+"d": "2:55",
+"w": "Traditional",
+"note": "The first verse is sung in Latin."
+},
+{
+"n": 9,
+"t": "Have Yourself a Merry Little Christmas",
+"d": "4:06",
+"w": "Hugh Martin / Ralph Blane"
+},
+{
+"n": 10,
+"t": "Must Be Santa",
+"d": "2:49",
+"w": "Hal Moore / Bill Fredricks",
+"note": "A polka. The video, with Dylan in a long wig at a house party, is a small masterpiece of chaos."
+},
+{
+"n": 11,
+"t": "Silver Bells",
+"d": "2:36",
+"w": "Jay Livingston / Ray Evans"
+},
+{
+"n": 12,
+"t": "The First Noel",
+"d": "2:31",
+"w": "Traditional"
+},
+{
+"n": 13,
+"t": "Christmas Island",
+"d": "2:29",
+"w": "Lyle Moraine"
+},
+{
+"n": 14,
+"t": "The Christmas Song",
+"d": "3:57",
+"w": "Mel Tormé / Robert Wells"
+},
+{
+"n": 15,
+"t": "O' Little Town of Bethlehem",
+"d": "2:17",
+"w": "Phillips Brooks / Lewis Redner"
+}
+]
+},
+{
+"id": "tempest",
+"title": "Tempest",
+"released": "2012-09-10",
+"era": "late",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "Released fifty years after his debut. Blood-soaked ballads, a fourteen-minute Titanic, and a farewell to John Lennon.",
+"tracks": [
+{
+"n": 1,
+"t": "Duquesne Whistle",
+"d": "5:43",
+"w": "Bob Dylan / Robert Hunter"
+},
+{
+"n": 2,
+"t": "Soon After Midnight",
+"d": "3:27"
+},
+{
+"n": 3,
+"t": "Narrow Way",
+"d": "7:28"
+},
+{
+"n": 4,
+"t": "Long and Wasted Years",
+"d": "3:46"
+},
+{
+"n": 5,
+"t": "Pay in Blood",
+"d": "5:09",
+"note": "'I pay in blood, but not my own.'"
+},
+{
+"n": 6,
+"t": "Scarlet Town",
+"d": "7:17"
+},
+{
+"n": 7,
+"t": "Early Roman Kings",
+"d": "5:16"
+},
+{
+"n": 8,
+"t": "Tin Angel",
+"d": "9:05"
+},
+{
+"n": 9,
+"t": "Tempest",
+"d": "13:54",
+"note": "Forty-five verses on the sinking of the Titanic, with Leonardo DiCaprio among the passengers."
+},
+{
+"n": 10,
+"t": "Roll On John",
+"d": "7:25",
+"note": "An elegy for John Lennon, quoting 'A Day in the Life' and 'Come Together'."
+}
+]
+},
+{
+"id": "shadows",
+"title": "Shadows in the Night",
+"released": "2015-02-03",
+"era": "songbook",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "Ten songs Frank Sinatra recorded, cut live with a five-piece band and no headphones. 'I'm not covering these songs. They've been covered enough. I'm uncovering them.'",
+"tracks": [
+{
+"n": 1,
+"t": "I'm a Fool to Want You",
+"d": "4:51",
+"w": "Frank Sinatra / Jack Wolf / Joel Herron"
+},
+{
+"n": 2,
+"t": "The Night We Called It a Day",
+"d": "3:24",
+"w": "Matt Dennis / Tom Adair"
+},
+{
+"n": 3,
+"t": "Stay with Me",
+"d": "2:56",
+"w": "Jerome Moross / Carolyn Leigh"
+},
+{
+"n": 4,
+"t": "Autumn Leaves",
+"d": "3:02",
+"w": "Joseph Kosma / Johnny Mercer / Jacques Prévert"
+},
+{
+"n": 5,
+"t": "Why Try to Change Me Now",
+"d": "3:38",
+"w": "Cy Coleman / Joseph McCarthy"
+},
+{
+"n": 6,
+"t": "Some Enchanted Evening",
+"d": "3:28",
+"w": "Richard Rodgers / Oscar Hammerstein II"
+},
+{
+"n": 7,
+"t": "Full Moon and Empty Arms",
+"d": "3:26",
+"w": "Buddy Kaye / Ted Mossman"
+},
+{
+"n": 8,
+"t": "Where Are You?",
+"d": "3:37",
+"w": "Harold Adamson / Jimmy McHugh"
+},
+{
+"n": 9,
+"t": "What'll I Do",
+"d": "3:20",
+"w": "Irving Berlin"
+},
+{
+"n": 10,
+"t": "That Lucky Old Sun",
+"d": "3:39",
+"w": "Beasley Smith / Haven Gillespie"
+}
+]
+},
+{
+"id": "fallen-angels",
+"title": "Fallen Angels",
+"released": "2016-05-20",
+"era": "songbook",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "A second helping of standards, released days before his 75th birthday and months before the Nobel Prize.",
+"tracks": [
+{
+"n": 1,
+"t": "Young at Heart",
+"d": "3:29",
+"w": "Johnny Richards / Carolyn Leigh"
+},
+{
+"n": 2,
+"t": "Maybe You'll Be There",
+"d": "3:58",
+"w": "Rube Bloom / Sammy Gallop"
+},
+{
+"n": 3,
+"t": "Polka Dots and Moonbeams",
+"d": "4:12",
+"w": "Jimmy Van Heusen / Johnny Burke"
+},
+{
+"n": 4,
+"t": "All the Way",
+"d": "3:21",
+"w": "Jimmy Van Heusen / Sammy Cahn"
+},
+{
+"n": 5,
+"t": "Skylark",
+"d": "3:06",
+"w": "Hoagy Carmichael / Johnny Mercer",
+"note": "The only song on the album Sinatra never recorded."
+},
+{
+"n": 6,
+"t": "Nevertheless",
+"d": "3:15",
+"w": "Harry Ruby / Bert Kalmar"
+},
+{
+"n": 7,
+"t": "All or Nothing at All",
+"d": "3:51",
+"w": "Arthur Altman / Jack Lawrence"
+},
+{
+"n": 8,
+"t": "On a Little Street in Singapore",
+"d": "3:28",
+"w": "Peter DeRose / Billy Hill"
+},
+{
+"n": 9,
+"t": "It Had to Be You",
+"d": "3:48",
+"w": "Isham Jones / Gus Kahn"
+},
+{
+"n": 10,
+"t": "Melancholy Mood",
+"d": "3:24",
+"w": "Walter Schumann / Vick Knight"
+},
+{
+"n": 11,
+"t": "That Old Black Magic",
+"d": "3:19",
+"w": "Harold Arlen / Johnny Mercer"
+},
+{
+"n": 12,
+"t": "Come Rain or Come Shine",
+"d": "3:02",
+"w": "Harold Arlen / Johnny Mercer"
+}
+]
+},
+{
+"id": "triplicate",
+"title": "Triplicate",
+"released": "2017-03-31",
+"era": "songbook",
+"label": "Columbia",
+"producer": "Jack Frost",
+"note": "Three discs of ten standards each, 32 minutes apiece, titled ''Til the Sun Goes Down', 'Devil Dolls' and 'Comin' Home'. His first triple album.",
+"tracks": [
+{
+"n": 1,
+"disc": 1,
+"t": "I Guess I'll Have to Change My Plans",
+"d": "2:36",
+"w": "Arthur Schwartz / Howard Dietz"
+},
+{
+"n": 2,
+"disc": 1,
+"t": "September of My Years",
+"d": "3:49",
+"w": "Jimmy Van Heusen / Sammy Cahn"
+},
+{
+"n": 3,
+"disc": 1,
+"t": "I Could Have Told You",
+"d": "3:40",
+"w": "Jimmy Van Heusen / Carl Sigman"
+},
+{
+"n": 4,
+"disc": 1,
+"t": "Once Upon a Time",
+"d": "2:31",
+"w": "Charles Strouse / Lee Adams"
+},
+{
+"n": 5,
+"disc": 1,
+"t": "Stormy Weather",
+"d": "3:04",
+"w": "Harold Arlen / Ted Koehler"
+},
+{
+"n": 6,
+"disc": 1,
+"t": "This Nearly Was Mine",
+"d": "3:46",
+"w": "Richard Rodgers / Oscar Hammerstein II"
+},
+{
+"n": 7,
+"disc": 1,
+"t": "That Old Feeling",
+"d": "3:38",
+"w": "Sammy Fain / Lew Brown"
+},
+{
+"n": 8,
+"disc": 1,
+"t": "It Gets Lonely Early",
+"d": "3:25",
+"w": "Jimmy Van Heusen / Sammy Cahn"
+},
+{
+"n": 9,
+"disc": 1,
+"t": "My One and Only Love",
+"d": "3:49",
+"w": "Guy Wood / Robert Mellin"
+},
+{
+"n": 10,
+"disc": 1,
+"t": "Trade Winds",
+"d": "3:11",
+"w": "Cliff Friend / Charles Tobias"
+},
+{
+"n": 11,
+"disc": 2,
+"t": "Braggin'",
+"d": "3:38",
+"w": "Benny Carter / Irving Mills"
+},
+{
+"n": 12,
+"disc": 2,
+"t": "As Time Goes By",
+"d": "3:32",
+"w": "Herman Hupfeld"
+},
+{
+"n": 13,
+"disc": 2,
+"t": "Imagination",
+"d": "3:05",
+"w": "Jimmy Van Heusen / Johnny Burke"
+},
+{
+"n": 14,
+"disc": 2,
+"t": "How Deep Is the Ocean",
+"d": "3:06",
+"w": "Irving Berlin"
+},
+{
+"n": 15,
+"disc": 2,
+"t": "P.S. I Love You",
+"d": "3:33",
+"w": "Gordon Jenkins / Johnny Mercer"
+},
+{
+"n": 16,
+"disc": 2,
+"t": "The Best Is Yet to Come",
+"d": "2:52",
+"w": "Cy Coleman / Carolyn Leigh"
+},
+{
+"n": 17,
+"disc": 2,
+"t": "But Beautiful",
+"d": "3:30",
+"w": "Jimmy Van Heusen / Johnny Burke"
+},
+{
+"n": 18,
+"disc": 2,
+"t": "Here's That Rainy Day",
+"d": "2:54",
+"w": "Jimmy Van Heusen / Johnny Burke"
+},
+{
+"n": 19,
+"disc": 2,
+"t": "Where Is the One",
+"d": "3:36",
+"w": "Alec Wilder / Edwin Finckel"
+},
+{
+"n": 20,
+"disc": 2,
+"t": "There's a Flaw in My Flue",
+"d": "3:11",
+"w": "Jimmy Van Heusen / Johnny Burke"
+},
+{
+"n": 21,
+"disc": 3,
+"t": "Day In, Day Out",
+"d": "3:04",
+"w": "Rube Bloom / Johnny Mercer"
+},
+{
+"n": 22,
+"disc": 3,
+"t": "I Couldn't Sleep a Wink Last Night",
+"d": "3:02",
+"w": "Jimmy McHugh / Harold Adamson"
+},
+{
+"n": 23,
+"disc": 3,
+"t": "Sentimental Journey",
+"d": "3:05",
+"w": "Les Brown / Ben Homer / Bud Green"
+},
+{
+"n": 24,
+"disc": 3,
+"t": "Somewhere Along the Way",
+"d": "3:28",
+"w": "Kurt Adams / Sammy Gallop"
+},
+{
+"n": 25,
+"disc": 3,
+"t": "When the World Was Young",
+"d": "3:49",
+"w": "Philippe-Gérard / Johnny Mercer"
+},
+{
+"n": 26,
+"disc": 3,
+"t": "These Foolish Things",
+"d": "3:34",
+"w": "Jack Strachey / Eric Maschwitz"
+},
+{
+"n": 27,
+"disc": 3,
+"t": "You Go to My Head",
+"d": "2:51",
+"w": "J. Fred Coots / Haven Gillespie"
+},
+{
+"n": 28,
+"disc": 3,
+"t": "Stardust",
+"d": "3:39",
+"w": "Hoagy Carmichael / Mitchell Parish"
+},
+{
+"n": 29,
+"disc": 3,
+"t": "It's Funny to Everyone but Me",
+"d": "3:36",
+"w": "Jack Lawrence"
+},
+{
+"n": 30,
+"disc": 3,
+"t": "Why Was I Born?",
+"d": "2:52",
+"w": "Jerome Kern / Oscar Hammerstein II"
+}
+]
+},
+{
+"id": "rough-and-rowdy",
+"title": "Rough and Rowdy Ways",
+"released": "2020-06-19",
+"era": "late",
+"label": "Columbia",
+"producer": "Bob Dylan",
+"note": "His first album of originals in eight years, released into the pandemic at 79. Whitman, Frankenstein, Dallas 1963 and the ghosts of Key West.",
+"tracks": [
+{
+"n": 1,
+"t": "I Contain Multitudes",
+"d": "4:36",
+"note": "'I'm just like Anne Frank, like Indiana Jones, and them British bad boys, the Rolling Stones.'"
+},
+{
+"n": 2,
+"t": "False Prophet",
+"d": "6:00",
+"note": "Built on Billy 'The Kid' Emerson's 1954 Sun single 'If Lovin' Is Believing'."
+},
+{
+"n": 3,
+"t": "My Own Version of You",
+"d": "6:41",
+"note": "A Frankenstein story: assembling a companion from limbs and brains, Al Pacino and Marlon Brando."
+},
+{
+"n": 4,
+"t": "I've Made Up My Mind to Give Myself to You",
+"d": "6:32"
+},
+{
+"n": 5,
+"t": "Black Rider",
+"d": "4:12"
+},
+{
+"n": 6,
+"t": "Goodbye Jimmy Reed",
+"d": "4:13"
+},
+{
+"n": 7,
+"t": "Mother of Muses",
+"d": "4:29"
+},
+{
+"n": 8,
+"t": "Crossing the Rubicon",
+"d": "7:22"
+},
+{
+"n": 9,
+"t": "Key West (Philosopher Pirate)",
+"d": "9:34"
+},
+{
+"n": 10,
+"t": "Murder Most Foul",
+"d": "16:54",
+"note": "Seventeen minutes on the Kennedy assassination and the songs that followed it. His first No. 1 single on any Billboard chart, released at midnight with no warning in March 2020."
+}
+]
+}
+]

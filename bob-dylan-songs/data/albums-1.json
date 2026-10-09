@@ -1,0 +1,1277 @@
+[
+{
+"id": "bob-dylan",
+"title": "Bob Dylan",
+"released": "1962-03-19",
+"era": "folk",
+"label": "Columbia",
+"producer": "John Hammond",
+"note": "Recorded in two afternoons for $402. Only two originals; the rest are the songs a 20-year-old carried out of the Village coffeehouses.",
+"tracks": [
+{
+"n": 1,
+"t": "You're No Good",
+"d": "1:40",
+"w": "Jesse Fuller"
+},
+{
+"n": 2,
+"t": "Talkin' New York",
+"d": "3:20"
+},
+{
+"n": 3,
+"t": "In My Time of Dyin'",
+"d": "2:40",
+"w": "Traditional"
+},
+{
+"n": 4,
+"t": "Man of Constant Sorrow",
+"d": "3:10",
+"w": "Traditional"
+},
+{
+"n": 5,
+"t": "Fixin' to Die",
+"d": "2:22",
+"w": "Bukka White"
+},
+{
+"n": 6,
+"t": "Pretty Peggy-O",
+"d": "3:23",
+"w": "Traditional"
+},
+{
+"n": 7,
+"t": "Highway 51 Blues",
+"d": "2:52",
+"w": "Curtis Jones"
+},
+{
+"n": 8,
+"t": "Gospel Plow",
+"d": "1:47",
+"w": "Traditional"
+},
+{
+"n": 9,
+"t": "Baby, Let Me Follow You Down",
+"d": "2:37",
+"w": "Traditional, arr. Eric von Schmidt"
+},
+{
+"n": 10,
+"t": "House of the Risin' Sun",
+"d": "5:20",
+"w": "Traditional"
+},
+{
+"n": 11,
+"t": "Freight Train Blues",
+"d": "2:18",
+"w": "Traditional"
+},
+{
+"n": 12,
+"t": "Song to Woody",
+"d": "3:12",
+"note": "A tribute to Woody Guthrie, sung to the tune of Guthrie's own '1913 Massacre'."
+},
+{
+"n": 13,
+"t": "See That My Grave Is Kept Clean",
+"d": "2:43",
+"w": "Blind Lemon Jefferson"
+}
+]
+},
+{
+"id": "freewheelin",
+"title": "The Freewheelin' Bob Dylan",
+"released": "1963-05-27",
+"era": "folk",
+"label": "Columbia",
+"producer": "John Hammond, Tom Wilson",
+"note": "The album that made him. Eleven originals, written in a single astonishing year.",
+"tracks": [
+{
+"n": 1,
+"t": "Blowin' in the Wind",
+"d": "2:48",
+"note": "Written in about ten minutes in April 1962, reputedly at the Commons on MacDougal Street. Peter, Paul and Mary took it to No. 2."
+},
+{
+"n": 2,
+"t": "Girl from the North Country",
+"d": "3:22",
+"note": "Borrows from 'Scarborough Fair', which Martin Carthy had taught him in London."
+},
+{
+"n": 3,
+"t": "Masters of War",
+"d": "4:34",
+"note": "Set to the melody of the English folk song 'Nottamun Town'."
+},
+{
+"n": 4,
+"t": "Down the Highway",
+"d": "3:27"
+},
+{
+"n": 5,
+"t": "Bob Dylan's Blues",
+"d": "2:23"
+},
+{
+"n": 6,
+"t": "A Hard Rain's a-Gonna Fall",
+"d": "6:55",
+"note": "Every line, he said, was the first line of a song he thought he'd never have time to write."
+},
+{
+"n": 7,
+"t": "Don't Think Twice, It's All Right",
+"d": "3:40",
+"note": "Melody adapted from Paul Clayton's 'Who's Gonna Buy You Ribbons'."
+},
+{
+"n": 8,
+"t": "Bob Dylan's Dream",
+"d": "5:03"
+},
+{
+"n": 9,
+"t": "Oxford Town",
+"d": "1:50",
+"note": "About James Meredith's enrollment at the University of Mississippi."
+},
+{
+"n": 10,
+"t": "Talkin' World War III Blues",
+"d": "6:28"
+},
+{
+"n": 11,
+"t": "Corrina, Corrina",
+"d": "2:44",
+"w": "Traditional"
+},
+{
+"n": 12,
+"t": "Honey, Just Allow Me One More Chance",
+"d": "2:01",
+"w": "Henry Thomas / Bob Dylan"
+},
+{
+"n": 13,
+"t": "I Shall Be Free",
+"d": "4:49"
+}
+]
+},
+{
+"id": "times",
+"title": "The Times They Are a-Changin'",
+"released": "1964-01-13",
+"era": "folk",
+"label": "Columbia",
+"producer": "Tom Wilson",
+"note": "His starkest record: ten originals, no humor, no covers, guitar and harmonica and the weight of the world.",
+"tracks": [
+{
+"n": 1,
+"t": "The Times They Are a-Changin'",
+"d": "3:15",
+"note": "Deliberately written as an anthem, drawing on Scottish and Irish ballad cadences."
+},
+{
+"n": 2,
+"t": "Ballad of Hollis Brown",
+"d": "5:06"
+},
+{
+"n": 3,
+"t": "With God on Our Side",
+"d": "7:08",
+"note": "Melody from Dominic Behan's 'The Patriot Game'."
+},
+{
+"n": 4,
+"t": "One Too Many Mornings",
+"d": "2:41"
+},
+{
+"n": 5,
+"t": "North Country Blues",
+"d": "4:35",
+"note": "Sung from the viewpoint of a miner's wife in the Iron Range where he grew up."
+},
+{
+"n": 6,
+"t": "Only a Pawn in Their Game",
+"d": "3:33",
+"note": "About the murder of Medgar Evers. Dylan sang it at the March on Washington."
+},
+{
+"n": 7,
+"t": "Boots of Spanish Leather",
+"d": "4:40"
+},
+{
+"n": 8,
+"t": "When the Ship Comes In",
+"d": "3:18",
+"note": "Written in a fit of pique after a hotel clerk refused him a room."
+},
+{
+"n": 9,
+"t": "The Lonesome Death of Hattie Carroll",
+"d": "5:48",
+"note": "Drawn almost line for line from a Baltimore newspaper report."
+},
+{
+"n": 10,
+"t": "Restless Farewell",
+"d": "5:32",
+"w": "Bob Dylan",
+"note": "Melody from the Irish 'The Parting Glass'. He sang it to Frank Sinatra at Sinatra's 80th birthday, by request."
+}
+]
+},
+{
+"id": "another-side",
+"title": "Another Side of Bob Dylan",
+"released": "1964-08-08",
+"era": "folk",
+"label": "Columbia",
+"producer": "Tom Wilson",
+"note": "Recorded in one night with a bottle of Beaujolais. The protest singer walks offstage; the poet walks on.",
+"tracks": [
+{
+"n": 1,
+"t": "All I Really Want to Do",
+"d": "4:04"
+},
+{
+"n": 2,
+"t": "Black Crow Blues",
+"d": "3:14",
+"note": "The first Dylan recording on which he plays piano."
+},
+{
+"n": 3,
+"t": "Spanish Harlem Incident",
+"d": "2:24"
+},
+{
+"n": 4,
+"t": "Chimes of Freedom",
+"d": "7:10",
+"note": "Partly written in the back of a station wagon on a cross-country drive in February 1964."
+},
+{
+"n": 5,
+"t": "I Shall Be Free No. 10",
+"d": "4:47"
+},
+{
+"n": 6,
+"t": "To Ramona",
+"d": "3:52"
+},
+{
+"n": 7,
+"t": "Motorpsycho Nitemare",
+"d": "4:33"
+},
+{
+"n": 8,
+"t": "My Back Pages",
+"d": "4:22",
+"note": "'I was so much older then, I'm younger than that now.' A farewell to finger-pointing songs."
+},
+{
+"n": 9,
+"t": "I Don't Believe You (She Acts Like We Never Have Met)",
+"d": "4:22"
+},
+{
+"n": 10,
+"t": "Ballad in Plain D",
+"d": "8:16",
+"note": "About the end of his relationship with Suze Rotolo. He later called writing it a mistake."
+},
+{
+"n": 11,
+"t": "It Ain't Me Babe",
+"d": "3:33"
+}
+]
+},
+{
+"id": "bringing",
+"title": "Bringing It All Back Home",
+"released": "1965-03-22",
+"era": "electric",
+"label": "Columbia",
+"producer": "Tom Wilson",
+"note": "One side electric, one side acoustic. The hinge of the whole decade.",
+"tracks": [
+{
+"n": 1,
+"t": "Subterranean Homesick Blues",
+"d": "2:21",
+"note": "His first Top 40 hit in the US. The cue-card film clip is among the first music videos."
+},
+{
+"n": 2,
+"t": "She Belongs to Me",
+"d": "2:47"
+},
+{
+"n": 3,
+"t": "Maggie's Farm",
+"d": "3:54",
+"note": "Opened the electric set at Newport in July 1965."
+},
+{
+"n": 4,
+"t": "Love Minus Zero/No Limit",
+"d": "2:51"
+},
+{
+"n": 5,
+"t": "Outlaw Blues",
+"d": "3:05"
+},
+{
+"n": 6,
+"t": "On the Road Again",
+"d": "2:35"
+},
+{
+"n": 7,
+"t": "Bob Dylan's 115th Dream",
+"d": "6:30",
+"note": "Begins with a false start and Dylan collapsing in laughter, left on the record on purpose."
+},
+{
+"n": 8,
+"t": "Mr. Tambourine Man",
+"d": "5:30",
+"note": "The Byrds' version became the first folk-rock No. 1."
+},
+{
+"n": 9,
+"t": "Gates of Eden",
+"d": "5:40"
+},
+{
+"n": 10,
+"t": "It's Alright, Ma (I'm Only Bleeding)",
+"d": "7:29",
+"note": "'He not busy being born is busy dying.' Quoted by Jimmy Carter in his 1976 acceptance speech."
+},
+{
+"n": 11,
+"t": "It's All Over Now, Baby Blue",
+"d": "4:12",
+"note": "The last song he played at Newport 1965, acoustic, after the electric set."
+}
+]
+},
+{
+"id": "highway61",
+"title": "Highway 61 Revisited",
+"released": "1965-08-30",
+"era": "electric",
+"label": "Columbia",
+"producer": "Bob Johnston, Tom Wilson",
+"note": "Named for the road that runs from his Minnesota hometown down to the Delta. Rock music grew up here.",
+"tracks": [
+{
+"n": 1,
+"t": "Like a Rolling Stone",
+"d": "6:13",
+"note": "Cut from a twenty-page 'long piece of vomit'. Al Kooper, not a keyboard player, improvised the organ part. Rolling Stone's greatest song of all time."
+},
+{
+"n": 2,
+"t": "Tombstone Blues",
+"d": "5:58"
+},
+{
+"n": 3,
+"t": "It Takes a Lot to Laugh, It Takes a Train to Cry",
+"d": "4:09"
+},
+{
+"n": 4,
+"t": "From a Buick 6",
+"d": "3:19"
+},
+{
+"n": 5,
+"t": "Ballad of a Thin Man",
+"d": "5:58",
+"note": "'Something is happening here, but you don't know what it is, do you, Mister Jones?'"
+},
+{
+"n": 6,
+"t": "Queen Jane Approximately",
+"d": "5:31"
+},
+{
+"n": 7,
+"t": "Highway 61 Revisited",
+"d": "3:30",
+"note": "The police-siren whistle was Dylan's own."
+},
+{
+"n": 8,
+"t": "Just Like Tom Thumb's Blues",
+"d": "5:31"
+},
+{
+"n": 9,
+"t": "Desolation Row",
+"d": "11:21",
+"note": "Eleven minutes, acoustic, with Charlie McCoy's Spanish guitar. Einstein disguised as Robin Hood, Ezra Pound and T.S. Eliot fighting in the captain's tower."
+}
+]
+},
+{
+"id": "blonde",
+"title": "Blonde on Blonde",
+"released": "1966-06-20",
+"era": "electric",
+"label": "Columbia",
+"producer": "Bob Johnston",
+"note": "Rock's first double album, cut mostly in Nashville with session players in overnight marathons. 'That thin, that wild mercury sound.'",
+"tracks": [
+{
+"n": 1,
+"t": "Rainy Day Women #12 & 35",
+"d": "4:36",
+"note": "Cut late at night with a Salvation Army-style brass band. 'Everybody must get stoned.'"
+},
+{
+"n": 2,
+"t": "Pledging My Time",
+"d": "3:50"
+},
+{
+"n": 3,
+"t": "Visions of Johanna",
+"d": "7:33",
+"note": "Many critics' pick for his finest lyric. 'The ghost of 'lectricity howls in the bones of her face.'"
+},
+{
+"n": 4,
+"t": "One of Us Must Know (Sooner or Later)",
+"d": "4:54"
+},
+{
+"n": 5,
+"t": "I Want You",
+"d": "3:07"
+},
+{
+"n": 6,
+"t": "Stuck Inside of Mobile with the Memphis Blues Again",
+"d": "7:05"
+},
+{
+"n": 7,
+"t": "Leopard-Skin Pill-Box Hat",
+"d": "3:58"
+},
+{
+"n": 8,
+"t": "Just Like a Woman",
+"d": "4:52"
+},
+{
+"n": 9,
+"t": "Most Likely You Go Your Way and I'll Go Mine",
+"d": "3:30"
+},
+{
+"n": 10,
+"t": "Temporary Like Achilles",
+"d": "5:02"
+},
+{
+"n": 11,
+"t": "Absolutely Sweet Marie",
+"d": "4:57",
+"note": "'To live outside the law, you must be honest.'"
+},
+{
+"n": 12,
+"t": "4th Time Around",
+"d": "4:35",
+"note": "Widely heard as an answer to the Beatles' 'Norwegian Wood'."
+},
+{
+"n": 13,
+"t": "Obviously 5 Believers",
+"d": "3:35"
+},
+{
+"n": 14,
+"t": "Sad-Eyed Lady of the Lowlands",
+"d": "11:23",
+"note": "Fills the entire fourth side. Written, he later sang, for his wife Sara."
+}
+]
+},
+{
+"id": "jwh",
+"title": "John Wesley Harding",
+"released": "1967-12-27",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Bob Johnston",
+"note": "After the motorcycle crash: twelve spare parables, recorded in Nashville in about twelve hours, released into the Summer of Love's psychedelic hangover.",
+"tracks": [
+{
+"n": 1,
+"t": "John Wesley Harding",
+"d": "2:58",
+"note": "The real outlaw spelled his name Hardin. Dylan said the extra 'g' was a mistake."
+},
+{
+"n": 2,
+"t": "As I Went Out One Morning",
+"d": "2:49"
+},
+{
+"n": 3,
+"t": "I Dreamed I Saw St. Augustine",
+"d": "3:53",
+"note": "Modeled on the labor hymn 'I Dreamed I Saw Joe Hill Last Night'."
+},
+{
+"n": 4,
+"t": "All Along the Watchtower",
+"d": "2:31",
+"note": "Jimi Hendrix's version arrived within months. Dylan has since performed it more than any other song of his, and plays it Hendrix's way."
+},
+{
+"n": 5,
+"t": "The Ballad of Frankie Lee and Judas Priest",
+"d": "5:35"
+},
+{
+"n": 6,
+"t": "Drifter's Escape",
+"d": "2:52"
+},
+{
+"n": 7,
+"t": "Dear Landlord",
+"d": "3:16"
+},
+{
+"n": 8,
+"t": "I Am a Lonesome Hobo",
+"d": "3:19"
+},
+{
+"n": 9,
+"t": "I Pity the Poor Immigrant",
+"d": "4:12"
+},
+{
+"n": 10,
+"t": "The Wicked Messenger",
+"d": "2:02"
+},
+{
+"n": 11,
+"t": "Down Along the Cove",
+"d": "2:23"
+},
+{
+"n": 12,
+"t": "I'll Be Your Baby Tonight",
+"d": "2:34",
+"note": "A preview of the country croon to come."
+}
+]
+},
+{
+"id": "nashville",
+"title": "Nashville Skyline",
+"released": "1969-04-09",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Bob Johnston",
+"note": "Twenty-seven minutes of country contentment, sung in a new, smooth voice he attributed to quitting cigarettes.",
+"tracks": [
+{
+"n": 1,
+"t": "Girl from the North Country",
+"d": "3:41",
+"note": "Duet with Johnny Cash, from sessions that produced an album's worth of duets, finally released on the Bootleg Series in 2019.",
+"feat": "Johnny Cash"
+},
+{
+"n": 2,
+"t": "Nashville Skyline Rag",
+"d": "3:22",
+"note": "An instrumental.",
+"inst": true
+},
+{
+"n": 3,
+"t": "To Be Alone with You",
+"d": "2:07"
+},
+{
+"n": 4,
+"t": "I Threw It All Away",
+"d": "2:30"
+},
+{
+"n": 5,
+"t": "Peggy Day",
+"d": "2:01"
+},
+{
+"n": 6,
+"t": "Lay Lady Lay",
+"d": "3:18",
+"note": "Written for 'Midnight Cowboy' but delivered too late for the film. His biggest hit in years."
+},
+{
+"n": 7,
+"t": "One More Night",
+"d": "2:23"
+},
+{
+"n": 8,
+"t": "Tell Me That It Isn't True",
+"d": "2:43"
+},
+{
+"n": 9,
+"t": "Country Pie",
+"d": "1:37"
+},
+{
+"n": 10,
+"t": "Tonight I'll Be Staying Here with You",
+"d": "3:23"
+}
+]
+},
+{
+"id": "self-portrait",
+"title": "Self Portrait",
+"released": "1970-06-08",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Bob Johnston",
+"note": "A sprawling double album of covers, instrumentals and live cuts. Greil Marcus's review began: 'What is this shit?' Dylan later said he made it to shake off the cult.",
+"tracks": [
+{
+"n": 1,
+"t": "All the Tired Horses",
+"d": "3:12",
+"note": "Two lines, sung by a female chorus, repeated for three minutes. Dylan does not sing.",
+"inst": true
+},
+{
+"n": 2,
+"t": "Alberta #1",
+"d": "2:57",
+"w": "Traditional"
+},
+{
+"n": 3,
+"t": "I Forgot More Than You'll Ever Know",
+"d": "2:23",
+"w": "Cecil Null"
+},
+{
+"n": 4,
+"t": "Days of 49",
+"d": "5:27",
+"w": "Traditional"
+},
+{
+"n": 5,
+"t": "Early Mornin' Rain",
+"d": "3:34",
+"w": "Gordon Lightfoot"
+},
+{
+"n": 6,
+"t": "In Search of Little Sadie",
+"d": "2:27",
+"w": "Traditional"
+},
+{
+"n": 7,
+"t": "Let It Be Me",
+"d": "3:00",
+"w": "Gilbert Bécaud / Pierre Delanoë / Mann Curtis"
+},
+{
+"n": 8,
+"t": "Little Sadie",
+"d": "2:00",
+"w": "Traditional"
+},
+{
+"n": 9,
+"t": "Woogie Boogie",
+"d": "2:06",
+"note": "An instrumental.",
+"inst": true
+},
+{
+"n": 10,
+"t": "Belle Isle",
+"d": "2:30",
+"w": "Traditional"
+},
+{
+"n": 11,
+"t": "Living the Blues",
+"d": "2:42"
+},
+{
+"n": 12,
+"t": "Like a Rolling Stone",
+"d": "5:18",
+"live": true,
+"note": "Live at the Isle of Wight, 1969, with The Band."
+},
+{
+"n": 13,
+"t": "Copper Kettle",
+"d": "3:34",
+"w": "Albert Frank Beddoe"
+},
+{
+"n": 14,
+"t": "Gotta Travel On",
+"d": "3:08",
+"w": "Paul Clayton et al."
+},
+{
+"n": 15,
+"t": "Blue Moon",
+"d": "2:29",
+"w": "Richard Rodgers / Lorenz Hart"
+},
+{
+"n": 16,
+"t": "The Boxer",
+"d": "2:48",
+"w": "Paul Simon",
+"note": "Dylan double-tracks himself, singing both Simon and Garfunkel's parts."
+},
+{
+"n": 17,
+"t": "The Mighty Quinn (Quinn the Eskimo)",
+"d": "2:48",
+"live": true,
+"note": "Live at the Isle of Wight, 1969."
+},
+{
+"n": 18,
+"t": "Take Me as I Am (Or Let Me Go)",
+"d": "3:03",
+"w": "Boudleaux Bryant"
+},
+{
+"n": 19,
+"t": "Take a Message to Mary",
+"d": "2:46",
+"w": "Boudleaux Bryant / Felice Bryant"
+},
+{
+"n": 20,
+"t": "It Hurts Me Too",
+"d": "3:15",
+"w": "Traditional"
+},
+{
+"n": 21,
+"t": "Minstrel Boy",
+"d": "3:32",
+"live": true,
+"note": "Live at the Isle of Wight, 1969."
+},
+{
+"n": 22,
+"t": "She Belongs to Me",
+"d": "2:43",
+"live": true,
+"note": "Live at the Isle of Wight, 1969."
+},
+{
+"n": 23,
+"t": "Wigwam",
+"d": "3:09",
+"note": "Wordless humming over a mariachi horn section. A Top 50 single.",
+"inst": true
+},
+{
+"n": 24,
+"t": "Alberta #2",
+"d": "3:12",
+"w": "Traditional"
+}
+]
+},
+{
+"id": "new-morning",
+"title": "New Morning",
+"released": "1970-10-21",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Bob Johnston",
+"note": "Released four months after Self Portrait, to relief. Dylan at the piano, domestic and warm.",
+"tracks": [
+{
+"n": 1,
+"t": "If Not for You",
+"d": "2:39",
+"note": "George Harrison recorded it too, on 'All Things Must Pass'; Olivia Newton-John had the hit."
+},
+{
+"n": 2,
+"t": "Day of the Locusts",
+"d": "3:57",
+"note": "About receiving an honorary doctorate from Princeton in June 1970, as the cicadas screamed."
+},
+{
+"n": 3,
+"t": "Time Passes Slowly",
+"d": "2:33"
+},
+{
+"n": 4,
+"t": "Went to See the Gypsy",
+"d": "2:51",
+"note": "Possibly about a meeting with Elvis Presley in Las Vegas, which may or may not have happened."
+},
+{
+"n": 5,
+"t": "Winterlude",
+"d": "2:21"
+},
+{
+"n": 6,
+"t": "If Dogs Run Free",
+"d": "3:37",
+"note": "A jazz-club recitation with scat vocals from Maeretha Stewart."
+},
+{
+"n": 7,
+"t": "New Morning",
+"d": "3:56"
+},
+{
+"n": 8,
+"t": "Sign on the Window",
+"d": "3:39"
+},
+{
+"n": 9,
+"t": "One More Weekend",
+"d": "3:09"
+},
+{
+"n": 10,
+"t": "The Man in Me",
+"d": "3:07",
+"note": "Revived decades later by 'The Big Lebowski'."
+},
+{
+"n": 11,
+"t": "Three Angels",
+"d": "2:07"
+},
+{
+"n": 12,
+"t": "Father of Night",
+"d": "1:27"
+}
+]
+},
+{
+"id": "pat-garrett",
+"title": "Pat Garrett & Billy the Kid",
+"released": "1973-07-13",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Gordon Carroll",
+"note": "Soundtrack to Sam Peckinpah's western, in which Dylan also appears as the knife-throwing Alias.",
+"tracks": [
+{
+"n": 1,
+"t": "Main Title Theme (Billy)",
+"d": "6:05",
+"note": "An instrumental.",
+"inst": true
+},
+{
+"n": 2,
+"t": "Cantina Theme (Workin' for the Law)",
+"d": "2:55",
+"note": "An instrumental.",
+"inst": true
+},
+{
+"n": 3,
+"t": "Billy 1",
+"d": "3:54"
+},
+{
+"n": 4,
+"t": "Bunkhouse Theme",
+"d": "2:15",
+"note": "An instrumental.",
+"inst": true
+},
+{
+"n": 5,
+"t": "River Theme",
+"d": "1:28",
+"note": "Wordless vocals.",
+"inst": true
+},
+{
+"n": 6,
+"t": "Turkey Chase",
+"d": "3:33",
+"note": "An instrumental, with Byron Berline's fiddle.",
+"inst": true
+},
+{
+"n": 7,
+"t": "Knockin' on Heaven's Door",
+"d": "2:30",
+"note": "Written for the scene where Slim Pickens' sheriff dies by the river. Covered by nearly everyone since."
+},
+{
+"n": 8,
+"t": "Final Theme",
+"d": "5:20",
+"note": "An instrumental.",
+"inst": true
+},
+{
+"n": 9,
+"t": "Billy 4",
+"d": "5:02"
+},
+{
+"n": 10,
+"t": "Billy 7",
+"d": "2:08"
+}
+]
+},
+{
+"id": "dylan-1973",
+"title": "Dylan",
+"released": "1973-11-16",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Bob Johnston",
+"note": "Outtakes from Self Portrait and New Morning, released by Columbia without his involvement after he left for Asylum. Long kept out of print.",
+"tracks": [
+{
+"n": 1,
+"t": "Lily of the West",
+"d": "3:44",
+"w": "Traditional"
+},
+{
+"n": 2,
+"t": "Can't Help Falling in Love",
+"d": "4:17",
+"w": "George David Weiss / Hugo Peretti / Luigi Creatore"
+},
+{
+"n": 3,
+"t": "Sarah Jane",
+"d": "2:43",
+"w": "Traditional"
+},
+{
+"n": 4,
+"t": "The Ballad of Ira Hayes",
+"d": "5:09",
+"w": "Peter La Farge"
+},
+{
+"n": 5,
+"t": "Mr. Bojangles",
+"d": "5:32",
+"w": "Jerry Jeff Walker"
+},
+{
+"n": 6,
+"t": "Mary Ann",
+"d": "2:40",
+"w": "Traditional"
+},
+{
+"n": 7,
+"t": "Big Yellow Taxi",
+"d": "2:12",
+"w": "Joni Mitchell"
+},
+{
+"n": 8,
+"t": "A Fool Such as I",
+"d": "2:41",
+"w": "Bill Trader"
+},
+{
+"n": 9,
+"t": "Spanish Is the Loving Tongue",
+"d": "4:13",
+"w": "Traditional / Charles Badger Clark"
+}
+]
+},
+{
+"id": "planet-waves",
+"title": "Planet Waves",
+"released": "1974-01-17",
+"era": "blood",
+"label": "Asylum",
+"producer": "Rob Fraboni",
+"note": "His first No. 1 album, recorded with The Band in three days before their 1974 tour.",
+"tracks": [
+{
+"n": 1,
+"t": "On a Night Like This",
+"d": "2:57"
+},
+{
+"n": 2,
+"t": "Going, Going, Gone",
+"d": "3:27"
+},
+{
+"n": 3,
+"t": "Tough Mama",
+"d": "4:17"
+},
+{
+"n": 4,
+"t": "Hazel",
+"d": "2:50"
+},
+{
+"n": 5,
+"t": "Something There Is About You",
+"d": "4:45"
+},
+{
+"n": 6,
+"t": "Forever Young",
+"d": "4:57",
+"note": "Written as a lullaby for one of his sons. The album includes it twice, slow and fast, because he couldn't choose."
+},
+{
+"n": 7,
+"t": "Forever Young (Continued)",
+"d": "2:49"
+},
+{
+"n": 8,
+"t": "Dirge",
+"d": "5:36"
+},
+{
+"n": 9,
+"t": "You Angel You",
+"d": "2:54"
+},
+{
+"n": 10,
+"t": "Never Say Goodbye",
+"d": "2:56"
+},
+{
+"n": 11,
+"t": "Wedding Song",
+"d": "4:42"
+}
+]
+},
+{
+"id": "blood",
+"title": "Blood on the Tracks",
+"released": "1975-01-20",
+"era": "blood",
+"label": "Columbia",
+"producer": "Bob Dylan",
+"note": "Recorded in New York, then half re-recorded in Minneapolis over Christmas. 'A lot of people tell me they enjoy that album. It's hard for me to relate to that.'",
+"tracks": [
+{
+"n": 1,
+"t": "Tangled Up in Blue",
+"d": "5:42",
+"note": "Written, he said, like a painting, with past and present on the same canvas. He still rewrites its verses onstage."
+},
+{
+"n": 2,
+"t": "Simple Twist of Fate",
+"d": "4:19"
+},
+{
+"n": 3,
+"t": "You're a Big Girl Now",
+"d": "4:36"
+},
+{
+"n": 4,
+"t": "Idiot Wind",
+"d": "7:48",
+"note": "'Blowing every time you move your teeth.' The New York version is a whisper; the released Minneapolis take is a snarl."
+},
+{
+"n": 5,
+"t": "You're Gonna Make Me Lonesome When You Go",
+"d": "2:55"
+},
+{
+"n": 6,
+"t": "Meet Me in the Morning",
+"d": "4:22"
+},
+{
+"n": 7,
+"t": "Lily, Rosemary and the Jack of Hearts",
+"d": "8:51",
+"note": "A fifteen-verse western in which the cabaret, the bank and the hanging judge all have their moment."
+},
+{
+"n": 8,
+"t": "If You See Her, Say Hello",
+"d": "4:49"
+},
+{
+"n": 9,
+"t": "Shelter from the Storm",
+"d": "5:02"
+},
+{
+"n": 10,
+"t": "Buckets of Rain",
+"d": "3:22"
+}
+]
+},
+{
+"id": "basement",
+"title": "The Basement Tapes",
+"released": "1975-06-26",
+"recorded": "1967-06-01",
+"era": "woodstock",
+"label": "Columbia",
+"producer": "Bob Dylan, The Band",
+"feat": "The Band",
+"note": "Recorded in 1967 in the basement of Big Pink in West Saugerties and bootlegged for years before this official release. Only Dylan's songs are shown here; The Band's own tracks are omitted.",
+"tracks": [
+{
+"n": 1,
+"t": "Odds and Ends",
+"d": "1:47"
+},
+{
+"n": 3,
+"t": "Million Dollar Bash",
+"d": "2:32"
+},
+{
+"n": 5,
+"t": "Goin' to Acapulco",
+"d": "5:27"
+},
+{
+"n": 7,
+"t": "Lo and Behold!",
+"d": "2:46"
+},
+{
+"n": 9,
+"t": "Clothes Line Saga",
+"d": "2:58",
+"note": "A deadpan answer to Bobbie Gentry's 'Ode to Billie Joe'."
+},
+{
+"n": 10,
+"t": "Apple Suckling Tree",
+"d": "2:49"
+},
+{
+"n": 11,
+"t": "Please, Mrs. Henry",
+"d": "2:33"
+},
+{
+"n": 12,
+"t": "Tears of Rage",
+"d": "4:14",
+"w": "Bob Dylan / Richard Manuel"
+},
+{
+"n": 13,
+"t": "Too Much of Nothing",
+"d": "3:04"
+},
+{
+"n": 14,
+"t": "Yea! Heavy and a Bottle of Bread",
+"d": "2:15"
+},
+{
+"n": 16,
+"t": "Crash on the Levee (Down in the Flood)",
+"d": "2:04"
+},
+{
+"n": 18,
+"t": "Tiny Montgomery",
+"d": "2:47"
+},
+{
+"n": 19,
+"t": "You Ain't Goin' Nowhere",
+"d": "2:42",
+"note": "The Byrds opened 'Sweetheart of the Rodeo' with it."
+},
+{
+"n": 21,
+"t": "Nothing Was Delivered",
+"d": "4:23"
+},
+{
+"n": 22,
+"t": "Open the Door, Homer",
+"d": "2:49"
+},
+{
+"n": 24,
+"t": "This Wheel's on Fire",
+"d": "3:52",
+"w": "Bob Dylan / Rick Danko"
+}
+]
+}
+]
