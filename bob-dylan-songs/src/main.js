@@ -33,7 +33,7 @@ function writeHash() {
   const parts = [state.mode];
   if (state.selected) parts.push(state.selected.id);
   else if (state.selectedAlbum) parts.push(`album:${state.selectedAlbum.id}`);
-  history.replaceState(null, '', `#${parts.join('/')}`);
+  try { history.replaceState(null, '', `#${parts.join('/')}`); } catch { /* sandboxed frames may refuse */ }
 }
 const nowS = () => performance.now() / 1000;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
