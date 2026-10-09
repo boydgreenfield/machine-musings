@@ -40,7 +40,7 @@ const sphereFrag = /* glsl */ `
     vec3 rim = (vColor * 1.25 + vec3(0.35)) * fres;
     vec3 col = core + rim;
     // Highlight: brighten everything and whiten the core.
-    col += (vColor * 0.6 + vec3(0.22)) * vGlow * (0.8 + 0.2 * sin(uTime * 3.0));
+    col += (vColor * 0.4 + vec3(0.1)) * vGlow * (0.8 + 0.2 * sin(uTime * 3.0));
     col *= mix(0.16, 1.0, vEmph);
     gl_FragColor = vec4(col, 1.0);
   }
@@ -102,7 +102,7 @@ const haloFrag = /* glsl */ `
     float d = length(gl_PointCoord - 0.5) * 2.0;
     if (d > 1.0) discard;
     float a = exp(-d * d * 5.0) * (1.0 - smoothstep(0.6, 1.0, d));
-    a *= (0.28 + vGlow * 0.9) * vAlpha;
+    a *= (0.28 + vGlow * 0.5) * vAlpha;
     gl_FragColor = vec4(vColor * a, a);
   }
 `;

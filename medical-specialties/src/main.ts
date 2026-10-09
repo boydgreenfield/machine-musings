@@ -10,7 +10,16 @@ import { Search } from './ui/search';
 import { Legend } from './ui/legend';
 import { Tour } from './ui/tour';
 
-const FONT_URL = `${import.meta.env.BASE_URL}fonts/Inter-SemiBold.ttf`;
+const LOCAL_FONT_URL = `${import.meta.env.BASE_URL}fonts/Inter-SemiBold.ttf`;
+// Static Inter 600 TTF served by Google Fonts, used only if the bundled font is absent.
+const FALLBACK_FONT_URL = 'https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuGKYMZg.ttf';
+async function resolveFontUrl(): Promise<string> {
+  try {
+    const r = await fetch(LOCAL_FONT_URL, { method: 'HEAD' });
+    if (r.ok && !(r.headers.get('content-type') ?? '').includes('text/html')) return LOCAL_FONT_URL;
+  } catch { /* fall through */ }
+  return FALLBACK_FONT_URL;
+}
 const LENSES: LensId[] = ['category', 'domain', 'training', 'workforce', 'credential'];
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -33,6 +42,8 @@ if (!webglAvailable()) {
   card.innerHTML = `<p class="eyebrow">Unavailable</p><h2>WebGL is required</h2><p>This atlas is drawn with three.js and needs a browser with WebGL enabled. Try a current version of Chrome, Firefox, Safari or Edge, or enable hardware acceleration in your browser settings.</p>`;
   throw new Error('WebGL unavailable');
 }
+
+const FONT_URL = await resolveFontUrl();
 
 // ── Tooltip ──────────────────────────────────────────────────────────────────
 const tooltip = $('tooltip');
