@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { buildCatalog } from './data.js';
 import { buildLayouts } from './layouts.js';
-import { Stage, SongMarks, LabelSet, setGuideAlpha } from './scene.js';
+import { Stage, SongMarks, LabelSet, CardAtlas, setGuideAlpha, fontsReady } from './scene.js';
 import { setupUI } from './ui.js';
 
 const catalog = buildCatalog();
@@ -18,8 +18,12 @@ try {
   document.getElementById('enter').remove();
   throw err;
 }
-const marks = new SongMarks(songs);
+const atlas = new CardAtlas(songs);
+const marks = new SongMarks(songs, atlas);
 stage.scene.add(marks.mesh);
+stage.scene.add(marks.posts);
+// Redraw hand-lettered textures once the web fonts arrive.
+fontsReady().then(() => { atlas.draw(); labels.refresh(); });
 const labels = new LabelSet();
 stage.scene.add(labels.group);
 Object.values(layouts).forEach((l) => { l.alpha = 0; l.alphaTarget = 0; setGuideAlpha(l.guide, 0); stage.scene.add(l.guide); });
@@ -65,12 +69,11 @@ function setMode(name, animate = true) {
   if (state.tour && state.tour.drive) stopTour();
   state.mode = name;
   const layout = layouts[name];
-  marks.setTargets(layout.targets, layout.scales, nowS(), animate);
+  marks.setTargets(layout, nowS(), animate);
   labels.set(layout.labels);
   labels.alphaTarget = 1;
   Object.values(layouts).forEach((l) => (l.alphaTarget = l === layout ? 1 : 0));
   ui.setMode(name);
-  stage.controls.autoRotate = name === 'galaxy' && !state.interacted;
   if (state.selected) {
     const f = layout.focus(state.selected);
     stage.flyTo(f.pos, f.target, animate ? T(2.2) : 0.01, nowS());
@@ -163,11 +166,11 @@ const _dp = new THREE.Vector3(), _dt = new THREE.Vector3();
 function updateDrive(dt) {
   const tour = state.tour;
   const road = layouts.highway.road;
-  const SPEED = reduceMotion ? 60 : 22;
+  const SPEED = reduceMotion ? 80 : 26;
   tour.d = Math.min(road.length - 1, tour.d + dt * SPEED);
   const a = road.frame(tour.d), b = road.frame(Math.min(road.length - 1, tour.d + 26));
-  _dp.set(a.p.x - a.n.x * 13 + a.t.x * -6, a.p.y + 9, a.p.z - a.n.z * 13 + a.t.z * -6);
-  _dt.set(b.p.x + b.n.x * 2.5, b.p.y + 3, b.p.z + b.n.z * 2.5);
+  _dp.set(a.p.x - a.n.x * 2.2 + a.t.x * -4, a.p.y + 4.2, a.p.z - a.n.z * 2.2 + a.t.z * -4);
+  _dt.set(b.p.x + b.n.x * 1.5, b.p.y + 3.2, b.p.z + b.n.z * 1.5);
   // ease the camera toward the moving vantage so the ride feels like suspension, not rails
   const k = 1 - Math.exp(-dt * 3.5);
   stage.camera.position.lerp(_dp, k);
@@ -251,14 +254,19 @@ function pick(includeLabels = false) {
       if (l.albumIndex !== undefined) return { album: albums[l.albumIndex] };
     }
   }
+  const pk = layouts[state.mode].pickables;
+  if (includeLabels && pk) {
+    const ph = ray.intersectObjects(pk, false);
+    if (ph.length && ph[0].object.userData.albumIndex !== undefined) return { album: albums[ph[0].object.userData.albumIndex] };
+  }
   return null;
 }
 
 // ------------------------------------------------------------ keyboard
 addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
-  if (e.key === '1') setMode('galaxy');
-  else if (e.key === '2') setMode('highway');
+  if (e.key === '1') setMode('highway');
+  else if (e.key === '2') setMode('years');
   else if (e.key === '3') setMode('records');
   else if (e.key === '4') setMode('lexicon');
   else if (e.key === '/') { e.preventDefault(); ui.focusSearch(); }
@@ -293,11 +301,11 @@ addEventListener('keydown', (e) => { if (!state.started && (e.key === 'Enter' ||
 
 // Initial state from the URL hash (#mode/song-id), camera pulled far back for the entrance dolly.
 const hashParts = location.hash.slice(1).split('/');
-const initial = ['galaxy', 'highway', 'records', 'lexicon'].includes(hashParts[0]) ? hashParts[0] : 'galaxy';
+const initial = ['highway', 'years', 'records', 'lexicon'].includes(hashParts[0]) ? hashParts[0] : 'highway';
 setMode(initial, false);
 {
   const l = layouts[initial];
-  const far = l.camera.pos.clone().sub(l.camera.target).multiplyScalar(1.9).add(l.camera.target);
+  const far = l.camera.pos.clone().sub(l.camera.target).multiplyScalar(1.6).add(l.camera.target);
   stage.camera.position.copy(far);
   stage.controls.target.copy(l.camera.target);
   stage.camTween = null;
@@ -326,8 +334,6 @@ function loop() {
     }
   }
   if (state.tour && state.tour.drive) updateDrive(dt);
-  // after a long idle in the galaxy with nothing selected, drift again
-  if (state.started && state.mode === 'galaxy' && !state.selected && !state.selectedAlbum && !state.tour && now - lastInteraction > 50) stage.controls.autoRotate = true;
   if (pointerDirty && state.started) {
     pointerDirty = false;
     const hit = pick(true);
@@ -343,11 +349,11 @@ function loop() {
 loop();
 
 // For scripted screenshots and curious consoles.
-window.__app = { setMode, selectSong, selectAlbum, clearSelection, enter, toggleTour, randomSong, catalog, layouts, stage, state,
+window.__app = { setMode, selectSong, selectAlbum, clearSelection, enter, toggleTour, randomSong, catalog, layouts, stage, state, marks, pick, pointer,
   findSong: (t) => songs.find((s) => s.title.toLowerCase() === t.toLowerCase()),
   // Finish every animation immediately (used by the screenshot script).
   settle() {
-    marks.t0 = -1e9; marks.cur.set(marks.pos1); marks.curS.set(marks.scl1);
+    marks.t0 = -1e9; marks.cur.set(marks.pos1); marks.curS.set(marks.scl1); marks.curQ.set(marks.q1); marks.curP.set(marks.ph1);
     for (let i = 0; i < marks.n; i++) { marks.state[i * 2] = marks.visTarget[i]; marks.state[i * 2 + 1] = marks.hiTarget[i]; }
     for (const l of Object.values(layouts)) { l.alpha = l.alphaTarget; setGuideAlpha(l.guide, l.alpha); }
     labels.alpha = labels.alphaTarget;

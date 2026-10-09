@@ -4,11 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Bob Dylan · Every Song</title>
-  <meta name="description" content="Every song Bob Dylan released, 1961–2020, as an explorable three.js universe: a highway, a wall of records, a galaxy and a lexicon." />
+  <meta name="description" content="Every song Bob Dylan released, 1961–2020, as a highway of hand-lettered cards, a wall of records and a year-by-year stack: a highway, a wall of records, a galaxy and a lexicon." />
   <meta property="og:title" content="Bob Dylan · Every Song" />
-  <meta property="og:description" content="534 songs, 39 albums, 38 hours of music, 1961 to 2020, as an explorable three.js universe." />
-  <meta name="theme-color" content="#07060b" />
+  <meta property="og:description" content="534 songs, 39 albums, 38 hours of music, 1961 to 2020, as a highway of hand-lettered cards, a wall of records and a year-by-year stack." />
+  <meta name="theme-color" content="#e9dec4" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%2307060b' stroke='%23f2d479' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23ff4757'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;700&family=Permanent+Marker&family=Special+Elite&display=swap" />
   <link rel="stylesheet" href="/src/styles.css" />
 </head>
 <body>
@@ -21,7 +24,7 @@
       <h1>Bob Dylan</h1>
       <p class="intro-sub" id="intro-sub">loading the catalogue…</p>
       <button id="enter" class="btn primary">Enter</button>
-      <p class="intro-hint">drag to orbit · scroll to zoom · click a song</p>
+      <p class="intro-hint">drag to look around · scroll to zoom · click a card</p>
     </div>
   </div>
 
@@ -34,8 +37,8 @@
   </header>
 
   <nav id="modes" class="ui modes" aria-label="Layouts">
-    <button data-mode="galaxy" class="mode"><span class="k">1</span>Galaxy<small>a spiral of time</small></button>
-    <button data-mode="highway" class="mode"><span class="k">2</span>Highway<small>album by album</small></button>
+    <button data-mode="highway" class="mode"><span class="k">1</span>Highway<small>album by album</small></button>
+    <button data-mode="years" class="mode"><span class="k">2</span>Years<small>a card for every song</small></button>
     <button data-mode="records" class="mode"><span class="k">3</span>Records<small>a wall of vinyl</small></button>
     <button data-mode="lexicon" class="mode"><span class="k">4</span>Lexicon<small>words in titles</small></button>
   </nav>
@@ -64,18 +67,18 @@
   <div id="help" class="help hidden">
     <div class="help-inner">
       <h2>How to read this</h2>
-      <p>Every mark is one song: <b>450</b> studio album tracks plus <b>84</b> originals that never made an album. Colour is the era. Size is the song's length. Dimmer marks are covers and traditionals; the brightest marks are Dylan originals.</p>
+      <p>Every card is one song, hand-lettered: <b>450</b> studio album tracks plus <b>84</b> originals that never made an album. The card's colour is the era. Its size is the song's length. Titles in black marker are Dylan originals; titles in pencil grey are covers and traditionals.</p>
       <dl>
-        <dt>Galaxy</dt><dd>A spiral of time. Each album is a cluster of stars on the arm; non-album songs drift in the halo.</dd>
-        <dt>Highway</dt><dd>Highway 61, album by album. Each song stands on the roadside; height is its length. Singles and outtakes line the far shoulder at the year they were recorded.</dd>
-        <dt>Records</dt><dd>A wall of vinyl. Each album is a record; each song's arc of the groove is proportional to its share of the running time.</dd>
+        <dt>Highway</dt><dd>Highway 61, album by album. Each song is a sign on a stake by the road; the taller the stake, the longer the song. Singles and outtakes line the far shoulder at the year they were recorded.</dd>
+        <dt>Years</dt><dd>A column of cards for every year from 1961 to 2020, stacked in release order.</dd>
+        <dt>Records</dt><dd>A wall of vinyl. Each album is a record with its songs fanned around the rim; a song's place on the rim is its share of the running time.</dd>
         <dt>Lexicon</dt><dd>The sixteen words Dylan put in titles most often, with the songs that carry them.</dd>
       </dl>
       <h3>By the numbers</h3>
       <dl id="numbers" class="numbers"></dl>
       <h3>Keys</h3>
       <dl class="keys">
-        <dt>1 – 4</dt><dd>switch layout</dd>
+        <dt>1 – 4</dt><dd>Highway · Years · Records · Lexicon</dd>
         <dt>/</dt><dd>search</dd>
         <dt>← →</dt><dd>previous / next song</dd>
         <dt>↑ ↓</dt><dd>previous / next album</dd>

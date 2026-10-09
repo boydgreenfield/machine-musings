@@ -19,7 +19,7 @@ await page.evaluate(() => window.__app.enter());
 await page.waitForTimeout(1500);
 const settle = async () => { await page.evaluate(() => window.__app.settle()); await page.waitForTimeout(900); };
 await settle();
-const shots = process.argv[4] ? process.argv[4].split(',') : ['galaxy', 'highway', 'records', 'lexicon'];
+const shots = process.argv[4] ? process.argv[4].split(',') : ['highway', 'years', 'records', 'lexicon'];
 for (const m of shots) {
   await page.evaluate((mode) => window.__app.setMode(mode), m);
   await settle();
@@ -63,7 +63,7 @@ await page.screenshot({ path: join(out, 'tour.png') });
 await page.evaluate(() => window.__app.toggleTour());
 await page.evaluate(() => window.__app.clearSelection());
 await page.setViewportSize({ width: 390, height: 844 });
-await page.evaluate(() => window.__app.setMode('galaxy'));
+await page.evaluate(() => window.__app.setMode('years'));
 await settle();
 await page.screenshot({ path: join(out, 'mobile.png') });
 await browser.close();

@@ -5,9 +5,9 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const MODE_NOTES = {
-  galaxy: 'A spiral of time, 1961 at the centre. Each album is a cluster of stars; outtakes and singles drift in the halo.',
-  highway: 'Album by album down the road. Height is length. The far shoulder carries songs that never made an album.',
-  records: 'Each album is a record. A song\'s arc of the groove is its share of the running time, starting at twelve o\'clock.',
+  highway: 'Album by album down Highway 61. Every song is a sign on a stake; the taller the stake, the longer the song. The far shoulder carries songs that never made an album.',
+  years: 'One column per year, 1961 to 2020. Every card is a song, stacked in the order it was released.',
+  records: 'Each album is a record with its cards fanned around the rim. A song\'s place on the rim is its share of the running time, from twelve o\'clock.',
   lexicon: 'The sixteen words that recur most in Dylan\'s titles, and the songs that carry them.',
 };
 
