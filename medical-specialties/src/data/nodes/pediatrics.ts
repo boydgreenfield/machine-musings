@@ -249,8 +249,8 @@ export const PEDIATRICS: SpecialtyInput[] = [
     parents: ['child-neurology', 'pediatrics'],
     board: 'American Board of Psychiatry & Neurology / American Board of Pediatrics',
     certification: 'abms-sub',
-    years: 2,
-    yearsNote: 'Typically a six-year combined pediatrics–neurology track.',
+    years: 1,
+    yearsNote: 'Usually trained as a six-year combined pediatrics–neurology programme rather than a separate fellowship.',
     system: 'nervous',
     description:
       'Chronic conditions of the developing nervous system such as cerebral palsy, intellectual disability and autism, bridging child neurology and developmental pediatrics.',

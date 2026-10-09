@@ -10,9 +10,10 @@ interface KeyboardDeps {
   focusSearch: () => void;
   toggleHelp: () => void;
   helpOpen: () => boolean;
+  tour: { stop: () => void; active: () => boolean };
 }
 
-export function setupKeyboard({ graph, store, app, focusSearch, toggleHelp, helpOpen }: KeyboardDeps): void {
+export function setupKeyboard({ graph, store, app, focusSearch, toggleHelp, helpOpen, tour }: KeyboardDeps): void {
   window.addEventListener('keydown', (ev) => {
     const target = ev.target as HTMLElement | null;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
@@ -31,6 +32,7 @@ export function setupKeyboard({ graph, store, app, focusSearch, toggleHelp, help
         break;
       case 'Escape':
         if (helpOpen()) toggleHelp();
+        else if (tour.active()) tour.stop();
         else if (store.state.selected) store.select(null);
         else store.showAllDomains();
         break;

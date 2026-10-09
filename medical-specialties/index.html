@@ -48,6 +48,7 @@
           <label class="toggle"><input type="checkbox" id="toggle-cross" /><span>Cross-board pathways</span></label>
           <label class="toggle"><input type="checkbox" id="toggle-labels" /><span>All labels</span></label>
           <button type="button" id="reset-view" class="text-btn">Reset view</button>
+          <button type="button" id="tour-btn" class="text-btn">Take the tour</button>
         </div>
         <p id="layout-hint" class="hint"></p>
       </nav>
@@ -96,6 +97,18 @@
       </div>
 
       <div id="intro-hint" class="hint-float">Drag to orbit · scroll to zoom · click a node</div>
+
+      <section id="tour" class="tour-card" aria-label="Guided tour" hidden>
+        <div class="tour-head"><span class="tour-counter"></span><button type="button" class="icon-btn" data-tour="end" aria-label="End tour">×</button></div>
+        <h2 class="tour-title"></h2>
+        <p class="tour-text"></p>
+        <div class="tour-actions">
+          <button type="button" class="btn ghost" data-tour="back">Back</button>
+          <button type="button" class="btn" data-tour="next">Next</button>
+        </div>
+      </section>
+
+      <div id="announce" class="visually-hidden" aria-live="polite"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

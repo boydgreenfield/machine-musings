@@ -8,23 +8,39 @@ import { setupKeyboard } from './ui/keyboard';
 import { setupLegend } from './ui/legend';
 import { setupPanel } from './ui/panel';
 import { setupSearch } from './ui/search';
+import { setupTour } from './ui/tour';
+import { renderFallback } from './ui/fallback';
 
 const graph = buildGraph();
 const store = new Store(graph);
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const app = new SceneApp(graph, store, {
-  container: document.getElementById('gl-container')!,
-  labelContainer: document.getElementById('labels')!,
-  reducedMotion,
-});
+let app: SceneApp;
+try {
+  app = new SceneApp(graph, store, {
+    container: document.getElementById('gl-container')!,
+    labelContainer: document.getElementById('labels')!,
+    reducedMotion,
+  });
+} catch (err) {
+  renderFallback(graph, err instanceof Error ? err.message : String(err));
+  throw err;
+}
 
 setupPanel(graph, store);
 setupLegend(graph, store);
 const search = setupSearch(graph, store);
 setupHud(graph, store, app);
 const help = setupHelp();
-setupKeyboard({ graph, store, app, focusSearch: search.focus, toggleHelp: help.toggle, helpOpen: help.isOpen });
+const tour = setupTour(graph, store, app);
+setupKeyboard({ graph, store, app, focusSearch: search.focus, toggleHelp: help.toggle, helpOpen: help.isOpen, tour });
+
+// Announce selections for assistive technology.
+const announce = document.getElementById('announce')!;
+store.on('select', (s) => {
+  const n = s.selected ? graph.byId.get(s.selected) : null;
+  announce.textContent = n ? `${n.name}. ${n.description}` : 'Selection cleared.';
+});
 
 // Deep links: #/<node-id> selects a node on load and keeps the hash in sync.
 const applyHash = () => {

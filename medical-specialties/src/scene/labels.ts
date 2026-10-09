@@ -241,6 +241,8 @@ export class NodeLabels extends Object3D {
       }
       if (pinned) priority += 15;
       if (emphasis > 1.2) priority += 10;
+      // The hovered or selected node always wins its label.
+      if (emphasis >= 1.35) priority += 100;
       if (!wanted) {
         this.fade(entry, 0, dt);
         continue;
