@@ -5,7 +5,7 @@ subspecialties: every residency, fellowship and certifying board in the United
 States system, and the pathways between them. Built with [three.js](https://threejs.org),
 TypeScript and Vite.
 
-![The constellation layout](docs/constellation.png)
+![The constellation layout](docs/constellation.jpg)
 
 ## What it shows
 
