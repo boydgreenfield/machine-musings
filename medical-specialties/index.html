@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="An interactive three-dimensional atlas of the major medical specialties, their subspecialties, and the fellowships that connect them." />
+    <meta name="theme-color" content="#06091a" />
+    <title>The Atlas of Medicine</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ffd166'/%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232ec4b6' stroke-width='1.5' opacity='.8'/%3E%3Ccircle cx='27' cy='12' r='2.5' fill='%23ff5c4d'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <canvas id="scene" aria-label="Three-dimensional map of medical specialties"></canvas>
+
+    <header class="hud hud-top-left">
+      <h1 class="title">The Atlas of Medicine</h1>
+      <p class="subtitle">Every board-certified specialty, subspecialty, and major fellowship in American medicine, and the training paths that bind them.</p>
+      <p class="stats" id="stats"></p>
+      <p class="layout-blurb" id="layout-blurb"></p>
+    </header>
+
+    <div class="hud hud-top-right">
+      <div class="search" id="search">
+        <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="search-input" type="search" placeholder="Search specialties… (press /)" autocomplete="off" spellcheck="false" aria-label="Search specialties" />
+        <button class="search-clear" id="search-clear" aria-label="Clear search" hidden>×</button>
+        <ul class="search-results" id="search-results" role="listbox" hidden></ul>
+      </div>
+    </div>
+
+    <aside class="hud legend" id="legend" aria-label="Legend"></aside>
+
+    <nav class="hud toolbar" id="toolbar" aria-label="View controls">
+      <div class="toolbar-group" id="layout-buttons" role="radiogroup" aria-label="Layout"></div>
+      <div class="toolbar-group">
+        <label class="select-wrap">
+          <span class="select-label">Colour by</span>
+          <select id="lens-select" aria-label="Colour nodes by">
+            <option value="category">Family of practice</option>
+            <option value="domain">Body system</option>
+            <option value="training">Years of training</option>
+            <option value="workforce">Workforce size</option>
+            <option value="credential">Credential type</option>
+          </select>
+        </label>
+      </div>
+      <div class="toolbar-group toggles">
+        <button class="toggle" id="toggle-fellowships" aria-pressed="true" title="Show fellowships without an ABMS certificate (F)">Fellowships</button>
+        <button class="toggle" id="toggle-labels" aria-pressed="true" title="Cycle label density (L)">Labels</button>
+        <button class="toggle" id="toggle-rotate" aria-pressed="true" title="Auto-rotate when idle (space)">Rotate</button>
+        <button class="toggle" id="toggle-glow" aria-pressed="true" title="Bloom and particle flow (G)">Glow</button>
+      </div>
+      <div class="toolbar-group">
+        <button class="btn btn-primary" id="tour-button" title="Guided tour (T)">▶ Tour</button>
+        <button class="btn" id="reset-button" title="Reset view (R)">Reset</button>
+        <button class="btn btn-icon" id="help-button" title="Keyboard shortcuts and about (?)" aria-label="Help">?</button>
+      </div>
+    </nav>
+
+    <aside class="hud panel" id="panel" hidden aria-live="polite"></aside>
+
+    <div class="tooltip" id="tooltip" hidden></div>
+
+    <div class="tour-bar" id="tour-bar" hidden>
+      <button class="tour-nav" id="tour-prev" aria-label="Previous stop">‹</button>
+      <div class="tour-body">
+        <div class="tour-progress" id="tour-progress"></div>
+        <h3 class="tour-title" id="tour-title"></h3>
+        <p class="tour-text" id="tour-text"></p>
+      </div>
+      <button class="tour-nav" id="tour-next" aria-label="Next stop">›</button>
+      <button class="tour-close" id="tour-close" aria-label="End tour">×</button>
+    </div>
+
+    <div class="overlay" id="intro">
+      <div class="overlay-card">
+        <p class="eyebrow">An interactive atlas</p>
+        <h2>The Atlas of Medicine</h2>
+        <p>
+          Medicine is not one profession but a constellation of them. This map shows every primary
+          specialty recognised by the American Board of Medical Specialties, the subspecialties that grow
+          from each, and the fields that bridge several boards at once.
+        </p>
+        <ul class="intro-tips">
+          <li><b>Drag</b> to orbit, <b>scroll</b> to zoom, <b>click</b> a node to learn about it.</li>
+          <li>Switch <b>layouts</b> to see the same fields as orbits, a physics constellation, a tower of training years, or body systems.</li>
+          <li>Press <b>/</b> to search, <b>T</b> for a guided tour, <b>?</b> for all shortcuts.</li>
+        </ul>
+        <div class="overlay-actions">
+          <button class="btn btn-primary btn-large" id="intro-explore">Explore</button>
+          <button class="btn btn-large" id="intro-tour">Take the tour</button>
+        </div>
+        <p class="overlay-foot" id="intro-loading">Loading fonts…</p>
+      </div>
+    </div>
+
+    <div class="overlay" id="help" hidden>
+      <div class="overlay-card">
+        <button class="overlay-close" id="help-close" aria-label="Close">×</button>
+        <h2>Shortcuts &amp; about</h2>
+        <table class="shortcuts">
+          <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
+          <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>Orbits · Constellation · Training tower · Body systems</td></tr>
+          <tr><td><kbd>C</kbd></td><td>Cycle colour lens</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Toggle fellowships</td></tr>
+          <tr><td><kbd>L</kbd></td><td>Cycle label density</td></tr>
+          <tr><td><kbd>G</kbd></td><td>Toggle glow &amp; flow</td></tr>
+          <tr><td><kbd>Space</kbd></td><td>Toggle auto-rotate</td></tr>
+          <tr><td><kbd>T</kbd></td><td>Start or stop the guided tour</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Reset the camera</td></tr>
+          <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Step through sibling nodes of the selection</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Clear selection, search, or close this panel</td></tr>
+        </table>
+        <h3>About the data</h3>
+        <p>
+          The taxonomy follows the 24 member boards of the American Board of Medical Specialties (ABMS) and
+          their certificates, with ACGME-accredited or widely recognised society fellowships added where
+          they shape practice. Training lengths are typical minimums after medical school. Workforce
+          figures are approximate counts of active US physicians, rounded from public AAMC and ABMS
+          reports, and used only for relative sizing. Osteopathic (AOA) boards, non-US systems, and
+          combined residencies other than Med-Peds are not shown.
+        </p>
+        <p class="overlay-foot">Built with three.js, troika-three-text and d3-force-3d.</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
