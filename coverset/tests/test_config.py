@@ -107,12 +107,14 @@ def test_comma_lists_from_constructor() -> None:
     assert settings.ai_exclude_globs == ["*.env"]
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("bind", ["127.0.0.1:8000", "localhost:9000", "[::1]:8000", "127.0.0.5:1"])
 def test_loopback_binds_need_no_token(bind: str) -> None:
     settings = Settings.for_tests(bind=bind)
     assert settings.is_loopback
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("bind", ["0.0.0.0:8000", "192.168.1.10:8000", "[::]:8000", "example.com:80"])
 def test_non_loopback_bind_requires_long_admin_token(bind: str) -> None:
     with pytest.raises(ValidationError, match="not a loopback address"):
@@ -123,6 +125,7 @@ def test_non_loopback_bind_requires_long_admin_token(bind: str) -> None:
     assert not settings.is_loopback
 
 
+@pytest.mark.security
 def test_short_admin_token_rejected_even_on_loopback() -> None:
     with pytest.raises(ValidationError, match="at least 32 characters"):
         Settings.for_tests(admin_token="short")
@@ -175,6 +178,7 @@ def test_public_url_and_audience_derivation() -> None:
     assert Settings.for_tests(bind="[::1]:9000").public_url == "http://[::1]:9000"
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     "public_url", ["https://coverset-demo.ngrok.app", "https://ci.example.org", "http://192.168.1.5:8000"]
 )
@@ -185,6 +189,7 @@ def test_public_url_reachable_from_outside_requires_admin_token(public_url: str)
     assert Settings.for_tests(public_url=public_url, admin_token=LONG_TOKEN).public_url == public_url
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     "public_url",
     ["http://localhost:8000", "http://127.0.0.2:8000", "http://[::1]:8000", "http://ci.example.test"],

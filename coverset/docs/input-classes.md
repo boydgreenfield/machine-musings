@@ -25,18 +25,22 @@ Each class belongs to a family. A family's classes become expected for a paramet
 | url | `url` | some observed string had `kind:url` | `kind:url` |
 | bytes | `empty`, `non-empty` | a `bytes` value was observed | `len:0`, or any other length |
 | container | `empty`, `single`, `multiple` | a `list`, `tuple`, `set`, `frozenset` or `dict` was observed | `len:0`, `len:1`, any longer length |
-| elements | `zero-element`, `negative-element`, `all-zero` | an observed container had `int` or `float` elements, or the annotation's element type is numeric | `any_zero`, `any_neg`, `all_zero` on a numeric container |
+| elements | `zero-element`, `negative-element`, `all-zero`, `sum-zero` | an observed container had `int` or `float` elements, or the annotation's element type is numeric | `any_zero`, `any_neg`, `all_zero`, `sum_zero` (the sampled elements sum to zero) on a numeric container |
 | elements | `nan-element` | additionally, `float` elements were observed or annotated | `any_nan` |
 | order | `unsorted`, `duplicates` | a `list` or `tuple` (observed or annotated) with comparable elements (`int`, `float`, `str`, `bytes`, `tuple`) | `order:unsorted` or `order:reverse`; `dups` |
 | pairs | `inverted-pair` | an observed sequence had `pair:...`, or the annotation's element type is a 2-tuple of numbers | `pair:gt` (every sampled pair has first > second) |
 | literal | one per `Literal` value, named by its `repr` | the annotation has `Literal[...]` | the redacted example equals the value's `repr` |
-| enum | one per member, `Name.MEMBER` | the annotation names an `Enum` and the catalogue was given an `enum_members` resolver | the example repr mentions `Name.MEMBER` |
+| enum | one per member, `Name.MEMBER` | the annotation names an `Enum` class defined in the head sources, and some observed example of the parameter names a member (see below) | the example repr mentions `Name.MEMBER` |
 
 Class names are prefixed by their kind only when two kinds of one parameter would produce the same name. A parameter that received both strings and lists gets `str-empty` and `container-empty` instead of two `empty` classes (`test_collisions_are_prefixed_by_kind`).
 
-Some recorded features map to no class: `big` and `integral` on numbers, `inf-neg`, `digits` and the length buckets of strings, `sum_zero` on numeric containers, `key:` on dicts. They stay in the facts for queries and the UI.
+Some recorded features map to no class: `big` and `integral` on numbers, `inf-neg`, `digits` and the length buckets of strings, `any_inf` on numeric containers, `key:` on dicts. They stay in the facts for queries and the UI.
 
-The enum family is implemented in `Catalogue` but inactive in the shipped paths: the ingest, the verdict and `coverset shapes` all build `Catalogue` without an `enum_members` resolver.
+`sum-zero` ("elements that sum to zero", e.g. `[2, -2]`) is the class of a numeric sequence whose sampled elements (the first 32) sum to exactly zero. It sits next to `all-zero` because both break code that divides by the total, as `allocate_cents` does; `all-zero` values are also `sum-zero`.
+
+Enum members come from the head commit's sources. `PythonAdapter.shape_catalogue(sources)` reads them with the AST (`analysis/shapes.py`, `enum_index`: classes deriving from `Enum`, `IntEnum`, `StrEnum` or from another enum found in the sources, with the names assigned in their bodies; a class name defined twice with different members is skipped) and passes them to `Catalogue` as the `enum_members` resolver. The ingest (`finalize_run`), the verdict and `coverset shapes` all build their catalogue that way. A member counts as observed when an example repr names it, and the members are expected only once some example of the parameter names a member: the shipped plugin records example reprs of exact builtin values only, so an `Enum` argument carries no example and its members are not expected (otherwise every member would read "never exercised" even when the tests pass it). Today the enum family therefore stays closed for values recorded by pytest-coverset; it opens for a tracer that records member reprs (`test_enum_members_are_observed_through_examples`, `test_shape_catalogue_resolves_enum_members_from_sources`).
+
+The example shown for an observed class is chosen by a fixed rule (`example_sort_key`): the shortest repr, then the lexicographically smallest repr, then the smallest test node id. `Catalogue.function_input_cov`, `render_markdown` and `facts.queries.shapes_for_function` all use it, so the same facts give byte-identical tables whatever the test order, shard layout or run order (`test_two_ingests_of_the_same_bundle_give_identical_markdown`).
 
 ### String kinds
 
@@ -95,7 +99,7 @@ For each parameter the catalogue takes the observed shapes and the annotation te
 | `float` | `nan` and `inf` once the number family is open |
 | `list[float]`, `Sequence[int]`, `tuple[int, ...]` | the element families, from the element type |
 | `list[tuple[int, int]]` | `inverted-pair` |
-| an `Enum` class | one class per member, only with a resolver (see above) |
+| an `Enum` class | one class per member, once an example names a member (see above) |
 | `Annotated[A, ...]` | whatever `A` adds |
 | a string annotation (`"list[int]"`) | parsed, then as above |
 
@@ -146,6 +150,7 @@ Every class carries a description and a Hypothesis strategy that produces values
 | `single`, `multiple` | `st.lists(<elem>, min_size=1, max_size=1)`, `st.lists(<elem>, min_size=2)` |
 | `zero-element`, `negative-element`, `nan-element` | `st.lists(<elem>, min_size=1).map(lambda xs: xs + [0])`, `... + [-1]`, `... + [float("nan")]` |
 | `all-zero` | `st.lists(st.just(0), min_size=1)` |
+| `sum-zero` | `st.lists(<elem>, min_size=1, max_size=16).map(lambda xs: xs + [-x for x in xs])` |
 | `unsorted` | `st.lists(<elem>, min_size=2, unique=True).map(lambda xs: sorted(xs)[::-1])` |
 | `duplicates` | `st.lists(<elem>, min_size=1).map(lambda xs: xs + xs[:1])` |
 | `inverted-pair` | `st.lists(st.tuples(st.integers(), st.integers()).filter(lambda p: p[0] > p[1]), min_size=1)` |
@@ -163,7 +168,7 @@ COVERSET_DATA_DIR=<scratch dir> uv run coverset demo --executor local --no-serve
 COVERSET_DATA_DIR=<scratch dir> uv run coverset shapes validate_email --markdown
 ```
 
-`coverset shapes` pools the five most recent runs of the repository, whatever their branch. After a full demo those are `main-4`, `main-5` and `main-6` (baselines), PR #1 "Support partial refunds" and PR #2 "Allow signups from company subdomains". Each table below is the command's output, pasted unchanged. Example values are the redacted examples recorded by the plugin. Rows without an example are container classes: the default `--coverset-repr-examples scalars` keeps no container examples.
+`coverset shapes` pools the last `--runs` (default 5) runs of one branch, by default the repository's default branch, so these tables come from baseline runs only: after a full demo, `main-2` to `main-6`. `--branch any` pools every branch, PR runs included. Each table below is the command's output, pasted unchanged, and two fresh demos give byte-identical tables. Example values are the redacted examples recorded by the plugin, the shortest (then smallest) one per class. Rows without an example are container classes: the default `--coverset-repr-examples scalars` keeps no container examples.
 
 All four functions are at 100% line and branch coverage on `main`: in the `main-6` run, `file_cov` shows `emailcheck.py`, `allocate.py`, `parse.py` and `merge.py` at 100.0% (statements and branches). The demo app's `tests/README.md` lists what the tests leave out on purpose.
 
@@ -175,10 +180,10 @@ All four functions are at 100% line and branch coverage on `main`: in the `main-
 |---|---|---|
 | `email:empty` | yes | `''` |
 | `email:whitespace` | yes | `' '` |
-| `email:ascii` | yes | `'u***@example.com'` |
+| `email:ascii` | yes | `'alice'` |
 | `email:unicode` | yes | `'Zoë Smith <z***@example.com>'` |
 | `email:ws-edge` | yes | `' d***@acme.com'` |
-| `email:plain` | yes | `'u***@example.com'` |
+| `email:plain` | yes | `'d***@acme.com'` |
 | `email:multi-label-domain` | **no** | `st.sampled_from(["bob@eng.acme.com", "ops@mail.eu.example.org"])` |
 | `email:plus-tag` | yes | `'B***@Example.ORG'` |
 | `email:uppercase` | yes | `'E***@Globex.IO'` |
@@ -196,10 +201,10 @@ The redaction keeps the domain and hides the local part, `+tag` included, which 
 |---|---|---|
 | `text:empty` | yes | `''` |
 | `text:whitespace` | **no** | `st.sampled_from([" ", "\t", "\n "])` |
-| `text:ascii` | yes | `'1h30m'` |
+| `text:ascii` | yes | `'h'` |
 | `text:unicode` | **no** | `st.text(st.characters(min_codepoint=128), min_size=1)` |
 | `text:ws-edge` | **no** | `st.text(min_size=1).map(lambda s: f" {s} ")` |
-| `text:single-unit` | yes | `'1m'` |
+| `text:single-unit` | yes | `'0d'` |
 | `text:multi-unit` | yes | `'1h30m'` |
 | `text:multi-letter-unit` | **no** | `st.sampled_from(["100ms", "2min", "3hr"])` |
 | `text:decimal` | **no** | `st.just("1.5h")` |
@@ -216,7 +221,7 @@ Each missing quantity class hides a silent wrong answer. Run against the demo so
 
 | Input class | Observed | Example or suggested Hypothesis strategy |
 |---|---|---|
-| `total_cents:negative` | yes | `-90` |
+| `total_cents:negative` | **no** | `st.integers(max_value=-1)` |
 | `total_cents:zero` | yes | `0` |
 | `total_cents:positive` | yes | `5` |
 | `weights:empty` | **no** | `st.just([])` |
@@ -225,13 +230,14 @@ Each missing quantity class hides a silent wrong answer. Run against the demo so
 | `weights:zero-element` | **no** | `st.lists(st.floats(0, 100), min_size=1).map(lambda xs: xs + [0])` |
 | `weights:negative-element` | **no** | `st.lists(st.floats(0, 100), min_size=1).map(lambda xs: xs + [-1])` |
 | `weights:all-zero` | **no** | `st.lists(st.just(0), min_size=1)` |
+| `weights:sum-zero` | **no** | `st.lists(st.floats(0, 100), min_size=1, max_size=16).map(lambda xs: xs + [-x for x in xs])` |
 | `weights:nan-element` | **no** | `st.lists(st.floats(0, 100), min_size=1).map(lambda xs: xs + [float("nan")])` |
 | `weights:unsorted` | yes | (no example recorded) |
 | `weights:duplicates` | yes | (no example recorded) |
 
-7 of 12 input classes observed (58.3%).
+6 of 13 input classes observed (46.2%).
 
-`total_cents:negative` shows as observed only because the pool includes PR #1, whose new `refund()` passes `-100` and `-90`; `coverset facts query` over `call_shapes` shows no negative total in any `main` run. Pooled over the `main` runs alone (computed with `facts.queries.shapes_for_function(..., branch="main")`, which the CLI does not expose), the same table reads `total_cents:negative` **no** and "6 of 12 input classes observed (50%)". That gap is exactly PR #1's bug: `allocate_cents(-100, [1, 2])` returns `[-32, -66]`, which sums to -98, because `int()` truncates towards zero and the negative remainder slice adds cents instead of removing them. The other missing classes fail loudly: `allocate_cents(100, [0, 0])` raises `ZeroDivisionError` and a NaN weight raises `ValueError`.
+No `main` run ever passes a negative total. With `--branch any` the pool includes PR #1, whose new `refund()` passes `-100` and `-90`, and `total_cents:negative` reads yes (example `-90`). That gap is exactly PR #1's bug: `allocate_cents(-100, [1, 2])` returns `[-32, -66]`, which sums to -98, because `int()` truncates towards zero and the negative remainder slice adds cents instead of removing them. The other missing classes fail loudly: `allocate_cents(100, [0, 0])` and any weights that sum to zero (`[1, -1]`, the `sum-zero` class) raise `ZeroDivisionError`, and a NaN weight raises `ValueError`.
 
 ### `merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]`
 
@@ -258,4 +264,4 @@ The `pairs` and `order` families are expected from the annotation `list[tuple[in
 - **Each-choice only.** The catalogue counts each class once per parameter; it does not track combinations across parameters (a negative total with a zero weight).
 - **Containers are summarised over 32 elements.** A zero at index 40 is not seen.
 - **Families open from data.** A parameter annotated `int` that was never called with any number has no number classes; a never-called function reports only what its annotations imply.
-- **The CLI pools across branches.** `coverset shapes` reads the last `--runs` runs of every branch, so a PR run can mark a class observed for `main`, as `allocate_cents` shows above.
+- **The CLI pools one branch.** `coverset shapes` reads the last `--runs` runs of the default branch unless `--branch` says otherwise; `--branch any` lets a PR run mark a class observed for `main`, as `allocate_cents` shows above.

@@ -9,10 +9,12 @@ over its parameters (each-choice coverage). Rules:
   least one observed value has that kind (an ``int`` was seen, so negative, zero and positive are
   expected; an email-shaped string was seen, so the email sub-classes are expected).
 * Element-summary classes are expected for sequences of numbers (zero, negative and NaN element,
-  all zero), of comparable values (unsorted, duplicates) and of numeric pairs (inverted pair),
-  judged from the observed element type or, when parseable, the annotation's element type.
+  all zero, elements summing to zero), of comparable values (unsorted, duplicates) and of numeric
+  pairs (inverted pair), judged from the observed element type or, when parseable, the
+  annotation's element type.
 * The annotation adds each ``Union`` arm, each ``Literal`` value, each ``Enum`` member (when the
-  catalogue can resolve the enum), both ``bool`` values and the ``None`` of an ``Optional``.
+  catalogue can resolve the enum and some observed example of the parameter names a member, so
+  members are distinguishable), both ``bool`` values and the ``None`` of an ``Optional``.
 * Unannotated parameters are never reported at 100%: when everything expected was observed, the
   percentage is None and the note says "unannotated: observed {...}".
 
@@ -25,6 +27,10 @@ room for the unannotated rule; :meth:`Catalogue.unannotated` names the parameter
 
 Class names are ``<param>:<class>``; when two kinds of one parameter would produce the same class
 name (an empty ``str`` and an empty ``list``) both are prefixed with their kind (``str-empty``).
+
+The example shown for an observed class is chosen by a stable rule (:func:`example_sort_key`): the
+shortest repr, then the lexicographically smallest, then the smallest test nodeid, so tables
+rendered from the same facts are byte-identical whatever order the observations arrive in.
 """
 
 from __future__ import annotations
@@ -46,6 +52,8 @@ __all__ = [
     "ParsedShape",
     "ShapeKeyError",
     "annotation_index",
+    "enum_index",
+    "example_sort_key",
     "function_input_cov",
     "parse_shape_key",
     "render_markdown",
@@ -72,6 +80,7 @@ _TYPE_ALIASES: Final = {
     "FrozenSet": "frozenset",
 }
 _REPEATED_GROUPS: Final = ("str", "bytes", "container")
+_ENUM_BASES: Final = frozenset({"Enum", "IntEnum", "StrEnum"})
 
 type ParamAnnotations = Mapping[str, str | None]
 """Bare parameter name → annotation text (None when unannotated), in signature order."""
@@ -234,6 +243,10 @@ _CLASS_TEXT: Final[Mapping[str, tuple[str, str]]] = {
     ),
     "nan-element": ("a NaN element", 'st.lists({elem}, min_size=1).map(lambda xs: xs + [float("nan")])'),
     "all-zero": ("only zero elements, e.g. [0, 0]", "st.lists(st.just(0), min_size=1)"),
+    "sum-zero": (
+        "elements that sum to zero, e.g. [2, -2]",
+        "st.lists({elem}, min_size=1, max_size=16).map(lambda xs: xs + [-x for x in xs])",
+    ),
     "unsorted": (
         "elements out of order",
         "st.lists({elem}, min_size=2, unique=True).map(lambda xs: sorted(xs)[::-1])",
@@ -288,6 +301,17 @@ class _ParamState:
     expected: list[InputClass] = field(default_factory=list)
     observed: dict[str, set[str]] = field(default_factory=dict)
     examples: dict[str, str] = field(default_factory=dict)
+    example_keys: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+
+
+def example_sort_key(example: str, test: str | None) -> tuple[int, str, str]:
+    """The stable order examples are chosen by: shortest repr, smallest repr, smallest test nodeid.
+
+    The first example under this key is the one shown for a class (in :func:`render_markdown`, in
+    :class:`FunctionInputCov` and in ``facts.queries.shapes_for_function`` rows), so the README
+    tables do not depend on test order, shard layout or which run recorded a value first.
+    """
+    return (len(example), example, test or "\U0010ffff")
 
 
 class Catalogue:
@@ -316,6 +340,10 @@ class Catalogue:
         annotations come from the ``annotations`` table, looked up by the observations' triple.
         """
         return self.param_input_cov(observations, self._annotations_for(observations))
+
+    def annotations_of(self, func: FuncTriple) -> ParamAnnotations | None:
+        """The parameter annotations recorded for one function triple (None when unknown)."""
+        return self._annotations.get(func)
 
     def expected_classes(self, param: ParamInfo, observed: Sequence[ShapeObs]) -> list[InputClass]:
         """Expected input classes of ``param`` given its observations, in catalogue order."""
@@ -430,7 +458,10 @@ class Catalogue:
                 full = f"{name}:{renames.get((group, cls), cls)}"
                 state.observed.setdefault(full, set()).update(obs.tests)
                 if obs.example is not None:
-                    state.examples.setdefault(full, obs.example)
+                    key = example_sort_key(obs.example, obs.example_test)
+                    if full not in state.example_keys or key < state.example_keys[full]:
+                        state.example_keys[full] = key
+                        state.examples[full] = obs.example
         return state
 
     def _expected_rows(self, state: _ParamState) -> list[_ClassRow]:
@@ -474,7 +505,7 @@ class Catalogue:
             elems = {e for s in shapes if s.group == "container" for e in s.attrs.get("elem", ())}
             elem_names = {_TYPE_ALIASES.get(a.name, a.name) for a in elem_arms}
             if elems & _NUMERIC or (elem_names and elem_names <= _NUMERIC):
-                add("elements", "elements", "zero-element", "negative-element", "all-zero")
+                add("elements", "elements", "zero-element", "negative-element", "all-zero", "sum-zero")
                 if "float" in elems or "float" in elem_names:
                     add("elements", "elements", "nan-element")
             ordered = any(s.type in _ORDERED for s in shapes) or any(
@@ -488,8 +519,14 @@ class Catalogue:
             for value in arm.literals:
                 add("literal", "literal", repr(value))
             if self._enum_members and not arm.literals and arm.name not in _TYPE_HINTS:
-                for member in self._enum_members(arm.name) or ():
-                    add("enum", "enum", f"{arm.name}.{member}")
+                members = self._enum_members(arm.name) or ()
+                # Members are expected only when the data can tell them apart: some example of the
+                # parameter names a member (``<Color.RED: 1>``). The shipped tracer records reprs of
+                # exact builtins only, so without such an example every member would read as never
+                # exercised even when the tests pass it.
+                if members and any(f"{arm.name}." in (obs.example or "") for _, obs in state.shapes):
+                    for member in members:
+                        add("enum", "enum", f"{arm.name}.{member}")
         return _dedupe(rows)
 
     def _annotation_hits(self, state: _ParamState, obs: ShapeObs) -> list[tuple[str, str]]:
@@ -539,6 +576,58 @@ def annotation_index(sources: Mapping[str, str]) -> dict[FuncTriple, dict[str, s
                     _bare(p): a for p, a in zip(region.params, item.annotations, strict=True)
                 }
     return index
+
+
+def enum_index(sources: Mapping[str, str]) -> dict[str, tuple[str, ...]]:
+    """Member names of every ``Enum``/``IntEnum``/``StrEnum`` class defined in ``sources``, by class name.
+
+    Found with the AST only (nothing is imported): a class whose base is one of those names, or a
+    class in ``sources`` already found to be an enum, contributes the names assigned in its body
+    (``RED = 1``, ``RED: int = 1``), private names and ``_ignore_`` excluded. A class name defined
+    twice with different members is left out (the annotation alone cannot say which one is meant).
+    Pass the result's ``get`` as :class:`Catalogue`'s ``enum_members``.
+    """
+    classes: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    for path in sorted(sources):
+        try:
+            tree = ast.parse(sources[path])
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                bases = tuple(_name(b) for b in node.bases)
+                classes.append((node.name, bases, _enum_member_names(node)))
+    enums: set[str] = set()
+    changed = True
+    while changed:  # a subclass of an enum found in the sources is an enum too
+        changed = False
+        for name, bases, _ in classes:
+            if name not in enums and any(b in _ENUM_BASES or b in enums for b in bases):
+                enums.add(name)
+                changed = True
+    found: dict[str, tuple[str, ...]] = {}
+    ambiguous: set[str] = set()
+    for name, _, members in classes:
+        if name not in enums or not members:
+            continue
+        if name in found and found[name] != members:
+            ambiguous.add(name)
+        found.setdefault(name, members)
+    return {name: members for name, members in found.items() if name not in ambiguous}
+
+
+def _enum_member_names(node: ast.ClassDef) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in node.body:
+        targets: list[ast.expr] = []
+        if isinstance(item, ast.Assign):
+            targets = list(item.targets)
+        elif isinstance(item, ast.AnnAssign) and item.value is not None:
+            targets = [item.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and not target.id.startswith("_") and target.id not in names:
+                names.append(target.id)
+    return tuple(names)
 
 
 def render_markdown(cov: FunctionInputCov) -> str:
@@ -642,6 +731,8 @@ def _shape_classes(shape: ParsedShape) -> list[tuple[str, str]]:
             found += [("elements", cls) for token, cls in tokens.items() if token in f]
             if "all_zero" in f:
                 found.append(("elements", "all-zero"))
+            if "sum_zero" in f:
+                found.append(("elements", "sum-zero"))
         if kind in _ORDERED and (shape.has("order", "unsorted") or shape.has("order", "reverse")):
             found.append(("order", "unsorted"))
         if "dups" in f:

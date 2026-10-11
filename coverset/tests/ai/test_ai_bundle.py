@@ -41,6 +41,7 @@ def test_token_in_a_test_body_is_redacted(email_bundle: BundleFactory) -> None:
     assert "ghp_[REDACTED]" in bundle.functions[0].covering_tests[0].body
 
 
+@pytest.mark.security
 def test_live_settings_secrets_are_redacted_everywhere(email_bundle: BundleFactory, tmp_path) -> None:
     settings = Settings.for_tests(data_dir=tmp_path / "d", github_token=PLAIN_SECRET)
     source = demo_source(EMAIL_PATH).replace(
@@ -56,6 +57,7 @@ def test_live_settings_secrets_are_redacted_everywhere(email_bundle: BundleFacto
     assert "[REDACTED]" in bundle.functions[0].source
 
 
+@pytest.mark.security
 def test_secret_in_an_example_value_is_redacted(email_bundle: BundleFactory) -> None:
     region = region_of(EMAIL_PATH, demo_source(EMAIL_PATH), "validate_email")
     shapes = [
@@ -68,6 +70,7 @@ def test_secret_in_an_example_value_is_redacted(email_bundle: BundleFactory) -> 
 # --- exclusion ---------------------------------------------------------------------------------
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("path", "excluded"),
     [
@@ -87,6 +90,7 @@ def test_always_excluded_paths(path: str, excluded: bool) -> None:
     assert is_excluded_path(path) is excluded
 
 
+@pytest.mark.security
 def test_user_exclude_globs_match_path_or_basename() -> None:
     assert is_excluded_path("src/vendor/lib.py", ["src/vendor/*"])
     assert is_excluded_path("src/a/b/generated_pb2.py", ["*_pb2.py"])
@@ -102,6 +106,7 @@ def test_function_under_an_excluded_glob_is_left_out(email_bundle: BundleFactory
     assert "validate_email" not in bundle.model_dump_json()
 
 
+@pytest.mark.security
 def test_tests_in_excluded_paths_are_left_out(email_bundle: BundleFactory) -> None:
     tests = [*EMAIL_TESTS, ("secrets/test_leak.py::test_leak", "def test_leak():\n    assert True\n")]
     bundle = email_bundle(tests=tests)
@@ -111,6 +116,7 @@ def test_tests_in_excluded_paths_are_left_out(email_bundle: BundleFactory) -> No
     assert bundle.dropped["excluded_paths"] >= 1
 
 
+@pytest.mark.security
 def test_function_in_a_secrets_directory_is_never_bundled(ai_settings: Settings) -> None:
     source = "def load():\n    return 1\n"
     region = region_of("secrets/loader.py", source, "load")
@@ -151,6 +157,7 @@ def _capped(email_bundle: BundleFactory, tmp_path, cap: int) -> ReviewBundle:
     return email_bundle(settings=settings, tests=_assertion_free_tests(6, 600))
 
 
+@pytest.mark.security
 def test_size_cap_drops_oracle_notes_first(email_bundle: BundleFactory, tmp_path) -> None:
     full = _capped(email_bundle, tmp_path, 10_000_000)
     assert len(full.functions[0].oracle_notes) >= 6  # docstring "Raises" + six assertion-free tests

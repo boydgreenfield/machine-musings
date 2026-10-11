@@ -41,7 +41,8 @@ def create_app(settings: Settings | None = None) -> Quart:
     ``app.extensions["settings"]`` holds the :class:`~coverset.config.Settings` and
     ``app.extensions["db"]`` the :class:`~coverset.db.session.Database`. The database is migrated
     when the app starts serving (unless ``settings.skip_migrations``) and the engine is disposed
-    when it stops.
+    when it stops. Outside tests, serving also starts the run dispatcher and the in-process gc
+    (:func:`schedule_gc`: once at startup, then every 24 h).
     """
     settings = settings or get_settings()
     configure_logging(settings)
@@ -88,7 +89,33 @@ def create_app(settings: Settings | None = None) -> Quart:
         from coverset.orchestrator.queue import install_run_queue
 
         install_run_queue(app)
+        schedule_gc(app)
     return app
+
+
+def schedule_gc(app: Quart, *, interval_s: float | None = None) -> None:
+    """Run the retention pass (``coverset gc``) as a background task while the app serves.
+
+    It runs once when serving starts and then every ``interval_s`` (24 h by default) until the app
+    shuts down (``app.shutdown_event``). ``create_app`` calls this outside tests only; tests call it
+    explicitly.
+    """
+    from coverset.facts.store import FactsStore
+    from coverset.orchestrator.history import GC_INTERVAL_S, gc_forever
+
+    settings: Settings = app.extensions["settings"]
+    database: Database = app.extensions["db"]
+
+    @app.before_serving
+    async def _start_gc() -> None:
+        app.add_background_task(
+            gc_forever,
+            database,
+            settings,
+            FactsStore(settings.facts_dir),
+            app.shutdown_event,
+            interval_s=GC_INTERVAL_S if interval_s is None else interval_s,
+        )
 
 
 async def _http_error(error: HTTPException) -> HTTPException | tuple[Response, int]:

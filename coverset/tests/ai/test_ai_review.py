@@ -201,6 +201,7 @@ def test_conflicting_reviews_keep_needs_review() -> None:
     assert findings_to_invariant_statuses(rows, {"inv": "needs_review"}) == {"inv": "needs_review"}
 
 
+@pytest.mark.security
 def test_review_evidence_feeds_evaluate_without_overriding_tests() -> None:
     [review_only, tested] = load_invariants(
         """

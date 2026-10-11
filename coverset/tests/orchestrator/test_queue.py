@@ -51,6 +51,7 @@ async def test_concurrency_cap(
     assert peak == 2
 
 
+@pytest.mark.security
 async def test_paused_dispatches_nothing(ctx: OrchestratorContext, repo: TestRepo, repo_id: int) -> None:
     await _queued(ctx, repo_id, repo.main_sha, 2)
     ctx.settings = ctx.settings.model_copy(update={"paused": True})
@@ -127,6 +128,7 @@ async def test_install_on_app_starts_and_stops(
     assert not dispatcher.started
 
 
+@pytest.mark.security
 async def test_budget_counts_only_todays_modal_runs(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int
 ) -> None:
@@ -168,6 +170,7 @@ async def test_budget_counts_only_todays_modal_runs(
         assert await budget.budget_exhausted(session, tight, "modal")
 
 
+@pytest.mark.security
 async def test_modal_run_over_budget_is_neutral(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int
 ) -> None:

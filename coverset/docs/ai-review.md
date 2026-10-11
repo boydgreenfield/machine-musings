@@ -76,7 +76,7 @@ shapes, input classes or invariants triggers a new review.
 
 ## The output schema
 
-`client.messages.parse(..., output_format=ReviewResult)` constrains the reply to this schema
+`client.beta.messages.parse(..., output_format=ReviewResult)` constrains the reply to this schema
 (`coverset/ai/schema.py`). It follows the structured-output rules: no recursion, enums instead of
 numbers, no length or range constraints, every field required, `additionalProperties: false`, and
 short rationale fields (never a "reasoning" field).
@@ -107,7 +107,11 @@ missing input class becomes `abstain`.
 `AnthropicReviewClient` follows the claude-api skill:
 
 - `client.beta.messages.parse(model="claude-opus-5-5", max_tokens=16000, output_format=ReviewResult,
-  output_config={"effort": "medium"}, system=[...], messages=[...])`, one function per request.
+  output_config={"effort": "medium"}, betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+  system=[...], messages=[...])`, one function per request (`AnthropicReviewClient.request_kwargs`).
+  The call goes through the **beta** messages surface, not `client.messages.parse`, because the
+  refusal-fallback parameters below (`betas` and `fallbacks`) exist only there; `parse` on that
+  surface still validates the reply into `ReviewResult` (`response.parsed_output`).
   `thinking` is omitted (Claude Opus 5.5 always uses adaptive thinking; disabling it is a 400), and
   there is no `temperature` and no assistant prefill (both rejected on this model).
 - **Server-side refusal fallbacks are enabled**: `betas=["server-side-fallback-2026-07-01"]` and

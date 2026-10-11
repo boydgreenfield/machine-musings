@@ -24,15 +24,16 @@ import stat
 import subprocess
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Final, Literal
 
 from coverset.analysis.diff import FileDiff, FileStatus, changed_functions
 from coverset.analysis.functions import index_functions
-from coverset.analysis.shapes import Catalogue, annotation_index
+from coverset.analysis.shapes import Catalogue, annotation_index, enum_index
 from coverset.facts.convert import read_python_bundle
+from coverset.facts.untrusted import BundleLimits
 from coverset.lang.base import EnvSpec, FunctionChange, FunctionRegion, NeutralBundle
 
 __all__ = [
@@ -248,9 +249,21 @@ class PythonAdapter:
             cmd.append("--no-cov")
         return cmd
 
-    def read_bundle(self, bundle_dir: Path) -> NeutralBundle:
-        """Convert an extracted pytest-coverset bundle (see :mod:`coverset.facts.convert`)."""
-        return read_python_bundle(bundle_dir)
+    def read_bundle(
+        self,
+        bundle_dir: Path,
+        *,
+        limits: BundleLimits | None = None,
+        source_root: Path | None = None,
+        head_paths: Collection[str] | None = None,
+    ) -> NeutralBundle:
+        """Convert an extracted pytest-coverset bundle (see :mod:`coverset.facts.convert`).
+
+        ``limits`` are the untrusted-bundle caps, ``source_root`` a checkout of the head commit
+        (for ``n_lines``) and ``head_paths`` the head tree's paths (any other path is dropped);
+        all three are passed to :func:`~coverset.facts.convert.read_python_bundle` unchanged.
+        """
+        return read_python_bundle(bundle_dir, limits=limits, source_root=source_root, head_paths=head_paths)
 
     def changed_functions(
         self, path: str, old_src: str | None, new_src: str | None, added: set[int], removed: set[int]
@@ -269,9 +282,13 @@ class PythonAdapter:
 
         ``sources`` (path → text of the head commit's measured files) supplies parameter
         annotations, so the catalogue ``facts.ingest.finalize_run`` calls per function applies the
-        same Union/Literal/Optional/bool rules as the UI.
+        same Union/Literal/Optional/bool rules as the UI, and the ``Enum`` classes defined in those
+        files (:func:`~coverset.analysis.shapes.enum_index`) as the ``enum_members`` resolver.
         """
-        return Catalogue(annotations=annotation_index(sources) if sources else None)
+        if not sources:
+            return Catalogue()
+        enums = enum_index(sources)
+        return Catalogue(enums.get if enums else None, annotations=annotation_index(sources))
 
     def _uv_export(self, repo_root: Path) -> str:
         uv = self._uv or shutil.which("uv")

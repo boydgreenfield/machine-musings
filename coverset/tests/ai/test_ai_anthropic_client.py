@@ -135,6 +135,7 @@ def test_system_prompt_is_cacheable_and_states_the_untrusted_data_rule() -> None
     assert "abstain" in SYSTEM_RUBRIC and "not_covered" in SYSTEM_RUBRIC
 
 
+@pytest.mark.security
 def test_injected_text_stays_inside_the_escaped_bundle(
     live_settings: Settings, email_bundle: BundleFactory
 ) -> None:
@@ -174,6 +175,7 @@ def test_tests_are_shuffled_deterministically_per_salt(live_settings: Settings) 
 # --- stop reasons and output hygiene -----------------------------------------------------------
 
 
+@pytest.mark.security
 def test_refusal_becomes_an_abstention(live_settings: Settings) -> None:
     client, _, _ = client_with(live_settings, response(None, stop_reason="refusal", category="cyber"))
     outcome = client.review(make_bundle(make_function()))
@@ -183,6 +185,7 @@ def test_refusal_becomes_an_abstention(live_settings: Settings) -> None:
     assert outcome.requests == 1
 
 
+@pytest.mark.security
 def test_max_tokens_becomes_an_abstention(live_settings: Settings) -> None:
     client, _, _ = client_with(live_settings, response(None, stop_reason="max_tokens"))
     [v] = client.review(make_bundle(make_function())).result.functions
@@ -190,6 +193,7 @@ def test_max_tokens_becomes_an_abstention(live_settings: Settings) -> None:
     assert "max_tokens" in v.abstain_reason
 
 
+@pytest.mark.security
 def test_unparseable_output_becomes_an_abstention(live_settings: Settings) -> None:
     try:
         ReviewResult.model_validate_json('{"functions": [')

@@ -26,7 +26,13 @@ from facts_helpers import (
 from hypothesis import given
 from hypothesis import strategies as st
 
-from coverset.facts.convert import first_lines, is_shape_key, numbits_to_lines, read_python_bundle
+from coverset.facts.convert import (
+    first_lines,
+    is_shape_key,
+    numbits_to_lines,
+    read_python_bundle,
+    tracer_mismatch,
+)
 from coverset.facts.untrusted import safe_rel_path
 from coverset.lang.base import IMPORT_CONTEXT
 
@@ -335,6 +341,7 @@ def test_paths_outside_the_head_tree_are_dropped(minimal_bundle: Path) -> None:
     assert no_tests.tests == ()
 
 
+@pytest.mark.security
 def test_n_lines_never_follows_a_symlink_out_of_the_checkout(minimal_bundle: Path, tmp_path: Path) -> None:
     repo = Path(shutil.copytree(minimal_bundle.parent / "repo", tmp_path / "repo"))
     outside = tmp_path / "outside.txt"
@@ -343,3 +350,28 @@ def test_n_lines_never_follows_a_symlink_out_of_the_checkout(minimal_bundle: Pat
     os.symlink(outside, repo / MODULE_PATH)
     bundle = read_python_bundle(minimal_bundle, source_root=repo)
     assert bundle.static[MODULE_PATH].n_lines == 33  # the fallback, not 1000
+
+
+@pytest.mark.parametrize("tracer", ["PyTracer", "SysMonitor"])
+def test_a_non_c_tracer_is_flagged(bundle_copy: Path, tracer: str) -> None:
+    meta = json.loads((bundle_copy / "meta.json").read_text())
+    (bundle_copy / "meta.json").write_text(json.dumps({**meta, "tracer": tracer}))
+    convert = read_python_bundle(bundle_copy).meta["convert"]
+    assert convert["tracer_mismatch"] is True and convert["tracer"] == tracer
+
+
+def test_the_c_tracer_or_no_tracer_is_not_flagged(minimal_bundle: Path, bundle_copy: Path) -> None:
+    assert "tracer_mismatch" not in read_python_bundle(minimal_bundle).meta["convert"]
+    meta = json.loads((bundle_copy / "meta.json").read_text())
+    del meta["tracer"]
+    (bundle_copy / "meta.json").write_text(json.dumps(meta))
+    assert "tracer_mismatch" not in read_python_bundle(bundle_copy).meta["convert"]
+
+
+def test_tracer_mismatch_clips_untrusted_names() -> None:
+    assert tracer_mismatch({"tracer": "CTracer"}) is None and tracer_mismatch({"tracer": "ctrace"}) is None
+    assert tracer_mismatch({}) is None and tracer_mismatch(None) is None
+    assert (
+        tracer_mismatch({"tracer": "Py\x1b[31mTracer" + "x" * 200}) == "Py[31mTracer" + "x" * 51
+    )  # clipped to 64, then non-printables dropped
+    assert tracer_mismatch({"tracer": "\n"}) == "an unnamed tracer"

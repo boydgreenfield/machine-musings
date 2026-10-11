@@ -6,7 +6,10 @@
    CLI runs are inserted that way) and a ``heartbeat_at`` refreshed every 10 s; the cancel watcher
    starts. Untrusted runs and (unless allowed) webhook-triggered runs never use the local executor;
    Modal runs stop at the daily budget, and an admitted Modal run reserves its predicted cost in
-   ``cost_estimate`` until its real cost replaces it.
+   ``cost_estimate`` until its real cost replaces it. An admitted PR run with a forge gets its
+   ``coverset`` check created ``in_progress`` (:func:`coverset.forge.verdict.start_check`,
+   ``external_id`` = the run id, ``details_url`` = the run page) before planning; the id is stored in
+   ``runs.check_run_id`` so the verdict completes that same check.
 2. **Plan** (:func:`coverset.orchestrator.planner.plan_run`): workers hold the source and their
    shard files; ``timeline.sandbox_ready`` is set. Planning never holds the execution lock or a
    write transaction, so the run's events keep flowing; a cancellation interrupts it.
@@ -33,6 +36,10 @@
    the patch report, input classes, invariants, AI review, ``test_stats`` and cost feed the final
    verdict. The status change, the verdict and the ``verdict`` and ``done`` events are written in
    one transaction (retried with backoff while the database is busy), then the verdict is posted.
+   A shard whose ``meta.json`` names a tracer other than coverage.py's C tracer gets a ``log``
+   event saying per-test contexts may be incomplete (``tracer_mismatch`` in its ``ingest_log``).
+6. **Retention.** After a PR run, :func:`coverset.orchestrator.history.expire_pr_runs` applies the
+   per-PR rule (outside ``COVERSET_ENV=test``).
 
 Every failure path ends the run as ``error`` or ``cancelled`` with a reason and a ``done`` event, so
 SSE clients and ``coverset-ci wait`` always finish; if even that write fails,
@@ -67,7 +74,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.config import ExecutorKind, Settings
-from coverset.db.models import PullRequest, Run, RunEvent, Shard, TestAttempt, TestResult, WebhookDelivery
+from coverset.db.models import (
+    PullRequest,
+    Repo,
+    Run,
+    RunEvent,
+    Shard,
+    TestAttempt,
+    TestResult,
+    WebhookDelivery,
+)
 from coverset.db.session import Database
 from coverset.executors.base import Executor, ExecutorError, Resources, RunResult
 from coverset.facts.ingest import RunContext, finalize_run, record_shard_failure
@@ -782,6 +798,7 @@ class _Execution:
                 if refusal is not None:
                     await self._finish(*refusal)
                 else:
+                    await self._start_check(run)
                     await self._execute_plan(run)
             except _Cancelled:
                 await self._finish("cancelled", "cancelled", self.cancel_reason or "cancelled")
@@ -810,7 +827,19 @@ class _Execution:
         if crash is not None:
             with contextlib.suppress(Exception):
                 await finalize_crashed(self.ctx.db, self.settings, self.run_id, crash, after_seq=sink.seq)
+        if run.pr_id is not None and self.settings.env != "test":
+            await self._expire_pr_runs(run.pr_id)
         return await self._outcome()
+
+    async def _expire_pr_runs(self, pr_id: int) -> None:
+        """The per-PR retention rule (best effort: retention never fails a run)."""
+        try:
+            expired = await history.expire_pr_runs(self.ctx.db, self.settings, self.ctx.store, pr_id)
+        except Exception:
+            log.exception("per-PR gc after run %s failed", self.run_id)
+            return
+        if expired:
+            log.info("per-PR gc after run %s deleted %d run(s)", self.run_id, len(expired))
 
     async def _stop_background(self) -> None:
         tasks = [t for t in (self.watcher, self.heartbeat, self.plan_task, *self.tasks) if t is not None]
@@ -896,6 +925,42 @@ class _Execution:
             if not admitted:
                 return "completed", "neutral", "budget exhausted"
         return None
+
+    async def _start_check(self, run: Run) -> None:
+        """Create the ``in_progress`` verdict check of a PR run and store its id (best effort)."""
+        forge = self.ctx.get_forge() if run.pr_id is not None and run.check_run_id is None else None
+        if forge is None:
+            return
+        from coverset.forge.verdict import start_check
+        from coverset.orchestrator.verdict import repo_ref
+
+        sink = self.sink
+        assert sink is not None
+        try:
+            async with self.ctx.db.session() as session:
+                repo = await session.get(Repo, run.repo_id)
+            if repo is None:
+                return
+            check_id = await start_check(
+                forge,
+                repo_ref(repo),
+                run.head_sha,
+                external_id=run.id,
+                details_url=f"{self.settings.public_url}/runs/{run.id}",
+            )
+        except Exception as exc:  # the forge never fails a run
+            log.warning("starting the check of run %s failed: %s", self.run_id, exc)
+            return
+        if check_id is None:
+            return
+
+        async def work(session: AsyncSession) -> None:
+            live = await session.get(Run, self.run_id)
+            if live is not None and live.check_run_id is None:
+                live.check_run_id = check_id
+
+        await sink.transact(work)
+        run.check_run_id = check_id
 
     def _resources(self, run: Run) -> Resources:
         return Resources(
@@ -1494,6 +1559,7 @@ class _Execution:
                 keep_paths=frozenset(plan.changed_files),
                 keep_funcs=frozenset(r.triple for r in interest.values()),
                 language=self.ctx.adapter.name,
+                adapter=self.ctx.adapter,
             )
             for shard_id, path in sorted(pulled.items())
         ]
@@ -1507,6 +1573,11 @@ class _Execution:
             if not outcome.ok:
                 self.shard_states[outcome.shard_id].error = self.shard_states[outcome.shard_id].error or (
                     f"bundle rejected: {outcome.error}"
+                )
+            elif (tracer := tracer_warning(outcome.meta)) is not None:
+                assert self.sink is not None
+                self.sink.event(
+                    "log", {"shard": outcome.shard_id, "text": tracer, "warning": "tracer_mismatch"}
                 )
         return outcomes
 
@@ -1760,6 +1831,15 @@ def _app_forge(app: Any) -> Any:
     except Exception as exc:  # misconfigured forge: verdicts are stored but not posted
         log.warning("no forge for posting verdicts: %s", exc)
         return False
+
+
+def tracer_warning(meta: Mapping[str, Any]) -> str | None:
+    """The ``log`` text for a shard whose coverage did not come from coverage.py's C tracer."""
+    convert = meta.get("convert")
+    if not isinstance(convert, Mapping) or not convert.get("tracer_mismatch"):
+        return None
+    name = str(convert.get("tracer") or meta.get("tracer") or "an unknown tracer")[:64]
+    return f"coverage was collected with {name}; per-test contexts may be incomplete"
 
 
 def _catalogue(adapter: LanguageAdapter, sources: Mapping[str, str]) -> Any:

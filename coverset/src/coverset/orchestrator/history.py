@@ -10,40 +10,59 @@
   (``not_run`` never counts; untrusted runs never update priors) and writes them in one upsert.
 * :func:`seed_history` replays the six demo ``main`` commits as baseline runs and then both demo
   PRs through the normal planner and runner.
+* Retention: :func:`collect_garbage` is what ``coverset gc`` does (expired runs and their facts, old
+  run events, old webhook payloads and delivery rows; the latest completed baseline per repo and
+  the latest run per open PR always stay). ``serve`` runs it once at startup and then every
+  :data:`GC_INTERVAL_S` (:func:`gc_forever`), and :func:`expire_pr_runs` applies the per-PR rule
+  after each PR run. Both take :data:`GC_LOCK` without waiting: a gc already running in this
+  process makes the other one skip.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import statistics
+import threading
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.analysis.prior import PriorCandidate
 from coverset.analysis.scoring import TestHistory
-from coverset.db.models import Run, TestCase, TestResult, TestStats
+from coverset.db.models import PullRequest, Run, RunEvent, TestCase, TestResult, TestStats, WebhookDelivery
 from coverset.facts.store import FactsStore
 
 if TYPE_CHECKING:
+    from coverset.config import Settings
+    from coverset.db.session import Database
     from coverset.orchestrator.runner import OrchestratorContext
 
 __all__ = [
     "BASELINE_TRIGGERS",
+    "DELIVERY_KEEP_DAYS",
+    "GC_INTERVAL_S",
+    "GC_LOCK",
     "HISTORY_WINDOW",
+    "GcReport",
     "SeededRun",
     "base_branch_run",
+    "collect_garbage",
+    "expire_pr_runs",
     "family_of",
+    "gc_forever",
     "load_test_history",
     "nodeid_hash",
     "previous_pr_run",
     "prior_candidates",
     "register_tests",
+    "runs_to_keep",
     "seed_history",
     "update_test_stats",
 ]
@@ -55,6 +74,15 @@ COFAIL_RUNS = 20
 BASELINE_TRIGGERS = frozenset({"baseline", "push"})
 FAILED = frozenset({"failed", "error"})
 _IN_CHUNK = 500
+GC_INTERVAL_S = 24 * 3600.0
+"""How often ``serve`` runs :func:`collect_garbage` (once at startup, then this often)."""
+DELIVERY_KEEP_DAYS = 30
+"""Delivery rows stay this long (payload nulled earlier) so redeliveries are still deduplicated."""
+GC_LOCK = threading.Lock()
+"""Held while :func:`collect_garbage` or :func:`expire_pr_runs` runs in this process."""
+_ACTIVE_STATUSES = ("queued", "running")
+
+log = logging.getLogger(__name__)
 _STATS_COLUMNS = (
     "repo_id",
     "test_id",
@@ -564,3 +592,193 @@ def _seeded(run: Run, name: str, *, reused: bool = False) -> SeededRun:
         rank_file_order=run.rank_file_order,
         reused=reused,
     )
+
+
+# -- retention ------------------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class GcReport:
+    """What :func:`collect_garbage` deleted (or, with ``dry_run``, would delete)."""
+
+    dry_run: bool
+    expired_db: list[str] = field(default_factory=list)
+    expired_facts: list[str] = field(default_factory=list)
+    events: int = 0
+    payloads: int = 0
+    deliveries: int = 0
+    kept: set[str] = field(default_factory=set)
+    skipped: bool = False
+    """Another gc held :data:`GC_LOCK`; nothing was done."""
+
+    def lines(self, settings: Settings) -> list[str]:
+        """The summary ``coverset gc`` prints."""
+        if self.skipped:
+            return ["skipped: another gc is running in this process"]
+        verb = "would delete" if self.dry_run else "deleted"
+        return [
+            f"{verb} {len(self.expired_db)} run(s) from the database and "
+            f"{len(self.expired_facts)} run(s) of facts",
+            f"{verb} {self.events} run event(s) older than {settings.retention_events_days} d",
+            f"{'would clear' if self.dry_run else 'cleared'} {self.payloads} webhook payload(s) older than "
+            f"{settings.retention_deliveries_days} d; {verb} {self.deliveries} delivery row(s)",
+            f"kept {len(self.kept)} run(s): the latest baseline per repo and the latest run per open PR",
+        ]
+
+
+async def runs_to_keep(session: AsyncSession) -> set[str]:
+    """The latest completed baseline per repo and the latest run per open PR."""
+    keep: set[str] = set()
+    baselines = await session.execute(
+        select(Run.repo_id, Run.id)
+        .where(Run.trigger.in_(BASELINE_TRIGGERS), Run.status == "completed")
+        .order_by(Run.created_at.desc())
+    )
+    seen: set[int] = set()
+    for repo_id, run_id in baselines:
+        if repo_id not in seen:
+            seen.add(repo_id)
+            keep.add(run_id)
+    for pr_id in await session.scalars(select(PullRequest.id).where(PullRequest.state == "open")):
+        latest = await session.scalar(
+            select(Run.id).where(Run.pr_id == pr_id).order_by(Run.created_at.desc()).limit(1)
+        )
+        if latest is not None:
+            keep.add(latest)
+    return keep
+
+
+async def collect_garbage(
+    db: Database, settings: Settings, store: FactsStore, *, dry_run: bool = False
+) -> GcReport:
+    """Apply the retention settings once (what ``coverset gc`` does); skipped while another gc runs.
+
+    Deletes runs older than ``COVERSET_RETENTION_RUNS_DAYS`` that are not queued or running and not
+    kept by :func:`runs_to_keep`, with their facts directories (``facts.gc.expire_runs``); run
+    events older than ``COVERSET_RETENTION_EVENTS_DAYS``; webhook payloads older than
+    ``COVERSET_RETENTION_DELIVERIES_DAYS`` (nulled) and delivery rows older than
+    ``max(30, COVERSET_RETENTION_DELIVERIES_DAYS)`` days.
+    """
+    if not GC_LOCK.acquire(blocking=False):
+        return GcReport(dry_run=dry_run, skipped=True)
+    try:
+        return await _collect_garbage(db, settings, store, dry_run=dry_run)
+    finally:
+        GC_LOCK.release()
+
+
+async def _collect_garbage(db: Database, settings: Settings, store: FactsStore, *, dry_run: bool) -> GcReport:
+    from coverset.facts.gc import expire_runs
+
+    now = settings.now()
+    run_cutoff = now - timedelta(days=settings.retention_runs_days)
+    event_cutoff = now - timedelta(days=settings.retention_events_days)
+    payload_cutoff = now - timedelta(days=settings.retention_deliveries_days)
+    delivery_cutoff = now - timedelta(days=max(DELIVERY_KEEP_DAYS, settings.retention_deliveries_days))
+    report = GcReport(dry_run=dry_run)
+    async with db.session() as session:
+        keep = report.kept = await runs_to_keep(session)
+        report.expired_db = list(
+            await session.scalars(
+                select(Run.id).where(
+                    Run.created_at < run_cutoff,
+                    Run.id.not_in(keep or {""}),
+                    Run.status.not_in(_ACTIVE_STATUSES),
+                )
+            )
+        )
+        report.events = int(
+            await session.scalar(select(func.count(RunEvent.id)).where(RunEvent.at < event_cutoff)) or 0
+        )
+        report.payloads = int(
+            await session.scalar(
+                select(func.count(WebhookDelivery.id)).where(
+                    WebhookDelivery.received_at < payload_cutoff, WebhookDelivery.payload.is_not(None)
+                )
+            )
+            or 0
+        )
+        report.deliveries = int(
+            await session.scalar(
+                select(func.count(WebhookDelivery.id)).where(WebhookDelivery.received_at < delivery_cutoff)
+            )
+            or 0
+        )
+        if not dry_run:
+            if report.expired_db:
+                await session.execute(delete(Run).where(Run.id.in_(report.expired_db)))
+            await session.execute(delete(RunEvent).where(RunEvent.at < event_cutoff))
+            await session.execute(
+                update(WebhookDelivery)
+                .where(WebhookDelivery.received_at < payload_cutoff)
+                .values(payload=None)
+            )
+            await session.execute(
+                delete(WebhookDelivery).where(WebhookDelivery.received_at < delivery_cutoff)
+            )
+            await session.commit()
+    report.expired_facts = await asyncio.to_thread(
+        expire_runs, store, keep_run_ids=keep, older_than=run_cutoff, dry_run=dry_run
+    )
+    return report
+
+
+async def expire_pr_runs(
+    db: Database, settings: Settings, store: FactsStore, pr_id: int, *, dry_run: bool = False
+) -> list[str]:
+    """The per-PR retention rule, applied after each PR run: keep the PR's latest run, delete its
+    other runs older than ``COVERSET_RETENTION_RUNS_DAYS`` (never a queued or running one) with
+    their facts. Returns the deleted run ids (empty when another gc holds :data:`GC_LOCK`)."""
+    if not GC_LOCK.acquire(blocking=False):
+        return []
+    try:
+        cutoff = settings.now() - timedelta(days=settings.retention_runs_days)
+        async with db.session() as session:
+            latest = await session.scalar(
+                select(Run.id).where(Run.pr_id == pr_id).order_by(Run.created_at.desc()).limit(1)
+            )
+            rows = (
+                await session.execute(
+                    select(Run.repo_id, Run.id).where(
+                        Run.pr_id == pr_id,
+                        Run.created_at < cutoff,
+                        Run.id != (latest or ""),
+                        Run.status.not_in(_ACTIVE_STATUSES),
+                    )
+                )
+            ).all()
+            expired = [(int(repo_id), str(run_id)) for repo_id, run_id in rows]
+            if expired and not dry_run:
+                await session.execute(delete(Run).where(Run.id.in_([run_id for _, run_id in expired])))
+                await session.commit()
+        if not dry_run:
+            for repo_id, run_id in expired:
+                await asyncio.to_thread(store.delete_run, repo_id, run_id)
+        return sorted(run_id for _, run_id in expired)
+    finally:
+        GC_LOCK.release()
+
+
+async def gc_forever(
+    db: Database,
+    settings: Settings,
+    store: FactsStore,
+    stop: asyncio.Event,
+    *,
+    interval_s: float = GC_INTERVAL_S,
+) -> None:
+    """Run :func:`collect_garbage` now and then every ``interval_s`` until ``stop`` is set.
+
+    A failed pass is logged and retried at the next interval; it never ends the loop.
+    """
+    while not stop.is_set():
+        try:
+            report = await collect_garbage(db, settings, store)
+            if not report.skipped:
+                log.info("gc: %s", "; ".join(report.lines(settings)))
+        except Exception:
+            log.exception("in-process gc failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue

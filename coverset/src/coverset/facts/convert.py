@@ -18,6 +18,11 @@ they compare directly with ``coverage.json``'s statements (see :func:`first_line
 Every reader enforces :class:`~coverset.facts.untrusted.BundleLimits`; dropped records are counted
 in ``NeutralBundle.meta['convert']`` instead of failing the shard, and anything malformed beyond
 that raises :class:`~coverset.facts.untrusted.BundleError` (never another exception type).
+
+``meta.json``'s ``tracer`` is checked: per-test contexts need coverage.py's C tracer, so any other
+named tracer (``PyTracer``, ``SysMonitor``) sets ``meta['convert']['tracer_mismatch'] = True`` and
+``meta['convert']['tracer']`` to the (clipped) name; the shard is still ingested. A bundle without a
+``tracer`` is not flagged.
 """
 
 from __future__ import annotations
@@ -70,6 +75,7 @@ __all__ = [
     "is_shape_key",
     "numbits_to_lines",
     "read_python_bundle",
+    "tracer_mismatch",
 ]
 
 COVERAGE_SQLITE = "coverage.sqlite"
@@ -92,6 +98,21 @@ _MAX_SOURCE_BYTES = 16 * 1024 * 1024
 _FETCH_ROWS = 65_536
 _SHAPE_TYPE = re.compile(r"(?:NoneType|bool|int|float|str|bytes|list|tuple|dict|set|frozenset|obj:[^|\s]+)")
 _SHAPE_FEATURE = re.compile(r"[^|\s]+")
+C_TRACERS: frozenset[str] = frozenset({"CTracer", "ctrace"})
+"""``meta.json`` ``tracer`` values that mean coverage.py's C tracer (the only one with dynamic contexts)."""
+_MAX_TRACER_CHARS = 64
+
+
+def tracer_mismatch(meta: object) -> str | None:
+    """The tracer named by a bundle's ``meta.json`` when it is not the C tracer, else None.
+
+    The name is clipped and stripped to printable characters (the bundle is untrusted).
+    """
+    tracer = meta.get("tracer") if isinstance(meta, dict) else None
+    if tracer is None or tracer in C_TRACERS:
+        return None
+    text = "".join(ch for ch in str(tracer)[:_MAX_TRACER_CHARS] if ch.isprintable())
+    return text or "an unnamed tracer"
 
 
 def numbits_to_lines(numbits: bytes) -> np.ndarray:
@@ -838,4 +859,7 @@ def _read(reader: _Reader) -> NeutralBundle:
         "contexts": len(coverage),
         "head_checked": reader.head_paths is not None,
     }
+    if (tracer := tracer_mismatch(meta)) is not None:
+        meta["convert"]["tracer_mismatch"] = True
+        meta["convert"]["tracer"] = tracer
     return bundle

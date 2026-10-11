@@ -56,6 +56,7 @@ async def login(client: Client, token: str) -> str:
     return body["csrf_token"]
 
 
+@pytest.mark.security
 async def test_protected_route_requires_auth(client: Client, admin_token: str) -> None:
     anonymous = await client.get("/")
     assert anonymous.status_code == 401
@@ -66,6 +67,7 @@ async def test_protected_route_requires_auth(client: Client, admin_token: str) -
     assert (await client.get("/", headers={"Authorization": f"Token {admin_token}"})).status_code == 401
 
 
+@pytest.mark.security
 async def test_wrong_bearer_never_falls_back_to_cookie(client: Client, admin_token: str) -> None:
     await login(client, admin_token)
     assert (await client.get("/")).status_code == 200
@@ -78,6 +80,7 @@ async def test_unauthorized_json_for_api_clients(client: Client) -> None:
     assert await response.get_json() == {"error": "unauthorized"}
 
 
+@pytest.mark.security
 async def test_public_routes_need_no_auth(client: Client, settings: Settings) -> None:
     assert (await client.get("/healthz")).status_code == 200
     assert (await client.get("/login")).status_code == 200
@@ -106,6 +109,7 @@ async def test_public_routes_see_admin_credentials(settings: Settings, admin_tok
     assert await response.get_json() == {"auth": "public", "admin": False}
 
 
+@pytest.mark.security
 async def test_non_admin_bearer_reaches_self_authorizing_views(settings: Settings) -> None:
     """``coverset-ci wait`` sends a GitHub OIDC JWT; the guard leaves it for the view to verify."""
     probe = probe_app(settings)
@@ -118,6 +122,7 @@ async def test_non_admin_bearer_reaches_self_authorizing_views(settings: Setting
     assert (await probe.get("/", headers=oidc)).status_code == 401
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("method", "path", "public"),
     [
@@ -145,6 +150,7 @@ def test_is_public(method: str, path: str, public: bool) -> None:
     assert is_public(method, path) is public
 
 
+@pytest.mark.security
 async def test_form_login_sets_cookie_and_redirects(client: Client, admin_token: str) -> None:
     response = await client.post("/login", form={"token": admin_token, "next": "/repos/1"})
     assert response.status_code == 303
@@ -170,6 +176,7 @@ UNSAFE_NEXT = [
 ]
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("target", UNSAFE_NEXT)
 async def test_login_redirect_stays_on_site(client: Client, admin_token: str, target: str) -> None:
     response = await client.post("/login", form={"token": admin_token, "next": target})
@@ -177,6 +184,7 @@ async def test_login_redirect_stays_on_site(client: Client, admin_token: str, ta
     assert response.headers["Location"] == "/"
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("target", ["/\t/evil.example", "//evil.example"])
 async def test_login_form_drops_unsafe_next(client: Client, target: str) -> None:
     response = await client.get("/login", query_string={"next": target})
@@ -198,6 +206,7 @@ async def test_bad_login_rejected(client: Client, admin_token: str) -> None:
     assert (await client.get("/")).status_code == 401
 
 
+@pytest.mark.security
 async def test_cookie_write_needs_csrf_header(client: Client, admin_token: str) -> None:
     csrf = await login(client, admin_token)
     assert (await client.post("/logout")).status_code == 403
@@ -207,12 +216,14 @@ async def test_cookie_write_needs_csrf_header(client: Client, admin_token: str) 
     assert (await client.get("/")).status_code == 401
 
 
+@pytest.mark.security
 async def test_bearer_write_needs_no_csrf(client: Client, admin_token: str) -> None:
     response = await client.post("/logout", headers=bearer(admin_token), json={})
     assert response.status_code == 200
     assert await response.get_json() == {"ok": True}
 
 
+@pytest.mark.security
 async def test_rotating_admin_token_invalidates_cookies(
     client: Client, settings: Settings, admin_token: str
 ) -> None:
@@ -233,6 +244,7 @@ async def test_oversized_login_body_rejected(client: Client) -> None:
     assert response.status_code == 413
 
 
+@pytest.mark.security
 async def test_require_admin_blocks_public_paths(settings: Settings, admin_token: str) -> None:
     app = create_app(settings)
     extra = Blueprint("extra", __name__)
@@ -280,12 +292,14 @@ class TestOpenMode:
         rejected = await client.get("/v1/verdict", headers={"Host": host})
         assert await rejected.get_json() == {"error": "bad_host"}
 
+    @pytest.mark.security
     @pytest.mark.parametrize(
         "host", ["127.0.0.1:8000", "localhost", "LOCALHOST.:8000", "[::1]:8000", "dash.localhost:8000"]
     )
     async def test_loopback_hosts_accepted(self, client: Client, host: str) -> None:
         assert (await client.get("/", headers={"Host": host})).status_code == 200
 
+    @pytest.mark.security
     async def test_public_url_host_not_trusted_in_open_mode(self, tmp_path: Path) -> None:
         """Open mode never answers for the public URL's host: a tunnel forwarding it would make every
         internet caller the operator (configuration refuses a reachable public URL without a token)."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -214,6 +215,7 @@ def test_views_add_partition_columns(facts: FactsStore) -> None:
         con.close()
 
 
+@pytest.mark.security
 def test_query_accepts_only_a_single_select(facts: FactsStore) -> None:
     table = facts.query(
         "SELECT run_id, count(*) AS n FROM tests_dim GROUP BY run_id ORDER BY run_id", repo_id=1
@@ -266,3 +268,90 @@ def test_store_layout_and_validation(facts: FactsStore, tmp_path: Path) -> None:
     assert facts.delete_run(1, "run-2") and not facts.delete_run(1, "run-2")
     assert facts.list_runs(1) == ["run-1"]
     assert not list(facts.run_dir(1, "run-1").glob(".*.tmp"))
+
+
+def _markdown(store: FactsStore, functions: list[FunctionRegion], **kwargs: object) -> str:
+    """``coverset shapes classify --markdown`` over ``store`` (catalogue and example rule as the CLI)."""
+    from coverset.analysis.shapes import Catalogue, render_markdown
+    from coverset.lang.base import ShapeObs
+
+    region = next(r for r in functions if r.qualname == "classify")
+    rows = shapes_for_function(store, 1, region.func_key, **kwargs)  # type: ignore[arg-type]
+    observations = [
+        ShapeObs(
+            region.triple,
+            r.param,
+            r.shape_key,
+            r.example_test or "",
+            r.samples,
+            r.tests,
+            False,
+            r.example,
+            r.example_test,
+        )
+        for r in rows
+    ]
+    return render_markdown(Catalogue().function_input_cov(region, observations, None))
+
+
+def test_two_ingests_of_the_same_bundle_give_identical_markdown(
+    tmp_path: Path, minimal_bundle: Path, functions: list[FunctionRegion]
+) -> None:
+    bundle = read_python_bundle(minimal_bundle)
+    reordered = dataclasses.replace(bundle, shapes=tuple(reversed(bundle.shapes)))
+    texts = []
+    for name, variant in (("a", bundle), ("b", reordered)):
+        store = FactsStore(tmp_path / name)
+        ingest_shard(store, make_ctx("run-1", day=1), variant, 0, functions)
+        texts.append(_markdown(store, functions))
+    assert texts[0] == texts[1]
+    assert "| `n:positive` | yes | `1` |" in texts[0]  # "1" beats "5": same length, smaller repr
+    store = FactsStore(tmp_path / "a")
+    ingest_shard(store, make_ctx("run-2", day=2), reordered, 0, functions)  # the same bundle again
+    assert _markdown(store, functions) == texts[0]
+
+
+def test_examples_do_not_depend_on_which_run_is_newest(
+    facts: FactsStore, minimal_bundle: Path, functions: list[FunctionRegion]
+) -> None:
+    before = {
+        (r.param, r.shape_key): (r.example, r.example_test) for r in shapes_for_function(facts, 1, CLASSIFY)
+    }
+    assert before[("n", "int|pos")] == ("1", T_BOX)
+    later = read_python_bundle(minimal_bundle)
+    later = dataclasses.replace(
+        later,
+        shapes=tuple(
+            dataclasses.replace(o, example="99", example_test=T_ADD) if o.shape_key == "int|pos" else o
+            for o in later.shapes
+        ),
+    )
+    ingest_shard(facts, make_ctx("run-3", day=3, head_sha="d" * 40), later, 0, functions)
+    after = {
+        (r.param, r.shape_key): (r.example, r.example_test) for r in shapes_for_function(facts, 1, CLASSIFY)
+    }
+    assert after[("n", "int|pos")] == ("1", T_BOX)  # the newest run's "99" is longer
+
+
+def test_branch_filter_keeps_pr_runs_out_of_baseline_history(
+    facts: FactsStore, minimal_bundle: Path, functions: list[FunctionRegion]
+) -> None:
+    pr = read_python_bundle(minimal_bundle)
+    pr = dataclasses.replace(pr, shapes=tuple(o for o in pr.shapes if o.shape_key == "int|zero"))
+    ingest_shard(
+        facts, make_ctx("run-pr", day=5, branch="pr-7", pr_number=7, head_sha="e" * 40), pr, 0, functions
+    )
+    every = {
+        r.shape_key: r.runs for r in shapes_for_function(facts, 1, CLASSIFY, branch=None) if r.param == "n"
+    }
+    main = {
+        r.shape_key: r.runs for r in shapes_for_function(facts, 1, CLASSIFY, branch="main") if r.param == "n"
+    }
+    only_pr = {r.shape_key for r in shapes_for_function(facts, 1, CLASSIFY, branch="pr-7") if r.param == "n"}
+    assert every["int|zero"] == 2 and main["int|zero"] == 1
+    assert only_pr == {"int|zero"}
+    one = {r.shape_key for r in shapes_for_function(facts, 1, CLASSIFY, last_n_runs=1, branch=None)}
+    assert one == {"int|zero"}  # the newest run overall is the PR run
+    assert ("int|pos") in {
+        r.shape_key for r in shapes_for_function(facts, 1, CLASSIFY, last_n_runs=1, branch="main")
+    }

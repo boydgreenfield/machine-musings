@@ -3,8 +3,9 @@
 A bundle is untrusted (the PR's own code ran next to the plugin that wrote it). Each one is pulled
 with ``Worker.get_file`` before the worker is released, size-checked, written under
 ``<data_dir>/runs/<run_id>/``, then handed to :func:`ingest_one`: safe extraction
-(:func:`~coverset.facts.untrusted.extract_bundle`), conversion with the head tree as the path
-allow-list (:func:`~coverset.facts.convert.read_python_bundle`) and a one-shard ingest
+(:func:`~coverset.facts.untrusted.extract_bundle`), conversion by the language adapter's
+``read_bundle`` with the head tree as the path allow-list (for Python,
+:meth:`~coverset.lang.python.PythonAdapter.read_bundle`) and a one-shard ingest
 (:func:`~coverset.facts.ingest.ingest_shard`). A bundle that breaks a limit is logged with
 :func:`~coverset.facts.ingest.record_shard_failure` and the run's coverage is then partial.
 
@@ -34,7 +35,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from coverset.config import Settings
-from coverset.facts.convert import read_python_bundle
 from coverset.facts.ingest import RunContext, ingest_shard, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleError, BundleLimits, extract_bundle
@@ -43,6 +43,7 @@ from coverset.lang.base import (
     FuncSampling,
     FunctionRegion,
     FuncTriple,
+    LanguageAdapter,
     ShapeObs,
     StaticFile,
     TestRow,
@@ -85,6 +86,21 @@ class IngestJob:
     keep_funcs: frozenset[FuncTriple] = frozenset()
     """Functions whose shape observations and sampling come back in the outcome."""
     language: str = "python"
+    adapter: LanguageAdapter | None = None
+    """The language adapter whose ``read_bundle`` converts the bundle (picklable for the process
+    pool); None means :class:`~coverset.lang.python.PythonAdapter`. It must accept the keyword
+    arguments ``limits``, ``source_root`` and ``head_paths``."""
+
+
+def adapter_for(job: IngestJob) -> LanguageAdapter:
+    """The adapter that converts ``job``'s bundle."""
+    if job.adapter is not None:
+        return job.adapter
+    if job.language != "python":
+        raise BundleError(f"no language adapter for {job.language!r}")
+    from coverset.lang.python import PythonAdapter
+
+    return PythonAdapter()
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +126,7 @@ def ingest_one(job: IngestJob) -> IngestOutcome:
     workdir = Path(tempfile.mkdtemp(prefix=f"coverset-ingest-{job.shard_id}-"))
     try:
         extract_bundle(Path(job.tarball), workdir / "bundle", job.limits)
-        bundle = read_python_bundle(
+        bundle = adapter_for(job).read_bundle(  # type: ignore[call-arg]
             workdir / "bundle",
             limits=job.limits,
             source_root=Path(job.source_root),

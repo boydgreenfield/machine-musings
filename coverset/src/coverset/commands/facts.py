@@ -1,4 +1,10 @@
-"""``coverset facts query`` and ``coverset shapes``: read-only views of the facts store."""
+"""``coverset facts query`` and ``coverset shapes``: read-only views of the facts store.
+
+``coverset shapes FUNC`` pools the shapes of the last ``--runs`` runs of one branch: by default the
+repo's default branch (baseline runs only), so its ``--markdown`` table is reproducible from
+baseline history and is what the README embeds; ``--branch any`` pools every branch, PR runs
+included. The function's region and annotations come from the newest completed run of that branch.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +19,11 @@ from sqlalchemy import select
 from coverset.commands.common import find_repo, load, prepare_db, run_async
 from coverset.config import Settings
 
-__all__ = ["facts_query_command", "shapes_command"]
+__all__ = ["ANY_BRANCH", "facts_query_command", "shapes_command"]
 
 MAX_CELL_CHARS = 60
+ANY_BRANCH = "any"
+"""``--branch`` value that pools runs of every branch."""
 
 
 @click.command("query")
@@ -67,23 +75,42 @@ def format_rows(columns: list[str], rows: list[dict[str, Any]]) -> str:
 @click.option(
     "--runs", "last_n", type=click.IntRange(1, 100), default=5, show_default=True, help="Runs to pool."
 )
+@click.option(
+    "--branch",
+    default=None,
+    help="Pool runs of this branch only (default: the repo's default branch, i.e. baseline runs; "
+    f"'{ANY_BRANCH}' pools every branch).",
+)
 @click.option("--markdown", is_flag=True, help="Print the input-class table as GitHub-flavoured markdown.")
 @click.option("--suggest", is_flag=True, help="Suggest the narrowest annotation per parameter.")
-def shapes_command(func: str, repo_spec: str | None, last_n: int, markdown: bool, suggest: bool) -> None:
+def shapes_command(
+    func: str, repo_spec: str | None, last_n: int, branch: str | None, markdown: bool, suggest: bool
+) -> None:
     """Show FUNC's observed and missing input classes (FUNC: qualname, module.qualname or func_key)."""
     settings = load()
-    click.echo(run_async(lambda: _shapes(settings, func, repo_spec, last_n, markdown, suggest)), nl=False)
+    click.echo(
+        run_async(lambda: _shapes(settings, func, repo_spec, last_n, markdown, suggest, branch=branch)),
+        nl=False,
+    )
 
 
 async def _shapes(
-    settings: Settings, func: str, repo_spec: str | None, last_n: int, markdown: bool, suggest: bool
+    settings: Settings,
+    func: str,
+    repo_spec: str | None,
+    last_n: int,
+    markdown: bool,
+    suggest: bool,
+    *,
+    branch: str | None = None,
 ) -> str:
-    from coverset.analysis.shapes import Catalogue, annotation_index, render_markdown
+    from coverset.analysis.shapes import render_markdown
     from coverset.db.models import Run
     from coverset.db.session import Database
     from coverset.facts.queries import ParquetPriorRun, shapes_for_function
     from coverset.facts.store import FactsStore
-    from coverset.orchestrator.repos import mirror_path, read_blob
+    from coverset.lang.python import PythonAdapter
+    from coverset.orchestrator.repos import mirror_path, read_blobs
 
     await prepare_db(settings)
     db = Database.from_url(settings.database_url)
@@ -91,29 +118,36 @@ async def _shapes(
     try:
         async with db.session() as session:
             repo = await find_repo(session, repo_spec)
-            run = await session.scalar(
-                select(Run)
-                .where(Run.repo_id == repo.id, Run.status == "completed")
-                .order_by(Run.created_at.desc())
-                .limit(1)
-            )
+            pooled = None if branch == ANY_BRANCH else branch or repo.default_branch
+            query = select(Run).where(Run.repo_id == repo.id, Run.status == "completed")
+            if pooled is not None:
+                query = query.where(Run.branch == pooled)
+            run = await session.scalar(query.order_by(Run.created_at.desc()).limit(1))
     finally:
         await db.engine.dispose()
+    scope = "every branch" if pooled is None else f"branch {pooled}"
     if run is None or not store.run_dir(repo.id, run.id).is_dir():
-        raise click.ClickException(f"{repo.full_name} has no completed run with facts yet")
+        raise click.ClickException(f"{repo.full_name} has no completed run with facts on {scope} yet")
     regions = await asyncio.to_thread(ParquetPriorRun(store, repo.id, run.id).functions)
     region = match_function(regions, func)
-    rows = await asyncio.to_thread(shapes_for_function, store, repo.id, region.func_key, last_n)
+    rows = await asyncio.to_thread(
+        lambda: shapes_for_function(store, repo.id, region.func_key, last_n, branch=pooled)
+    )
     observations = [_observation(region, row) for row in rows]
     sampling = await asyncio.to_thread(_sampling, store, repo.id, run.id, region)
-    blob = await asyncio.to_thread(read_blob, mirror_path(settings, repo.id), run.head_sha, region.path)
-    sources = {region.path: blob.decode("utf-8", "replace")} if blob is not None else {}
-    annotations = annotation_index(sources) if sources else {}
-    cov = Catalogue(annotations=annotations).function_input_cov(region, observations, sampling)
-    header = f"{region.qualname} ({region.path}:{region.def_line}) · {len(rows)} shapes over the last {last_n} runs"
+    paths = sorted({r.path for r in regions} | {region.path})
+    blobs = await asyncio.to_thread(read_blobs, mirror_path(settings, repo.id), run.head_sha, paths)
+    sources = {path: data.decode("utf-8", "replace") for path, data in blobs.items()}
+    catalogue = PythonAdapter().shape_catalogue(sources)
+    cov = catalogue.function_input_cov(region, observations, sampling)
+    header = (
+        f"{region.qualname} ({region.path}:{region.def_line}) · {len(rows)} shapes over the last "
+        f"{last_n} runs on {scope}"
+    )
     text = render_markdown(cov) if markdown else _plain(header, cov)
     if suggest:
-        text += "\n" + _suggestions(observations, annotations.get(region.triple) or {})
+        annotations = catalogue.annotations_of(region.triple)
+        text += "\n" + _suggestions(observations, annotations or {})
     return text
 
 

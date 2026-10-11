@@ -4,20 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-from datetime import timedelta
 from pathlib import Path
 
 import click
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete
 
 from coverset.commands.common import find_repo, load, prepare_db, run_async
 from coverset.config import Settings
 
 __all__ = ["gc_command", "invariants_check_command", "modal_reap_command", "repo_purge_command"]
-
-DELIVERY_KEEP_DAYS = 30
-"""Delivery rows stay this long (payload nulled earlier) so redeliveries are still deduplicated."""
 
 
 @click.command("gc")
@@ -30,91 +25,18 @@ def gc_command(dry_run: bool) -> None:
 
 
 async def _gc(settings: Settings, *, dry_run: bool) -> list[str]:
-    from coverset.db.models import Run, RunEvent, WebhookDelivery
+    """``serve`` runs the same pass daily in-process (``orchestrator.history.gc_forever``)."""
     from coverset.db.session import Database
-    from coverset.facts.gc import expire_runs
     from coverset.facts.store import FactsStore
+    from coverset.orchestrator.history import collect_garbage
 
     await prepare_db(settings)
-    now = settings.now()
-    run_cutoff = now - timedelta(days=settings.retention_runs_days)
-    event_cutoff = now - timedelta(days=settings.retention_events_days)
-    payload_cutoff = now - timedelta(days=settings.retention_deliveries_days)
-    delivery_cutoff = now - timedelta(days=max(DELIVERY_KEEP_DAYS, settings.retention_deliveries_days))
     db = Database.from_url(settings.database_url)
-    store = FactsStore(settings.facts_dir)
     try:
-        async with db.session() as session:
-            keep = await _runs_to_keep(session)
-            expired_db = list(
-                await session.scalars(
-                    select(Run.id).where(
-                        Run.created_at < run_cutoff,
-                        Run.id.not_in(keep or {""}),
-                        Run.status.not_in(("queued", "running")),
-                    )
-                )
-            )
-            events = await session.scalar(select(func.count(RunEvent.id)).where(RunEvent.at < event_cutoff))
-            payloads = await session.scalar(
-                select(func.count(WebhookDelivery.id)).where(
-                    WebhookDelivery.received_at < payload_cutoff, WebhookDelivery.payload.is_not(None)
-                )
-            )
-            deliveries = await session.scalar(
-                select(func.count(WebhookDelivery.id)).where(WebhookDelivery.received_at < delivery_cutoff)
-            )
-            if not dry_run:
-                if expired_db:
-                    await session.execute(delete(Run).where(Run.id.in_(expired_db)))
-                await session.execute(delete(RunEvent).where(RunEvent.at < event_cutoff))
-                await session.execute(
-                    update(WebhookDelivery)
-                    .where(WebhookDelivery.received_at < payload_cutoff)
-                    .values(payload=None)
-                )
-                await session.execute(
-                    delete(WebhookDelivery).where(WebhookDelivery.received_at < delivery_cutoff)
-                )
-                await session.commit()
+        report = await collect_garbage(db, settings, FactsStore(settings.facts_dir), dry_run=dry_run)
     finally:
         await db.engine.dispose()
-    expired_facts = await asyncio.to_thread(
-        expire_runs, store, keep_run_ids=keep, older_than=run_cutoff, dry_run=dry_run
-    )
-    verb = "would delete" if dry_run else "deleted"
-    return [
-        f"{verb} {len(expired_db)} run(s) from the database and {len(expired_facts)} run(s) of facts",
-        f"{verb} {events or 0} run event(s) older than {settings.retention_events_days} d",
-        f"{'would clear' if dry_run else 'cleared'} {payloads or 0} webhook payload(s) older than "
-        f"{settings.retention_deliveries_days} d; {verb} {deliveries or 0} delivery row(s)",
-        f"kept {len(keep)} run(s): the latest baseline per repo and the latest run per open PR",
-    ]
-
-
-async def _runs_to_keep(session: AsyncSession) -> set[str]:
-    """The latest completed baseline per repo and the latest run per open PR."""
-    from coverset.db.models import PullRequest, Run
-    from coverset.orchestrator.history import BASELINE_TRIGGERS
-
-    keep: set[str] = set()
-    baselines = await session.execute(
-        select(Run.repo_id, Run.id)
-        .where(Run.trigger.in_(BASELINE_TRIGGERS), Run.status == "completed")
-        .order_by(Run.created_at.desc())
-    )
-    seen: set[int] = set()
-    for repo_id, run_id in baselines:
-        if repo_id not in seen:
-            seen.add(repo_id)
-            keep.add(run_id)
-    for pr_id in await session.scalars(select(PullRequest.id).where(PullRequest.state == "open")):
-        latest = await session.scalar(
-            select(Run.id).where(Run.pr_id == pr_id).order_by(Run.created_at.desc()).limit(1)
-        )
-        if latest is not None:
-            keep.add(latest)
-    return keep
+    return report.lines(settings)
 
 
 @click.command("purge")

@@ -8,6 +8,10 @@ from readers), then appends ``ok`` to the shard's ``ingest_log``, which is the c
 different bundle for the shard replaces it wholesale. :func:`finalize_run` computes ``file_cov``
 and ``func_input_cov`` once the expected shards are in and records ``coverage_complete``.
 
+A bundle whose ``meta.json`` names a tracer other than coverage.py's C tracer is ingested with
+``tracer_mismatch: true`` (and the tracer's name) in its ``ingest_log.convert_json``, so the runner
+and the UI can warn that per-test contexts may be incomplete.
+
 Retried tests keep their first coverage: the runner's retries are never ingested (they run in a
 separate output directory), and if a nodeid's coverage is already recorded by another shard of the
 run, a later shard's lines for it are dropped (counted as ``duplicate_tests``) while its result is
@@ -27,6 +31,7 @@ from datetime import UTC, datetime
 import numpy as np
 import pyarrow as pa
 
+from coverset.facts.convert import tracer_mismatch
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import CALLABLE_KINDS, SCHEMAS
 from coverset.facts.store import FactsStore, conform
@@ -501,6 +506,8 @@ def ingest_shard(
             store.write_table(ctx.repo_id, ctx.run_id, "functions", tables["functions"])
         convert = bundle.meta.get("convert", {}) if isinstance(bundle.meta, dict) else {}
         details = {**convert, "unmatched_functions": len(resolver.unmatched), "duplicate_tests": len(skip)}
+        if (tracer := tracer_mismatch(bundle.meta)) is not None:
+            details.update(tracer_mismatch=True, tracer=tracer)
         _append_log(store, ctx, shard_id, attempt, sha, "ok", details, len(bundle.tests), n_lines)
         _unfinalize(store, ctx)
         for old, paths in store.attempt_files(ctx.repo_id, ctx.run_id, shard_id).items():

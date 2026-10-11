@@ -184,7 +184,8 @@ class Script:
     ``delay_s`` is slept before each test; ``collected`` overrides the collection (nodeids the
     fixture does not know are synthesised); ``collect_delay_s`` is slept during collection;
     ``inject`` lines are emitted, nonce-framed, before a shard's first test; ``bundle_outcomes``
-    overrides outcomes in the bundle's ``results.jsonl`` only (what the stream said stays).
+    overrides outcomes in the bundle's ``results.jsonl`` only (what the stream said stays);
+    ``meta`` entries replace keys of the bundle's ``meta.json`` (e.g. ``{"tracer": "PyTracer"}``).
     """
 
     outcomes: dict[str, Outcome] = field(default_factory=dict)
@@ -197,6 +198,7 @@ class Script:
     collect_delay_s: float = 0.0
     inject: list[str] = field(default_factory=list)
     bundle_outcomes: dict[str, Outcome] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
     envs: list[dict[str, str]] = field(default_factory=list)
     commands: list[list[str]] = field(default_factory=list)
 
@@ -312,7 +314,8 @@ class FakeWorker:
                 if r["nodeid"] in self.script.bundle_outcomes
                 else r
                 for r in results
-            ]
+            ],
+            meta=self.script.meta,
         )
         (out / "bundle.tar.gz").write_bytes(bundle)
         emit(
@@ -348,13 +351,15 @@ class FakeWorker:
         shutil.rmtree(self._root, ignore_errors=True)
 
 
-def _bundle(results: list[dict[str, Any]]) -> bytes:
-    """The fixture bundle with ``results.jsonl`` replaced by ``results``."""
+def _bundle(results: list[dict[str, Any]], *, meta: Mapping[str, Any] | None = None) -> bytes:
+    """The fixture bundle with ``results.jsonl`` replaced by ``results`` (and ``meta`` merged in)."""
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
         for member in sorted((FIXTURE / "bundle").iterdir()):
             if member.name == "results.jsonl":
                 data = "".join(json.dumps({"kind": "test", **r}) + "\n" for r in results).encode()
+            elif member.name == "meta.json" and meta:
+                data = json.dumps({**json.loads(member.read_text()), **meta}).encode()
             else:
                 data = member.read_bytes()
             info = tarfile.TarInfo(member.name)

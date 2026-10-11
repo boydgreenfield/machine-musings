@@ -28,6 +28,7 @@ def _append(path: Path, *rows: object) -> None:
             fh.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
 
 
+@pytest.mark.security
 def test_oversized_and_bad_result_lines_are_dropped(bundle_copy: Path) -> None:
     limits = BundleLimits(max_json_line_bytes=4096)
     _append(
@@ -49,6 +50,7 @@ def test_oversized_and_bad_result_lines_are_dropped(bundle_copy: Path) -> None:
     assert dropped["bad_paths"] == 1
 
 
+@pytest.mark.security
 def test_path_traversal_in_coverage_json_is_dropped(bundle_copy: Path) -> None:
     path = bundle_copy / "coverage.json"
     report = json.loads(path.read_text())
@@ -69,6 +71,7 @@ def _rewrite_shapes(bundle_dir: Path, edit) -> None:
         fh.writelines(json.dumps(row) + "\n" for row in rows)
 
 
+@pytest.mark.security
 def test_shape_rows_with_bad_paths_or_indexes_are_dropped(bundle_copy: Path) -> None:
     def edit(rows: list[dict]) -> list[dict]:
         rows[0]["funcs"].append(["../../evil.py", "f", 1])
@@ -102,6 +105,7 @@ def test_shapes_with_bad_header_are_ignored(bundle_copy: Path) -> None:
     assert bundle.meta["convert"]["dropped"]["shapes.bad_header"] == 1
 
 
+@pytest.mark.security
 def test_gzip_bomb_is_capped(bundle_copy: Path) -> None:
     with gzip.open(bundle_copy / "shapes.jsonl.gz", "ab") as fh:
         fh.write(b" " * (8 * 1024 * 1024))
@@ -111,6 +115,7 @@ def test_gzip_bomb_is_capped(bundle_copy: Path) -> None:
     assert len(bundle.shapes) == 9  # rows before the cap are kept
 
 
+@pytest.mark.security
 def test_total_bundle_size_limit(minimal_bundle: Path) -> None:
     with pytest.raises(BundleError, match="limit"):
         read_python_bundle(minimal_bundle, limits=BundleLimits(max_bundle_bytes=10_000))
@@ -131,6 +136,7 @@ def test_optional_files_may_be_missing(bundle_copy: Path) -> None:
     assert set(bundle.run_arcs[MODULE_PATH]) >= {(10, 11), (31, 33)}  # from coverage.sqlite arcs
 
 
+@pytest.mark.security
 def test_symlinked_bundle_file_is_refused(bundle_copy: Path, tmp_path: Path) -> None:
     secret = tmp_path / "secret.json"
     secret.write_text(json.dumps({"stolen": True}))
@@ -145,6 +151,7 @@ def test_symlinked_bundle_file_is_refused(bundle_copy: Path, tmp_path: Path) -> 
         read_python_bundle(bundle_copy)
 
 
+@pytest.mark.security
 def test_sqlite_views_masquerading_as_tables_are_refused(bundle_copy: Path) -> None:
     path = bundle_copy / "coverage.sqlite"
     path.unlink()
@@ -159,6 +166,7 @@ def test_sqlite_views_masquerading_as_tables_are_refused(bundle_copy: Path) -> N
         read_python_bundle(bundle_copy)
 
 
+@pytest.mark.security
 def test_garbage_sqlite_is_a_bundle_error(bundle_copy: Path) -> None:
     (bundle_copy / "coverage.sqlite").write_bytes(b"not a database" * 100)
     with pytest.raises(BundleError):
@@ -195,6 +203,7 @@ def _special(name: str, kind: bytes, linkname: str = "") -> tarfile.TarInfo:
     return info
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("name", "kind", "linkname"),
     [
@@ -213,6 +222,7 @@ def test_extract_refuses_links_and_devices(tmp_path: Path, name: str, kind: byte
     assert not (tmp_path / "out" / info.name).exists()
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("name", ["../escape.txt", "/abs.txt", "a/../../b.txt", "a//b.txt"])
 def test_extract_refuses_unsafe_paths(tmp_path: Path, name: str) -> None:
     archive = _tar(tmp_path / "b.tar.gz", [(tarfile.TarInfo(name), b"x")])
@@ -221,6 +231,7 @@ def test_extract_refuses_unsafe_paths(tmp_path: Path, name: str) -> None:
     assert not (tmp_path / "escape.txt").exists()
 
 
+@pytest.mark.security
 def test_extract_refuses_duplicates_and_member_floods(tmp_path: Path) -> None:
     dup = _tar(tmp_path / "dup.tar.gz", [(tarfile.TarInfo("a"), b"1"), (tarfile.TarInfo("a"), b"2")])
     with pytest.raises(BundleError, match="duplicate"):
@@ -230,6 +241,7 @@ def test_extract_refuses_duplicates_and_member_floods(tmp_path: Path) -> None:
         extract_bundle(flood, tmp_path / "flood", BundleLimits(max_members=4))
 
 
+@pytest.mark.security
 def test_extract_caps_declared_member_sizes(tmp_path: Path) -> None:
     archive = _tar(tmp_path / "bomb.tar.gz", [(tarfile.TarInfo("zeros"), b"\0" * (4 * 1024 * 1024))])
     with pytest.raises(BundleError, match="declare more than"):
@@ -239,6 +251,7 @@ def test_extract_caps_declared_member_sizes(tmp_path: Path) -> None:
         extract_bundle(archive, tmp_path / "out2", BundleLimits(max_bundle_bytes=100))
 
 
+@pytest.mark.security
 def test_extract_caps_the_decompressed_stream(tmp_path: Path) -> None:
     """Bytes outside any member's declared size (here a huge PAX header) still count."""
     info = tarfile.TarInfo("results.jsonl")
@@ -253,6 +266,7 @@ def test_extract_caps_the_decompressed_stream(tmp_path: Path) -> None:
         extract_bundle(archive, tmp_path / "out", BundleLimits(gzip_floor_bytes=256 * 1024))
 
 
+@pytest.mark.security
 def test_extract_refuses_sparse_members(tmp_path: Path) -> None:
     """A PAX GNU sparse 1.0 member declares 300 MiB from a few hundred bytes of archive."""
     sparse_map = b"1\n0\n512\n".ljust(512, b"\0")
@@ -277,6 +291,7 @@ def test_extract_refuses_sparse_members(tmp_path: Path) -> None:
     assert written == 0
 
 
+@pytest.mark.security
 def test_extract_needs_an_empty_destination(tmp_path: Path) -> None:
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "leftover").write_text("x")
@@ -314,6 +329,7 @@ def _numbits_bundle(tmp_path: Path, blob: bytes) -> Path:
     return bundle_dir
 
 
+@pytest.mark.security
 def test_numbits_bomb_is_dropped_before_decoding(tmp_path: Path) -> None:
     """8 MiB of 0xFF compresses ~1000x but would decode to 67M lines: the blob is refused."""
     bundle = read_python_bundle(_numbits_bundle(tmp_path, b"\xff" * (8 * 1024 * 1024)))
@@ -321,6 +337,7 @@ def test_numbits_bomb_is_dropped_before_decoding(tmp_path: Path) -> None:
     assert bundle.meta["convert"]["dropped"]["coverage.bad_numbits"] == 1
 
 
+@pytest.mark.security
 def test_coverage_cells_are_capped(tmp_path: Path, minimal_bundle: Path) -> None:
     bundle_dir = _numbits_bundle(tmp_path, nums_to_numbits(range(1, 2001)))
     with pytest.raises(BundleError, match="cells"):
@@ -331,6 +348,7 @@ def test_coverage_cells_are_capped(tmp_path: Path, minimal_bundle: Path) -> None
         read_python_bundle(minimal_bundle, limits=BundleLimits(max_coverage_cells=10))
 
 
+@pytest.mark.security
 def test_arc_rows_with_bad_values_are_dropped(bundle_copy: Path) -> None:
     db = sqlite3.connect(bundle_copy / "coverage.sqlite")
     db.execute("INSERT INTO arc (file_id, context_id, fromno, tono) VALUES (1, 1, 'abc', 5)")
@@ -343,6 +361,7 @@ def test_arc_rows_with_bad_values_are_dropped(bundle_copy: Path) -> None:
     assert set(bundle.coverage) == {IMPORT_CONTEXT, *TESTS}
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("limits", "match"),
     [
@@ -360,6 +379,7 @@ def test_distinct_names_are_capped(minimal_bundle: Path, limits: BundleLimits, m
 # -- hostile values never escape as other exceptions -----------------------------------------------
 
 
+@pytest.mark.security
 def test_deeply_nested_json_is_counted_not_raised(bundle_copy: Path) -> None:
     _append(bundle_copy / "results.jsonl", "[" * 200_000, '{"a":' * 100_000 + "1" + "}" * 100_000)
     for name in ("coverage.json", "meta.json", "collect.json"):
@@ -371,6 +391,7 @@ def test_deeply_nested_json_is_counted_not_raised(bundle_copy: Path) -> None:
     assert {row.nodeid for row in bundle.tests} == set(TESTS)
 
 
+@pytest.mark.security
 def test_huge_and_odd_numbers_are_dropped(bundle_copy: Path) -> None:
     _append(
         bundle_copy / "results.jsonl",
@@ -391,6 +412,7 @@ def test_huge_and_odd_numbers_are_dropped(bundle_copy: Path) -> None:
     assert MODULE_PATH not in bundle.static
 
 
+@pytest.mark.security
 def test_shape_counts_and_keys_are_validated(bundle_copy: Path) -> None:
     def edit(rows: list[dict]) -> list[dict]:
         rows[0]["shapes"] += ["int|zero|big", "obj:" + "x" * 600]
@@ -413,6 +435,7 @@ def test_corrupt_shapes_stream_is_counted(bundle_copy: Path) -> None:
     assert bundle.meta["convert"]["dropped"]["shapes.corrupt"] == 1
 
 
+@pytest.mark.security
 def test_unexpected_errors_become_bundle_errors(bundle_copy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def explode(self: object) -> None:
         raise TypeError("unsupported operand")

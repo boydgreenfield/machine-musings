@@ -22,6 +22,7 @@ import duckdb
 import numpy as np
 import pyarrow as pa
 
+from coverset.analysis.shapes import example_sort_key
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.facts.store import FactsStore
@@ -385,15 +386,15 @@ LIMIT $last_n
 
 _SHAPES_SQL = """
 WITH recent AS (
-    SELECT run_id, any_value(created_at) AS created_at FROM runs_dim GROUP BY run_id
+    SELECT DISTINCT run_id FROM runs_dim
 ), cs AS (
-    SELECT cs.*, r.created_at FROM call_shapes cs JOIN recent r USING (run_id)
+    SELECT cs.* FROM call_shapes cs JOIN recent r USING (run_id)
     WHERE cs.func_key = $func_key
 )
 SELECT param, shape_id, sum(samples)::BIGINT AS samples, count(DISTINCT run_id) AS runs,
        list_sort(list_distinct(flatten(list(test_ids)))) AS test_ids,
-       arg_max(example_repr, created_at) FILTER (WHERE example_repr IS NOT NULL) AS example,
-       arg_max(example_test_id, created_at) FILTER (WHERE example_repr IS NOT NULL) AS example_test_id
+       list(DISTINCT {'example': example_repr, 'test_id': example_test_id})
+           FILTER (WHERE example_repr IS NOT NULL) AS examples
 FROM cs GROUP BY param, shape_id
 ORDER BY param, samples DESC, shape_id
 """
@@ -410,9 +411,12 @@ def shapes_for_function(
 ) -> list[ShapeRow]:
     """Every shape recorded for ``func_key`` over the repo's ``last_n_runs`` most recent runs.
 
-    Recent runs are picked from ``runs_dim`` first (only runs of ``branch`` when given), so only
-    those runs' ``call_shapes`` files are read. ``tests`` holds at most ``max_tests`` nodeids
-    (sorted); ``n_tests`` is the full count. The example is the newest non-null redacted example.
+    Recent runs are picked from ``runs_dim`` first (only runs whose ``runs_dim.branch`` is
+    ``branch`` when given, e.g. the default branch for baseline-only history), so only those runs'
+    ``call_shapes`` files are read. ``tests`` holds at most ``max_tests`` nodeids (sorted);
+    ``n_tests`` is the full count. The example is chosen among every non-null redacted example of
+    the (parameter, shape) by :func:`~coverset.analysis.shapes.example_sort_key` (shortest repr,
+    then smallest repr, then smallest test nodeid), so it does not depend on run or test order.
     """
     recent = _query(
         store,
@@ -437,7 +441,7 @@ def shapes_for_function(
     result = []
     for row in rows:
         nodeids = sorted(ids.nodeid(t) for t in row["test_ids"])
-        example_test = row["example_test_id"]
+        example, example_test = _stable_example(row["examples"] or [], ids)
         result.append(
             ShapeRow(
                 param=row["param"],
@@ -446,11 +450,28 @@ def shapes_for_function(
                 runs=row["runs"],
                 n_tests=len(nodeids),
                 tests=tuple(nodeids[:max_tests]),
-                example=row["example"],
-                example_test=ids.nodeid(example_test) if example_test is not None else None,
+                example=example,
+                example_test=example_test,
             )
         )
     return result
+
+
+def _stable_example(
+    candidates: Sequence[Mapping[str, object]], ids: RepoDictionary
+) -> tuple[str | None, str | None]:
+    """The (example, nodeid) that sorts first under :func:`example_sort_key`."""
+    best: tuple[tuple[int, str, str], str, str | None] | None = None
+    for candidate in candidates:
+        example = candidate.get("example")
+        if not isinstance(example, str):
+            continue
+        test_id = candidate.get("test_id")
+        nodeid = ids.nodeid(test_id) if isinstance(test_id, int) else None
+        key = example_sort_key(example, nodeid)
+        if best is None or key < best[0]:
+            best = (key, example, nodeid)
+    return (best[1], best[2]) if best is not None else (None, None)
 
 
 @dataclass(frozen=True, slots=True)

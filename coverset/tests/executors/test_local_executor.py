@@ -123,6 +123,7 @@ async def test_child_environment_is_scrubbed(
     await worker.release()
 
 
+@pytest.mark.security
 def test_sanitize_env_rules() -> None:
     assert sanitize_env(
         {
@@ -137,6 +138,7 @@ def test_sanitize_env_rules() -> None:
     ) == {"OK_NAME": "1"}
 
 
+@pytest.mark.security
 def test_venv_cache_builds_once_under_the_lock(tmp_path: Path) -> None:
     calls: list[str] = []
     first = LocalExecutor(
@@ -161,6 +163,7 @@ def test_venv_cache_builds_once_under_the_lock(tmp_path: Path) -> None:
     assert leftovers == []
 
 
+@pytest.mark.security
 def test_failed_venv_build_leaves_nothing(tmp_path: Path) -> None:
     def broken(env: EnvSpec, target: Path) -> None:
         (target / "partial").write_text("x")
@@ -173,6 +176,7 @@ def test_failed_venv_build_leaves_nothing(tmp_path: Path) -> None:
     assert [p for p in venvs.iterdir() if not p.name.endswith(".lock")] == []
 
 
+@pytest.mark.security
 async def test_timeout_kills_the_process_group(executor: LocalExecutor) -> None:
     worker = await _worker(executor)
     marker = Path(worker.path("tmp/grandchild.pid"))
@@ -191,6 +195,7 @@ async def test_timeout_kills_the_process_group(executor: LocalExecutor) -> None:
     await worker.release()
 
 
+@pytest.mark.security
 async def test_sigterm_ignoring_process_gets_sigkill(executor: LocalExecutor) -> None:
     worker = await _worker(executor)
     script = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(60)"
@@ -206,6 +211,7 @@ async def test_sigterm_ignoring_process_gets_sigkill(executor: LocalExecutor) ->
     await worker.release()
 
 
+@pytest.mark.security
 async def test_stdout_cap_and_line_cap(executor: LocalExecutor) -> None:
     worker = await _worker(executor)
     lines: list[str] = []
@@ -226,6 +232,7 @@ async def test_stdout_cap_and_line_cap(executor: LocalExecutor) -> None:
     await worker.release()
 
 
+@pytest.mark.security
 async def test_files_in_and_out(executor: LocalExecutor) -> None:
     worker = await _worker(executor)
     buffer = io.BytesIO()
@@ -258,6 +265,7 @@ async def test_files_in_and_out(executor: LocalExecutor) -> None:
     assert not root.exists()
 
 
+@pytest.mark.security
 async def test_acquire_respects_max_workers_and_release(executor: LocalExecutor) -> None:
     env = await executor.ensure_env(spec())
     first = {"coverset_run": "run-1"}
@@ -295,6 +303,7 @@ async def test_acquire_waits_for_a_release_instead_of_failing(executor: LocalExe
     await executor.close()
 
 
+@pytest.mark.security
 def test_startup_sweep_removes_old_run_dirs(tmp_path: Path) -> None:
     temp = tmp_path / "sweep"
     temp.mkdir()

@@ -13,6 +13,8 @@ from coverset.analysis.shapes import (
     ParamInfo,
     ShapeKeyError,
     annotation_index,
+    enum_index,
+    example_sort_key,
     function_input_cov,
     parse_shape_key,
     render_markdown,
@@ -165,7 +167,14 @@ def test_annotation_arms_bool_literal_optional_enum() -> None:
     assert names("name", "Optional[str]", []) == ["name:str", "name:none"]
     assert names("name", "str | None", [obs("name", "NoneType")]) == ["name:str", "name:none"]
     assert names("mode", "Literal['fast', 'slow']", []) == ["mode:'fast'", "mode:'slow'"]
-    assert names("c", "Color", []) == ["c:Color.RED", "c:Color.GREEN"]
+    # Enum members are expected only once some example tells members apart (the shipped tracer
+    # records no repr for Enum values, so annotation alone would report false gaps).
+    assert names("c", "Color", []) == []
+    assert names("c", "Color", [obs("c", "obj:pkg.Color")]) == []
+    assert names("c", "Color", [obs("c", "obj:pkg.Color", example="<Color.RED: 1>")]) == [
+        "c:Color.RED",
+        "c:Color.GREEN",
+    ]
     observed = catalogue.function_input_cov(
         FUNCS["validate_email"].region,
         [obs("email", "str|ascii|len:2-10", example="'fast'")],
@@ -309,3 +318,74 @@ def test_missing_reason_says_never_exercised_only_without_a_sample_cap() -> None
         FuncSampling(("src/ledger/demo.py", "validate_email", 1), 2048, ("t::a", "t::b"), True),
     )
     assert capped.missing_reason == "not observed in 2048 sampled calls (2 tests hit the sample cap)"
+
+
+def test_enum_members_are_observed_through_examples() -> None:
+    catalogue = Catalogue(enum_members=lambda name: ("RED", "GREEN") if name == "Color" else None)
+    region = FUNCS["validate_email"].region
+    cov = catalogue.function_input_cov(
+        region,
+        [obs("email", "obj:pkg.Color", example="<Color.RED: 1>")],
+        None,
+        annotations={"email": "Color"},
+    )
+    assert [c.name for c in cov.expected] == ["email:Color.RED", "email:Color.GREEN"]
+    assert [c.name for c in cov.missing] == ["email:Color.GREEN"]
+
+
+def test_enum_index_reads_enum_members_from_sources() -> None:
+    sources = {
+        "src/pkg/roles.py": (
+            "from enum import Enum, IntEnum, StrEnum\n"
+            "import enum\n"
+            "class Role(IntEnum):\n    VIEWER = 1\n    ADMIN = 2\n    _hidden = 3\n"
+            "    def label(self):\n        return self.name\n"
+            "class Mode(enum.StrEnum):\n    FAST = 'fast'\n    SLOW: str = 'slow'\n"
+            "class Base(Enum):\n    pass\n"
+            "class Child(Base):\n    ONE = 1\n"
+            "class Plain:\n    X = 1\n"
+        ),
+        "src/pkg/broken.py": "def (:\n",
+        "src/pkg/a.py": "from enum import Enum\nclass Dup(Enum):\n    A = 1\n",
+        "src/pkg/b.py": "from enum import Enum\nclass Dup(Enum):\n    B = 1\n",
+    }
+    index = enum_index(sources)
+    assert index == {"Role": ("VIEWER", "ADMIN"), "Mode": ("FAST", "SLOW"), "Child": ("ONE",)}
+
+
+def test_sum_zero_is_an_element_class() -> None:
+    catalogue = Catalogue()
+    expected = [
+        c.name for c in catalogue.expected_classes(ParamInfo("w", None), [obs("w", "list|elem:int|len:2-10")])
+    ]
+    assert "w:sum-zero" in expected
+    assert expected.index("w:sum-zero") == expected.index("w:all-zero") + 1
+    seen = catalogue.observed_classes([obs("w", "list|any_neg|elem:int|len:2-10|sum_zero")])
+    assert "w:sum-zero" in seen and "w:all-zero" not in seen
+    assert "w:sum-zero" not in catalogue.observed_classes([obs("w", "list|elem:str|len:2-10|sum_zero")])
+    cls = next(
+        c
+        for c in catalogue.expected_classes(ParamInfo("w", None), [obs("w", "list|elem:int|len:1")])
+        if c.name == "w:sum-zero"
+    )
+    assert cls.description == "elements that sum to zero, e.g. [2, -2]"
+    assert "-x for x in xs" in cls.hypothesis_hint
+
+
+def test_examples_are_chosen_by_a_stable_rule() -> None:
+    region = FUNCS["validate_email"].region
+    rows = [
+        obs("email", "int|neg", example="-100", tests=("tests/t.py::b",)),
+        obs("email", "int|neg", example="-90", tests=("tests/t.py::c",)),
+        obs("email", "int|neg", example="-91", tests=("tests/t.py::a",)),
+        obs("email", "int|pos", example="7", tests=("tests/t.py::z",)),
+        obs("email", "int|pos", example="7", tests=("tests/t.py::y",)),
+    ]
+    first = Catalogue().function_input_cov(region, rows, None)
+    again = Catalogue().function_input_cov(region, list(reversed(rows)), None)
+    assert first.examples["email:negative"] == "-90"  # shortest, then smallest
+    assert first.examples["email:positive"] == "7"
+    assert first.examples == again.examples
+    assert render_markdown(first) == render_markdown(again)
+    assert example_sort_key("-90", None) > example_sort_key("-90", "tests/t.py::a")
+    assert example_sort_key("7", "b") < example_sort_key("-1", "a")

@@ -269,6 +269,7 @@ def test_a_rejected_bundle_changes_nothing_but_the_log(store: FactsStore, bundle
     assert not store.table_files(1, "run-1", "file_cov")
 
 
+@pytest.mark.security
 def test_sample_counts_beyond_int64_are_rejected(store: FactsStore, bundle: NeutralBundle) -> None:
     obs = dataclasses.replace(bundle.shapes[0], samples=2**63)
     with pytest.raises(BundleError, match="sample counts"):
@@ -365,3 +366,20 @@ def test_extra_shard_ids_do_not_block_completeness(store: FactsStore, bundle: Ne
     done = finalize_run(store, ctx, expected_shards=2)
     assert (done.ingested_shards, done.coverage_complete) == (2, True)
     assert _rows(store, "runs_dim")[0]["coverage_complete"] is True
+
+
+def test_tracer_mismatch_is_recorded_in_the_ingest_log(
+    store: FactsStore, bundle_copy: Path, functions: list[FunctionRegion]
+) -> None:
+    meta = json.loads((bundle_copy / "meta.json").read_text())
+    (bundle_copy / "meta.json").write_text(json.dumps({**meta, "tracer": "PyTracer"}))
+    bundle = read_python_bundle(bundle_copy)
+    assert bundle.meta["convert"]["tracer_mismatch"] is True
+    ingest_shard(store, make_ctx(), bundle, 0, functions)
+    details = json.loads(_rows(store, "ingest_log")[0]["convert_json"])
+    assert details["tracer_mismatch"] is True and details["tracer"] == "PyTracer"
+    # a bundle from another converter is checked from its meta alone
+    other = dataclasses.replace(bundle, meta={"tracer": "PyTracer"})
+    ingest_shard(store, make_ctx("run-2"), other, 0, functions)
+    rows = store.read_table(1, "run-2", "ingest_log", shard_id=0).to_pylist()
+    assert json.loads(rows[0]["convert_json"])["tracer_mismatch"] is True

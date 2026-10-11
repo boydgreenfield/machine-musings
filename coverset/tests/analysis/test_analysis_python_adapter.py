@@ -15,6 +15,7 @@ from analysis_helpers import obs
 
 from coverset.analysis.functions import index_functions
 from coverset.analysis.shapes import Catalogue
+from coverset.facts.untrusted import BundleLimits
 from coverset.lang import python as python_lang
 from coverset.lang.base import LanguageAdapter
 from coverset.lang.python import ConfigError, CoversetConfig, EnvSpecError, PythonAdapter, read_tool_config
@@ -260,8 +261,15 @@ def test_test_command() -> None:
 def test_delegations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     adapter = PythonAdapter()
     sentinel = object()
-    monkeypatch.setattr(python_lang, "read_python_bundle", lambda path: (sentinel, path))
-    assert adapter.read_bundle(tmp_path) == (sentinel, tmp_path)
+    monkeypatch.setattr(python_lang, "read_python_bundle", lambda path, **kwargs: (sentinel, path, kwargs))
+    assert adapter.read_bundle(tmp_path) == (
+        sentinel,
+        tmp_path,
+        {"limits": None, "source_root": None, "head_paths": None},
+    )
+    limits = BundleLimits(max_bundle_bytes=1024)
+    passed = adapter.read_bundle(tmp_path, limits=limits, source_root=tmp_path, head_paths={"a.py"})
+    assert passed[2] == {"limits": limits, "source_root": tmp_path, "head_paths": {"a.py"}}
     regions = adapter.index_functions("m.py", "def f():\n    return 1\n")
     assert [r.qualname for r in regions] == ["<module>", "f"]
     assert isinstance(adapter.shape_catalogue(), Catalogue)
@@ -286,6 +294,7 @@ def _workspace(root: Path) -> Path:
     return root
 
 
+@pytest.mark.security
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
 def test_env_spec_never_emits_workspace_or_local_packages(tmp_path: Path) -> None:
     repo = _workspace(tmp_path / "ws")
@@ -317,6 +326,7 @@ def test_symlinked_python_version_is_refused_without_echo(tmp_path: Path) -> Non
     assert "secret" not in str(info.value) and "regular file" in str(info.value)
 
 
+@pytest.mark.security
 def test_symlinked_pyproject_and_lock_are_refused(tmp_path: Path) -> None:
     outside = tmp_path / "outside.toml"
     outside.write_text("[tool.coverset]\n")
@@ -332,6 +342,7 @@ def test_symlinked_pyproject_and_lock_are_refused(tmp_path: Path) -> None:
         PythonAdapter(uv=str(_fake_uv(tmp_path))).env_spec(repo, {})
 
 
+@pytest.mark.security
 def test_fifo_python_version_does_not_hang(tmp_path: Path) -> None:
     os.mkfifo(tmp_path / ".python-version")
     with pytest.raises(ConfigError, match="regular file"):
@@ -346,6 +357,7 @@ def test_python_version_file_contents(tmp_path: Path, content: str, python: str)
     assert PythonAdapter().load_config(tmp_path).python == python
 
 
+@pytest.mark.security
 def test_bad_python_version_file_is_not_echoed(tmp_path: Path) -> None:
     (tmp_path / ".python-version").write_text("secret-token-abc\n")
     with pytest.raises(ConfigError) as info:
@@ -353,12 +365,14 @@ def test_bad_python_version_file_is_not_echoed(tmp_path: Path) -> None:
     assert "secret" not in str(info.value)
 
 
+@pytest.mark.security
 def test_oversized_pyproject_is_refused(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("# pad\n" * (python_lang.MAX_PYPROJECT_BYTES // 6 + 1))
     with pytest.raises(ConfigError, match="larger than"):
         PythonAdapter().load_config(tmp_path)
 
 
+@pytest.mark.security
 def test_symlinked_source_root_is_not_inferred(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     (outside / "hostpkg").mkdir(parents=True)
@@ -377,3 +391,18 @@ def test_shape_catalogue_applies_annotations_from_sources() -> None:
     assert {"x:none", "x:int"} <= set(with_sources["x"].missing) | set(with_sources["x"].observed)
     assert "x:none" in with_sources["x"].missing
     assert "x:none" not in PythonAdapter().shape_catalogue()(observations)["x"].expected
+
+
+def test_shape_catalogue_resolves_enum_members_from_sources() -> None:
+    roles = "from enum import IntEnum\n\n\nclass Role(IntEnum):\n    VIEWER = 1\n    ADMIN = 2\n"
+    path, source = "src/m.py", "from roles import Role\n\n\ndef f(role: Role):\n    return role\n"
+    region = index_functions(path, source)[1]
+    sources = {path: source, "src/roles.py": roles}
+    catalogue = PythonAdapter().shape_catalogue(sources)
+    named = [obs("role", "obj:roles.Role", func=region.triple, example="<Role.ADMIN: 2>")]
+    result = catalogue(named)["role"]
+    assert result.expected == ("role:Role.VIEWER", "role:Role.ADMIN")
+    assert result.missing == ("role:Role.VIEWER",) and "role:Role.ADMIN" in result.observed
+    # Without an example naming a member (what the shipped tracer records for Enum values), the
+    # members are not expected: annotation alone would report every member as never exercised.
+    assert catalogue([obs("role", "obj:roles.Role", func=region.triple)])["role"].expected == ()

@@ -123,7 +123,7 @@ Shard tables (one file per shard per attempt):
 | `call_shapes` | `func_key`, `param`, `shape_id`, `caller_kind` (`func` or `test`), `caller_key`, `caller_path`, `caller_qualname`, `caller_line`, `samples`, `test_ids[]`, `truncated`, `example_test_id`, `example_repr` | one row per `(function, parameter, shape, caller)`; `caller_key` is the caller's `func_key` or the calling test's node id |
 | `func_sampling` | `func_key`, `path`, `qualname`, `firstlineno`, `calls`, `tests_called`, `tests_truncated`, `truncated`, `test_ids[]` | how often the tracer sampled each function |
 | `shapes` | `shape_id`, `shape_key` | the shape keys this shard used |
-| `ingest_log` | `shard_id`, `attempt`, `bundle_sha256`, `status` (`ok`, `failed`), `ingested_at`, `n_tests`, `n_test_lines`, `convert_json` | one file per shard holding every attempt; the commit record |
+| `ingest_log` | `shard_id`, `attempt`, `bundle_sha256`, `status` (`ok`, `failed`), `ingested_at`, `n_tests`, `n_test_lines`, `convert_json` | one file per shard holding every attempt; the commit record. `convert_json` carries the converter's counts and, when `meta.json` names a tracer other than coverage.py's C tracer (`CTracer`), `tracer_mismatch: true` and the tracer's name; the runner then adds a `log` run event "coverage was collected with <name>; per-test contexts may be incomplete" |
 
 Run tables (one file per run):
 
@@ -203,7 +203,7 @@ uv run coverset facts query "SELECT path, statements, covered, branches, branche
 | Tests covering a function | `tests_covering(path, start, end)` | distinct `test_id` in `test_lines` for the file with `line BETWEEN start AND end`, `<import>` excluded by default, joined to `tests_dim` for node ids |
 | Tests covering one line (the source-view popover) | `line_tests` | `tests_covering` with `start = end`, `<import>` included |
 | Treemap aggregates | `treemap` | each statement belongs to the innermost function whose body contains it, else to the file's `<module>` leaf; leaves roll up to files and directories; `input_cov` from `func_input_cov` |
-| Shape history | `shapes_for_function(func_key, last_n_runs=5, branch=None)` | pick the newest runs from `runs_dim` first (optionally one branch), then read only those runs' `call_shapes`, grouped by `(param, shape_id)`: summed samples, run count, test ids, newest non-null example |
+| Shape history | `shapes_for_function(func_key, last_n_runs=5, branch=None)` | pick the newest runs from `runs_dim` first (only runs whose `runs_dim.branch` is `branch` when given; `coverset shapes` passes the default branch unless `--branch any`), then read only those runs' `call_shapes`, grouped by `(param, shape_id)`: summed samples, run count, test ids, and the example that sorts first by (repr length, repr, test node id), so the choice does not depend on run or test order |
 | Run headline | `run_summary` | `runs_dim`, outcome counts from `tests_dim` (a test seen by several shards takes the most recently committed one), totals from `file_cov` |
 | Prior-run facts for scoring and wave 1 | `ParquetPriorRun` | loads `functions`, `test_lines`, `file_static` and `tests_dim` of one run into sorted numpy arrays |
 
@@ -221,7 +221,7 @@ As an example, on the PR #2 run of a local demo, `SELECT count(DISTINCT tl.test_
 
 `coverset repo purge NAME` deletes a repository's rows, its facts directory and its mirror.
 
-Committed today, gc runs only when the command is invoked. The plan's daily in-process gc and the per-PR rule after each ingest are not wired.
+The same pass (`orchestrator/history.py`, `collect_garbage`) runs in-process: `serve` starts it as a Quart background task when it starts serving and then every 24 hours (`app.py`, `schedule_gc`; stopped by the app's shutdown event). After each PR run the runner applies the per-PR rule (`history.expire_pr_runs`): the PR's latest run stays, its other runs older than `COVERSET_RETENTION_RUNS_DAYS` are deleted with their facts. Both take a module-level lock without waiting, so a second gc in the same process skips instead of racing, and neither runs under `COVERSET_ENV=test` unless a test invokes it.
 
 ## The NeutralBundle contract
 
