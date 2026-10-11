@@ -134,12 +134,12 @@ async def _shapes(
         lambda: shapes_for_function(store, repo.id, region.func_key, last_n, branch=pooled)
     )
     observations = [_observation(region, row) for row in rows]
-    sampling = await asyncio.to_thread(_sampling, store, repo.id, run.id, region)
+    sampling, tests_called = await asyncio.to_thread(_sampling, store, repo.id, run.id, region)
     paths = sorted({r.path for r in regions} | {region.path})
     blobs = await asyncio.to_thread(read_blobs, mirror_path(settings, repo.id), run.head_sha, paths)
     sources = {path: data.decode("utf-8", "replace") for path, data in blobs.items()}
     catalogue = PythonAdapter().shape_catalogue(sources)
-    cov = catalogue.function_input_cov(region, observations, sampling)
+    cov = catalogue.function_input_cov(region, observations, sampling, tests_called=tests_called)
     header = (
         f"{region.qualname} ({region.path}:{region.def_line}) · {len(rows)} shapes over the last "
         f"{last_n} runs on {scope}"
@@ -186,8 +186,13 @@ def _observation(region: Any, row: Any) -> Any:
     )
 
 
-def _sampling(store: Any, repo_id: int, run_id: str, region: Any) -> Any:
-    """The function's sampling summary in the run (how many tests hit the sample cap)."""
+def _sampling(store: Any, repo_id: int, run_id: str, region: Any) -> tuple[Any, list[str]]:
+    """The function's sampling summary in the run and the tests that called it.
+
+    Built the way the pages build it (sampled nodeids from ``func_sampling``, callers from
+    ``tests_covering``), so ``cap_hits`` counts the same tests here as on the function page.
+    """
+    from coverset.facts.queries import tests_covering
     from coverset.lang.base import FuncSampling
 
     rows = [
@@ -195,15 +200,18 @@ def _sampling(store: Any, repo_id: int, run_id: str, region: Any) -> Any:
         for r in store.read_table(repo_id, run_id, "func_sampling").to_pylist()
         if r["func_key"] == region.func_key
     ]
+    called = tests_covering(store, repo_id, run_id, region.path, region.body_start, region.end_line)
     if not rows:
-        return None
-    truncated = max(int(r.get("tests_truncated") or 0) for r in rows)
-    return FuncSampling(
+        return None, called
+    ids = store.dictionary(repo_id)
+    sampled = sorted({ids.nodeid(t) for r in rows for t in (r.get("test_ids") or ())})
+    sampling = FuncSampling(
         func=region.triple,
         calls=sum(int(r.get("calls") or 0) for r in rows),
-        tests=tuple(f"<sampled test {i}>" for i in range(truncated)),
-        truncated=truncated > 0,
+        tests=tuple(sampled),
+        truncated=any(bool(r.get("truncated")) for r in rows),
     )
+    return sampling, called
 
 
 def _plain(header: str, cov: Any) -> str:

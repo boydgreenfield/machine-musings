@@ -295,7 +295,7 @@ coverset-ci wait --server "$SERVER" --repo-id "${{ github.repository_id }}" \
 `--repo-id` is GitHub's numeric repository id. The exit code follows pytest: 0 passed, 1 failed,
 2 interrupted, errored, cancelled or timed out, 5 no tests, 3 when the server could not be reached.
 The `exit_code` in the run's `done` event wins over guesses from the counts (an errored run with no
-tests exits 2, not 5), but never turns anything other than `success` into 0.
+tests exits 2, not 5), but never turns anything other than `success` into 0. A `failure` verdict, the early one included, ends the wait at once with 1; after any other verdict the wait reads on to the `done` event, whose `exit_code` decides (a run that collected nothing sends `neutral` and then `done` with 5, so it exits 5).
 
 The server checks the token with GitHub's JWKS
 (`https://token.actions.githubusercontent.com/.well-known/jwks`, keys cached for an hour; an unknown

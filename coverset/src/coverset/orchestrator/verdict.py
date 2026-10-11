@@ -59,6 +59,7 @@ from coverset.db.models import PullRequest, Repo, ReviewFinding, Run
 from coverset.facts.queries import tests_covering
 from coverset.facts.store import FactsStore
 from coverset.forge.verdict import (
+    ESTIMATE_LABEL,
     FailureRow,
     FunctionRow,
     InvariantRow,
@@ -171,10 +172,6 @@ def functions_of_interest(plan: RunPlan) -> dict[str, FunctionRegion]:
     for region in plan.invariant_targets.values():
         found[region.func_key] = region
     return found
-
-
-ESTIMATE_LABEL = "estimated from the first test"
-"""How every reader labels ``t_first_failure_file_order_est``."""
 
 
 def file_order_estimate(plan: RunPlan, nodeid: str, first_test_s: float) -> float | None:

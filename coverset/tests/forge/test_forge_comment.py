@@ -85,7 +85,10 @@ def test_layout_of_a_failing_verdict() -> None:
     assert "**1 changed function has no covering test**" in text
     assert "**2 input classes never exercised in changed functions**" in text
     assert "more in invariant targets" not in text
-    assert "The first failing test ran 1st of 212 (file order: 187th, ~41 s est.)." in text
+    assert (
+        "The first failing test ran 1st of 212 (file order: 187th, ~41 s estimated from the first test)."
+        in text
+    )
     assert "| Changed function | Tests | Lines | Input classes | Invariants |" in text
     assert "<details><summary>Input classes never exercised (1)</summary>" in text and "</details>" in text
     assert "```python\n  @given(st.lists(st.just(0), min_size=1))\n  ```" in text
@@ -428,7 +431,7 @@ def test_timings_use_the_shared_seconds_formatter() -> None:
     """The comment prints seconds by the same rule as the PR page: one decimal under 10 s."""
     text = render_sticky_comment(replace(FAIL, first_failure_s=0.97, t_first_failure_file_order_est=1.84))
     assert text.splitlines()[0] == "### coverset · FAIL · first failure in 1.0 s"
-    assert "(file order: 187th, ~1.8 s est.)" in text
+    assert "(file order: 187th, ~1.8 s estimated from the first test)" in text
     text = render_sticky_comment(replace(FAIL, first_failure_s=41.2, t_first_failure_file_order_est=725.0))
     assert "first failure in 41 s" in text
-    assert "~12 min est." in text
+    assert "~12 min estimated from the first test" in text

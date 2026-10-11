@@ -540,6 +540,9 @@ async def seed_history(
             on_run(name, run_id)
         await execute_run(ctx, run_id, on_event=on_event)
         seeded.append(_seeded(await _load(ctx, run_id), name))
+    # The tip baseline schedules background work (the invariants scan, on Modal a re-snapshot);
+    # let it finish so the PR runs, and the numbers measured on them, start from a quiet process.
+    await ctx.finish_background()
     for pr in prs:
         number = int(pr["number"])
         existing = await _completed_run(

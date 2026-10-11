@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 from coverset.forge.markdown import code_block, code_span, md_text, safe_url
 from coverset.forge.verdict import (
+    ESTIMATE_LABEL,
     STICKY_MARKER,
     FunctionRow,
     InvariantRow,
@@ -158,7 +159,7 @@ def _rank_line(summary: VerdictSummary) -> str | None:
     if summary.rank_file_order is not None:
         estimate = ""
         if summary.t_first_failure_file_order_est is not None:
-            estimate = f", ~{fmt_secs(summary.t_first_failure_file_order_est)} est."
+            estimate = f", ~{fmt_secs(summary.t_first_failure_file_order_est)} {ESTIMATE_LABEL}"
         line += f" (file order: {_ordinal(summary.rank_file_order)}{estimate})"
     return line + "."
 

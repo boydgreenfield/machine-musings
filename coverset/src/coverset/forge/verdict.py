@@ -35,6 +35,9 @@ APPROVAL_CHECK_NAME = "coverset: awaiting approval"
 """The neutral check an untrusted PR gets until someone with write access presses Approve run."""
 
 STICKY_MARKER = "<!-- coverset:sticky -->"
+
+ESTIMATE_LABEL = "estimated from the first test"
+"""How every reader labels ``t_first_failure_file_order_est`` (the pages, the comment, the API)."""
 """Hidden marker that identifies coverset's sticky PR comment."""
 
 VerdictConclusion = Literal["success", "failure", "neutral", "cancelled", "timed_out"]
