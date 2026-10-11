@@ -359,3 +359,32 @@ async def test_shapes_command_defaults_to_baseline_runs(
     assert markdown.startswith("| Input class | Observed |")
     with pytest.raises(click.ClickException, match="no completed run with facts on branch nope"):
         await _shapes(ctx.settings, "classify", None, 5, False, False, branch="nope")
+
+
+# -- a shard's exit code must agree with the results it streamed ---------------------------------
+
+
+@pytest.mark.security
+async def test_shard_exit_code_that_disagrees_with_its_results_is_noted(
+    ctx: OrchestratorContext, repo: TestRepo, repo_id: int, script: Script
+) -> None:
+    """The reason names a shard whose pytest exit code contradicts its reported outcomes, both
+    ways: a failure reported under exit code 0 (a plugin lying about a red run) and exit code 1
+    with nothing failed. Neither changes the verdict the outcomes decide."""
+    script.zero_passes = True
+    await run_baseline(ctx, repo_id, repo.main_sha)
+    script.zero_passes = False
+    script.shard_exit_code = 0
+    run = await load_run(ctx, await run_pr(ctx, repo_id, pr_change(repo), repo.main_sha))
+    assert run.verdict == "failure"
+    assert "shard 0 exit code 0 disagrees with its results" in (run.reason or "")
+    script.zero_passes = True
+    script.shard_exit_code = 1
+    head = pr_change(repo, branch="pr-2", body="return a + b + 0", hour=2)
+    run = await load_run(ctx, await run_pr(ctx, repo_id, head, repo.main_sha))
+    assert run.verdict == "success"
+    assert "shard 0 exit code 1 disagrees with its results" in (run.reason or "")
+    script.shard_exit_code = None
+    head = pr_change(repo, branch="pr-3", body="return 0 + a + b", hour=3)
+    run = await load_run(ctx, await run_pr(ctx, repo_id, head, repo.main_sha))
+    assert run.verdict == "success" and "disagrees" not in (run.reason or "")

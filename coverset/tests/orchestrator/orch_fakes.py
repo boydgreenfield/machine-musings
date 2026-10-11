@@ -185,7 +185,9 @@ class Script:
     fixture does not know are synthesised); ``collect_delay_s`` is slept during collection;
     ``inject`` lines are emitted, nonce-framed, before a shard's first test; ``bundle_outcomes``
     overrides outcomes in the bundle's ``results.jsonl`` only (what the stream said stays);
-    ``meta`` entries replace keys of the bundle's ``meta.json`` (e.g. ``{"tracer": "PyTracer"}``).
+    ``meta`` entries replace keys of the bundle's ``meta.json`` (e.g. ``{"tracer": "PyTracer"}``);
+    ``shard_exit_code`` overrides the exit code of shard execs (never retries), like a plugin whose
+    exit code contradicts the results it streamed.
     """
 
     outcomes: dict[str, Outcome] = field(default_factory=dict)
@@ -199,6 +201,7 @@ class Script:
     inject: list[str] = field(default_factory=list)
     bundle_outcomes: dict[str, Outcome] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
+    shard_exit_code: int | None = None
     envs: list[dict[str, str]] = field(default_factory=list)
     commands: list[list[str]] = field(default_factory=list)
 
@@ -308,6 +311,8 @@ class FakeWorker:
             exit_code = 1 if failed else exit_code
         if stopped:
             exit_code = 2
+        if not retry and self.script.shard_exit_code is not None:
+            exit_code = self.script.shard_exit_code
         bundle = _bundle(
             [
                 {**r, "outcome": self.script.bundle_outcomes[r["nodeid"]]}
