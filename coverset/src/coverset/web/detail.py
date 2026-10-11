@@ -90,6 +90,7 @@ def build_cards(
         tests = sorted(row.tests, key=lambda n: (ranks.get(n, 10**9), n))
         failing = [t for t in tests if outcomes.get(t) in ("failed", "error")]
         targeted = [inv for inv in invariants if inv["target_func_key"] == region.func_key]
+        targeted += _via_tests(invariants, targeted, tests, failing)
         card = Card(
             change=row.change,
             region=region,
@@ -114,6 +115,26 @@ def build_cards(
         )
     )
     return cards
+
+
+def _via_tests(
+    invariants: list[dict[str, Any]], targeted: list[dict[str, Any]], tests: list[str], failing: list[str]
+) -> list[dict[str, Any]]:
+    """Invariants on other functions whose linked tests also cover this one, each with ``via``
+    naming one such test (a failing one first): ``refund`` shows ``cents_conserved`` when its
+    failing covering test carries the marker, although the invariant targets ``allocate_cents``."""
+    covering = set(tests)
+    seen = {inv["key"] for inv in targeted}
+    out = []
+    for inv in invariants:
+        if inv["key"] in seen:
+            continue
+        linked = [t for t in inv.get("linked") or () if t in covering]
+        if not linked:
+            continue
+        via = next((t for t in failing if t in linked), linked[0])
+        out.append({**inv, "via": via, "via_name": via.rsplit("::", 1)[-1]})
+    return out
 
 
 def _grade(card: Card) -> None:
@@ -176,6 +197,14 @@ def hypothesis_stub(view: FunctionView) -> str | None:
     return "\n".join(lines) + "\n"
 
 
+def _new_example(example: str | None, description: str) -> str | None:
+    """The example value unless the description already quotes it (no "e.g. x … e.g. 'x'")."""
+    if not example:
+        return None
+    bare = example.strip().strip("'\"")
+    return None if bare and bare in description else example
+
+
 def _finding_view(finding: ReviewFinding | None) -> dict[str, Any] | None:
     if finding is None:
         return None
@@ -186,7 +215,7 @@ def _finding_view(finding: ReviewFinding | None) -> dict[str, Any] | None:
         "verdict": VERDICT_LABELS.get(row.verdict, row.verdict),
         "confidence": row.confidence,
         "missing": [
-            (m.name, m.description, m.example_value)
+            (m.name, m.description, _new_example(m.example_value, m.description))
             for m in (verdict.missing_input_classes if verdict else [])
         ],
         "suggested": [(t.name, t.code) for t in (verdict.suggested_tests if verdict else [])],

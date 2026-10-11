@@ -9,7 +9,13 @@ import pytest
 from markdown_it import MarkdownIt
 
 from coverset.forge.base import ForgeCapabilities, RepoRef
-from coverset.forge.comment import render_check_summary, render_sticky_comment
+from coverset.forge.comment import (
+    lens_note,
+    lens_parts,
+    missing_counts,
+    render_check_summary,
+    render_sticky_comment,
+)
 from coverset.forge.fake import FakeForge
 from coverset.forge.markdown import ZERO_WIDTH_SPACE, code_block, code_span, md_text, safe_url
 from coverset.forge.verdict import (
@@ -48,7 +54,12 @@ FAIL = VerdictSummary(
     ),
     zero_test_functions=1,
     missing_input_classes=(
-        MissingClass("allocate_cents", "weights", "zero-element", "@given(st.lists(st.just(0), min_size=1))"),
+        MissingClass(
+            "billing.allocate_cents",
+            "weights",
+            "weights:zero-element",
+            "@given(st.lists(st.just(0), min_size=1))",
+        ),
     ),
     invariants=(InvariantRow("cents_conserved", "violated", "sum is -98, expected -100"),),
     failures=(
@@ -72,7 +83,8 @@ def test_layout_of_a_failing_verdict() -> None:
     assert lines[0] == "### coverset · FAIL · first failure in 1.8 s"
     assert "**Patch coverage 70.6%** (24 of 34 changed lines)" in text
     assert "**1 changed function has no covering test**" in text
-    assert "**1 input class never exercised**" in text
+    assert "**2 input classes never exercised in changed functions**" in text
+    assert "more in invariant targets" not in text
     assert "The first failing test ran 1st of 212 (file order: 187th, ~41 s est.)." in text
     assert "| Changed function | Tests | Lines | Input classes | Invariants |" in text
     assert "<details><summary>Input classes never exercised (1)</summary>" in text and "</details>" in text
@@ -102,6 +114,51 @@ def test_layout_of_a_failing_verdict() -> None:
 def test_labels(summary: VerdictSummary, label: str) -> None:
     assert summary.label == label
     assert render_sticky_comment(summary).startswith(f"### coverset · {label}")
+
+
+def test_headline_splits_changed_functions_from_invariant_targets() -> None:
+    """The headline counts what the PR's cards show; other functions' classes are a muted extra."""
+    rows = (
+        FunctionRow("validate_email", "modified", 4, 100.0, ("email:idn", "email:multi-label-domain")),
+        FunctionRow("signup", "modified", 3, 100.0, ("email:idn", "email:idn")),
+    )
+    missing = (
+        MissingClass("validate_email", "email", "email:idn"),
+        MissingClass("validate_email", "email", "email:multi-label-domain"),
+        MissingClass("signup", "email", "email:idn"),
+        MissingClass("allocate_cents", "weights", "weights:empty"),
+        MissingClass("parse_duration", "text", "text:signed"),
+    )
+    assert missing_counts(rows, missing) == (3, 2)
+    summary = VerdictSummary(
+        conclusion="success", title="ok", function_rows=rows, missing_input_classes=missing
+    )
+    text = render_sticky_comment(summary)
+    assert "**3 input classes never exercised in changed functions** · 2 more in invariant targets" in text
+    assert "<details><summary>Input classes never exercised (5)</summary>" in text
+    only_targets = replace(summary, function_rows=())
+    assert "5 input classes never exercised in invariant targets" in render_sticky_comment(only_targets)
+
+
+def test_invariant_lens_note_drops_its_key_prefix() -> None:
+    note = "cents_conserved: 6 tests, never reached weights:empty, total_cents:negative"
+    assert lens_note(note, "cents_conserved") == (
+        "linked tests: 6 · never reached: weights:empty, total_cents:negative"
+    )
+    parts = lens_parts(
+        "sig: no linked tests, never reached email:idn; changed lines not covered by linked tests", "sig"
+    )
+    assert parts.tests == 0 and parts.unreached == ("email:idn",) and parts.changed_uncovered
+    assert lens_note("m: 1 test, reached all 4 input classes", "m") == (
+        "linked tests: 1 · reached all 4 input classes"
+    )
+    assert lens_note("anything else", "k") == "anything else"
+    summary = VerdictSummary(
+        conclusion="success", title="ok", invariants=(InvariantRow("cents_conserved", "satisfied", note),)
+    )
+    text = render_sticky_comment(summary)
+    assert "cents\\_conserved: 6 tests" not in text and "cents_conserved: 6 tests" not in text
+    assert "linked tests: 6 · never reached: weights:empty" in text.replace("\\", "")
 
 
 def test_untested_invariant_is_a_gap() -> None:
@@ -159,6 +216,7 @@ def test_check_summary_has_no_marker_or_heading() -> None:
     assert "Patch coverage" in summary
 
 
+@pytest.mark.security
 def test_md_text_escapes_and_neutralises() -> None:
     assert md_text("a*b_c`d") == "a\\*b\\_c\\`d"
     assert md_text("<b>&amp;") == "\\<b\\>&amp;amp;"
@@ -167,6 +225,7 @@ def test_md_text_escapes_and_neutralises() -> None:
     assert md_text("x" * 500, limit=10) == "x" * 9 + "…"
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
@@ -281,6 +340,7 @@ async def test_post_verdict_keeps_going_when_one_step_fails() -> None:
     assert posted.errors and posted.errors[0].startswith("check:")
 
 
+@pytest.mark.security
 def test_issue_and_gh_references_are_neutralised() -> None:
     """GitHub links references after rendering, so escaping ``#`` is not enough."""
     text = md_text("fixes #12, see torvalds/linux#1 and GH-5 and gh-6")
@@ -291,6 +351,7 @@ def test_issue_and_gh_references_are_neutralised() -> None:
     assert re.search(r"#\d", html) is None and re.search(r"(?i)gh-\d", html) is None
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("char", ["‮", "‪", "⁦", "⁩", "‎", "‏", "؜", "﻿"])
 def test_bidi_and_format_characters_are_stripped_everywhere(char: str) -> None:
     hostile = f"safe{char}evil"
@@ -325,6 +386,7 @@ def _huge_summary(rows: int, snippets: int, failures: int = 0) -> VerdictSummary
     )
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("rows", "snippets", "failures"), [(16, 30, 0), (40, 30, 10), (10, 30, 10), (40, 0, 10)]
 )
@@ -350,10 +412,10 @@ def test_a_section_that_cannot_fit_is_named() -> None:
 
     original = comment.COMMENT_LIMIT
     try:
-        comment.COMMENT_LIMIT = 4_000
+        comment.COMMENT_LIMIT = 3_800  # small enough that the input-class section cannot fit
         text = render_sticky_comment(summary)
     finally:
         comment.COMMENT_LIMIT = original
-    assert len(text) <= 4_000 + len(STICKY_MARKER) + 4
+    assert len(text) <= 3_800 + len(STICKY_MARKER) + 4
     assert "Not shown to fit GitHub's size limit" in text and "input classes" in text
     assert text.count("<details>") == text.count("</details>")

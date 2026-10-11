@@ -15,6 +15,7 @@ import os
 import re
 from typing import Any
 
+from markupsafe import Markup
 from quart import Blueprint, Response, request, url_for
 from sqlalchemy import select
 from werkzeug.exceptions import NotFound
@@ -66,12 +67,14 @@ async def _run_for(rid: int, repo: Any) -> tuple[Run | None, PullRequest | None]
     return run, pr
 
 
-def chips_for(view: FunctionView, shapes_url: str) -> str:
-    """The inlay row under a def line."""
-    note = view.cov.note or (
-        "never called by a test" if not view.observations else "no input classes expected"
+def chips_for(view: FunctionView, shapes_url: str) -> Markup | None:
+    """The inlay row under a def line (None for a function that expects no input classes, such
+    as a property or a function no test called: its lines already say whether they ran)."""
+    if not view.cov.expected:
+        return None
+    return render_inlay(
+        view.chips(), note=view.cov.note, shapes_url=shapes_url, missing=view.cov.missing_reason
     )
-    return render_inlay(view.chips(), note=note, shapes_url=shapes_url)
 
 
 @bp.get("/repos/<int:rid>/files/<path:path>")
@@ -84,7 +87,7 @@ async def source(rid: int, path: str) -> Response:
     facts = await facts_for(run)
     text = await read_source(run, path, facts)
     if text is None:
-        raise NotFound()
+        raise NotFound(f"{path} is not a measured file of run {run.id}.")
     changed: set[int] = set()
     removed: dict[int, list[str]] = {}
     if pr is not None or run.pr_id is not None:
@@ -200,7 +203,7 @@ async def _function(rid: int, func_key: str) -> tuple[Any, Run, RunFacts, Any]:
     facts = await facts_for(run)
     region = facts.region(func_key)
     if region is None:
-        raise NotFound()
+        raise NotFound(f"Run {run.id} has no function with key {func_key}.")
     return repo, run, facts, region
 
 
@@ -239,8 +242,8 @@ async def shapes(rid: int, func_key: str) -> Response:
         cell = next((c for c in cells if c.name == wanted), None)
         if cell is None:
             raise NotFound()
-        tests = list(view.cov.tests.get(cell.name, ()))
-        example = view.cov.examples.get(cell.name)
+        tests = [] if cell.is_return else list(view.cov.tests.get(cell.name, ()))
+        example = None if cell.is_return else view.cov.examples.get(cell.name)
         return await render_page(
             "shape_cell.html",
             repo=repo,

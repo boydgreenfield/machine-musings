@@ -14,7 +14,19 @@ from collections.abc import Iterable
 
 from markupsafe import Markup, escape
 
-__all__ = ["Markup", "attr", "attrs", "esc", "join", "num", "safe_href", "truncate"]
+__all__ = [
+    "Markup",
+    "attr",
+    "attrs",
+    "breakable",
+    "esc",
+    "fmt_ms",
+    "fmt_secs",
+    "join",
+    "num",
+    "safe_href",
+    "truncate",
+]
 
 _SAFE_PATH = re.compile(r"^/(?!/)[^\s\\\x00-\x1f\x7f]*$")
 _SAFE_URL = re.compile(r"^https?://[^\s<>\"'`\\\x00-\x1f\x7f]+$", re.IGNORECASE)
@@ -72,3 +84,34 @@ def truncate(text: str, limit: int) -> str:
 def join(parts: Iterable[Markup | str]) -> Markup:
     """Concatenate already-safe pieces (plain strings are escaped)."""
     return Markup("").join(p if isinstance(p, Markup) else escape(p) for p in parts)
+
+
+def fmt_secs(value: float | None) -> str:
+    """Seconds as every page shows them: ``1.0 s``, ``41 s``, ``3 min`` (``–`` for None)."""
+    if value is None:
+        return "–"
+    if value < 10:
+        return f"{value:.1f} s"
+    if value < 600:
+        return f"{value:.0f} s"
+    return f"{value / 60:.0f} min"
+
+
+def fmt_ms(value: float | None) -> str:
+    """Milliseconds as ``0.4 ms``, ``12 ms`` or ``1.4 s`` (``–`` for None)."""
+    if value is None:
+        return "–"
+    if value < 10:
+        return f"{value:.1f} ms"
+    if value < 1000:
+        return f"{value:.0f} ms"
+    return f"{value / 1000:.1f} s"
+
+
+_JOINTS = re.compile(r"(?<=::)|(?<=/)|(?<=\[)|(?<=_)|(?<=-)")
+
+
+def breakable(text: object) -> Markup:
+    """Escaped ``text`` with ``<wbr>`` after ``::``, ``/``, ``[``, ``_`` and ``-``, so a long test
+    id wraps at its natural joints instead of mid-word."""
+    return Markup("<wbr>").join(esc(part) for part in _JOINTS.split("" if text is None else str(text)))

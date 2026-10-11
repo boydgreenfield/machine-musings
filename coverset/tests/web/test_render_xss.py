@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from markupsafe import Markup
 
-from coverset.web.render.html import attrs, esc, safe_href
+from coverset.web.render.html import attrs, breakable, esc, safe_href
 from coverset.web.render.markdown import render_markdown, render_sticky
 from coverset.web.render.ribbon import Flow, render_ribbon
 from coverset.web.render.shapegrid import (
@@ -49,6 +49,8 @@ def test_html_helpers() -> None:
     assert safe_href("/repos/1") == "/repos/1"
     assert safe_href("https://github.com/x") == "https://github.com/x"
     assert safe_href(" javascript:alert(1)") == "#"
+    assert_safe(breakable(EVIL))
+    assert str(breakable("t/a.py::test_x[<b>]")) == "t/<wbr>a.py::<wbr>test_<wbr>x[<wbr>&lt;b&gt;]"
 
 
 def test_source_renderer() -> None:
@@ -92,7 +94,15 @@ def test_shape_grid_renderers() -> None:
     )
     assert_safe(render_grid(model, cell_url=lambda c: JS_URL, target=EVIL))
     assert_safe(render_strip(cells, label=EVIL))
-    assert_safe(render_inlay([(EVIL, EVIL, cells, 2)], note=EVIL, shapes_url=JS_URL))
+    assert_safe(render_inlay([(EVIL, EVIL, cells, cells)], note=EVIL, shapes_url=JS_URL, missing=EVIL))
+    returned = GridCell(f"return:{EVIL}", EVIL, True, 2, description=EVIL, role="return")
+    assert_safe(
+        render_grid(
+            GridModel(EVIL, EVIL, (GridRow("return", EVIL, (returned,)),), 0, 0),
+            cell_url=lambda c: JS_URL,
+            target=EVIL,
+        )
+    )
     assert_safe(render_inlay([], note=EVIL, shapes_url=JS_URL))
 
 
@@ -106,10 +116,18 @@ def test_timeline_renderers() -> None:
     assert_safe(render_timeline(marks, ghost=3.0, ghost_label=EVIL))
     lanes = {0: [Block(EVIL, 0.0, 1.0, EVIL), Block(EVIL, 1.0, 2.0, "failed", flaky=True)]}
     assert_safe(
-        render_gantt(lanes, span=2.0, queued={0: 3}, lane_status={0: EVIL}, lane_bounds={0: (0.0, None)})
+        render_gantt(
+            lanes,
+            span=2.0,
+            queued={0: 3},
+            lane_status={0: EVIL},
+            lane_bounds={0: (0.0, None)},
+            failure_at=1.0,
+            failure_label=EVIL,
+        )
     )
-    rows = [OrderRow(1, EVIL, 8.0, {"new_or_changed": 8.0}, EVIL, "failed", 66, True, True)]
-    assert_safe(render_why_order(rows, test_url=lambda n: JS_URL))
+    rows = [OrderRow(1, EVIL, 8.0, {"new_or_changed": 8.0}, EVIL, "failed", 66, True, True, tie=EVIL)]
+    assert_safe(render_why_order(rows, test_url=lambda n: JS_URL, rest=3, rest_note=EVIL))
 
 
 @pytest.mark.parametrize(

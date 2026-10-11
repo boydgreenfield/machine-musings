@@ -4,7 +4,7 @@
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / tests</div>
 <div class="page-head">
   <h1>Tests</h1>
-  <p class="meta"><span>{{ rows|length }} tests</span><span>{{ rows|selectattr('quarantined')|list|length }} quarantined</span><span>statistics over each test's last 50 executed results</span></p>
+  <p class="meta"><span>{{ rows|length }} tests</span>{% set quarantined = rows|selectattr('quarantined')|list|length %}{% include "tests_count.html" %}<span>statistics over each test's last 50 executed results</span></p>
 </div>
 <div class="map-tools">
   <span class="seg" role="group" aria-label="Sort by">
@@ -15,11 +15,13 @@
   <span class="muted">Quarantined tests still run; their failures never fail a pull request.{% if not can_quarantine %} Sign in as admin to change quarantine.{% endif %}</span>
 </div>
 <section class="panel">
-<table>
+<div class="table-scroll">
+<table class="tests-table">
   <thead><tr><th>Test</th><th class="num">Runs</th><th class="num">Fail rate</th><th class="num">Flaky</th><th class="num">p50</th><th class="num">p95</th><th class="num">Last failed</th><th>Quarantine</th></tr></thead>
   <tbody>
   {% for row in rows %}{% include "tests_row.html" %}{% endfor %}
   </tbody>
 </table>
+</div>
 </section>
 {% endblock %}

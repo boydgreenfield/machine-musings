@@ -9,7 +9,7 @@
     <span>head <code>{{ run.head_sha|sha }}</code>{% if run.base_sha %} vs <code>{{ run.base_sha|sha }}</code>{% endif %}</span>
     <span>executor {{ run.executor }}</span>
     <span>{{ run.shard_count }} shard{{ '' if run.shard_count == 1 else 's' }}</span>
-    <span>cost ${{ '%.4f'|format(run.cost_estimate or 0) }} (estimate)</span>
+    {% if run.executor != 'local' %}<span>cost ${{ '%.4f'|format(run.cost_estimate or 0) }} (estimate)</span>{% endif %}
     <span>{{ run.created_at|stamp }}</span>
     {% if replay %}<a href="{{ url_for('runs.run_page', run_id=run.id) }}">stop replay</a>{% elif has_events and not live %}<a href="{{ url_for('runs.run_page', run_id=run.id, replay=1, speed=0.25) }}">replay at ¼ speed</a>{% endif %}
   </p>
@@ -45,12 +45,11 @@
     <div class="panel-head"><h2>Failures</h2></div>
     <div id="run-failures" {% if stream_url %}sse-swap="failures" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_failures.html" %}</div>
   </section>
+  <section class="panel" id="why-order">
+    <div class="panel-head"><h2>Why this order</h2><span class="aside">tests with a risk signal, by priority; failing tests pinned on top</span></div>
+    <div id="run-order" {% if stream_url %}sse-swap="order" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_order.html" %}</div>
+  </section>
 </div>
-
-<section class="panel">
-  <div class="panel-head"><h2>Why this order</h2><span class="aside">the first {{ order|length }} tests by priority score; failing tests pinned on top</span></div>
-  {{ why_order_svg }}
-</section>
 
 <details class="section">
   <summary>All tests <span class="muted">{{ results|length }} · failures first</span></summary>
@@ -61,7 +60,7 @@
     {% for r in results %}
       <tr>
         <td>{{ outcome(r.outcome) }}{% if r.flaky %} <span class="badge">flaky</span>{% endif %}</td>
-        <td class="nodeid">{{ r.nodeid }}</td>
+        <td class="nodeid">{{ r.nodeid|nodeid }}</td>
         <td class="num">{{ r.rank or '–' }}</td>
         <td class="num">{{ r.file_rank or '–' }}</td>
         <td class="num">{{ r.duration_ms|ms }}</td>

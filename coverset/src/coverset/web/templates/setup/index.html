@@ -46,7 +46,8 @@ and the private key to <code>{{ key_path }}</code> (both readable only by you). 
 </ul>
 <form method="post" action="{{ action }}">
   <input type="hidden" name="manifest" value="{{ manifest_json }}">
-  <button class="btn" type="submit">Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
+  <button class="btn" type="submit"{% if not reachable %} disabled aria-describedby="app-disabled"{% endif %}>Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
+  {% if not reachable %}<p id="app-disabled" class="muted">Disabled: GitHub cannot reach {{ public_url }}. Set a public URL first (see above).</p>{% endif %}
 </form>
 <p>For an organization, open <code>/setup?org=&lt;organization&gt;</code> instead.</p>
 <details>

@@ -9,7 +9,8 @@ raw HTML is the fixed ``<details>``/``<summary>`` skeleton and the marker.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import re
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
 from coverset.forge.markdown import code_block, code_span, md_text, safe_url
@@ -56,6 +57,20 @@ def _heading(summary: VerdictSummary) -> str:
     return " · ".join(parts)
 
 
+def missing_counts(function_rows: Iterable[FunctionRow], missing: Iterable[MissingClass]) -> tuple[int, int]:
+    """``(in changed functions, more in invariant targets)``: the never-exercised input classes.
+
+    The first number counts distinct ``param:class`` names per changed function (the PR cards show
+    the same classes); the second counts the summary's never-exercised classes of other functions
+    (the targets of invariants the PR did not touch), which the full ``<details>`` list includes.
+    """
+    rows = list(function_rows)
+    changed = {(row.qualname, name) for row in rows for name in row.input_classes_missing}
+    names = {row.qualname for row in rows}
+    elsewhere = {(m.function, m.class_name) for m in missing if m.function not in names}
+    return len(changed), len(elsewhere)
+
+
 def _headline(summary: VerdictSummary) -> str:
     parts = []
     if summary.patch_total:
@@ -67,10 +82,70 @@ def _headline(summary: VerdictSummary) -> str:
         verb = "has" if summary.zero_test_functions == 1 else "have"
         noun = _plural(summary.zero_test_functions, "changed function", "changed functions")
         parts.append(f"**{noun} {verb} no covering test**")
-    missing = len(summary.missing_input_classes)
-    if missing:
-        parts.append(f"**{_plural(missing, 'input class', 'input classes')} never exercised**")
+    changed, elsewhere = missing_counts(summary.function_rows, summary.missing_input_classes)
+    if changed:
+        noun = _plural(changed, "input class", "input classes")
+        parts.append(f"**{noun} never exercised in changed functions**")
+    if elsewhere and changed:
+        parts.append(f"{elsewhere} more in invariant targets")
+    elif elsewhere:
+        parts.append(
+            f"{_plural(elsewhere, 'input class', 'input classes')} never exercised in invariant targets"
+        )
     return " · ".join(parts)
+
+
+_LENS = re.compile(
+    r"^(?:(?P<n>\d+) tests?|no linked tests)"
+    r"(?:, never reached (?P<unreached>[^;]+)|, reached all (?P<all>\d+) input classes)?"
+    r"(?P<changed>; changed lines not covered by linked tests)?$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LensParts:
+    """An invariant's coverage lens, parsed from its one-line summary."""
+
+    tests: int | None
+    """Linked tests (None when the summary did not parse)."""
+    unreached: tuple[str, ...] = ()
+    reached_all: int | None = None
+    changed_uncovered: bool = False
+    text: str = ""
+    """The summary without its ``<key>: `` prefix."""
+
+
+def lens_parts(note: str | None, key: str) -> LensParts:
+    """Split a lens summary (``<key>: 6 tests, never reached a:b, c:d; changed lines …``)."""
+    text = (note or "").strip()
+    if text.startswith(f"{key}: "):
+        text = text[len(key) + 2 :]
+    found = _LENS.match(text)
+    if found is None:
+        return LensParts(None, text=text)
+    unreached = tuple(c.strip() for c in (found["unreached"] or "").split(",") if c.strip())
+    return LensParts(
+        tests=int(found["n"]) if found["n"] else 0,
+        unreached=unreached,
+        reached_all=int(found["all"]) if found["all"] else None,
+        changed_uncovered=bool(found["changed"]),
+        text=text,
+    )
+
+
+def lens_note(note: str | None, key: str) -> str:
+    """The lens as one plain line: ``linked tests: 6 · never reached: a:b, c:d``."""
+    parts = lens_parts(note, key)
+    if parts.tests is None:
+        return parts.text
+    line = f"linked tests: {parts.tests}"
+    if parts.unreached:
+        line += " · never reached: " + ", ".join(parts.unreached)
+    elif parts.reached_all is not None:
+        line += f" · reached all {parts.reached_all} input classes"
+    if parts.changed_uncovered:
+        line += " · changed lines not covered by linked tests"
+    return line
 
 
 def _rank_line(summary: VerdictSummary) -> str | None:
@@ -189,7 +264,8 @@ def _failures(summary: VerdictSummary) -> Section:
 def _invariants(title: str, rows: tuple[InvariantRow, ...]) -> Section:
     items = []
     for row in rows[:MAX_INVARIANTS]:
-        note = f": {md_text(row.note, limit=200)}" if row.note else ""
+        text = lens_note(row.note, row.id) if row.note else ""
+        note = f": {md_text(text, limit=200)}" if text else ""
         items.append([f"- {code_span(row.id)} {md_text(row.status, limit=20)}{note}"])
     return Section(
         [f"**{title}**", ""],

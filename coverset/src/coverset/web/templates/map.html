@@ -16,10 +16,11 @@
   {{ legend }}
   {% if root %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, run=run.id) }}">whole repository</a>{% endif %}
 </div>
-<p class="muted">{% if mode == 'gap' %}Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called.{% elif mode == 'inputs' %}Share of each function's expected input classes some test passed in. Hatched tiles were never called.{% else %}Share of each function's statements that some test ran.{% endif %}</p>
+<p class="muted">{% if mode == 'gap' %}Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes; outlined tiles are module-level code.{% elif mode == 'inputs' %}Share of each function's expected input classes some test passed in. Hatched tiles were never called.{% else %}Share of each function's statements that some test ran.{% endif %}</p>
 {{ svg }}
 <section class="panel map-table">
-  <div class="panel-head"><h2>Largest gaps</h2><span class="aside">the same data as a table</span></div>
+  <div class="panel-head"><h2>Largest gaps</h2><span class="aside">called functions whose lines ran but whose tests never tried some input classes</span></div>
+  {% if gaps %}
   <table>
     <thead><tr><th>Function</th><th class="num">Lines</th><th class="num">Input classes</th><th class="num">Gap</th></tr></thead>
     <tbody>
@@ -28,11 +29,29 @@
         <td><a href="{{ url_for('files.source', rid=repo.id, path=g.file, run=run.id) }}#L{{ g.node.def_line or 1 }}"><code>{{ g.name }}</code></a> <span class="muted">{{ g.file }}</span></td>
         <td class="num">{{ g.line|pct }}</td>
         <td class="num">{{ g.inputs|pct }}</td>
-        <td class="num">{% if g.gap is not none %}{{ '%.0f'|format(g.gap) }} pts{% else %}<span class="muted">never called</span>{% endif %}</td>
+        <td class="num">{{ '%.0f'|format(g.gap) }} pts</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  {% if gaps_total > gaps|length %}<p class="muted">The {{ gaps|length }} largest of {{ gaps_total }}.</p>{% endif %}
+  {% else %}<p class="empty">Every called function's tests passed in every expected input class.</p>{% endif %}
+  {% if never_called %}
+  <h3 class="sub">Never called by a test</h3>
+  <table>
+    <thead><tr><th>Function</th><th class="num">Statements</th><th class="num">Lines</th></tr></thead>
+    <tbody>
+    {% for g in never_called %}
+      <tr>
+        <td><a href="{{ url_for('files.source', rid=repo.id, path=g.file, run=run.id) }}#L{{ g.node.def_line or 1 }}"><code>{{ g.name }}</code></a> <span class="muted">{{ g.file }}</span></td>
+        <td class="num">{{ g.node.statements }}</td>
+        <td class="num">{{ g.line|pct }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if quiet.functions or quiet.modules %}<p class="muted">Left out: {% if quiet.functions %}{{ quiet.functions }} called function{{ '' if quiet.functions == 1 else 's' }} that expect no input classes{% endif %}{% if quiet.functions and quiet.modules %} and {% endif %}{% if quiet.modules %}module-level code of {{ quiet.modules }} file{{ '' if quiet.modules == 1 else 's' }}{% endif %} (nothing to compare).</p>{% endif %}
 </section>
 {% endif %}
 {% endblock %}

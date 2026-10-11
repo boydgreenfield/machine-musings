@@ -1,5 +1,5 @@
 <tr id="test-{{ row.id }}"{% if row.quarantined %} class="is-quarantined"{% endif %}>
-  <td class="nodeid">{{ row.nodeid }}</td>
+  <td class="nodeid">{{ row.nodeid|nodeid }}</td>
   <td class="num">{{ row.runs }}</td>
   <td class="num">{% if row.fail_rate is not none %}{{ (100 * row.fail_rate)|pct }}{% else %}–{% endif %}</td>
   <td class="num">{% if row.flaky_n %}{{ row.flaky_n }}× <span class="muted">({{ '%.2f'|format(row.flaky_score) }})</span>{% else %}–{% endif %}</td>
@@ -15,3 +15,4 @@
     {% else %}{{ 'quarantined' if row.quarantined else '' }}{% endif %}
   </td>
 </tr>
+{% if oob %}{% include "tests_count.html" %}{% endif %}

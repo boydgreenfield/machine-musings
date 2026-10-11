@@ -24,6 +24,7 @@ __all__ = ["GridCell", "GridModel", "GridRow", "render_grid", "render_inlay", "r
 CELL = 14.0
 LABEL_W = 150.0
 CHAR_W = 6.6
+FAMILY_CHAR_W = 5.8
 CELL_GAP = 14.0
 GROUP_GAP = 18.0
 LINE_H = 22.0
@@ -42,6 +43,13 @@ class GridCell:
     samples: int = 0
     hint: str = ""
     description: str = ""
+    role: str = "input"
+    """``input`` (a parameter's class) or ``return`` (a class of the returned value: observed only)."""
+
+    @property
+    def is_return(self) -> bool:
+        """Whether this cell describes the returned value."""
+        return self.role == "return"
 
     @property
     def short(self) -> str:
@@ -101,9 +109,13 @@ def render_grid(
     *,
     cell_url: Callable[[GridCell], str],
     target: str,
-    width: float = 900.0,
+    width: float = 860.0,
 ) -> Markup:
-    """The grid block: header line, SVG and the hollow-cell wording."""
+    """The grid block: header line, SVG and the hollow-cell wording.
+
+    ``width`` is the SVG's coordinate width; size it to the grid's container (the stylesheet scales
+    the SVG down, never up, so it never overflows a narrower column).
+    """
     parts: list[str] = []
     y = 4.0
     max_x = width - 8
@@ -138,30 +150,33 @@ def render_grid(
                 x = LABEL_W
                 line_y += LINE_H + CAPTION_H
             parts.append(f'<text class="sg-family" x="{num(x)}" y="{num(line_y - 4)}">{esc(family)}</text>')
+            caption_end = x + len(family) * FAMILY_CHAR_W + GROUP_GAP
             for cell in cells:
                 cw = CELL + 4 + _label_w(cell.short)
                 if x + cw > max_x and x > LABEL_W:
                     x = LABEL_W
                     line_y += LINE_H + CAPTION_H
+                    caption_end = LABEL_W
                 parts.append(_cell(cell, x, line_y, cell_url, target, model.missing_reason))
                 x += cw + CELL_GAP
-            x += GROUP_GAP - CELL_GAP
+            x = max(x + GROUP_GAP - CELL_GAP, caption_end)
         y = line_y + LINE_H + ROW_GAP
         if index < len(model.rows) - 1:
             rule_y = num(y - ROW_GAP / 2)
             parts.append(f'<line class="sg-rule" x1="0" x2="{num(width)}" y1="{rule_y}" y2="{rule_y}"/>')
     height = max(y, 30.0)
     svg = (
-        f'<svg class="shape-grid" viewBox="0 0 {num(width)} {num(height)}" width="{num(width)}"'
+        f'<svg class="shape-grid" viewBox="0 0 {num(width)} {num(height)}"'
         f' role="group" aria-label="{attr("Shape grid of " + model.qualname)}">{"".join(parts)}</svg>'
     )
     hollow = model.expected - model.observed
     note = ""
     if hollow:
+        noun = "input class" if hollow == 1 else "input classes"
         note = (
             '<p class="sg-note"><svg viewBox="0 0 14 14" class="sw" aria-hidden="true">'
             '<rect class="sg-hollow" x="1" y="1" width="12" height="12" rx="1"/></svg>'
-            f" {hollow} hollow: {esc(model.missing_reason)}</p>"
+            f" {hollow} {noun} {esc(model.missing_reason)}</p>"
         )
     extra = f'<p class="sg-note">{esc(model.note)}</p>' if model.note else ""
     return Markup(
@@ -172,13 +187,21 @@ def render_grid(
     )
 
 
+def _calls(samples: int) -> str:
+    return f"{samples} sampled call{'s' if samples != 1 else ''}"
+
+
 def _cell(
     cell: GridCell, x: float, y: float, cell_url: Callable[[GridCell], str], target: str, missing: str
 ) -> str:
     if cell.observed:
         level = shade_level(cell.samples)
-        shape = f'<rect class="sg-filled sg-f{level}" x="{num(x)}" y="{num(y)}" width="{num(CELL)}" height="{num(CELL)}" rx="2"/>'
-        what = f"observed in {cell.samples} sampled call{'s' if cell.samples != 1 else ''}"
+        role = " sg-return" if cell.is_return else ""
+        shape = (
+            f'<rect class="sg-filled sg-f{level}{role}" x="{num(x)}" y="{num(y)}" width="{num(CELL)}"'
+            f' height="{num(CELL)}" rx="2"/>'
+        )
+        what = ("returned in " if cell.is_return else "observed in ") + _calls(cell.samples)
     else:
         shape = (
             f'<rect class="sg-hollow" x="{num(x + 1)}" y="{num(y + 1)}" width="{num(CELL - 2)}"'
@@ -195,8 +218,10 @@ def _cell(
     )
 
 
-def render_strip(cells: Sequence[GridCell], *, label: str = "") -> Markup:
-    """A one-line strip of small squares (filled = observed, hollow = never observed)."""
+def render_strip(cells: Sequence[GridCell], *, label: str = "", missing: str = "never exercised") -> Markup:
+    """A one-line strip of small squares (filled = observed, hollow = never exercised); input
+    classes only, the return value is never part of it."""
+    cells = [c for c in cells if not c.is_return]
     size, gap = 9.0, 3.0
     width = max(1.0, len(cells) * (size + gap))
     items = []
@@ -204,13 +229,14 @@ def render_strip(cells: Sequence[GridCell], *, label: str = "") -> Markup:
         x = i * (size + gap)
         if cell.observed:
             items.append(
-                f'<rect class="sg-filled sg-f{shade_level(cell.samples)}" x="{num(x)}" y="1"'
-                f' width="{num(size)}" height="{num(size)}" rx="1.5"><title>{esc(cell.name)}: observed</title></rect>'
+                f'<rect class="sg-filled sg-f{shade_level(cell.samples)}" x="{num(x + 0.5)}" y="1.5"'
+                f' width="{num(size - 1)}" height="{num(size - 1)}" rx="1.5">'
+                f"<title>{esc(cell.name)}: observed in {_calls(cell.samples)}</title></rect>"
             )
         else:
             items.append(
                 f'<rect class="sg-hollow" x="{num(x + 0.75)}" y="1.75" width="{num(size - 1.5)}"'
-                f' height="{num(size - 1.5)}" rx="1"><title>{esc(cell.name)}: never observed</title></rect>'
+                f' height="{num(size - 1.5)}" rx="1"><title>{esc(cell.name)}: {esc(missing)}</title></rect>'
             )
     observed = sum(1 for c in cells if c.observed)
     aria = label or f"{observed} of {len(cells)} input classes observed"
@@ -220,24 +246,42 @@ def render_strip(cells: Sequence[GridCell], *, label: str = "") -> Markup:
     )
 
 
+MAX_HIDDEN_NAMES = 4
+
+
 def render_inlay(
-    chips: Sequence[tuple[str, str | None, Sequence[GridCell], int]], *, note: str, shapes_url: str
+    chips: Sequence[tuple[str, str | None, Sequence[GridCell], Sequence[GridCell]]],
+    *,
+    note: str,
+    shapes_url: str,
+    missing: str = "never exercised",
 ) -> Markup:
     """The inlay row under a def line: ``email: str  plain 14 · multi-label-domain 0`` per parameter,
-    hollow chips for classes never observed, and a lazily loaded shape grid (key ``i``)."""
+    hollow chips for classes never exercised, a "+K more (names)" chip for classes the row leaves
+    out (hollow when one of them was never exercised) and a lazily loaded shape grid (key ``i``)."""
     parts = []
     for param, annotation, cells, hidden in chips:
         label = f"{param}: {annotation}" if annotation else param
         items = []
         for cell in cells:
             cls = "chip" if cell.observed else "chip chip-hollow"
-            state = f"observed {cell.samples}" if cell.observed else "never observed"
+            state = f"observed in {_calls(cell.samples)}" if cell.observed else missing
             items.append(
                 f'<span class="{cls}" title="{attr(cell.name + ": " + state)}">{esc(cell.short)}'
                 f" <b>{cell.samples}</b></span>"
             )
-        more = f'<span class="chip-more">+{hidden} more</span>' if hidden else ""
-        parts.append(f'<span class="inlay-param"><code>{esc(label)}</code>{"".join(items)}{more}</span>')
+        if hidden:
+            names = [c.short for c in hidden]
+            shown_names = ", ".join(names[:MAX_HIDDEN_NAMES]) + ("…" if len(names) > MAX_HIDDEN_NAMES else "")
+            gaps = [c.short for c in hidden if not c.observed]
+            title = f"Not shown: {', '.join(names)}"
+            if gaps:
+                title += f" ({len(gaps)} {missing}: {', '.join(gaps)})"
+            cls = "chip chip-more chip-hollow" if gaps else "chip chip-more"
+            items.append(
+                f'<span class="{cls}" title="{attr(title)}">+{len(hidden)} more ({esc(shown_names)})</span>'
+            )
+        parts.append(f'<span class="inlay-param"><code>{esc(label)}</code>{"".join(items)}</span>')
     if not parts:
         parts.append(f'<span class="inlay-note">{esc(note)}</span>')
     grid = (

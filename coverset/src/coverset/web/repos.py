@@ -17,7 +17,9 @@ from werkzeug.exceptions import Forbidden, NotFound
 
 from coverset.ai.review import SOURCE_LABELS
 from coverset.db.models import Invariant, InvariantResult, PullRequest, Run, TestCase, TestStats
+from coverset.forge.comment import missing_counts
 from coverset.orchestrator.repos import mirror_path
+from coverset.orchestrator.verdict import summary_from_json
 from coverset.web.auth import is_admin
 from coverset.web.context import app_db, app_settings
 from coverset.web.detail import build_cards, card_detail
@@ -94,12 +96,24 @@ async def _pr(rid: int, n: int) -> tuple[Any, PullRequest, Run | None]:
             select(PullRequest).where(PullRequest.repo_id == rid, PullRequest.number == n)
         )
         if pr is None:
-            raise NotFound()
+            raise NotFound(f"There is no pull request #{n} in {repo_row.full_name}.")
         wanted = request.args.get("run")
         run = await require_run(session, wanted, rid) if wanted else await pr_run(session, pr)
         if run is not None and run.pr_id != pr.id:
             raise NotFound()
     return repo_row, pr, run
+
+
+def summary_missing_counts(summary: dict[str, Any]) -> tuple[int, int] | None:
+    """``(in changed functions, more in invariant targets)`` from a stored verdict summary, the
+    same split the sticky comment's headline uses (None for a summary that does not parse)."""
+    if not summary:
+        return None
+    try:
+        parsed = summary_from_json(summary)
+    except (TypeError, ValueError, KeyError):
+        return None
+    return missing_counts(parsed.function_rows, parsed.missing_input_classes)
 
 
 @bp.get("/repos/<int:rid>/prs/<int:n>")
@@ -134,6 +148,7 @@ async def pr_page(rid: int, n: int) -> Response:
     changed_invariants = summary.get("invariants_changed") or []
     return await render_page(
         "pr.html",
+        missing=summary_missing_counts(summary),
         repo=repo_row,
         pr=pr,
         run=run,
@@ -208,21 +223,7 @@ async def map_page(rid: int) -> Response:
     leaves = [
         n for n in nodes if n.kind == "function" and n.statements and (not root or n.path.startswith(root))
     ]
-    gaps = []
-    for node in leaves:
-        line = 100.0 * node.covered / node.statements
-        inputs = 100.0 * node.input_cov if node.input_cov is not None else None
-        gaps.append(
-            {
-                "node": node,
-                "file": node.path.partition("::")[0],
-                "name": node.path.partition("::")[2],
-                "line": line,
-                "inputs": inputs,
-                "gap": (line - inputs) if inputs is not None else None,
-            }
-        )
-    gaps.sort(key=lambda g: (-(g["gap"] if g["gap"] is not None else -1), g["file"]))
+    gaps, never_called, quiet = gap_rows(leaves)
     crumbs = []
     if root:
         parts = root.split("/")
@@ -235,10 +236,44 @@ async def map_page(rid: int) -> Response:
         modes=MODES,
         svg=svg,
         legend=render_legend(mode),
-        gaps=gaps[:15],
+        gaps=gaps[:MAX_GAP_ROWS],
+        gaps_total=len(gaps),
+        never_called=never_called,
+        quiet=quiet,
         root=root,
         crumbs=crumbs,
     )
+
+
+MAX_GAP_ROWS = 15
+
+
+def gap_rows(leaves: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    """The "largest gaps" table: ``(gaps, never called, counts left out)``.
+
+    A gap needs something to compare: a function some test called that expects input classes.
+    Functions no test called are listed apart ("never called"); called functions that expect no
+    input class (properties, no-argument functions) and module-level code are only counted.
+    """
+    gaps: list[dict[str, Any]] = []
+    never: list[dict[str, Any]] = []
+    quiet = {"functions": 0, "modules": 0}
+    for node in leaves:
+        file, _, name = node.path.partition("::")
+        line = 100.0 * node.covered / node.statements
+        row = {"node": node, "file": file, "name": name, "line": line}
+        if node.func_key is None:
+            quiet["modules"] += 1
+        elif node.covered == 0:
+            never.append(row)
+        elif node.input_cov is None:
+            quiet["functions"] += 1
+        else:
+            inputs = 100.0 * node.input_cov
+            gaps.append({**row, "inputs": inputs, "gap": max(0.0, line - inputs)})
+    gaps.sort(key=lambda g: (-g["gap"], -g["node"].statements, g["file"], g["name"]))
+    never.sort(key=lambda g: (-g["node"].statements, g["file"], g["name"]))
+    return gaps, never, quiet
 
 
 async def _test_rows(rid: int, test_id: int | None = None) -> list[dict[str, Any]]:
@@ -310,11 +345,21 @@ async def toggle_quarantine(rid: int, test_id: int) -> Response:
         wanted = form.get("quarantined")
         case.quarantined = (wanted == "1") if wanted in ("0", "1") else not case.quarantined
         await session.commit()
+        quarantined = await session.scalar(
+            select(func.count()).select_from(TestCase).where(TestCase.repo_id == rid, TestCase.quarantined)
+        )
     rows = await _test_rows(rid, test_id)
     repo_row = await get_repo(rid)
     if request.headers.get("HX-Request") != "true":
         return redirect(url_for("repos.tests_page", rid=rid), code=303)  # type: ignore[return-value]
-    return await render_page("tests_row.html", repo=repo_row, row=rows[0], can_quarantine=True)
+    return await render_page(
+        "tests_row.html",
+        repo=repo_row,
+        row=rows[0],
+        can_quarantine=True,
+        oob=True,
+        quarantined=quarantined or 0,
+    )
 
 
 @bp.get("/repos/<int:rid>/invariants")

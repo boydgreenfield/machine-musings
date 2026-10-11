@@ -27,3 +27,14 @@
 {% macro run_name(run, prs) -%}
 {%- if run.pr_id and prs.get(run.pr_id) -%}PR #{{ prs[run.pr_id].number }} {{ prs[run.pr_id].title }}{%- else -%}{{ run.trigger }} on {{ run.branch or 'detached' }}{%- endif -%}
 {%- endmacro %}
+
+{% macro lens(note, key) -%}
+{%- set parts = note|lens_parts(key) -%}
+{%- if parts.tests is none -%}{%- if parts.text %}<p class="lens">{{ parts.text }}</p>{% endif -%}
+{%- else -%}
+<p class="lens">linked tests: <strong>{{ parts.tests }}</strong>
+{%- if parts.unreached %} · never reached: {% for c in parts.unreached %}<span class="chip chip-hollow" title="{{ c }}: never exercised by a linked test">{{ c }}</span>{% if not loop.last %} {% endif %}{% endfor %}
+{%- elif parts.reached_all is not none %} · reached all {{ parts.reached_all }} input classes{% endif %}
+{%- if parts.changed_uncovered %} · changed lines not covered by linked tests{% endif %}</p>
+{%- endif -%}
+{%- endmacro %}

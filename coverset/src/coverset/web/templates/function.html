@@ -1,5 +1,5 @@
 {% extends layout %}
-{% from "_macros.html" import inv_chip %}
+{% from "_macros.html" import inv_chip, lens %}
 {% block title %}{{ region.qualname }}{% endblock %}
 {% block main %}
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / <a href="{{ detail.source_url }}">{{ region.path }}</a> / function</div>
@@ -11,7 +11,7 @@
 <section class="panel">
   <h2>Invariants on this function</h2>
   {% for inv in invariants %}
-  <div class="inv-card"><div><span class="key">{{ inv.key }}</span><p class="statement">{{ inv.statement }}</p>{% if inv.lens %}<p class="lens">{{ inv.lens }}</p>{% endif %}</div><div>{{ inv_chip(inv.status) }}</div></div>
+  <div class="inv-card"><div><span class="key">{{ inv.key }}</span><p class="statement">{{ inv.statement }}</p>{{ lens(inv.lens, inv.key) }}</div><div>{{ inv_chip(inv.status) }}</div></div>
   {% endfor %}
 </section>
 {% endif %}

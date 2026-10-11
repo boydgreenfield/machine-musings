@@ -122,7 +122,7 @@ class FunctionView:
                     note = "never called by a test"
             rows.append(GridRow(param, self.annotations.get(param), cells, note))
         if self.return_cells or any(o.param == "return" for o in self.observations):
-            rows.append(GridRow("return", self.returns, self.return_cells, "no classes"))
+            rows.append(GridRow("return", self.returns, self.return_cells, "no return classes recorded"))
         observed = self.cov.observed_expected
         return GridModel(
             func_key=self.region.func_key,
@@ -136,8 +136,13 @@ class FunctionView:
             note=self.cov.note,
         )
 
-    def chips(self) -> list[tuple[str, str | None, list[GridCell], int]]:
-        """Inlay chips per parameter: ``(param, annotation, shown cells, hidden count)``."""
+    def chips(self) -> list[tuple[str, str | None, list[GridCell], list[GridCell]]]:
+        """Inlay chips per parameter: ``(param, annotation, shown cells, hidden cells)``.
+
+        Specific families (email, quantity, ...) are shown when a parameter has any, at most
+        :data:`MAX_CHIPS` (never-exercised classes first); every other class is returned as hidden,
+        so the inlay can say "+K more" and name them.
+        """
         out = []
         for param in dict.fromkeys(p.lstrip("*") for p in self.region.params):
             cells = self.cells(param)
@@ -145,9 +150,11 @@ class FunctionView:
                 continue
             specific = [c for c in cells if c.family in SPECIFIC_FAMILIES]
             shown = specific or cells
-            hidden = len(shown) - MAX_CHIPS if len(shown) > MAX_CHIPS else 0
-            shown = sorted(shown, key=lambda c: c.observed)[:MAX_CHIPS] if hidden else shown
-            out.append((param, self.annotations.get(param), shown, max(0, hidden)))
+            if len(shown) > MAX_CHIPS:
+                shown = sorted(shown, key=lambda c: c.observed)[:MAX_CHIPS]
+            kept = {c.name for c in shown}
+            hidden = sorted((c for c in cells if c.name not in kept), key=lambda c: c.observed)
+            out.append((param, self.annotations.get(param), shown, hidden))
         return out
 
     def flows(self, file_of: Callable[[str], str]) -> list[Flow]:
@@ -492,12 +499,16 @@ class RunFacts:
             for obs in returned:
                 for name in catalogue.observed_classes([obs]):
                     ret_samples[name] += obs.samples
+            # Only what the function was seen returning: a return value is an output, so a class
+            # it never returned is not a gap and gets no hollow square or strategy.
             return_cells = tuple(
                 dataclasses.replace(
-                    _cell(cls, cls.name in seen, ret_samples.get(cls.name, 0)),
+                    _cell(cls, True, ret_samples.get(cls.name, 0)),
                     name="return:" + cls.name.split(":", 1)[1],
+                    role="return",
                 )
                 for cls in catalogue.expected_classes(info, returned)
+                if cls.name in seen
             )
         line_pct, branch_pct = self.body_coverage(region)
         return FunctionView(

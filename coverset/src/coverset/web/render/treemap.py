@@ -2,7 +2,8 @@
 
 Layout is pure Python (Bruls, Huizing and van Wijk's squarified algorithm). Leaves are functions
 and each file's ``<module>`` code; colour is a CSS class per bucket so light and dark themes come
-from the stylesheet. Modes:
+from the stylesheet. Buckets have round edges (0-20-40-60-80-100) and the lowest one is already a
+visible step of its ramp. Modes:
 
 ``gap`` (default)
     line coverage % minus input-class coverage % on one hue: the darker a leaf, the more of it
@@ -12,9 +13,11 @@ from the stylesheet. Modes:
 ``inputs``
     input-class coverage % on the blue ramp.
 
-A function no test called is hatched in ``inputs`` and ``gap`` (there is nothing to compare), and a
-called function with no expected input classes is neutral grey. Clicking a leaf opens the source
-view at its def line; hovering shows the numbers.
+In ``inputs`` and ``gap`` a function no test called is hatched (there is nothing to compare), a
+called function with no expected input classes is neutral grey, and module-level code is an
+outlined tile in the surface colour (it takes no arguments, so it has no input classes). Clicking a
+leaf opens the source view at its def line; hovering shows the numbers. The SVG is a ``group`` of
+links, each with its own ``aria-label``.
 """
 
 from __future__ import annotations
@@ -41,7 +44,7 @@ __all__ = [
 
 Mode = Literal["gap", "lines", "inputs"]
 MODES: tuple[Mode, ...] = ("gap", "lines", "inputs")
-BUCKETS = 6
+BUCKETS = 5
 HEADER_H = 15.0
 PAD = 2.0
 MIN_LABEL_W = 46.0
@@ -222,6 +225,14 @@ def _line_pct(item: TreeItem) -> float | None:
     return 100.0 * item.covered / item.statements if item.statements else None
 
 
+MODULE_LEAF = "<module>"
+
+
+def is_module(item: TreeItem) -> bool:
+    """Whether ``item`` is a file's module-level code."""
+    return item.kind == "function" and item.func_key is None and item.name == MODULE_LEAF
+
+
 def leaf_bucket(item: TreeItem, mode: Mode) -> tuple[str, str]:
     """``(css class, hover text)`` of a leaf in ``mode``."""
     line = _line_pct(item)
@@ -232,6 +243,8 @@ def leaf_bucket(item: TreeItem, mode: Mode) -> tuple[str, str]:
         base += f" · input classes {_pct(inputs)}"
     if mode == "lines":
         return (f"tm-b{_bucket(line)}" if line is not None else "tm-none"), base
+    if is_module(item):
+        return "tm-module", base + " · module-level code: no input classes"
     if inputs is None:
         if not called:
             return "tm-hatch", base + " · never called by a test"
@@ -243,7 +256,8 @@ def leaf_bucket(item: TreeItem, mode: Mode) -> tuple[str, str]:
 
 
 def _bucket(value: float) -> int:
-    return max(0, min(BUCKETS - 1, int(value / (100.0 / BUCKETS))))
+    """1-5 for 0-20, 20-40, 40-60, 60-80, 80-100 (100 falls in the top bucket)."""
+    return max(1, min(BUCKETS, 1 + int(value // (100.0 / BUCKETS))))
 
 
 def _pct(value: float | None) -> str:
@@ -260,11 +274,11 @@ def render_treemap(
     dir_url: Callable[[TreeItem], str],
     label: str = "",
 ) -> Markup:
-    """The treemap SVG (``role="img"`` with a title; every leaf is a link with a hover title)."""
+    """The treemap SVG (``role="group"``; every tile is a link with an aria-label and a hover title)."""
     nodes = layout(tree, Rect(0.0, 0.0, width, height))
     parts: list[str] = [
         f'<svg class="treemap mode-{attr(mode)}" viewBox="0 0 {num(width)} {num(height)}"'
-        f' role="img" aria-label="{attr(label or "Treemap of statements by function")}">',
+        f' role="group" aria-label="{attr(label or "Treemap of statements by function")}">',
         '<defs><pattern id="tm-hatch" width="6" height="6" patternUnits="userSpaceOnUse"'
         ' patternTransform="rotate(45)"><rect class="tm-hatch-bg" width="6" height="6"/>'
         '<line class="tm-hatch-line" x1="0" y1="0" x2="0" y2="6"/></pattern></defs>',
@@ -278,7 +292,7 @@ def render_treemap(
             cls, text = leaf_bucket(item, mode)
             title = f"{item.file}::{item.name} · {text}"
             parts.append(
-                f'<a href="{attr(safe_href(leaf_url(item)))}" class="tm-leaf-link">'
+                f'<a href="{attr(safe_href(leaf_url(item)))}" class="tm-leaf-link" aria-label="{attr(title)}">'
                 f"<title>{esc(title)}</title>"
                 f'<rect class="tm-leaf {cls}" {geometry} rx="2"/>'
             )
@@ -294,7 +308,7 @@ def render_treemap(
             line = _line_pct(item)
             title = f"{item.path} · {item.statements} statements · lines {_pct(line)}"
             parts.append(
-                f'<a href="{attr(safe_href(dir_url(item)))}" class="tm-group-link">'
+                f'<a href="{attr(safe_href(dir_url(item)))}" class="tm-group-link" aria-label="{attr(title)}">'
                 f"<title>{esc(title)}</title>"
                 f'<rect class="{cls}" {geometry} rx="3"/>'
             )
@@ -320,8 +334,8 @@ def render_legend(mode: Mode) -> Markup:
     }[mode]
     items = [
         f'<li><svg viewBox="0 0 14 14" class="sw" aria-hidden="true"><rect class="{prefix}{i}"'
-        f' width="14" height="14" rx="2"/></svg>{i * step}–{(i + 1) * step if i < BUCKETS - 1 else 100}</li>'
-        for i in range(BUCKETS)
+        f' width="14" height="14" rx="2"/></svg>{(i - 1) * step}–{i * step}</li>'
+        for i in range(1, BUCKETS + 1)
     ]
     extra = ""
     if mode != "lines":
@@ -330,6 +344,8 @@ def render_legend(mode: Mode) -> Markup:
             ' width="14" height="14" rx="2"/></svg>never called</li>'
             '<li><svg viewBox="0 0 14 14" class="sw" aria-hidden="true"><rect class="tm-none"'
             ' width="14" height="14" rx="2"/></svg>no input classes</li>'
+            '<li><svg viewBox="0 0 14 14" class="sw" aria-hidden="true"><rect class="tm-module"'
+            ' x="0.75" y="0.75" width="12.5" height="12.5" rx="2"/></svg>module-level code</li>'
         )
     return Markup(
         f'<div class="legend"><span class="legend-title">{esc(label)}</span>'

@@ -40,7 +40,7 @@
 <main id="main">
 {% block main %}{% endblock %}
 </main>
-<footer>coverset · times shown in UTC · press <kbd>?</kbd> for keys</footer>
+<footer>coverset · times shown in UTC{% if not no_scripts %} · press <kbd>?</kbd> for keys{% endif %}</footer>
 <div id="line-tests" class="popover" popover><div id="line-tests-body">Loading…</div></div>
 <dialog id="keys-help" aria-labelledby="keys-title">
   <h2 id="keys-title">Keys</h2>

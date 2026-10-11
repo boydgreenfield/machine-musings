@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import re
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -15,7 +16,16 @@ from coverset.lang.base import FuncSampling, ShapeObs
 from coverset.web.facts_view import FunctionView
 from coverset.web.render.shapegrid import render_grid, render_strip, shade_level
 from coverset.web.render.timeline import render_gantt
-from coverset.web.render.treemap import Rect, build_tree, layout, leaf_bucket, squarify
+from coverset.web.render.treemap import (
+    Rect,
+    _bucket,
+    build_tree,
+    layout,
+    leaf_bucket,
+    render_legend,
+    render_treemap,
+    squarify,
+)
 from coverset.web.runstate import Block
 
 EPS = 1e-6
@@ -101,11 +111,41 @@ def test_leaf_buckets_per_mode() -> None:
     }
     assert leaf_bucket(leaves["g"], "gap")[0] == "tm-hatch"  # never called
     assert leaf_bucket(leaves["g"], "inputs")[0] == "tm-hatch"
-    assert leaf_bucket(leaves["g"], "lines")[0] == "tm-b0"
-    assert leaf_bucket(leaves["<module>"], "gap")[0] == "tm-none"
+    assert leaf_bucket(leaves["g"], "lines")[0] == "tm-b1"  # 0-20 is the first visible bin
+    assert leaf_bucket(leaves["<module>"], "gap")[0] == "tm-module"  # outlined, never a gap colour
+    assert leaf_bucket(leaves["<module>"], "inputs")[0] == "tm-module"
+    assert leaf_bucket(leaves["<module>"], "lines")[0] == "tm-b5"
     cls, title = leaf_bucket(leaves["f"], "gap")  # 60% lines - 25% inputs = 35 points
     assert cls == "tm-g2" and "gap 35 points" in title
-    assert leaf_bucket(leaves["h"], "gap")[0] == "tm-g0"
+    assert leaf_bucket(leaves["h"], "gap")[0] == "tm-g1"
+
+
+@pytest.mark.parametrize(
+    ("value", "bucket"), [(0, 1), (19.9, 1), (20, 2), (39.9, 2), (40, 3), (60, 4), (80, 5), (100, 5)]
+)
+def test_buckets_have_round_edges(value: float, bucket: int) -> None:
+    assert _bucket(value) == bucket
+
+
+def test_legend_uses_round_edges_and_names_module_code() -> None:
+    legend = str(render_legend("gap"))
+    assert [m for m in re.findall(r"</svg>(\d+–\d+)</li>", legend)] == [
+        "0–20",
+        "20–40",
+        "40–60",
+        "60–80",
+        "80–100",
+    ]
+    assert "module-level code" in legend and "never called" in legend and "no input classes" in legend
+
+
+def test_treemap_is_a_group_of_labelled_links() -> None:
+    svg = str(
+        render_treemap(build_tree(_nodes()), leaf_url=lambda i: "/l", dir_url=lambda i: "/d", label="map")
+    )
+    assert 'role="group"' in svg and 'role="img"' not in svg
+    links = re.findall(r"<a [^>]*>", svg)
+    assert links and all("aria-label=" in link for link in links)
 
 
 SOURCE = """\

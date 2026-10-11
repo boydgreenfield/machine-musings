@@ -1,5 +1,5 @@
 {% extends layout %}
-{% from "_macros.html" import run_status, outcome, inv_chip %}
+{% from "_macros.html" import run_status, outcome, inv_chip, lens %}
 {% block title %}PR #{{ pr.number }} {{ pr.title }}{% endblock %}
 {% block main %}
 {% set s = summary %}
@@ -12,7 +12,7 @@
     {% endif %}
     {% if s.get('patch_total') %}<span>patch <strong>{{ s.patch_pct|pct }}</strong> ({{ s.patch_covered }}/{{ s.patch_total }})</span>{% endif %}
     {% if s %}<span><strong>{{ s.get('zero_test_functions', 0) }}</strong> changed function{{ '' if s.get('zero_test_functions', 0) == 1 else 's' }} with no test</span>{% endif %}
-    {% if s %}<span><strong>{{ (s.get('missing_input_classes') or [])|length }}</strong> input class{{ '' if (s.get('missing_input_classes') or [])|length == 1 else 'es' }} never exercised</span>{% endif %}
+    {% if missing %}<span><strong>{{ missing[0] }}</strong> input class{{ '' if missing[0] == 1 else 'es' }} never exercised in changed functions{% if missing[1] %} <span class="muted">·</span> <a class="more" href="{{ url_for('repos.invariants_page', rid=repo.id, run=run.id) }}" title="Functions this PR did not change, checked because invariants target them, have {{ missing[1] }} more input class{{ '' if missing[1] == 1 else 'es' }} no test exercised. The sticky comment lists them all.">{{ missing[1] }} more in invariant targets</a>{% endif %}</span>{% endif %}
     {% set untested = (s.get('invariants') or [])|selectattr('status', 'equalto', 'untested')|list %}
     {% set violated = (s.get('invariants') or [])|selectattr('status', 'equalto', 'violated')|list %}
     {% if violated %}<span><strong>{{ violated|length }}</strong> invariant{{ '' if violated|length == 1 else 's' }} violated</span>{% endif %}
@@ -39,7 +39,7 @@
 
 {% if cards %}
 <section aria-labelledby="attention">
-  <div class="panel-head"><h2 id="attention">Needs attention</h2><span class="aside">changed functions, most severe first · filled square = input class a test passed in, hollow = never</span></div>
+  <div class="panel-head"><h2 id="attention">Needs attention</h2><span class="aside">changed functions, most severe first · filled square = input class a test passed in, hollow = never exercised</span></div>
   <div class="cards">
   {% for card in cards %}
     {% set fk = card.region.func_key %}
@@ -52,7 +52,7 @@
             <div class="row strip-row">
               {{ card.strip }}
               <span class="muted">{{ card.view.cov.observed_expected }} of {{ card.view.cov.expected|length }} input classes</span>
-              {% for inv in card.invariants %}{{ inv_chip(inv.status, inv.key) }}{% endfor %}
+              {% for inv in card.invariants %}<span class="inv-wrap">{{ inv_chip(inv.status, inv.key) }}{% if inv.via %} <span class="muted via" title="{{ inv.via }} is linked to {{ inv.key }} and covers this function">via {{ inv.via_name }}</span>{% endif %}</span>{% endfor %}
               {% if card.ai_label %}<span class="ai-chip" title="Advisory: AI findings never change pass or fail">{{ card.ai_label }} <em>advisory</em></span>{% endif %}
             </div>
           </div>
@@ -84,7 +84,7 @@
     {% for r in results[:200] %}
       <tr>
         <td>{{ outcome(r.outcome) }}{% if r.flaky %} <span class="badge">flaky</span>{% endif %}{% if r.quarantined %} <span class="badge">quarantined</span>{% endif %}</td>
-        <td class="nodeid">{{ r.nodeid }}</td>
+        <td class="nodeid">{{ r.nodeid|nodeid }}</td>
         <td class="num">{{ r.rank or '–' }}</td>
         <td class="num">{{ r.file_rank or '–' }}</td>
         <td class="num">{{ r.duration_ms|ms }}</td>
@@ -104,7 +104,7 @@
     <div class="inv-card">
       <div><span class="key">{{ inv.key }}</span> {% if inv.removed_in_head %}<span class="badge">removed by this PR</span>{% endif %}
         <p class="statement">{{ inv.statement }}</p>
-        {% if inv.lens %}<p class="lens">{{ inv.lens }}</p>{% endif %}
+        {{ lens(inv.lens, inv.key) }}
       </div>
       <div>{{ inv_chip(inv.status) }}</div>
     </div>

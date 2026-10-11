@@ -1,5 +1,5 @@
 {% extends layout %}
-{% from "_macros.html" import inv_chip, run_status %}
+{% from "_macros.html" import inv_chip, run_status, lens %}
 {% block title %}Invariants · {{ repo.full_name }}{% endblock %}
 {% block main %}
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / invariants</div>
@@ -25,7 +25,7 @@
         <td><code>{{ row.key }}</code>{% if row.removed_in_head %} <span class="badge">removed by this PR</span>{% endif %}</td>
         <td>{% if base_status.get(row.key) %}{{ inv_chip(base_status[row.key]) }}{% else %}<span class="muted">–</span>{% endif %}</td>
         <td>{{ inv_chip(row.status) }}{% if base_status.get(row.key) and base_status[row.key] != row.status %} <strong>changed</strong>{% endif %}</td>
-        <td class="muted">{{ row.lens }}</td>
+        <td>{{ lens(row.lens, row.key) }}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -45,12 +45,18 @@
     <div>
       <span class="key">{{ key }}</span> <span class="muted">{{ s.get('severity', '') }} · {{ (s.get('scope') or {}).get('kind', '') }} <code>{{ (s.get('scope') or {}).get('target', '') }}</code> · verified by {{ (s.get('verify') or [])|map(attribute='kind')|join(', ') }}</span>
       <p class="statement">{{ s.get('statement', '') }}</p>
-      {% if current and current.lens %}<p class="lens">{{ current.lens }}</p>{% endif %}
+      {% if current %}{{ lens(current.lens, key) }}{% endif %}
       {% if current and current.entries %}<p class="muted">{% for e in current.entries %}{{ e.get('kind') }}: {{ e.get('status') }}{% if e.get('linked') is not none %} ({{ e.get('ran', 0) }} of {{ e.get('linked') }} linked tests ran){% endif %}{% if e.get('reason') %}, {{ e.get('reason') }}{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
     </div>
     <div>
       {% if current %}{{ inv_chip(current.status) }}{% else %}<span class="muted">not evaluated</span>{% endif %}
-      <div class="history" aria-label="Recent statuses, newest first">{% for result, run in history.get(key, []) %}<span class="h-{{ result.status }}" title="{{ result.status }} · {{ run.trigger }} {{ run.head_sha|sha }}"></span>{% endfor %}</div>
+      {% set past = history.get(key, []) %}
+      {% if past %}
+      <div class="history-block">
+        <ol class="history" aria-label="Last {{ past|length }} statuses, oldest first">{% for result, run in past|reverse %}<li class="h-{{ result.status }}" title="{{ result.status.replace('_', ' ') }} · {{ run.trigger }} {{ run.head_sha|sha }} · {{ run.created_at|stamp }}"><span aria-hidden="true">{{ {'satisfied': '✓', 'violated': '✕', 'untested': '?', 'stale': '≈', 'needs_review': '…'}.get(result.status, '·') }}</span><span class="sr">{{ result.status.replace('_', ' ') }}</span></li>{% endfor %}</ol>
+        <span class="history-caption">oldest → newest</span>
+      </div>
+      {% endif %}
     </div>
   </div>
 {% else %}

@@ -90,7 +90,7 @@ async def test_pr_pages_tell_the_demo_story(client: Client, demo: Demo) -> None:
     assert "signup_rejects_existing_domain untested" in pr2
     assert "email:multi-label-domain" in pr2 or "multi-label-domain" in pr2
     assert "sg-hollow" in pr2 and "sg-filled" in pr2
-    assert "Suggested Hypothesis test" in pr2 and 'data-copy-target="#suggest-' in pr2
+    assert re.search(r"<h3>Suggested (Hypothesis )?test ", pr2) and 'data-copy-target="#suggest-' in pr2
     for section in ("Tests", "Invariants", "Indirect changes", "Invariants changed by this PR"):
         assert f"<summary>{section} " in pr2
 

@@ -8,6 +8,7 @@ Displayed times are relative to ``settings.now()``, so ``COVERSET_FAKE_NOW`` pin
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,9 @@ from werkzeug.exceptions import NotFound
 
 import coverset
 from coverset.db.models import Repo
+from coverset.forge.comment import LensParts, lens_parts
 from coverset.web.context import app_db, app_settings
+from coverset.web.render.html import Markup, breakable, fmt_ms, fmt_secs
 
 __all__ = [
     "bp",
@@ -81,7 +84,7 @@ async def get_repo(rid: int) -> Repo:
     async with app_db().session() as session:
         repo = await session.get(Repo, rid)
     if repo is None:
-        raise NotFound()
+        raise NotFound(f"There is no repository with id {rid}.")
     return repo
 
 
@@ -113,26 +116,14 @@ def stamp(moment: datetime | None) -> str:
 
 @bp.app_template_filter("secs")
 def secs(value: float | None) -> str:
-    """``1.0 s``, ``41 s``, ``3 min``."""
-    if value is None:
-        return "–"
-    if value < 10:
-        return f"{value:.1f} s"
-    if value < 600:
-        return f"{value:.0f} s"
-    return f"{value / 60:.0f} min"
+    """``1.0 s``, ``41 s``, ``3 min`` (the one formatter for every duration and estimate)."""
+    return fmt_secs(value)
 
 
 @bp.app_template_filter("ms")
 def ms(value: float | None) -> str:
     """Milliseconds as ``12 ms`` or ``1.4 s``."""
-    if value is None:
-        return "–"
-    if value < 10:
-        return f"{value:.1f} ms"
-    if value < 1000:
-        return f"{value:.0f} ms"
-    return f"{value / 1000:.1f} s"
+    return fmt_ms(value)
 
 
 @bp.app_template_filter("pct")
@@ -156,6 +147,24 @@ def ordinal(number: int | None) -> str:
 def short_sha(value: str | None) -> str:
     """The first 8 characters of a SHA."""
     return (value or "")[:8]
+
+
+@bp.app_template_filter("lens_parts")
+def lens_filter(note: str | None, key: str) -> LensParts:
+    """An invariant's coverage lens split into linked tests and never-reached classes."""
+    return lens_parts(note, key)
+
+
+@bp.app_template_filter("domid")
+def domid(value: str) -> str:
+    """A stable, attribute-safe id fragment for any string (failure ``<details>`` per nodeid)."""
+    return hashlib.blake2b(value.encode("utf-8", "surrogatepass"), digest_size=6).hexdigest()
+
+
+@bp.app_template_filter("nodeid")
+def nodeid_filter(value: str | None) -> Markup:
+    """A test id that wraps at ``::``, ``/``, ``[``, ``_`` and ``-`` (``<wbr>``; text escaped)."""
+    return breakable(value)
 
 
 @bp.app_template_filter("plural")

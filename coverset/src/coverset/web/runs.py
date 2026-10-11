@@ -15,14 +15,11 @@ from coverset.web.auth import is_admin
 from coverset.web.context import app_db
 from coverset.web.loaders import run_counts
 from coverset.web.pages import render_page
-from coverset.web.render.timeline import render_why_order
 from coverset.web.run_view import TERMINAL, build_state, load_bundle, load_events, order_rows, regions_context
 from coverset.web.runstate import RunState
 from coverset.web.sse import page_stream, parse_speed
 
 bp = Blueprint("runs", __name__)
-
-WHY_ROWS_PINNED = 3
 
 
 def _freeze() -> float | None:
@@ -49,11 +46,11 @@ async def run_page(run_id: str) -> Response:
         if bundle is None:
             raise NotFound()
         events = await load_events(session, run_id)
-        order, results = await order_rows(session, bundle.run)
+        _order, results = await order_rows(session, bundle.run)
         counts = (await run_counts(session, [run_id])).get(run_id, {})
     final = events[-1].at if events else None
     state = RunState(run_id) if replay else build_state(run_id, events)
-    context = regions_context(bundle, state, replay=replay, final_clock=final)
+    context = regions_context(bundle, state, replay=replay, final_clock=final, first_render=True)
     run = bundle.run
     stream_url = None
     if replay and events:
@@ -66,8 +63,6 @@ async def run_page(run_id: str) -> Response:
     return await render_page(
         "run.html",
         **context,
-        order=order,
-        why_order_svg=render_why_order(order[: WHY_ROWS_PINNED + 20]),
         results=results,
         result_counts=counts,
         stream_url=stream_url,

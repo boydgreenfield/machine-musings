@@ -57,10 +57,10 @@ async def facts_for(run: Run) -> RunFacts:
 async def require_run(session: AsyncSession, run_id: str | None, repo_id: int | None = None) -> Run:
     """The run with ``run_id`` (of ``repo_id`` when given) or 404."""
     if not run_id or not RUN_ID_PARAM.fullmatch(run_id):
-        raise NotFound()
+        raise NotFound("That is not a run id.")
     run = await session.get(Run, run_id)
     if run is None or (repo_id is not None and run.repo_id != repo_id):
-        raise NotFound()
+        raise NotFound(f"There is no run {run_id} in this repository.")
     return run
 
 
@@ -176,8 +176,12 @@ async def invariant_rows(session: AsyncSession, run: Run) -> list[dict[str, Any]
                 "entries": evidence.get("entries", []),
                 "target_func_key": result.target_func_key,
                 "covering": len(result.covering_test_ids or []),
+                "covering_ids": [t for t in result.covering_test_ids or [] if isinstance(t, int)],
             }
         )
+    names = await nodeid_map(session, sorted({t for row in out for t in row["covering_ids"]}))
+    for row in out:
+        row["linked"] = [names[t] for t in row["covering_ids"] if t in names]
     return out
 
 

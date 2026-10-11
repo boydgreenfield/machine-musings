@@ -222,8 +222,19 @@ def _explore(ordered: list[ScoredTest], seed: int) -> list[ScoredTest]:
     return ordered[:cut] + explored + ordered[cut:head] + rest
 
 
+def _duration(seconds: float) -> str:
+    """A p50 the way the UI's tests page shows durations: ``0.4 ms``, ``12 ms``, ``1.4 s``."""
+    ms = seconds * 1000.0
+    if ms < 10:
+        return f"{ms:.1f} ms"
+    if ms < 1000:
+        return f"{ms:.0f} ms"
+    return f"{seconds:.1f} s"
+
+
 def _quiet_explanation(history: TestHistory | None, p50: float | None) -> str:
-    duration = f"p50 {p50:.2f} s" if p50 is not None else "duration unknown"
+    """The reason of a test with no risk signal (score 0): its fail rate if any, and its p50."""
+    duration = f"p50 {_duration(p50)}" if p50 is not None else "duration unknown"
     if history is not None and history.fail_ewma > 0:
         return f"no recent risk signal; fail rate {history.fail_ewma:.0%}; {duration}"
     return f"no risk signal; {duration}"

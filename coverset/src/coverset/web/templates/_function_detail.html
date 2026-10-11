@@ -10,7 +10,7 @@
     <section>
       <h3>Top covering tests <span class="muted">· {{ detail.test_total }} in all, in run order</span></h3>
       {% if detail.top_tests %}
-      <ul class="test-list">{% for nodeid, oc in detail.top_tests %}<li>{{ outcome(oc) }}<span class="nodeid">{{ nodeid }}</span></li>{% endfor %}</ul>
+      <ul class="test-list">{% for nodeid, oc in detail.top_tests %}<li>{{ outcome(oc) }}<span class="nodeid">{{ nodeid|nodeid }}</span></li>{% endfor %}</ul>
       {% else %}<p class="empty">No test calls this function.</p>{% endif %}
     </section>
   </div>
@@ -22,7 +22,7 @@
     </section>
     {% if detail.suggestion %}
     <section>
-      <h3>Suggested Hypothesis test <span class="muted">· {{ detail.suggestion_source }}</span></h3>
+      <h3>{{ 'Suggested Hypothesis test' if '@given' in detail.suggestion else 'Suggested test' }} <span class="muted">· {{ detail.suggestion_source }}</span></h3>
       <div class="code-block"><pre id="suggest-{{ fk }}"><code>{{ detail.suggestion }}</code></pre><button type="button" class="copy" data-copy-target="#suggest-{{ fk }}">Copy</button></div>
     </section>
     {% endif %}
@@ -31,7 +31,7 @@
       <h3>AI review <span class="muted">· {{ detail.finding.source }} · advisory, never changes pass or fail</span></h3>
       <p>{{ detail.finding.verdict }} ({{ detail.finding.confidence }} confidence)</p>
       {% if detail.finding.missing %}<ul>{% for name, description, example in detail.finding.missing %}<li><code>{{ name }}</code>: {{ description }}{% if example %} e.g. <code>{{ example }}</code>{% endif %}</li>{% endfor %}</ul>{% endif %}
-      {% for inv_id, status, evidence in detail.finding.invariants %}<p class="lens"><code>{{ inv_id }}</code> {{ status }}: {{ evidence }}</p>{% endfor %}
+      {% for inv_id, status, evidence in detail.finding.invariants %}<p class="lens ai-claim"><span class="ai-says">AI suggests:</span> <code>{{ inv_id }}</code> may be {{ status.replace('_', ' ') }}{% if evidence %}: {{ evidence }}{% endif %}</p>{% endfor %}
     </section>
     {% endif %}
   </div>

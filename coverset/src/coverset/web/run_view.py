@@ -1,16 +1,18 @@
 """The run page's data: the run row, its events folded into a :class:`RunState`, and the live
-regions (head, timeline, Gantt, failures) that the page renders first and the SSE stream re-renders.
+regions (head, timeline, Gantt, failures, why-this-order) that the page renders first and the SSE
+stream re-renders.
 
 The same :func:`regions_context` feeds the first render (the page template includes the region
 partials) and every SSE frame (each partial rendered alone), so a live run and a replay look the
-same at every point. In replay mode the timeline shows only milestones reached by the replay clock
-and the Gantt keeps the finished run's time axis so blocks do not rescale as they arrive.
+same at every point. In replay mode the timeline shows only milestones reached by the replay clock,
+the Gantt keeps the finished run's time axis so blocks do not rescale as they arrive, and a failing
+test is pinned in "why this order" only once its failure has been replayed.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -19,25 +21,42 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.db.models import PullRequest, Repo, Run, RunEvent, Shard, TestCase, TestResult
 from coverset.web.pages import load_numbers
-from coverset.web.render.timeline import OrderRow, milestones, render_gantt, render_timeline
+from coverset.web.render.timeline import (
+    Milestone,
+    OrderRow,
+    milestones,
+    render_gantt,
+    render_timeline,
+    render_why_order,
+)
 from coverset.web.runstate import RunState
 
 __all__ = [
     "REGIONS",
     "RunBundle",
     "TERMINAL",
+    "WhyOrder",
     "load_bundle",
     "load_events",
     "order_rows",
     "regions_context",
 ]
 
-REGIONS = ("head", "timeline", "gantt", "failures")
+REGIONS = ("head", "timeline", "gantt", "failures", "order")
 """Live regions: element id ``run-<name>``, SSE event ``<name>``, partial ``runs/_<name>.html``."""
 TERMINAL = frozenset({"completed", "cancelled", "abandoned", "skipped", "error"})
 WHY_ORDER_ROWS = 20
 MAX_PINNED = 3
 GHOST_KEY = "t_cold_path"
+
+
+@dataclass(slots=True)
+class WhyOrder:
+    """The "why this order" panel: listed rows and how many ranked tests it leaves out."""
+
+    rows: list[OrderRow] = field(default_factory=list)
+    rest: int = 0
+    rest_note: str = ""
 
 
 @dataclass(slots=True)
@@ -48,10 +67,25 @@ class RunBundle:
     repo: Repo
     pr: PullRequest | None
     shards: list[Shard]
+    order: WhyOrder = field(default_factory=WhyOrder)
+    basis: Run | None = None
+    """The run whose coverage and history the scores were computed against."""
+
+    @property
+    def basis_label(self) -> str:
+        """``merge-base`` when the basis ran the PR's base commit, else what it was."""
+        if self.basis is None:
+            return ""
+        if self.run.base_sha and self.basis.head_sha == self.run.base_sha:
+            return "merge-base"
+        if self.basis.pr_id is not None and self.basis.pr_id == self.run.pr_id:
+            return "previous run of this PR"
+        return f"{self.basis.branch or 'default branch'} baseline"
 
 
 async def load_bundle(session: AsyncSession, run_id: str) -> RunBundle | None:
-    """The run, its repo, PR and shards (None when the run does not exist)."""
+    """The run, its repo, PR, shards, priority order and scoring basis (None when the run does
+    not exist)."""
     run = await session.get(Run, run_id)
     if run is None:
         return None
@@ -60,7 +94,9 @@ async def load_bundle(session: AsyncSession, run_id: str) -> RunBundle | None:
         return None
     pr = await session.get(PullRequest, run.pr_id) if run.pr_id is not None else None
     shards = list(await session.scalars(select(Shard).where(Shard.run_id == run_id).order_by(Shard.shard_id)))
-    return RunBundle(run, repo, pr, shards)
+    order, _results = await order_rows(session, run)
+    basis = await session.get(Run, run.scoring_basis_run_id) if run.scoring_basis_run_id else None
+    return RunBundle(run, repo, pr, shards, order, basis)
 
 
 async def load_events(
@@ -92,8 +128,10 @@ def regions_context(
     *,
     replay: bool = False,
     final_clock: datetime | None = None,
+    first_render: bool = False,
 ) -> dict[str, Any]:
-    """Template context for the live regions at the state's clock."""
+    """Template context for the live regions at the state's clock (``first_render`` for the page
+    itself, whose first failure starts open; stream frames never re-open a failure)."""
     run = bundle.run
     origin = _origin(run)
     clock = state.clock if replay else None
@@ -125,6 +163,9 @@ def regions_context(
         )
         for sid, lane in state.lanes.items()
     }
+    failure = _failure_mark(marks, state, origin)
+    if failure is not None and failure.key == "failure_reported":
+        marks = sorted([*marks, failure], key=lambda m: m.at)
     timeline_end = max([m.at for m in marks] or [0.0])
     counts = state.counts
     verdict = state.verdict
@@ -140,6 +181,9 @@ def regions_context(
         "verdict": verdict,
         "live": live,
         "replay": replay,
+        "first_render": first_render,
+        "basis": bundle.basis,
+        "basis_label": bundle.basis_label,
         "timeline_svg": render_timeline(marks, span=max(span, timeline_end), ghost=ghost_s),
         "ghost_s": ghost_s,
         "gantt_svg": render_gantt(
@@ -148,14 +192,55 @@ def regions_context(
             queued=queued,
             lane_status={sid: lane.status for sid, lane in state.lanes.items()},
             lane_bounds=bounds,
+            failure_at=failure.at if failure is not None else None,
+            failure_label=failure.label if failure is not None else "",
         ),
         "failures": state.failed_reports(),
         "confirmed": {f.get("nodeid"): f for f in state.failures},
+        "order_html": _why_order(bundle.order, state if replay else None),
+        "order_count": len(bundle.order.rows),
     }
 
 
-async def order_rows(session: AsyncSession, run: Run) -> tuple[list[OrderRow], list[dict[str, Any]]]:
-    """The first tests by priority (failing tests pinned) and every result row for the tests table."""
+def _failure_mark(marks: Sequence[Milestone], state: RunState, origin: datetime) -> Milestone | None:
+    """The confirmed first failure when the clock has reached it, else the first failed report
+    as a provisional "failure reported" mark (a retry has not confirmed it yet)."""
+    confirmed = next((m for m in marks if m.key == "first_failure"), None)
+    if confirmed is not None:
+        return confirmed
+    reported = state.failed_reports()
+    if not reported:
+        return None
+    return Milestone("failure_reported", "failure reported", (reported[0].at - origin).total_seconds())
+
+
+def _why_order(order: WhyOrder, replayed: RunState | None) -> Any:
+    """The panel; while replaying, a failing test is pinned (and marked failed) only after the
+    replay has reached its failed report, so the panel never gives the ending away."""
+    rows = order.rows
+    if replayed is not None:
+        failed = {r.nodeid for r in replayed.failed_reports()}
+        rows = [
+            row
+            if row.nodeid in failed
+            else replace(
+                row,
+                pinned=False,
+                outcome=replayed.tests[row.nodeid].outcome if row.nodeid in replayed.tests else "not_run",
+            )
+            for row in rows
+            if row.nodeid in failed or not row.pinned or row.listed
+        ]
+    return render_why_order(rows, rest=order.rest, rest_note=order.rest_note)
+
+
+async def order_rows(session: AsyncSession, run: Run) -> tuple[WhyOrder, list[dict[str, Any]]]:
+    """The "why this order" panel and every result row for the tests table.
+
+    The panel lists, in rank order, the first :data:`WHY_ORDER_ROWS` tests with a risk signal (a
+    score above 0, or a place in wave 1); up to :data:`MAX_PINNED` failing tests are pinned on top
+    (with how a tie on their score was broken); every other ranked test is summed up in one line.
+    """
     rows = (
         await session.execute(
             select(TestResult, TestCase.nodeid, TestCase.quarantined)
@@ -165,7 +250,7 @@ async def order_rows(session: AsyncSession, run: Run) -> tuple[list[OrderRow], l
         )
     ).all()
     results: list[dict[str, Any]] = []
-    order: list[OrderRow] = []
+    ranked: list[tuple[TestResult, str, dict[str, Any]]] = []
     for result, nodeid, quarantined in rows:
         explanation = result.score_explanation or {}
         results.append(
@@ -183,23 +268,72 @@ async def order_rows(session: AsyncSession, run: Run) -> tuple[list[OrderRow], l
                 "why": explanation.get("text") or "",
             }
         )
-        if result.rank is None:
-            continue
-        failing = result.outcome in ("failed", "error") and not result.flaky
-        pinned = failing and sum(1 for o in order if o.pinned) < MAX_PINNED
-        if result.rank <= WHY_ORDER_ROWS or pinned:
-            order.append(
-                OrderRow(
-                    rank=result.rank,
-                    nodeid=nodeid,
-                    score=float(result.score or 0.0),
-                    components=dict(explanation.get("components") or {}),
-                    text=str(explanation.get("text") or ""),
-                    outcome=result.outcome,
-                    file_rank=explanation.get("file_rank"),
-                    wave1=bool(explanation.get("wave1")),
-                    pinned=pinned,
-                )
-            )
+        if result.rank is not None:
+            ranked.append((result, nodeid, explanation))
+    order = _why_order_rows(ranked)
     results.sort(key=lambda r: (r["outcome"] not in ("failed", "error"), r["rank"] or 10**9))
     return order, results
+
+
+def _why_order_rows(ranked: list[tuple[TestResult, str, dict[str, Any]]]) -> WhyOrder:
+    scores = [float(result.score or 0.0) for result, _n, _e in ranked]
+    out: list[OrderRow] = []
+    listed_ids: set[str] = set()
+    pinned = 0
+    for result, nodeid, explanation in ranked:
+        score = float(result.score or 0.0)
+        wave1 = bool(explanation.get("wave1"))
+        signal = score > 0 or wave1
+        listed = signal and len(listed_ids) < WHY_ORDER_ROWS
+        failing = result.outcome in ("failed", "error") and not result.flaky
+        pin = failing and pinned < MAX_PINNED
+        if not (listed or pin):
+            continue
+        pinned += pin
+        text = str(explanation.get("text") or "")
+        out.append(
+            OrderRow(
+                rank=result.rank or 0,
+                nodeid=nodeid,
+                score=score,
+                components=dict(explanation.get("components") or {}),
+                text=text,
+                outcome=result.outcome,
+                file_rank=explanation.get("file_rank"),
+                wave1=wave1,
+                pinned=pin,
+                tie=_tie_note(score, scores, wave1, text) if pin else "",
+                listed=listed,
+            )
+        )
+        if listed:
+            listed_ids.add(nodeid)
+    rest = [
+        (result, explanation)
+        for result, nodeid, explanation in ranked
+        if nodeid not in listed_ids and not any(r.nodeid == nodeid for r in out)
+    ]
+    return WhyOrder(out, len(rest), _rest_note(rest))
+
+
+def _tie_note(score: float, scores: list[float], wave1: bool, text: str) -> str:
+    """How the order broke a tie on ``score`` (empty when no other test has that score)."""
+    others = sum(1 for s in scores if abs(s - score) < 1e-6) - 1
+    if others <= 0:
+        return ""
+    noun = "other" if others == 1 else "others"
+    head = f"tied at {score:.1f} with {others} {noun}"
+    if wave1 and text.startswith("covers "):
+        return f"{head}; wave 1 runs the test covering the most changed functions per second first"
+    if wave1:
+        return f"{head}; wave 1 runs these tests by name"
+    return f"{head}; the shorter p50 ran first, then by name"
+
+
+def _rest_note(rest: list[tuple[TestResult, dict[str, Any]]]) -> str:
+    """In what order the unlisted tests ran: file order when their ranks follow it, else the
+    scoring tie-break (shorter p50 first, then by name; an exploration sample moves a few up)."""
+    file_ranks = [e.get("file_rank") for _r, e in rest]
+    if all(isinstance(f, int) for f in file_ranks) and file_ranks == sorted(file_ranks):  # type: ignore[type-var]
+        return "then in file order"
+    return "then shortest p50 first"

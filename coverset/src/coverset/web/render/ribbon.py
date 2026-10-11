@@ -5,7 +5,9 @@ calls the function directly is the caller "called from the test"; a call from an
 function names that function. Ribbon width is the number of sampled calls; ribbon colour steps with
 the number of distinct input classes the calls carried (more classes, darker), and every ribbon has
 a hover title with both numbers. Columns keep their :data:`MAX_NODES` largest nodes and fold the
-rest into "other".
+rest into "other". Node bars are thin; test-file labels sit left of their bar, caller labels just
+above theirs (clear of the ribbons that leave it) and parameter labels to the right. The SVG scales
+to its container (``width`` is its coordinate width, sized to the column it sits in).
 """
 
 from __future__ import annotations
@@ -22,8 +24,9 @@ __all__ = ["Flow", "render_ribbon"]
 
 MAX_NODES = 10
 CHAR_W = 6.4
-NODE_W = 10.0
-NODE_GAP = 8.0
+NODE_W = 4.0
+NODE_GAP = 22.0
+LABEL_ABOVE = 5.0
 OTHER = "other"
 
 
@@ -90,17 +93,17 @@ def render_ribbon(flows: Sequence[Flow], *, width: float = 900.0, height: float 
         for c in range(3)
     ]
     most = max(len(c) for c in columns)
-    height = height or max(150.0, 34.0 * most + 30.0)
+    height = height or max(150.0, 44.0 * most + 40.0)
     total = sum(f.samples for f in flows)
     left_w = min(width * 0.36, max(len(n.name) for n in columns[0]) * CHAR_W + 12)
-    right_w = min(width * 0.2, max(len(n.name) for n in columns[2]) * CHAR_W + 16)
+    right_w = min(width * 0.25, max(len("parameters"), *(len(n.name) for n in columns[2])) * CHAR_W + 16)
     x0, x2 = left_w, width - right_w - NODE_W
     xs = (x0, x0 + (x2 - x0) * 0.5, x2)
     label_chars = {
-        1: max(6, int((x2 - xs[1] - NODE_W - 12) / CHAR_W)),
+        1: max(6, int((x2 - xs[1] - 12) / CHAR_W)),
         2: max(6, int((right_w - 8) / CHAR_W)),
     }
-    top = 22.0
+    top = 34.0
     for column in columns:
         usable = height - top - 8.0 - NODE_GAP * (len(column) - 1)
         y = top
@@ -109,7 +112,7 @@ def render_ribbon(flows: Sequence[Flow], *, width: float = 900.0, height: float 
             node.h = max(2.0, usable * node.total / total)
             y += node.h + NODE_GAP
     parts: list[str] = []
-    titles = (("test files", xs[0] - 6, "end"), ("callers", xs[1], "start"), ("parameters", width - 2, "end"))
+    titles = (("test files", xs[0] - 6, "end"), ("callers", xs[1], "start"), ("parameters", x2, "start"))
     for title, tx, anchor in titles:
         parts.append(f'<text class="rb-col" x="{num(tx)}" y="12" text-anchor="{anchor}">{esc(title)}</text>')
     links: list[tuple[tuple[int, str], tuple[int, str], int, set[str]]] = []
@@ -155,10 +158,15 @@ def render_ribbon(flows: Sequence[Flow], *, width: float = 900.0, height: float 
                     f'<text class="rb-label" x="{num(x - 6)}" y="{num(ty)}" text-anchor="end">'
                     f"{esc(truncate(node.name, max(6, int((left_w - 12) / CHAR_W))))}</text>"
                 )
+            elif node.column == 1:
+                parts.append(
+                    f'<text class="rb-label rb-halo" x="{num(x)}" y="{num(node.y - LABEL_ABOVE)}">'
+                    f"{esc(truncate(node.name, label_chars[1]))}</text>"
+                )
             else:
                 parts.append(
-                    f'<text class="rb-label rb-halo" x="{num(x + NODE_W + 6)}" y="{num(ty)}">'
-                    f"{esc(truncate(node.name, label_chars[node.column]))}</text>"
+                    f'<text class="rb-label" x="{num(x + NODE_W + 6)}" y="{num(ty)}">'
+                    f"{esc(truncate(node.name, label_chars[2]))}</text>"
                 )
     legend = (
         '<p class="rb-legend">Ribbon width: sampled calls. Shade: input classes carried '
@@ -170,6 +178,6 @@ def render_ribbon(flows: Sequence[Flow], *, width: float = 900.0, height: float 
     )
     return Markup(
         f'<div class="ribbon-block"><svg class="flow-ribbon" viewBox="0 0 {num(width)} {num(height)}"'
-        f' width="{num(width)}" role="img" aria-label="{attr("Flow from test files through callers to parameters")}">'
+        f' role="img" aria-label="{attr("Flow from test files through callers to parameters")}">'
         f"{''.join(parts)}</svg>{legend}</div>"
     )

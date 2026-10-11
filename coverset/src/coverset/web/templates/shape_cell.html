@@ -1,12 +1,15 @@
 {% extends layout %}
 {% block title %}{{ cell.name }}{% endblock %}
 {% block main %}
-{% if cell.observed %}
+{% if cell.is_return %}
+<p><strong><code>{{ cell.name }}</code></strong>: returned in {{ cell.samples }} sampled call{{ '' if cell.samples == 1 else 's' }}{% if cell.description %} ({{ cell.description }}){% endif %}.</p>
+<p class="muted">The return row shows what the function gave back under its tests. It is an output, not an input, so it never counts as a gap.</p>
+{% elif cell.observed %}
 <p><strong><code>{{ cell.name }}</code></strong> observed in {{ cell.samples }} sampled call{{ '' if cell.samples == 1 else 's' }}{% if cell.description %}: {{ cell.description }}{% endif %}.</p>
 {% if example %}<p>Example (redacted): <code>{{ example }}</code></p>{% endif %}
 {% if tests %}
 <p>Tests that passed this class in{% if tests|length > 12 %} (first 12 of {{ tests|length }}){% endif %}:</p>
-<ul class="test-list">{% for t in tests[:12] %}<li><span class="nodeid">{{ t }}</span></li>{% endfor %}</ul>
+<ul class="test-list">{% for t in tests[:12] %}<li><span class="nodeid">{{ t|nodeid }}</span></li>{% endfor %}</ul>
 {% endif %}
 {% else %}
 <p><strong><code>{{ cell.name }}</code></strong>: {{ missing_reason }}{% if cell.description %}. {{ cell.description }}{% endif %}.</p>

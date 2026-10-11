@@ -1,6 +1,8 @@
 /* coverset UI behaviour (no inline scripts: the CSP allows only same-origin script files).
    - theme toggle (auto / light / dark) persisted in localStorage, applied before first paint
    - document.body.dataset.ready = "1" whenever htmx has no request in flight (screenshots)
+   - a failed htmx request writes "Could not load this section (HTTP n)" into its target
+   - morphs keep the reader's open/closed state of <details data-keep-open>
    - copy buttons, keyboard activation of SVG buttons, the line-tests popover position
    - source-view keys: j/k n/N t i [ ] ? */
 (function () {
@@ -47,12 +49,42 @@
     pending += 1;
     updateReady();
   });
-  ["htmx:afterRequest", "htmx:sendError", "htmx:timeout", "htmx:abort"].forEach(function (name) {
-    document.addEventListener(name, function () {
-      pending = Math.max(0, pending - 1);
-      window.setTimeout(updateReady, 0);
-    });
+  // htmx fires afterRequest once per request, also after an error, abort or timeout (it fires
+  // sendError / sendAbort / timeout as well), so only afterRequest settles a request.
+  document.addEventListener("htmx:afterRequest", function () {
+    pending = Math.max(0, pending - 1);
+    window.setTimeout(updateReady, 0);
   });
+
+  // -- failed fragments: say so instead of staying on "Loading…" ----------------------------
+  function showLoadError(event, text) {
+    var target = event.detail && event.detail.target;
+    if (!target || target === document.body) return;
+    if (target.tagName === "TR") target = target.lastElementChild || target;
+    var note = document.createElement("span");
+    note.className = "load-error";
+    note.setAttribute("role", "status");
+    note.textContent = text;
+    target.replaceChildren(note);
+  }
+  document.addEventListener("htmx:responseError", function (event) {
+    var xhr = event.detail && event.detail.xhr;
+    showLoadError(event, "Could not load this section (HTTP " + (xhr ? xhr.status : "error") + ")");
+  });
+  document.addEventListener("htmx:sendError", function (event) {
+    showLoadError(event, "Could not load this section (the server did not answer)");
+  });
+
+  // -- morphs leave a reader's open/closed <details data-keep-open> alone ---------------------
+  function keepOpenState() {
+    var morph = window.Idiomorph;
+    if (!morph || !morph.defaults || !morph.defaults.callbacks) return;
+    var previous = morph.defaults.callbacks.beforeAttributeUpdated;
+    morph.defaults.callbacks.beforeAttributeUpdated = function (name, node, kind) {
+      if (name === "open" && node.tagName === "DETAILS" && node.hasAttribute("data-keep-open")) return false;
+      return previous ? previous(name, node, kind) : undefined;
+    };
+  }
   window.addEventListener("load", function () {
     window.setTimeout(function () {
       loaded = true;
@@ -253,20 +285,24 @@
       var width = Math.min(560, window.innerWidth * 0.92);
       var left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
       var below = window.innerHeight - rect.bottom;
+      var above = rect.top;
       popover.style.position = "fixed";
       popover.style.left = left + "px";
-      if (below < 280 && rect.top > below) {
+      if (below < 280 && above > below) {
         popover.style.top = "auto";
         popover.style.bottom = window.innerHeight - rect.top + 6 + "px";
+        popover.style.maxHeight = Math.max(120, above - 18) + "px";
       } else {
         popover.style.bottom = "auto";
         popover.style.top = rect.bottom + 6 + "px";
+        popover.style.maxHeight = Math.max(120, below - 18) + "px";
       }
     });
   }
 
   document.addEventListener("DOMContentLoaded", function () {
     applyTheme(storedTheme());
+    keepOpenState();
     updateReady();
     if (window.location.hash) {
       var target = document.getElementById(window.location.hash.slice(1));
