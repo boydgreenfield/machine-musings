@@ -125,3 +125,22 @@ def test_neutral_bundle_report(neutral_dir: Path, tmp_path: Path) -> None:
     index = pages["index.html"]
     assert "expected &lt;b&gt;throw&lt;/b&gt;" in index
     assert "jest-coverset" in pages["about.html"]
+
+
+def test_shipped_descriptors_win_over_source_parsing(tmp_path: Path) -> None:
+    """The TypeScript fixture with its sources on disk: the declared types come from the bundle's
+    descriptors (a .ts file has no Python annotations), so a literal and an enum parameter expect
+    their declared values, not the string classes the observations alone would suggest."""
+    fixture = Path(__file__).resolve().parents[2] / "fixtures" / "bundles" / "neutral-ts"
+    out = tmp_path / "out"
+    build_report(load_bundle(fixture / "bundle", repo_root=fixture / "repo"), out)
+    pages = all_pages(out)
+    rate = next(h for n, h in pages.items() if n.startswith("functions/") and "<code>rateFor</code>" in h)
+    assert (
+        "Literal[&#39;domestic&#39;, &#39;eu&#39;, &#39;world&#39;]" in rate or "Literal['domestic'" in rate
+    )
+    price = next(
+        h for n, h in pages.items() if n.startswith("functions/") and "<code>formatPrice</code>" in h
+    )
+    assert "currency: Currency" in price
+    assert "Source not available." not in pages[next(n for n in pages if n.startswith("files/"))]

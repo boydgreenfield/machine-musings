@@ -134,10 +134,11 @@ def input_from_bundle(
     sources = read_sources(root, paths)
     regions = regions_for(paths, sources, bundle)
     types = bundle_types(bundle, regions)
+    # Declared types shipped in the bundle win over whatever the source parser would read: a
+    # TypeScript file has no Python annotations, and a converted Python bundle's descriptors
+    # came from those very annotations.
     catalogues = {
-        r.func_key: catalogue_from_descriptors(r, types[r.func_key])
-        for r in regions
-        if r.func_key in types and sources.get(r.path) is None
+        r.func_key: catalogue_from_descriptors(r, types[r.func_key]) for r in regions if r.func_key in types
     }
     facts = BundleFacts(bundle, regions, catalogues=catalogues)
     coverage = {

@@ -209,10 +209,11 @@ class BundleFacts(RunFacts):
         raise NotImplementedError("the report computes treemap nodes from function views")
 
     def function_view(self, region: FunctionRegion, source: str | None) -> FunctionView:
-        """The pages' function view; for a function without source, the bundle's type descriptors
-        (when it ships them) stand in for the annotations."""
+        """The pages' function view; when the bundle ships type descriptors for the function they
+        stand in for the source annotations (a TypeScript file has none the Python parser could
+        read, and a converted Python bundle's descriptors came from those annotations)."""
         found = self._catalogues.get(region.func_key)
-        if source is not None or found is None:
+        if found is None:
             return super().function_view(region, source)
         return view_with_catalogue(self, region, found)
 
@@ -221,7 +222,7 @@ def view_with_catalogue(facts: RunFacts, region: FunctionRegion, found: Function
     """:meth:`RunFacts.function_view` with a given catalogue (annotations from type descriptors).
 
     Mirrors ``RunFacts.function_view`` line for line except where the catalogue comes from; it is
-    only used for neutral bundles whose sources are not on disk.
+    used for every function whose bundle ships type descriptors.
     """
     from coverset.analysis.shapes import ParamInfo
     from coverset.web.facts_view import _cell

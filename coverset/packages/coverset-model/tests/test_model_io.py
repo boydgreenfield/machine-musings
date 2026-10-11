@@ -132,6 +132,7 @@ def test_dropped_rows_do_not_reach_the_bundle(written: Path) -> None:
     assert bundle.coverage[IMPORT_CONTEXT][PATH] == (1, 6)
 
 
+@pytest.mark.security
 def test_lone_surrogates_and_bad_json(written: Path) -> None:
     with open(written / "tests.jsonl", "ab") as fh:
         fh.write(b'{"id": "t\\ud800", "file": "t.ts", "outcome": null}\n')
@@ -154,6 +155,7 @@ def test_lone_surrogates_and_bad_json(written: Path) -> None:
         ({"format": "coverset-neutral", "version": 1, "language": "TypeScript!", "producer": {"name": "x", "version": "1"}}, "schema"),
     ],
 )  # fmt: skip
+@pytest.mark.security
 def test_manifest_problems_are_fatal(written: Path, manifest: dict, code: str) -> None:
     (written / "manifest.json").write_text(json.dumps(manifest))
     problems = validate(written)
@@ -173,12 +175,14 @@ def test_missing_files(written: Path) -> None:
     assert not is_neutral(written)
 
 
+@pytest.mark.security
 def test_both_variants_of_a_file_are_ambiguous(written: Path) -> None:
     data = (written / "tests.jsonl").read_bytes()
     (written / "tests.jsonl.gz").write_bytes(gzip.compress(data))
     assert ("tests.jsonl", "ambiguous") in _codes(written)
 
 
+@pytest.mark.security
 def test_size_limits(written: Path) -> None:
     rewrite_jsonl(written / "tests.jsonl", lambda rows: [{**rows[0], "message": "m" * 5000}, *rows[1:]])
     small = Limits(max_json_line_bytes=1000)
@@ -190,6 +194,7 @@ def test_size_limits(written: Path) -> None:
     assert ("shapes.jsonl", "limit") in _codes(written, limits=Limits(max_shape_keys=1))
 
 
+@pytest.mark.security
 def test_a_gzip_bomb_is_refused(written: Path) -> None:
     (written / "shapes.jsonl").unlink()
     (written / "shapes.jsonl.gz").write_bytes(gzip.compress(b" " * (4 * 1024 * 1024)))
@@ -200,6 +205,7 @@ def test_a_gzip_bomb_is_refused(written: Path) -> None:
         read_bundle(written, limits=limits)
 
 
+@pytest.mark.security
 def test_links_devices_and_nested_members_are_refused(written: Path, tmp_path: Path) -> None:
     (written / "links.jsonl").symlink_to(written / "tests.jsonl")
     assert any(p.fatal and "regular file" in p.message for p in validate(written))
@@ -224,6 +230,7 @@ def test_links_devices_and_nested_members_are_refused(written: Path, tmp_path: P
     assert validate(tmp_path / "junk.tar.gz")[-1].code == "archive"
 
 
+@pytest.mark.security
 def test_allowed_paths_filter_rows(written: Path) -> None:
     bundle = read_bundle(written, allowed_paths={"tests/calc.test.ts"})
     assert bundle.static == {} and bundle.functions == ()
@@ -231,6 +238,7 @@ def test_allowed_paths_filter_rows(written: Path) -> None:
     assert bundle.meta["convert"]["head_checked"] is True
 
 
+@pytest.mark.security
 def test_validate_never_raises(tmp_path: Path) -> None:
     (tmp_path / "empty").mkdir()
     assert validate(tmp_path / "empty")[0].code == "missing"
@@ -260,5 +268,6 @@ def test_inspect_counts_rows(written: Path) -> None:
     [("a/b.ts", True), ("a//b", False), ("./a", False), ("a/../b", False), ("/a", False), ("C:/a", False),
      ("a\\b", False), ("a\0b", False), ("a\nb", False), ("", False), ("x" * 513, False), (3, False)],
 )  # fmt: skip
+@pytest.mark.security
 def test_safe_rel_path(value: object, ok: bool) -> None:
     assert (safe_rel_path(value) is not None) is ok

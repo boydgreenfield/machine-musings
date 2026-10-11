@@ -14,5 +14,8 @@ build-backend = "hatchling.build"
 packages = ["src/coverset_model"]
 
 [tool.pytest.ini_options]
+markers = [
+  "security: security-focused tests (run with -m security)",
+]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
