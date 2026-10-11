@@ -4,8 +4,11 @@ Executors whose workers can outlive the control plane (Modal sandboxes) implemen
 :class:`~coverset.executors.base.ReapingExecutor`; :func:`reap` hands them the ids of runs that are
 still active so they terminate everything else (or everything with ``all=True``). Local workers die
 with their process and are swept from the temp directory at start-up, so for them this is a no-op.
-``coverset modal reap [--all]`` and the 60 s loop that ``coverset serve`` starts when the executor is
-Modal (:func:`reap_forever`, via :func:`coverset.app.schedule_executor_upkeep`) call :func:`reap`.
+``coverset modal reap [--all] [--any-instance]`` and the 60 s loop that ``coverset serve`` starts
+for the Modal executor (:func:`reap_forever`, via :func:`coverset.app.schedule_executor_upkeep`) call
+:func:`reap`. Without ``all`` a Modal reap keeps pool, snapshot and smoke sandboxes younger than
+their natural lifetime, because another process sharing the data dir may own them
+(:meth:`coverset.executors.modal_.ModalExecutor.natural_lifetime_s`).
 """
 
 from __future__ import annotations
@@ -34,11 +37,21 @@ async def active_run_ids(session: AsyncSession) -> set[str]:
     return set(rows)
 
 
-async def reap(executor: Executor, *, all: bool = False, active: set[str] | None = None) -> ReapReport:
-    """Terminate ``executor``'s workers not tied to ``active`` runs (every one with ``all``)."""
+async def reap(
+    executor: Executor,
+    *,
+    all: bool = False,
+    active: set[str] | None = None,
+    any_instance: bool = False,
+) -> ReapReport:
+    """Terminate ``executor``'s workers not tied to ``active`` runs (every one with ``all``; with
+    ``any_instance``, every installation's)."""
     if not isinstance(executor, ReapingExecutor):
         return ReapReport()
-    return await executor.reap(active_run_ids=set() if all else set(active or ()), all=all)
+    active_ids = set() if all else set(active or ())
+    if any_instance:
+        return await executor.reap(active_run_ids=active_ids, all=all, any_instance=True)
+    return await executor.reap(active_run_ids=active_ids, all=all)
 
 
 async def reap_forever(

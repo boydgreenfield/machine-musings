@@ -33,16 +33,29 @@ queued ──▶ claim + policy ──▶ plan ───────────
    time; `timeline.requeued_from` names the old run) is created first, since the old run's shard and
    result rows already exist.
 2. **Policy.** Untrusted runs never use the local executor; webhook-triggered runs use it only with
-   `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true`; Modal runs past `COVERSET_MODAL_DAILY_BUDGET_USD` (the sum
-   of today's `runs.cost_estimate`, which includes the reservations of runs still in flight) conclude
-   `neutral` with reason "budget exhausted". An admitted Modal run reserves its predicted cost (one
-   worker for 10 minutes before planning, then the plan's predicted shard durations plus 30 s each)
-   until its real cost replaces it, so concurrent runs see each other's spend. The cancel watcher
-   starts right after the claim, so cancelling or superseding a run also interrupts its planning.
+   `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true`. A Modal run is admitted only if today's spend plus what
+   it reserves fits `COVERSET_MODAL_DAILY_BUDGET_USD`; otherwise it concludes `neutral` with reason
+   "budget exhausted". Today's spend (UTC) is today's `runs.cost_estimate`, which includes the
+   reservations of runs still in flight, plus today's `executor_spend` rows (pool idle time, snapshot
+   builds, smoke tests, image builds: spend that belongs to no run). Before planning a run reserves one
+   worker for 10 minutes; after planning it is re-admitted at its worst case, every worker for the
+   full `COVERSET_RUN_TIMEOUT_S` at the limit rate, capped by `COVERSET_MAX_RUN_COST_USD` (1.00), and
+   refused ("budget exhausted") if that no longer fits. The reservation stays until the real cost
+   replaces it, so concurrent runs see each other's spend. The cap is also enforced live: on every
+   progress tick and heartbeat the runner prices the workers held so far, and once that passes the
+   cap the shards get STOP files and are cancelled, a `log` event (`warning: cost_cap`) is written and
+   the run ends `error`, `neutral`, "run cost cap $X reached", with its real cost recorded. The cancel
+   watcher starts right after the claim, so cancelling or superseding a run also interrupts its
+   planning.
 3. **Plan.** The repo's bare mirror (`data/mirrors/<repo_id>.git`) is refreshed; the head commit is
    exported with `git archive` into a temporary control-plane checkout. The environment spec is the
    repo's `uv export` plus the pytest-coverset wheel (`executors/env_export.py`), and the executor
-   builds or finds it (`ensure_env`). Executors with snapshots use the newest ready trusted snapshot;
+   builds or finds it (`ensure_env`). An untrusted run never builds an environment the executor does
+   not have (Modal's image builder has network access): it is `skipped`, `neutral`, "untrusted PR
+   changes the environment: approve to build" until a maintainer approves it, and refused even then
+   when the requirements carry direct URL, VCS or index references (`planner._untrusted_env`). A
+   forced shard count (`coverset run --shards N`) is capped by `COVERSET_MAX_SHARDS` before any worker
+   is acquired. Executors with snapshots use the newest ready trusted snapshot;
    a PR never waits for one. Workers are acquired (as many as the repo's timed tests need), each gets
    the archive (`put_tree`), and `sandbox_ready` is recorded. Worker 0 collects
    (`pytest --collect-only` with the plugin; `collect.json` is read back, the `-q` listing is the
@@ -110,7 +123,8 @@ cancelled, abandoned, neutral such as "budget exhausted" or a skipped run).
 
 **Cost.** `runs.cost_estimate = Σ executor.cost_usd(resources, seconds the worker was held)` over
 every worker the run acquired, from `acquire` to `release` (extras released right after sharding
-count for the time they were held), recorded on every terminal path. Local runs cost 0.
+count for the time they were held), recorded on every terminal path. Local runs cost 0. Spend that
+belongs to no run is in `executor_spend` (see Policy above).
 
 ## Events
 
@@ -235,19 +249,22 @@ loop); backends with warm pools implement `PoolingExecutor.fill_pool/drain_pool`
 
 ## Serving: the warm pool, the reaper and re-snapshots
 
-`create_app` starts these only outside tests and only when `COVERSET_EXECUTOR=modal`
-(`app.schedule_executor_upkeep`; tests call it explicitly). Both loops use the executor instance the
-app's runs use (`OrchestratorContext.from_app(app).executor(...)`), because the pool lives in that
-process.
+`create_app` starts these only outside tests (`app.schedule_executor_upkeep`; tests call it
+explicitly): at startup when `COVERSET_EXECUTOR=modal`, and otherwise as soon as the serving process
+builds a Modal executor (`OrchestratorContext.on_executor_built`), e.g. for a run queued by
+`coverset run --no-wait --executor modal`, so such a run never executes without the reaper and the
+pool. Both loops use the executor instance the app's runs use
+(`OrchestratorContext.from_app(app).executor(...)`), because the pool lives in that process.
 
 | Loop | Every | What it does | Code |
 |---|---|---|---|
-| reaper | 60 s, starting when serving starts | terminates sandboxes tagged with this installation's `coverset_instance` whose `run` tag is not a queued or running run and that this process does not hold (pool, shards, snapshot builds) | `orchestrator/reaper.py` (`reap_forever`) |
+| reaper | 60 s, starting with the Modal executor | terminates sandboxes tagged with this installation's `coverset_instance` whose `run` tag is not a queued or running run, that this process does not hold (pool, shards, snapshot builds), and that are not a pool, snapshot or smoke sandbox younger than its natural lifetime (another process's `warm` or `smoke`) | `orchestrator/reaper.py` (`reap_forever`) |
 | pool maintainer | 30 s, starting when serving starts | for each repo with a run on this executor in the last `COVERSET_POOL_TTL_S` (600) seconds, tops the pool up to `COVERSET_POOL_SIZE` (4) sandboxes from the repo's newest ready, unexpired trusted snapshot (a repo without one gets no pool); drains the pools of repos that went quiet; while today's spend has reached `COVERSET_MODAL_DAILY_BUDGET_USD` it fills nothing and drains every pool | `orchestrator/pool.py` (`PoolMaintainer`) |
 
-Fills go through `ModalExecutor.fill_pool`, so they count against the process-wide sandbox semaphore
-(`COVERSET_MAX_SANDBOXES`, shared with shards and snapshot builds) and its own budget guard, which
-also counts the idle cost of pooled sandboxes. The runner calls `PoolMaintainer.refill(repo_id)` after
+Fills go through `ModalExecutor.fill_pool`, so they count against the sandbox semaphore of the
+process (`COVERSET_MAX_SANDBOXES`, shared with shards and snapshot builds; one semaphore per
+process) and its own budget guard. A pooled sandbox's idle cost is written to `executor_spend` when
+it is claimed or terminated, so every process and the next restart see it. The runner calls `PoolMaintainer.refill(repo_id)` after
 a re-snapshot, so a new snapshot replaces the pool at once (pooled sandboxes of an older image are
 terminated). `COVERSET_POOL_SIZE=0` disables the maintainer. When serving stops, re-snapshots still in
 flight are cancelled, the pool is drained and the executors are closed, so no sandbox this process

@@ -9,11 +9,17 @@ The wheel is built once per plugin source tree: ``uv build --wheel packages/pyte
 ``~/.cache/coverset/wheels/<source hash>/``, under an exclusive file lock and an atomic rename, and
 memoised for the life of the process.
 
-Executors install the wheel with ``--no-deps``, so its runtime dependencies come from the
-requirements: :func:`build_env_spec` appends ``coverage==<the version in coverset's own uv.lock>``
-(and ``pytest==...`` when the repo's lock has no pytest at all) unless the repo's lock already pins
-them, which is respected. Added pins are part of the identity: ``env_hash`` becomes
-``sha256(adapter env_hash \0 added pins)``.
+Both executors install the wheel with ``--no-deps`` (the LocalExecutor with ``uv pip install``, the
+Modal image with ``pip install``), so its runtime dependencies come from the requirements:
+:func:`build_env_spec` appends ``coverage==<the version in coverset's own uv.lock>`` (and
+``pytest==...`` when the repo's lock has no pytest at all) unless the repo's lock already pins them,
+which is respected. A target repo need not depend on ``coverage`` at all. Added pins are part of the
+identity: ``env_hash`` becomes ``sha256(adapter env_hash \0 added pins)``.
+
+:func:`direct_references` lists the requirement lines that would fetch code from somewhere other
+than the package index by name and version (``pkg @ <url>``, VCS and ``file:`` references, pip
+options such as ``--index-url`` or ``-e``). Building such an environment runs code from that
+location with network access, so the runner never builds one for an untrusted pull request.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ __all__ = [
     "PLUGIN_DIR",
     "build_env_spec",
     "build_plugin_wheel",
+    "direct_references",
     "env_hash",
     "file_lock",
     "plugin_runtime_pins",
@@ -133,6 +140,29 @@ def pinned_packages(requirements_txt: str) -> set[str]:
         if match:
             names.add(_normalise(match.group(1)))
     return names
+
+
+_DIRECT_REF_RE = re.compile(r"^\s*[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\])?\s*@")
+_VCS_MARKERS = ("git+", "hg+", "svn+", "bzr+", "file:", "://")
+
+
+def direct_references(requirements_txt: str) -> list[str]:
+    """Requirement lines that are not a plain ``name[extras]==version`` from the index (see the
+    module docstring); each cut to 80 characters. Comments and blank lines are ignored."""
+    found = []
+    for raw in requirements_txt.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lowered = line.lower()
+        if (
+            line.startswith("-")
+            or " @ " in line
+            or _DIRECT_REF_RE.match(line)
+            or any(marker in lowered for marker in _VCS_MARKERS)
+        ):
+            found.append(line[:80])
+    return found
 
 
 def listed_packages(requirements_txt: str) -> set[str]:

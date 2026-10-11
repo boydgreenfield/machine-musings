@@ -8,8 +8,14 @@ written and read back through the filesystem API, and a SIGTERM delivered to a r
 :meth:`~coverset.executors.modal_.ModalWorker.cancel` does it. The sandbox is terminated in a
 ``finally`` block whatever happens; the command exits non-zero with the error if any step fails.
 
-``modal reap [--all]`` lives in :mod:`coverset.commands.maintenance` and works through
-:meth:`~coverset.executors.modal_.ModalExecutor.reap`.
+The smoke sandbox's cost is recorded in ``executor_spend`` (kind ``smoke``) when it is terminated,
+so it counts against the daily budget like everything else.
+
+``images`` reads ``<data_dir>/modal/images.json``: it lists the env images built through *this* data
+directory only (other data dirs, e.g. the benchmark's, keep their own file).
+
+``modal reap [--all] [--any-instance]`` lives in :mod:`coverset.commands.maintenance` and works
+through :meth:`~coverset.executors.modal_.ModalExecutor.reap`.
 """
 
 from __future__ import annotations
@@ -175,8 +181,9 @@ async def token_info(modal: Any) -> str:
 @click.command("images")
 @click.option("--days", type=click.IntRange(1, 3650), default=30, show_default=True)
 def modal_images_command(days: int) -> None:
-    """List the env images this installation built and flag those unused for DAYS days.
+    """List the env images built through this data dir and flag those unused for DAYS days.
 
+    Reads <data_dir>/modal/images.json only: images built from other data dirs are not listed.
     Modal has no API to delete an image; remove flagged ones by hand if you need to.
     """
     from coverset.executors.modal_ import ModalExecutor

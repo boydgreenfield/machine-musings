@@ -41,9 +41,11 @@ def create_app(settings: Settings | None = None) -> Quart:
     ``app.extensions["settings"]`` holds the :class:`~coverset.config.Settings` and
     ``app.extensions["db"]`` the :class:`~coverset.db.session.Database`. The database is migrated
     when the app starts serving (unless ``settings.skip_migrations``) and the engine is disposed
-    when it stops. Outside tests, serving also starts the run dispatcher and the in-process gc
-    (:func:`schedule_gc`: once at startup, then every 24 h), and with ``COVERSET_EXECUTOR=modal`` the
-    reaper and the warm-pool maintainer (:func:`schedule_executor_upkeep`).
+    when it stops. Outside tests, serving also starts the run dispatcher, the in-process gc
+    (:func:`schedule_gc`: once at startup, then every 24 h) and the executor upkeep
+    (:func:`schedule_executor_upkeep`): the reaper and the warm-pool maintainer start with the app
+    when ``COVERSET_EXECUTOR=modal``, and otherwise as soon as the process builds a Modal executor
+    (a run queued with ``coverset run --no-wait --executor modal``).
     """
     settings = settings or get_settings()
     configure_logging(settings)
@@ -91,8 +93,7 @@ def create_app(settings: Settings | None = None) -> Quart:
 
         install_run_queue(app)
         schedule_gc(app)
-        if settings.executor == "modal":
-            schedule_executor_upkeep(app)
+        schedule_executor_upkeep(app)
     return app
 
 
@@ -126,8 +127,12 @@ def schedule_executor_upkeep(
 ) -> None:
     """Reap and keep the warm pool filled while the app serves; drain the pool when it stops.
 
-    For ``settings.executor`` (the executor the app's runs use, shared through
-    :meth:`~coverset.orchestrator.runner.OrchestratorContext.from_app`):
+    For every executor the app's runs use (shared through
+    :meth:`~coverset.orchestrator.runner.OrchestratorContext.from_app`): ``settings.executor`` when it
+    is Modal from the start, and any executor the process builds later, the moment it is built
+    (:attr:`~coverset.orchestrator.runner.OrchestratorContext.on_executor_built`), so a ``serve`` whose
+    default executor is local still reaps and pools for Modal runs queued by
+    ``coverset run --no-wait --executor modal``:
 
     * :func:`~coverset.orchestrator.reaper.reap_forever` runs at startup and then every
       ``reap_interval_s`` (60 s), terminating workers tagged with this installation that no queued or
@@ -138,42 +143,62 @@ def schedule_executor_upkeep(
     * when serving stops, re-snapshots in flight are cancelled, the pool is drained and the
       executors are closed, so no worker this process created is left running.
 
-    ``create_app`` calls this outside tests when the executor is Modal; tests call it explicitly.
+    ``create_app`` calls this outside tests; tests call it explicitly.
     """
-    from coverset.orchestrator.pool import POOL_INTERVAL_S, PoolMaintainer
+    from coverset.executors.base import Executor, ReapingExecutor
+    from coverset.orchestrator.pool import POOL_INTERVAL_S, PoolMaintainer, supports_pool
     from coverset.orchestrator.reaper import REAP_INTERVAL_S, reap_forever
     from coverset.orchestrator.runner import OrchestratorContext
 
     settings: Settings = app.extensions["settings"]
     ctx = OrchestratorContext.from_app(app)
-    state: dict[str, PoolMaintainer] = {}
+    maintainers: list[PoolMaintainer] = []
+    started: set[int] = set()
+    serving: list[bool] = []
 
-    @app.before_serving
-    async def _start_executor_upkeep() -> None:
-        executor = ctx.executor(settings.executor)
+    def start_for(executor: Executor) -> None:
+        """Start the reaper (and pool maintainer) of ``executor`` once, while serving."""
+        if not serving or id(executor) in started:
+            return
+        started.add(id(executor))
+        if isinstance(executor, ReapingExecutor):
+            app.add_background_task(
+                reap_forever,
+                ctx.db,
+                executor,
+                interval_s=REAP_INTERVAL_S if reap_interval_s is None else reap_interval_s,
+                stop=app.shutdown_event,
+            )
+        if not supports_pool(executor):
+            return
         maintainer = PoolMaintainer(ctx.db, settings, executor)
-        state["maintainer"] = maintainer
-        app.add_background_task(
-            reap_forever,
-            ctx.db,
-            executor,
-            interval_s=REAP_INTERVAL_S if reap_interval_s is None else reap_interval_s,
-            stop=app.shutdown_event,
-        )
         if maintainer.enabled:
-            ctx.pool_maintainer = maintainer
+            maintainers.append(maintainer)
+            if ctx.pool_maintainer is None:
+                ctx.pool_maintainer = maintainer
             app.add_background_task(
                 maintainer.run_forever,
                 app.shutdown_event,
                 interval_s=POOL_INTERVAL_S if pool_interval_s is None else pool_interval_s,
             )
 
+    @app.before_serving
+    async def _start_executor_upkeep() -> None:
+        serving.append(True)
+        ctx.on_executor_built = lambda _kind, executor: start_for(executor)
+        if settings.executor == "modal":
+            ctx.executor(settings.executor)  # built now, so the reaper runs from the start
+        for executor in list(ctx.executors.values()):
+            start_for(executor)
+
     @app.after_serving
     async def _stop_executor_upkeep() -> None:
+        serving.clear()
+        ctx.on_executor_built = None
         ctx.pool_maintainer = None
         await ctx.finish_background(cancel=True)
-        maintainer = state.pop("maintainer", None)
-        if maintainer is not None and maintainer.enabled:
+        while maintainers:
+            maintainer = maintainers.pop()
             try:
                 drained = await maintainer.drain()
             except Exception:

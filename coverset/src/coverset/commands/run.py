@@ -25,7 +25,12 @@ __all__ = ["run_command", "warm_command"]
 @click.option("--base", default=None, help="Base SHA or branch (runs the change base...head).")
 @click.option("--pr", "pr_number", type=int, default=None, help="Pull request number to attach the run to.")
 @click.option("--executor", type=click.Choice(["local", "modal"]), default=None, help="Where shards run.")
-@click.option("--shards", type=click.IntRange(1, 256), default=None, help="Force the number of shards.")
+@click.option(
+    "--shards",
+    type=click.IntRange(1, 256),
+    default=None,
+    help="Force the number of shards (capped by COVERSET_MAX_SHARDS).",
+)
 @click.option(
     "--trigger",
     type=click.Choice(["pr", "baseline"]),

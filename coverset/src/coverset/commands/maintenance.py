@@ -123,15 +123,30 @@ def invariants_check_command(repo_path: Path) -> None:
 
 @click.command("reap")
 @click.option(
-    "--all", "reap_all", is_flag=True, help="Terminate every coverset sandbox, active runs included."
+    "--all",
+    "reap_all",
+    is_flag=True,
+    help="Terminate every coverset sandbox, active runs and other processes' young pool, snapshot "
+    "and smoke sandboxes included.",
 )
-def modal_reap_command(reap_all: bool) -> None:
-    """Terminate coverset sandboxes not tied to an active run."""
+@click.option(
+    "--any-instance",
+    is_flag=True,
+    help="Look at every coverset sandbox in the App (any data dir, e.g. benchmarks), not only this "
+    "installation's; their shards are terminated because their runs are unknown here.",
+)
+def modal_reap_command(reap_all: bool, any_instance: bool) -> None:
+    """Terminate coverset sandboxes not tied to an active run.
+
+    Without --all, pool, snapshot and smoke sandboxes younger than their natural lifetime (pool:
+    COVERSET_POOL_TTL_S + 60 s; snapshot and smoke: COVERSET_RUN_TIMEOUT_S) are kept, because a
+    running `coverset serve`, `coverset warm` or `modal smoke` may own them.
+    """
     settings = load()
-    click.echo(run_async(lambda: _reap(settings, reap_all=reap_all)))
+    click.echo(run_async(lambda: _reap(settings, reap_all=reap_all, any_instance=any_instance)))
 
 
-async def _reap(settings: Settings, *, reap_all: bool) -> str:
+async def _reap(settings: Settings, *, reap_all: bool, any_instance: bool = False) -> str:
     from coverset.db.session import Database
     from coverset.executors import ExecutorError, get_executor
     from coverset.orchestrator.reaper import active_run_ids, reap
@@ -145,7 +160,7 @@ async def _reap(settings: Settings, *, reap_all: bool) -> str:
     try:
         async with db.session() as session:
             active = await active_run_ids(session)
-        report = await reap(executor, all=reap_all, active=active)
+        report = await reap(executor, all=reap_all, active=active, any_instance=any_instance)
     finally:
         await db.engine.dispose()
         await executor.close()

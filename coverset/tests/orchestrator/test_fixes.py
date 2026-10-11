@@ -284,8 +284,10 @@ async def test_cost_is_worker_lifetime_on_every_path(
 async def test_concurrent_modal_runs_see_each_others_reservation(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int, executor: FakeExecutor, script: Script
 ) -> None:
-    executor.rate_per_s = 0.01  # 600 s reservation = $6, over a $5 budget for a second run
-    ctx.settings = ctx.settings.model_copy(update={"modal_daily_budget_usd": 5.0})
+    # The pre-plan reservation (600 s) is $3 and the planned one min($9 per worker, cap $5) = $5:
+    # either way a second run's $3 no longer fits next to the first run's reservation.
+    executor.rate_per_s = 0.005
+    ctx.settings = ctx.settings.model_copy(update={"modal_daily_budget_usd": 5.0, "max_run_cost_usd": 5.0})
     script.zero_passes = True
     script.delay_s = 0.2
     first = await _baseline_run(ctx, repo_id, repo.main_sha, executor="modal")

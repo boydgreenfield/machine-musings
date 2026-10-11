@@ -116,17 +116,21 @@ class Settings(BaseSettings):
     local_max_workers: int = Field(default_factory=_default_workers, gt=0)
     local_allow_webhook_runs: bool = False
     modal_environment: str = "coverset"
-    shard_cpu_limit: float = Field(default=2.0, gt=0)
-    shard_memory_mib: int = Field(default=2048, gt=0)
-    run_timeout_s: int = Field(default=1800, gt=0)
-    pool_ttl_s: int = Field(default=600, ge=0)
-    pool_size: int = Field(default=4, ge=0)
-    max_shards: int = Field(default=32, gt=0)
-    max_sandboxes: int = Field(default=48, gt=0)
+    shard_cpu_limit: float = Field(default=2.0, gt=0, le=16)
+    shard_memory_mib: int = Field(default=2048, gt=0, le=65536)
+    run_timeout_s: int = Field(default=1800, gt=0, le=7200)
+    pool_ttl_s: int = Field(default=600, ge=0, le=86400)
+    pool_size: int = Field(default=4, ge=0, le=32)
+    max_shards: int = Field(default=32, gt=0, le=128)
+    max_sandboxes: int = Field(default=48, gt=0, le=256)
     max_concurrent_runs: int = Field(default=4, gt=0)
     retry_budget_per_run: int = Field(default=5, ge=0)
     cancel_superseded: bool = True
-    modal_daily_budget_usd: float = Field(default=5.0, ge=0)
+    modal_daily_budget_usd: float = Field(default=5.0, ge=0, le=1000)
+    max_run_cost_usd: float = Field(default=1.0, ge=0, le=1000)
+    """Per-run Modal cost cap: the post-planning reservation and the live stop (at most the daily budget)."""
+    max_image_builds_per_day: int = Field(default=20, ge=0, le=1000)
+    """Modal env image builds allowed per UTC day (each one is also priced into the daily budget)."""
     paused: bool = False
     sandbox_network: SandboxNetwork = "blocked"
     sandbox_domain_allowlist: CommaList = Field(default_factory=list)
@@ -217,6 +221,13 @@ class Settings(BaseSettings):
             self.anthropic_api_key and self.anthropic_api_key.get_secret_value()
         ):
             raise ValueError("COVERSET_AI=anthropic requires ANTHROPIC_API_KEY")
+        if self.max_run_cost_usd > self.modal_daily_budget_usd:
+            if "max_run_cost_usd" in self.model_fields_set:
+                raise ValueError(
+                    f"COVERSET_MAX_RUN_COST_USD ({self.max_run_cost_usd:.2f}) must not exceed "
+                    f"COVERSET_MODAL_DAILY_BUDGET_USD ({self.modal_daily_budget_usd:.2f})"
+                )
+            self.max_run_cost_usd = self.modal_daily_budget_usd  # the default follows a smaller budget
         audience_host = (urlsplit(self.oidc_audience).hostname or "").lower()
         if audience_host == "github.com" or audience_host.endswith(".github.com"):
             raise ValueError(

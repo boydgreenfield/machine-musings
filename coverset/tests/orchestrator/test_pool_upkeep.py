@@ -232,6 +232,7 @@ async def test_maintainer_skips_repos_without_a_ready_snapshot(
     assert pooling.fills == []
 
 
+@pytest.mark.security
 async def test_budget_exhaustion_skips_pool_fills_and_drains(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int, script: Script, pooling: PoolingFake
 ) -> None:
@@ -262,6 +263,7 @@ async def test_pool_size_zero_disables_the_maintainer(ctx: OrchestratorContext, 
 # -- the reaper loop -------------------------------------------------------------------------------------
 
 
+@pytest.mark.security
 async def test_reap_forever_runs_on_its_cadence_until_stopped(
     ctx: OrchestratorContext, pooling: PoolingFake
 ) -> None:
@@ -282,6 +284,7 @@ async def test_reap_forever_ignores_executors_that_do_not_reap(
 # -- serve: started with the app, drained on shutdown ------------------------------------------------------
 
 
+@pytest.mark.security
 async def test_serve_reaps_fills_and_drains_on_shutdown(
     ctx: OrchestratorContext,
     settings: Settings,
@@ -311,11 +314,35 @@ async def test_serve_reaps_fills_and_drains_on_shutdown(
     assert pooling.reaps == reaps, "the reaper stops with the app"
 
 
-def test_create_app_starts_the_upkeep_only_for_modal(settings: Settings) -> None:
+@pytest.mark.security
+def test_create_app_schedules_the_executor_upkeep_outside_tests(settings: Settings) -> None:
     def hooks(**update: Any) -> list[str]:
         app = create_app(settings.model_copy(update=update))
         return [f.__name__ for f in app.before_serving_funcs]
 
     assert "_start_executor_upkeep" not in hooks()  # env=test
-    assert "_start_executor_upkeep" not in hooks(env="dev", executor="local")
+    assert "_start_executor_upkeep" in hooks(env="dev", executor="local")  # lazy: see below
     assert "_start_executor_upkeep" in hooks(env="dev", executor="modal")
+
+
+@pytest.mark.security
+async def test_a_local_serve_starts_the_modal_upkeep_when_it_builds_a_modal_executor(
+    ctx: OrchestratorContext, settings: Settings, pooling: PoolingFake
+) -> None:
+    """``coverset run --no-wait --executor modal`` queues a Modal run for a ``serve`` whose default
+    executor is local: the reaper and the pool start when that serve builds the Modal executor."""
+    assert settings.executor == "local"
+    app = create_app(settings)
+    app.extensions["orchestrator"] = ctx
+    schedule_executor_upkeep(app, reap_interval_s=0.05, pool_interval_s=0.05)
+    async with app.test_app():
+        await asyncio.sleep(0.15)
+        assert pooling.reaps == 0 and ctx.pool_maintainer is None, "no Modal executor yet: no upkeep"
+        assert ctx.executor("modal") is pooling
+        for _ in range(200):
+            if pooling.reaps >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert pooling.reaps >= 2
+        assert isinstance(ctx.pool_maintainer, PoolMaintainer)
+    assert pooling.closed and ctx.pool_maintainer is None and ctx.on_executor_built is None

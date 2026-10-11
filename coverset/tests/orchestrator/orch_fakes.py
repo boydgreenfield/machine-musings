@@ -214,6 +214,16 @@ class Script:
         return self.retry_outcomes.get(nodeid, first) if retry else first
 
 
+def _option(cmd: list[str], name: str) -> str | None:
+    """The value of ``name`` in a pytest argv, as ``--opt value`` or ``--opt=value`` (None if absent)."""
+    for index, word in enumerate(cmd):
+        if word == name and index + 1 < len(cmd):
+            return cmd[index + 1]
+        if word.startswith(name + "="):
+            return word[len(name) + 1 :]
+    return None
+
+
 class FakeWorker:
     """A :class:`~coverset.executors.base.Worker` that scripts pytest-coverset's behaviour."""
 
@@ -249,7 +259,7 @@ class FakeWorker:
         self.script.commands.append(list(cmd))
         emit = on_line or (lambda text, stream: None)
         prefix = f"\x1ecoverset {env.get('COVERSET_EVENT_NONCE', '-')} "
-        out = Path(cmd[cmd.index("--coverset-out") + 1])
+        out = Path(_option(cmd, "--coverset-out") or "")
         out.mkdir(parents=True, exist_ok=True)
         if "--collect-only" in cmd:
             if self.script.collect_delay_s:
@@ -273,7 +283,7 @@ class FakeWorker:
             return RunResult(0 if chosen else 5, started, time.time(), 10, False)
         args_file = Path(next(c for c in cmd if c.startswith("@"))[1:])
         nodeids = [line for line in args_file.read_text().splitlines() if line]
-        stop_file = cmd[cmd.index("--coverset-stop-file") + 1] if "--coverset-stop-file" in cmd else None
+        stop_file = _option(cmd, "--coverset-stop-file")
         retry = "retry-" in out.name
         results: list[dict[str, Any]] = []
         exit_code = 0

@@ -9,13 +9,14 @@ leading column of some index, because SQLite looks children up by it on every pa
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    Date,
     Float,
     ForeignKey,
     Index,
@@ -67,6 +68,7 @@ InvariantTrigger = Literal["run", "scan"]
 FindingSource = Literal["fixture", "heuristic", "anthropic"]
 FindingVerdict = Literal["covered", "partially_covered", "not_covered", "abstain"]
 Confidence = Literal["low", "medium", "high"]
+SpendKind = Literal["pool", "snapshot", "smoke", "build", "bench"]
 
 JSONDict = MutableDict.as_mutable(JSON)
 """A JSON object column that tracks in-place changes to its top-level keys (``d[k] = v``).
@@ -447,6 +449,25 @@ class ReviewFinding(Base):
     verdict: Mapped[FindingVerdict] = mapped_column(str_enum(FindingVerdict))
     confidence: Mapped[Confidence] = mapped_column(str_enum(Confidence))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+
+class ExecutorSpend(Base):
+    """Estimated executor spend that belongs to no run: pool idle time, snapshot builds, smoke tests,
+    benchmarks and image builds. Today's rows count against the daily budget next to
+    ``runs.cost_estimate``, across processes and restarts.
+    """
+
+    __tablename__ = "executor_spend"
+    __table_args__ = (Index(None, "day", "executor", "kind"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[date] = mapped_column(Date)
+    """The UTC day the spend is charged to."""
+    executor: Mapped[ExecutorKind] = mapped_column(str_enum(ExecutorKind))
+    kind: Mapped[SpendKind] = mapped_column(str_enum(SpendKind))
+    usd: Mapped[float] = mapped_column(Float, default=0.0)
+    sandbox_id: Mapped[str | None] = mapped_column(String(KEY_LEN))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 
 

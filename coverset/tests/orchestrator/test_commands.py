@@ -99,3 +99,49 @@ def test_format_rows_and_function_matching() -> None:
         match_function(regions, "f")
     with pytest.raises(Exception, match="no function"):
         match_function(regions, "nope")
+
+
+_SIGTERM_SCRIPT = """
+import asyncio, sys
+from pathlib import Path
+from coverset.commands.common import run_async
+
+out = Path(sys.argv[1])
+
+
+async def fake_run():
+    try:
+        out.joinpath("started").write_text("1")
+        await asyncio.sleep(60)  # a run holding workers
+    finally:
+        out.joinpath("released").write_text("1")  # what execute_run's and ctx.close()'s finally do
+
+
+run_async(fake_run)
+"""
+
+
+@pytest.mark.security
+def test_sigterm_cancels_the_command_so_finally_blocks_release_workers(tmp_path: Path) -> None:
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    from coverset.commands.common import SIGTERM_EXIT_CODE
+
+    script = tmp_path / "sigterm_run.py"
+    script.write_text(_SIGTERM_SCRIPT, encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, str(script), str(tmp_path)], env={**os.environ})
+    try:
+        deadline = time.monotonic() + 30
+        while not (tmp_path / "started").exists():
+            assert proc.poll() is None and time.monotonic() < deadline, "the fake run never started"
+            time.sleep(0.05)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) == SIGTERM_EXIT_CODE == 143
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert (tmp_path / "released").read_text() == "1", "the finally block ran"

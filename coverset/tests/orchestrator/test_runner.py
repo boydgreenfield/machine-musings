@@ -139,6 +139,7 @@ async def test_preexisting_failure_does_not_fail_the_pr(
     assert failures and failures[0]["preexisting"] is True
 
 
+@pytest.mark.security
 async def test_retry_budget_exhausted_confirms_without_retry(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int, script: Script
 ) -> None:

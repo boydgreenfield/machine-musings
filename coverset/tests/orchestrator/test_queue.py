@@ -24,6 +24,7 @@ async def _queued(ctx: OrchestratorContext, repo_id: int, sha: str, n: int) -> l
     ]
 
 
+@pytest.mark.security
 async def test_concurrency_cap(
     monkeypatch: pytest.MonkeyPatch, ctx: OrchestratorContext, repo: TestRepo, repo_id: int
 ) -> None:

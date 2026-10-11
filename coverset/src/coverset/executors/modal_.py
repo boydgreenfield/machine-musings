@@ -1,8 +1,9 @@
-"""``ModalExecutor``: shards in Modal Sandboxes, driven client-side (nothing is deployed).
+"""``ModalExecutor``: shards in Modal Sandboxes, driven client-side (no functions are deployed).
 
 All Modal objects live in the App ``coverset-runner`` of the Modal environment
-``COVERSET_MODAL_ENVIRONMENT`` (default ``coverset``), looked up with ``create_if_missing=True``; the
-App is only a container for sandboxes.
+``COVERSET_MODAL_ENVIRONMENT`` (default ``coverset``), looked up with ``create_if_missing=True``; that
+creates an empty, persistent app record (``modal app list`` shows it as deployed) which is only a
+container for sandboxes.
 
 * **Environments** (:meth:`ModalExecutor.ensure_env`): one image per ``env_hash`` built from the recipe
   in :mod:`coverset.executors.modal_images`. Its object id is remembered in
@@ -18,16 +19,22 @@ App is only a container for sandboxes.
   created from the trusted snapshot, never exec'd before they are claimed, serve one run and are then
   terminated), the rest created concurrently; capacity errors shrink the result instead of failing.
 * **Guards**: every sandbox gets ``cpu=(0.125, COVERSET_SHARD_CPU_LIMIT)``,
-  ``memory=(512, COVERSET_SHARD_MEMORY_MIB)``, ``timeout <= COVERSET_RUN_TIMEOUT_S``,
-  ``idle_timeout=COVERSET_POOL_TTL_S``, ``secrets=[]``, ``include_oidc_identity_token=False``, network
-  per policy (``blocked`` unless the run says otherwise) and the tags
-  ``{coverset_instance, repo, run, role}``, never a ``name``. One process-wide counter caps live
-  sandboxes (pool + shards + snapshot builds) at ``COVERSET_MAX_SANDBOXES``. Before creating anything
-  the executor checks the daily budget (``COVERSET_MODAL_DAILY_BUDGET_USD`` against today's
-  ``runs.cost_estimate`` plus what this process has running) and refuses with
-  :class:`~coverset.executors.base.CapacityError` ("budget exhausted").
+  ``memory=(512, COVERSET_SHARD_MEMORY_MIB)``, ``timeout <= COVERSET_RUN_TIMEOUT_S`` (pooled sandboxes:
+  ``COVERSET_RUN_TIMEOUT_S + COVERSET_POOL_TTL_S``, so a claimed one outlives the run's timeout),
+  ``idle_timeout=COVERSET_POOL_TTL_S`` (None when it is 0), ``secrets=[]``,
+  ``include_oidc_identity_token=False``, network per policy (``blocked`` unless the run says
+  otherwise) and the tags ``{coverset_instance, repo, run, role, created, owner}``, never a ``name``.
+  One counter per process caps the live sandboxes it creates (pool + shards + snapshot builds) at
+  ``COVERSET_MAX_SANDBOXES``. Before creating anything the executor checks the daily budget
+  (``COVERSET_MODAL_DAILY_BUDGET_USD``) against today's spend plus what the request may cost, and
+  refuses with :class:`~coverset.executors.base.CapacityError` ("budget exhausted"). Today's spend
+  is ``runs.cost_estimate`` plus ``executor_spend`` (pool idle time, snapshot builds, smoke tests,
+  image builds, recorded here) plus the accrued time of this process's live non-shard sandboxes.
+  Env image builds also count against ``COVERSET_MAX_IMAGE_BUILDS_PER_DAY``.
 * **Reaping** (:meth:`ModalExecutor.reap`): lists sandboxes tagged with this installation's
-  ``coverset_instance`` and terminates every one not tied to an active run (or all of them).
+  ``coverset_instance`` (or, with ``any_instance``, every coverset sandbox in the App) and terminates
+  every one not tied to an active run, except pool, snapshot and smoke sandboxes younger than their
+  natural lifetime, which may belong to another process (``all`` terminates every one of them).
 
 Cost (:meth:`ModalExecutor.cost_usd`): Modal bills ``max(request, usage)`` per second at $0.142 per
 core-hour and $0.024 per GiB-hour. Usage is not observable client-side, so a running shard is
@@ -39,10 +46,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import logging
 import math
 import os
+import socket
 import threading
 import time
 import uuid
@@ -106,6 +115,10 @@ EXEC_BACKSTOP_S = 60
 SNAPSHOT_COLLECT_TIMEOUT_S = 300.0
 SNAPSHOT_SANDBOX_TIMEOUT_S = 900
 SLOT_WAIT_S = 120.0
+POOL_REAP_GRACE_S = 60
+"""A non-``all`` reap keeps pool sandboxes younger than ``COVERSET_POOL_TTL_S`` plus this."""
+BUILD_RESERVE_S = 120.0
+"""Seconds of limit-rate spend an env image build must fit in the remaining budget before it starts."""
 MAX_GET_FILE_BYTES = 1024 * 1024 * 1024
 DB_RETRY_DELAYS_S = (1.0, 3.0, 10.0, 30.0)
 PYCACHE_DIR = ".pycache"
@@ -156,6 +169,9 @@ def rate_usd_per_s(cpu: float, memory_mib: float) -> float:
 
 class SandboxSlots:
     """A counting semaphore over live sandboxes (pool + shards + snapshot builds), shared process-wide.
+
+    One semaphore per process: ``serve`` and a concurrent CLI ``coverset run`` each count only their
+    own sandboxes, so together they may hold up to twice ``COVERSET_MAX_SANDBOXES``.
 
     Thread-safe and loop-independent: acquiring never blocks the event loop (``try_take``) except in
     :meth:`take`, which polls for a free slot with a deadline.
@@ -242,18 +258,21 @@ def sandbox_options(
     *,
     idle_timeout_s: int | None,
     timeout_s: int | None = None,
+    extra_timeout_s: int = 0,
 ) -> dict[str, Any]:
     """The keyword arguments of every ``Sandbox.create`` call (the cost and isolation guards).
 
-    Limits are clamped to the configured ceilings; the timeout never exceeds ``run_timeout_s``.
+    Limits are clamped to the configured ceilings; the timeout never exceeds ``run_timeout_s`` plus
+    ``extra_timeout_s`` (a pooled sandbox's idle time before its claim: at most ``pool_ttl_s``).
     """
     cpu_limit = max(CPU_REQUEST, min(resources.cpu, settings.shard_cpu_limit))
     memory_limit = max(MEMORY_REQUEST_MIB, min(resources.memory_mib, settings.shard_memory_mib))
     timeout = int(min(timeout_s or resources.timeout_s, resources.timeout_s, settings.run_timeout_s))
+    extra = max(0, min(int(extra_timeout_s), settings.pool_ttl_s))
     options: dict[str, Any] = {
         "cpu": (CPU_REQUEST, float(cpu_limit)),
         "memory": (MEMORY_REQUEST_MIB, int(memory_limit)),
-        "timeout": max(1, timeout),
+        "timeout": max(1, timeout + extra),
         "idle_timeout": idle_timeout_s if idle_timeout_s and idle_timeout_s > 0 else None,
         "secrets": [],
         "include_oidc_identity_token": False,
@@ -288,6 +307,18 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def process_owner() -> str:
+    """The ``owner`` tag of sandboxes this process creates: ``<hostname>:<pid>``."""
+    return f"{(socket.gethostname() or 'localhost')[:64]}:{os.getpid()}"
+
+
+def spend_kind(role: str) -> str:
+    """The ``executor_spend.kind`` of a sandbox role that belongs to no run."""
+    if role in ("pool", "snapshot", "smoke"):
+        return role
+    return "bench"
+
+
 # -- live sandboxes ---------------------------------------------------------------------------------
 
 
@@ -306,6 +337,8 @@ class _Live:
     memory_mib: int
     created_at: float = field(default_factory=time.monotonic)
     claimed: bool = False
+    created_wall: int = field(default_factory=lambda: int(time.time()))
+    """Creation time (UNIX seconds), also the sandbox's ``created`` tag."""
 
     def rate(self) -> float:
         """Estimated USD/s: requests while pooled and unclaimed, limits otherwise."""
@@ -325,7 +358,10 @@ class ExecutorStats:
     rebuilds: int = 0
     capacity_errors: list[str] = field(default_factory=list)
     untracked_usd: float = 0.0
-    """Estimated spend not attributed to a run (pool idle time, snapshot builds, smoke tests)."""
+    """Estimated spend this process attributed to no run (pool idle time, snapshot builds, smoke
+    tests, image builds). A statistic only: the budget reads ``executor_spend`` instead."""
+    build_usd: float = 0.0
+    """Estimated spend of the env image builds this process ran (limit rate x wall time)."""
     lifetime_usd: float = 0.0
     """Estimated spend of every terminated sandbox over its whole lifetime (all roles, rate card)."""
     sandbox_seconds: float = 0.0
@@ -366,6 +402,13 @@ class ModalExecutor:
         self._db: Any = None
         self._db_tasks: set[asyncio.Task[None]] = set()
         self._closed = False
+        self.owner = process_owner()
+        self._spend_ids = itertools.count(1)
+        self._pending_spend: dict[int, float] = {}
+        """Non-run spend recorded but not yet in ``executor_spend`` (still counted by the budget)."""
+        self._pending_builds: set[int] = set()
+        self._lost_spend: dict[str, float] = {}
+        """Per UTC day: spend whose ``executor_spend`` row could not be written (still counted)."""
 
     # -- Modal client ------------------------------------------------------------------------------
 
@@ -406,33 +449,59 @@ class ModalExecutor:
 
     async def ensure_env(self, spec: EnvSpec) -> EnvRef:
         """The env image for ``spec``: cached id (memory, ``images.json``, ``envs``), else a build."""
-        image_id = self._images.get(spec.env_hash) or self._cached_image(spec.env_hash)
-        if image_id is None:
-            image_id = await self._db_image_id(spec.env_hash)
-            if image_id is not None:
-                self._remember_image(spec, image_id)
+        image_id = await self._known_image(spec)
         if image_id is None or image_id in self._dead_images:
             image_id = await self._build_env(spec, stale=image_id)
         else:
             self._touch_image(spec.env_hash)
         return EnvRef(env_hash=spec.env_hash, python=spec.python, location=image_id, spec=spec)
 
+    async def cached_env(self, spec: EnvSpec) -> EnvRef | None:
+        """The env image for ``spec`` if one is known (never builds): what an untrusted run may use."""
+        image_id = await self._known_image(spec)
+        if image_id is None or image_id in self._dead_images:
+            return None
+        self._touch_image(spec.env_hash)
+        return EnvRef(env_hash=spec.env_hash, python=spec.python, location=image_id, spec=spec)
+
+    async def _known_image(self, spec: EnvSpec) -> str | None:
+        image_id = self._images.get(spec.env_hash) or self._cached_image(spec.env_hash)
+        if image_id is None:
+            image_id = await self._db_image_id(spec.env_hash)
+            if image_id is not None:
+                self._remember_image(spec, image_id)
+        return image_id
+
     async def _build_env(self, spec: EnvSpec, *, stale: str | None = None) -> str:
+        """Build the env image of ``spec`` (budget, daily build cap; the build is priced as spend).
+
+        Modal's billing of image builds is not documented for the client, so a build is *estimated*
+        at the shard limit rate for its wall time and recorded as ``executor_spend`` (kind ``build``).
+        """
         lock = self._build_locks.setdefault(spec.env_hash, asyncio.Lock())
         async with lock:
             current = self._images.get(spec.env_hash)
             if current is not None and current != stale and current not in self._dead_images:
                 return current
-            started = time.monotonic()
+            if self._closed:
+                raise CapacityError("the Modal executor is closed")
+            await self._guard_budget(amount=self.cost_usd(self._default_resources(), BUILD_RESERVE_S))
+            cap = self.settings.max_image_builds_per_day
+            built_today = await self._db_builds_today() + len(self._pending_builds)
+            if built_today >= cap:
+                raise CapacityError(f"image build cap reached ({built_today} of {cap} today)")
             image = await asyncio.to_thread(env_image, spec, spec.plugin_wheel, modal=self.modal)
-            image_id = await build_and_record(await self.app(), image, verbose=self.verbose, modal=self.modal)
+            app = await self.app()
+            started = time.monotonic()
+            try:  # a failed build counts too: Modal may have run (and billed) part of it
+                image_id = await build_and_record(app, image, verbose=self.verbose, modal=self.modal)
+            finally:
+                seconds = time.monotonic() - started
+                usd = self.cost_usd(self._default_resources(), seconds)
+                self.stats.build_usd += usd
+                self._record_spend("build", usd)
             self.stats.images_built += 1
-            log.info(
-                "modal env image %s for %s built in %.1f s",
-                image_id,
-                spec.env_hash[:12],
-                time.monotonic() - started,
-            )
+            log.info("modal env image %s for %s built in %.1f s", image_id, spec.env_hash[:12], seconds)
             if stale is not None and stale != image_id:
                 self._remap[stale] = image_id
             self._remember_image(spec, image_id)
@@ -476,17 +545,19 @@ class ModalExecutor:
         self, env: EnvRef, repo_id: int | str, sha: str, tarball: bytes
     ) -> SnapshotRef:
         """Build a snapshot image from ``tarball`` (trusted, default-branch source) and record it."""
-        await self._guard_budget()
-        if not await self._slots.take(SLOT_WAIT_S):
-            raise CapacityError(
-                f"no sandbox slot for a snapshot build (max_sandboxes={self._slots.capacity})"
-            )
+        if self._closed:
+            raise CapacityError("the Modal executor is closed")
         resources = Resources(
             cpu=self.settings.shard_cpu_limit,
             memory_mib=self.settings.shard_memory_mib,
             network="blocked",
             timeout_s=min(SNAPSHOT_SANDBOX_TIMEOUT_S, self.settings.run_timeout_s),
         )
+        await self._guard_budget(amount=self.cost_usd(resources, resources.timeout_s))
+        if not await self._slots.take(SLOT_WAIT_S):
+            raise CapacityError(
+                f"no sandbox slot for a snapshot build (max_sandboxes={self._slots.capacity})"
+            )
         live = await self._create_or_rebuild(
             env, env.location, resources, role="snapshot", repo=str(repo_id), run="snapshot"
         )
@@ -550,27 +621,37 @@ class ModalExecutor:
         """
         if n <= 0:
             return []
+        if self._closed:
+            raise CapacityError("the Modal executor is closed")
         repo = str(labels.get("repo", ""))
         run = str(labels.get("coverset_run", ""))
-        await self._guard_budget(run)
+        await self._guard_budget(run, amount=self._run_exposure(n, resources))
         env = base.env if isinstance(base, SnapshotRef) else base
         image_id = self._current_image(base.image_id if isinstance(base, SnapshotRef) else base.location)
         claimed = await self._claim_pool(repo, image_id, resources, run, n)
-        workers: list[Worker] = [ModalWorker(self, live, kill_grace_s=self.kill_grace_s) for live in claimed]
-        wanted = n - len(claimed)
-        if wanted <= 0:
-            return workers
-        slots = self._slots.try_take(wanted)
-        if slots < wanted:
-            message = f"max_sandboxes={self._slots.capacity} reached: {slots + len(claimed)} of {n} workers"
-            log.warning(message)
-            self.stats.capacity_errors.append(message)
-        created, errors = await self._create_many(
-            image_id, slots, resources, role="shard", repo=repo, run=run, idle_timeout_s=ttl_s
-        )
-        if not created and errors and all(_is_not_found(e) for e in errors):
-            created, errors = await self._recover_image(base, env, slots, resources, repo, run, ttl_s)
-        workers += [ModalWorker(self, live, kill_grace_s=self.kill_grace_s) for live in created]
+        created: list[_Live] = []
+        try:
+            wanted = n - len(claimed)
+            errors: list[BaseException] = []
+            if wanted > 0:
+                slots = self._slots.try_take(wanted)
+                if slots < wanted:
+                    message = (
+                        f"max_sandboxes={self._slots.capacity} reached: {slots + len(claimed)} of {n} workers"
+                    )
+                    log.warning(message)
+                    self.stats.capacity_errors.append(message)
+                created, errors = await self._create_many(
+                    image_id, slots, resources, role="shard", repo=repo, run=run, idle_timeout_s=ttl_s
+                )
+                if not created and errors and all(_is_not_found(e) for e in errors):
+                    created, errors = await self._recover_image(base, env, slots, resources, repo, run, ttl_s)
+        except BaseException:
+            await self._abandon([*claimed, *created])
+            raise
+        workers: list[Worker] = [
+            ModalWorker(self, live, kill_grace_s=self.kill_grace_s) for live in [*claimed, *created]
+        ]
         if not workers:
             if errors:
                 raise CapacityError(
@@ -622,6 +703,9 @@ class ModalExecutor:
         except ExecutorError as exc:
             self._slots.give_back(k)
             return [], [exc]
+        except BaseException:
+            self._slots.give_back(k)
+            raise
         self._remap[env.location] = new_id
         return await self._create_many(
             new_id, k, resources, role="shard", repo=repo, run=run, idle_timeout_s=ttl_s
@@ -645,7 +729,11 @@ class ModalExecutor:
                 raise CapacityError("no sandbox slot left")
             self.stats.rebuilds += 1
             self._dead_images.add(self._current_image(image_id))
-            new_id = await self._build_env(env.spec, stale=self._current_image(image_id))
+            try:
+                new_id = await self._build_env(env.spec, stale=self._current_image(image_id))
+            except BaseException:
+                self._slots.give_back(1)
+                raise
             created, errors = await self._create_many(
                 new_id, 1, resources, role=role, repo=repo, run=run, idle_timeout_s=self.settings.pool_ttl_s
             )
@@ -664,26 +752,46 @@ class ModalExecutor:
         repo: str,
         run: str,
         idle_timeout_s: int | None,
+        extra_timeout_s: int = 0,
     ) -> tuple[list[_Live], list[BaseException]]:
-        """Create ``k`` sandboxes concurrently (``k`` slots already taken; failed ones are returned)."""
+        """Create ``k`` sandboxes concurrently (``k`` slots already taken; failed ones are returned).
+
+        If the caller is cancelled meanwhile, the creates still in flight are cancelled, every slot
+        of a failed or cancelled create is given back, the sandboxes already created are terminated
+        (which frees their slots) and the cancellation propagates: nothing is left behind.
+        """
         if k <= 0:
             return [], []
-        results = await asyncio.gather(
-            *(
+        tasks = [
+            asyncio.ensure_future(
                 self._create_one(
-                    image_id, resources, role=role, repo=repo, run=run, idle_timeout_s=idle_timeout_s
+                    image_id,
+                    resources,
+                    role=role,
+                    repo=repo,
+                    run=run,
+                    idle_timeout_s=idle_timeout_s,
+                    extra_timeout_s=extra_timeout_s,
                 )
-                for _ in range(k)
-            ),
-            return_exceptions=True,
-        )
+            )
+            for _ in range(k)
+        ]
+        try:
+            await asyncio.wait(tasks)
+        except asyncio.CancelledError:
+            cleanup = asyncio.ensure_future(self._abandon_creates(tasks))
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(cleanup)
+            raise
         created: list[_Live] = []
         errors: list[BaseException] = []
-        for result in results:
+        for task in tasks:
+            result: BaseException | _Live = (
+                asyncio.CancelledError() if task.cancelled() else (task.exception() or task.result())
+            )
             if isinstance(result, _Live):
                 created.append(result)
                 continue
-            assert isinstance(result, BaseException)
             self._slots.give_back(1)
             errors.append(result)
             if isinstance(result, asyncio.CancelledError):
@@ -699,6 +807,35 @@ class ModalExecutor:
             raise asyncio.CancelledError()
         return created, errors
 
+    async def _abandon_creates(self, tasks: list[asyncio.Future[_Live]]) -> None:
+        """The caller of :meth:`_create_many` was cancelled: undo every create (see there)."""
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        created = [t.result() for t in tasks if not t.cancelled() and t.exception() is None]
+        self._slots.give_back(len(tasks) - len(created))
+        await self._terminate_all(created)
+
+    async def _abandon(self, lives: list[_Live]) -> None:
+        """Terminate ``lives`` even while the caller is being cancelled (shielded)."""
+        if not lives:
+            return
+        for entries in self._pool.values():
+            entries[:] = [e for e in entries if e not in lives]
+        cleanup = asyncio.ensure_future(self._terminate_all(lives))
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(cleanup)
+
+    def _tags(self, repo: str, run: str, role: str, created: int) -> dict[str, str]:
+        return {
+            "coverset_instance": self.instance_id,
+            "repo": repo,
+            "run": run,
+            "role": role,
+            "created": str(created),
+            "owner": self.owner,
+        }
+
     async def _create_one(
         self,
         image_id: str,
@@ -708,13 +845,21 @@ class ModalExecutor:
         repo: str,
         run: str,
         idle_timeout_s: int | None,
+        extra_timeout_s: int = 0,
     ) -> _Live:
         modal = self.modal
         app = await self.app()
-        tags = {"coverset_instance": self.instance_id, "repo": repo, "run": run, "role": role}
-        options = sandbox_options(self.settings, resources, tags, idle_timeout_s=idle_timeout_s)
+        created = int(time.time())
+        options = sandbox_options(
+            self.settings,
+            resources,
+            self._tags(repo, run, role, created),
+            idle_timeout_s=idle_timeout_s,
+            extra_timeout_s=extra_timeout_s,
+        )
         image = image_from_id(image_id, modal=modal)
         sandbox = await modal.Sandbox.create.aio(app=app, image=image, **options)
+        # Registered before anything else is awaited: from here on close() and reap() know it.
         live = _Live(
             sandbox=sandbox,
             sandbox_id=str(sandbox.object_id),
@@ -725,6 +870,7 @@ class ModalExecutor:
             network=resources.network,
             cpu_limit=options["cpu"][1],
             memory_mib=options["memory"][1],
+            created_wall=created,
         )
         self._live[live.sandbox_id] = live
         self.stats.created += 1
@@ -737,16 +883,19 @@ class ModalExecutor:
 
         Returns the sandbox and an async ``terminate`` callback (call it in a ``finally``).
         """
-        await self._guard_budget()
-        if not await self._slots.take(SLOT_WAIT_S):
-            raise CapacityError(f"no sandbox slot (max_sandboxes={self._slots.capacity})")
+        if self._closed:
+            raise CapacityError("the Modal executor is closed")
         res = resources or Resources(
             cpu=self.settings.shard_cpu_limit,
             memory_mib=self.settings.shard_memory_mib,
             network="blocked",
             timeout_s=min(600, self.settings.run_timeout_s),
         )
-        tags = {"coverset_instance": self.instance_id, "repo": repo, "run": run, "role": role}
+        await self._guard_budget(amount=self.cost_usd(res, min(res.timeout_s, self.settings.run_timeout_s)))
+        if not await self._slots.take(SLOT_WAIT_S):
+            raise CapacityError(f"no sandbox slot (max_sandboxes={self._slots.capacity})")
+        created = int(time.time())
+        tags = self._tags(repo, run, role, created)
         options = sandbox_options(self.settings, res, tags, idle_timeout_s=self.settings.pool_ttl_s)
         try:
             sandbox = await self.modal.Sandbox.create.aio(app=await self.app(), image=image, **options)
@@ -763,6 +912,7 @@ class ModalExecutor:
             network=res.network,
             cpu_limit=options["cpu"][1],
             memory_mib=options["memory"][1],
+            created_wall=created,
         )
         self._live[live.sandbox_id] = live
         self.stats.created += 1
@@ -792,7 +942,7 @@ class ModalExecutor:
             return
         seconds = max(0.0, time.monotonic() - live.created_at)
         if live.role != "shard":
-            self.stats.untracked_usd += live.rate() * seconds
+            self._record_spend(spend_kind(live.role), live.rate() * seconds, live.sandbox_id)
         self.stats.lifetime_usd += live.rate() * seconds
         self.stats.sandbox_seconds += seconds
         try:
@@ -816,8 +966,9 @@ class ModalExecutor:
         """
         if size <= 0 or self._closed:
             return 0
+        ttl = ttl_s or self.settings.pool_ttl_s
         try:
-            await self._guard_budget()
+            await self._guard_budget(amount=self.idle_cost_usd(ttl or self.settings.run_timeout_s) * size)
         except CapacityError as exc:
             log.warning("not filling the pool: %s", exc)
             return 0
@@ -845,8 +996,12 @@ class ModalExecutor:
             role="pool",
             repo=repo,
             run="pool",
-            idle_timeout_s=ttl_s or self.settings.pool_ttl_s,
+            idle_timeout_s=ttl,
+            extra_timeout_s=ttl,  # a claimed sandbox must still survive the run's full timeout
         )
+        if self._closed:  # closed while creating: close() already ran, so clean up here
+            await self._terminate_all(created)
+            return 0
         entries.extend(created)
         return len(created)
 
@@ -907,7 +1062,11 @@ class ModalExecutor:
                 )  # fmt: skip
         if not candidates:
             return []
-        alive = await asyncio.gather(*(self._still_running(e) for e in candidates))
+        try:
+            alive = await asyncio.gather(*(self._still_running(e) for e in candidates))
+        except BaseException:  # cancelled: the candidates left the pool, so terminate them
+            await self._abandon(candidates)
+            raise
         claimed: list[_Live] = []
         for entry, ok in zip(candidates, alive, strict=True):
             if not ok:
@@ -920,12 +1079,16 @@ class ModalExecutor:
             # The pooled time so far was idle (billed at requests) and belongs to no run.
             idle_s = time.monotonic() - entry.created_at
             idle_usd = rate_usd_per_s(CPU_REQUEST, MEMORY_REQUEST_MIB) * idle_s
-            self.stats.untracked_usd += idle_usd
+            self._record_spend("pool", idle_usd, entry.sandbox_id)
             self.stats.lifetime_usd += idle_usd
             self.stats.sandbox_seconds += idle_s
             entry.created_at = time.monotonic()
             claimed.append(entry)
-        await asyncio.gather(*(self._retag(e) for e in claimed), return_exceptions=True)
+        try:
+            await asyncio.gather(*(self._retag(e) for e in claimed), return_exceptions=True)
+        except BaseException:  # cancelled before the caller got them: terminate them
+            await self._abandon(claimed)
+            raise
         self.stats.pool_claims += len(claimed)
         return claimed
 
@@ -936,7 +1099,7 @@ class ModalExecutor:
             return False
 
     async def _retag(self, entry: _Live) -> None:
-        tags = {"coverset_instance": self.instance_id, "repo": entry.repo, "run": entry.run, "role": "shard"}
+        tags = self._tags(entry.repo, entry.run, "shard", entry.created_wall)
         try:
             await entry.sandbox.set_tags.aio(tags)
         except Exception as exc:  # the reaper still keeps it: it is in this process's live set
@@ -944,16 +1107,44 @@ class ModalExecutor:
 
     # -- reaping -----------------------------------------------------------------------------------
 
-    async def reap(self, *, active_run_ids: set[str], all: bool = False) -> ReapReport:
+    def natural_lifetime_s(self, role: str) -> int | None:
+        """How long a sandbox of ``role`` may legitimately live without a run: pool sandboxes their
+        idle TTL plus a grace, snapshot builds, smoke tests and benchmarks the run timeout; None for
+        shards (they are judged by their run)."""
+        if role == "shard":
+            return None
+        if role == "pool":
+            return (self.settings.pool_ttl_s or self.settings.run_timeout_s) + POOL_REAP_GRACE_S
+        return self.settings.run_timeout_s
+
+    def _young(self, tags: Mapping[str, str], now: float) -> bool:
+        """Whether a sandbox may still belong to another process (see :meth:`natural_lifetime_s`)."""
+        lifetime = self.natural_lifetime_s(str(tags.get("role", "shard")))
+        try:
+            created = int(str(tags.get("created", "")))
+        except ValueError:
+            return False  # no creation time (an older coverset): treat it as old
+        return lifetime is not None and now - created < lifetime
+
+    async def reap(
+        self, *, active_run_ids: set[str], all: bool = False, any_instance: bool = False
+    ) -> ReapReport:
         """Terminate sandboxes tagged with this instance that no active run (or this process) holds.
 
-        With ``all``, terminate every one of them, including this process's pool and workers.
+        Pool, snapshot, smoke and benchmark sandboxes younger than :meth:`natural_lifetime_s` are kept:
+        another process sharing the data dir (``serve``, ``coverset warm``, ``modal smoke``) may own
+        them. With ``all``, terminate every one of them, including this process's pool and workers and
+        other processes' young sandboxes. With ``any_instance``, look at every sandbox in the App that
+        carries a ``coverset_instance`` tag (other data dirs: benchmarks, scratch demos) instead of only
+        this installation's; their runs are unknown here, so their shards are terminated.
         """
         found = terminated = kept = 0
         errors: list[str] = []
         app = await self.app()
         mine = set() if all else set(self._live)
-        listing = self.modal.Sandbox.list.aio(app_id=app.app_id, tags={"coverset_instance": self.instance_id})
+        filters = {} if any_instance else {"tags": {"coverset_instance": self.instance_id}}
+        listing = self.modal.Sandbox.list.aio(app_id=app.app_id, **filters)
+        now = time.time()
         async for sandbox in listing:
             sandbox_id = str(sandbox.object_id)
             try:
@@ -961,12 +1152,16 @@ class ModalExecutor:
                     continue  # finished; Modal lists terminated sandboxes for a few seconds
             except Exception:
                 pass
-            found += 1
             try:
                 tags = await sandbox.get_tags.aio()
             except Exception:
                 tags = {}
-            if not all and (sandbox_id in mine or tags.get("run") in active_run_ids):
+            if any_instance and "coverset_instance" not in tags:
+                continue  # not a coverset sandbox
+            found += 1
+            if not all and (
+                sandbox_id in mine or tags.get("run") in active_run_ids or self._young(tags, now)
+            ):
                 kept += 1
                 continue
             try:
@@ -1035,7 +1230,11 @@ class ModalExecutor:
         return len(self._live)
 
     async def close(self) -> None:
-        """Terminate every sandbox this process holds (pool included) and flush pending DB writes."""
+        """Terminate every sandbox this process holds (pool included) and flush pending DB writes.
+
+        A closed executor creates nothing more: ``acquire`` and ``create_sandbox`` raise
+        :class:`CapacityError`, ``fill_pool`` returns 0.
+        """
         self._closed = True
         self._pool.clear()
         await self._terminate_all(list(self._live.values()))
@@ -1052,9 +1251,11 @@ class ModalExecutor:
     async def spent_today_usd(self, *, exclude_run: str | None = None) -> float:
         """Today's estimated Modal spend, as the orchestrator's budget sees it plus what it cannot see.
 
-        ``runs.cost_estimate`` holds finished runs' costs and in-flight runs' reservations (minus
-        ``exclude_run``, the run asking for workers, exactly like ``budget.reserve``); on top come the
-        sandboxes this process holds for no run (pool, snapshot builds) and their past cost.
+        :func:`coverset.orchestrator.budget.spent_today` sums ``runs.cost_estimate`` (finished runs'
+        costs and in-flight runs' reservations, minus ``exclude_run``, the run asking for workers,
+        exactly like ``budget.reserve``) and today's ``executor_spend`` rows (non-run spend of every
+        process). On top come what only this process knows: the accrued time of the sandboxes it holds
+        for no run (pool, snapshot builds, smoke tests) and non-run spend not yet written.
         """
         if self._budget_probe is not None:
             recorded = await self._budget_probe()
@@ -1064,13 +1265,82 @@ class ModalExecutor:
         unattributed = sum(
             live.rate() * (now - live.created_at) for live in self._live.values() if live.role != "shard"
         )
-        return recorded + unattributed + self.stats.untracked_usd
+        unwritten = sum(self._pending_spend.values()) + self._lost_spend.get(self._today(), 0.0)
+        return recorded + unattributed + unwritten
 
-    async def _guard_budget(self, run: str | None = None) -> None:
+    async def _guard_budget(self, run: str | None = None, *, amount: float = 0.0) -> None:
+        """Refuse when today's spend has reached the budget or ``amount`` more would pass it."""
         budget = self.settings.modal_daily_budget_usd
         spent = await self.spent_today_usd(exclude_run=run or None)
-        if spent >= budget:
-            raise CapacityError(f"budget exhausted (${spent:.2f} of ${budget:.2f} today)")
+        if spent >= budget or spent + max(0.0, amount) > budget:
+            raise CapacityError(
+                f"budget exhausted (${spent:.2f} of ${budget:.2f} today; this needs up to ${amount:.2f})"
+            )
+
+    def _run_exposure(self, n: int, resources: Resources) -> float:
+        """What ``n`` more workers of a run may cost: their run timeout at the limit rate, at most
+        the per-run cap (``COVERSET_MAX_RUN_COST_USD``, which the runner enforces live)."""
+        from coverset.orchestrator.budget import run_cost_cap
+
+        worst = n * self.cost_usd(resources, min(resources.timeout_s, self.settings.run_timeout_s))
+        return min(worst, run_cost_cap(self.settings))
+
+    def _default_resources(self) -> Resources:
+        return Resources(
+            cpu=self.settings.shard_cpu_limit,
+            memory_mib=self.settings.shard_memory_mib,
+            network="blocked",
+            timeout_s=self.settings.run_timeout_s,
+        )
+
+    def _today(self) -> str:
+        return self.settings.now().date().isoformat()
+
+    def _record_spend(self, kind: str, usd: float, sandbox_id: str | None = None) -> None:
+        """Persist non-run spend as an ``executor_spend`` row (in the background, retried); until it
+        lands it is counted from memory by :meth:`spent_today_usd`."""
+        usd = max(0.0, float(usd))
+        if usd <= 0.0 and kind != "build":
+            return
+        self.stats.untracked_usd += usd
+        token = next(self._spend_ids)
+        self._pending_spend[token] = usd
+        if kind == "build":
+            self._pending_builds.add(token)
+        day = self._today()
+
+        async def write(session: Any) -> None:
+            from coverset.orchestrator.budget import record_spend
+
+            record_spend(session, self.settings, self.name, kind, usd, sandbox_id=sandbox_id)
+
+        async def persist() -> None:
+            try:
+                for delay in (0.0, *DB_RETRY_DELAYS_S):
+                    if delay:
+                        await asyncio.sleep(delay)
+                    try:
+                        await self._write_once(write)
+                        return
+                    except Exception as exc:
+                        if "no such table" in str(exc):  # no database here (smoke, scratch dirs)
+                            return
+                        log.debug("recording %s spend failed: %s", kind, exc)
+                log.warning("could not record $%.4f of %s spend; counting it in memory", usd, kind)
+                self._lost_spend[day] = self._lost_spend.get(day, 0.0) + usd
+            finally:
+                self._pending_spend.pop(token, None)
+                self._pending_builds.discard(token)
+
+        try:
+            task = asyncio.get_running_loop().create_task(persist())
+        except RuntimeError:  # no event loop: keep it in memory for this process
+            self._pending_spend.pop(token, None)
+            self._pending_builds.discard(token)
+            self._lost_spend[day] = self._lost_spend.get(day, 0.0) + usd
+            return
+        self._db_tasks.add(task)
+        task.add_done_callback(self._db_tasks.discard)
 
     # -- persistence: images.json and the control-plane database ------------------------------------
 
@@ -1154,6 +1424,15 @@ class ModalExecutor:
 
         value = await self._db_read(query)
         return float(value or 0.0)
+
+    async def _db_builds_today(self) -> int:
+        from coverset.orchestrator.budget import builds_today
+
+        async def query(session: Any) -> int:
+            return await builds_today(session, self.settings, self.name)
+
+        value = await self._db_read(query)
+        return int(value or 0)
 
     async def _db_image_id(self, env_hash: str) -> str | None:
         from sqlalchemy import select

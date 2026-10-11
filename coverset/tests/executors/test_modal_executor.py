@@ -7,9 +7,12 @@ import dataclasses
 import io
 import json
 import os
+import socket
 import subprocess
 import tarfile
+import time
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +124,7 @@ def tarball(files: dict[str, bytes]) -> bytes:
 # -- guards ------------------------------------------------------------------------------------------
 
 
+@pytest.mark.security
 def test_sandbox_options_carry_every_guard(settings: Settings) -> None:
     tags = {"coverset_instance": "i", "repo": "1", "run": "r", "role": "shard"}
     options = sandbox_options(settings, RESOURCES, tags, idle_timeout_s=600)
@@ -145,6 +149,7 @@ def test_sandbox_options_clamp_to_the_configured_ceilings(settings: Settings) ->
     assert options["idle_timeout"] is None
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     ("network", "allowlist", "expected"),
     [
@@ -217,7 +222,8 @@ async def test_ensure_env_builds_the_recipe_and_records_the_image(
     assert steps[2] == ("env", {"UV_COMPILE_BYTECODE": "1", "PYTHONUNBUFFERED": "1"})
     assert steps[3][0] == "uv_pip_install" and steps[3][3] == (spec.requirements_txt,)
     assert steps[4] == ("add_local_file", str(wheel), f"/opt/wheels/{wheel.name}", True)
-    assert steps[5] == ("run_commands", (f"pip install /opt/wheels/{wheel.name}",))  # with its deps
+    # without its dependencies, like the LocalExecutor: the requirements carry the coverage pin
+    assert steps[5] == ("run_commands", (f"pip install --no-deps /opt/wheels/{wheel.name}",))
     assert env.location.startswith("im-") and env.spec is spec
     records = json.loads((db_settings.data_dir / "modal" / "images.json").read_text())
     assert records[spec.env_hash]["image_id"] == env.location
@@ -268,6 +274,7 @@ async def test_empty_requirements_skip_the_install_step(
 # -- acquire ---------------------------------------------------------------------------------------------
 
 
+@pytest.mark.security
 async def test_acquire_creates_guarded_tagged_sandboxes(
     settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
 ) -> None:
@@ -280,11 +287,14 @@ async def test_acquire_creates_guarded_tagged_sandboxes(
         assert call["timeout"] <= settings.run_timeout_s and call["idle_timeout"] == 600
         assert call["secrets"] == [] and call["include_oidc_identity_token"] is False
         assert call["block_network"] is True and "name" not in call
-        assert call["tags"] == {
+        tags = dict(call["tags"])
+        assert abs(int(tags.pop("created")) - time.time()) < 60
+        assert tags == {
             "coverset_instance": executor.instance_id,
             "repo": "1",
             "run": "run_A",
             "role": "shard",
+            "owner": f"{socket.gethostname()[:64]}:{os.getpid()}",
         }
     assert all(isinstance(w, ModalWorker) and w.root == "/work" for w in workers)
     await executor.close()
@@ -314,6 +324,7 @@ async def test_acquire_with_nothing_available_raises_capacity_error(
     assert executor._slots.used == 0
 
 
+@pytest.mark.security
 async def test_acquire_respects_the_global_sandbox_cap(
     settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
 ) -> None:
@@ -329,6 +340,7 @@ async def test_acquire_respects_the_global_sandbox_cap(
     await second.close()
 
 
+@pytest.mark.security
 async def test_budget_exhausted_refuses_before_creating(
     settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
 ) -> None:
@@ -498,6 +510,7 @@ async def _seed_pool_repo(settings: Settings, *, cost: float = 0.0) -> int:
     return repo_id
 
 
+@pytest.mark.security
 async def test_serve_fills_the_pool_reaps_and_drains_on_shutdown(
     db_settings: Settings, fake_modal: Any, world: Any
 ) -> None:
@@ -859,3 +872,237 @@ async def test_budget_ignores_the_acquiring_runs_own_reservation(
     assert len(workers) == 1, "a run's own reservation must not lock it out (as budget.reserve)"
     with pytest.raises(CapacityError, match="budget exhausted"):
         await executor.acquire(env_ref(spec), 1, RESOURCES, 600, {**LABELS, "coverset_run": "run_other"})
+
+
+# -- cost-safety fixes: cancellation, close, slots, budget, spend, image builds, reaping --------------------
+
+
+async def _gate_creates_after(fake_modal: Any, k: int) -> asyncio.Event:
+    """Let the first ``k`` creates through; the rest wait for the returned event."""
+    original = fake_modal.Sandbox.create.aio
+    gate = asyncio.Event()
+    calls = {"n": 0}
+
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] > k:
+            await gate.wait()
+        return await original(*args, **kwargs)
+
+    fake_modal.Sandbox.create.aio = create
+    return gate
+
+
+@pytest.mark.security
+async def test_cancelled_acquire_leaves_no_sandbox_and_no_slot(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    executor = make_executor(settings, fake_modal)
+    await _gate_creates_after(fake_modal, 2)
+    task = asyncio.create_task(executor.acquire(env_ref(spec), 4, RESOURCES, 600, LABELS))
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if len(world.sandboxes) >= 2:
+            break
+    assert len(world.sandboxes) == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert world.live() == [] and executor.live_sandboxes == 0
+    assert executor._slots.used == 0, "every slot came back: the two created and the two cancelled"
+
+
+@pytest.mark.security
+async def test_cancelled_pool_claim_terminates_the_claimed_sandboxes(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    executor = make_executor(settings, fake_modal)
+    base = SnapshotRef(env=env_ref(spec), sha="a" * 40, image_id="im-snap", snapshot_id=1)
+    assert await executor.fill_pool(base, "1", 2, 600) == 2
+    gate = asyncio.Event()
+    for sandbox in world.live():
+
+        async def slow_poll(sb: Any = sandbox) -> int | None:
+            await gate.wait()
+            return 0 if sb.terminated else None
+
+        sandbox.poll.aio = slow_poll
+    task = asyncio.create_task(executor.acquire(base, 2, RESOURCES, 600, LABELS))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert world.live() == [] and executor._slots.used == 0 and executor.pool_size() == 0
+
+
+@pytest.mark.security
+async def test_a_closed_executor_creates_nothing(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    executor = make_executor(settings, fake_modal)
+    await executor.close()
+    with pytest.raises(CapacityError, match="closed"):
+        await executor.acquire(env_ref(spec), 2, RESOURCES, 600, LABELS)
+    with pytest.raises(CapacityError, match="closed"):
+        await executor.create_sandbox(fake_modal.Image.debian_slim("3.13"), role="smoke")
+    assert await executor.fill_pool(env_ref(spec), "1", 2, 600) == 0
+    assert world.create_calls == []
+
+
+@pytest.mark.security
+async def test_a_failed_rebuild_gives_its_slot_back(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    executor = make_executor(settings, fake_modal)
+    world.missing_images.add("im-env")
+    world.build_error = RuntimeError("build boom")
+    with pytest.raises(ExecutorError):
+        await executor.snapshot_from_archive(env_ref(spec), 1, "a" * 40, tarball({"a.py": b""}))
+    assert executor._slots.used == 0 and world.live() == []
+
+
+@pytest.mark.security
+async def test_acquire_admits_only_what_fits_in_the_budget(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    async def almost() -> float:
+        return settings.modal_daily_budget_usd - 0.01
+
+    executor = make_executor(settings, fake_modal, budget_probe=almost)
+    with pytest.raises(CapacityError, match="budget exhausted"):
+        await executor.acquire(env_ref(spec), 32, RESOURCES, 600, LABELS)
+    assert world.create_calls == []
+    roomy = make_executor(settings, fake_modal)
+    one_worker_worst = roomy.cost_usd(RESOURCES, settings.run_timeout_s)
+    assert 32 * one_worker_worst > settings.modal_daily_budget_usd  # $5.31 uncapped
+    assert roomy._run_exposure(32, RESOURCES) == settings.max_run_cost_usd  # capped per run
+    assert len(await roomy.acquire(env_ref(spec), 32, RESOURCES, 600, LABELS)) == 32
+
+
+@pytest.mark.security
+async def test_pooled_sandboxes_outlive_the_run_timeout(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    executor = make_executor(settings, fake_modal)
+    base = SnapshotRef(env=env_ref(spec), sha="a" * 40, image_id="im-snap", snapshot_id=1)
+    await executor.fill_pool(base, "1", 1, 600)
+    call = world.create_calls[-1]
+    assert call["timeout"] == settings.run_timeout_s + 600 and call["idle_timeout"] == 600
+    no_ttl = make_executor(settings.model_copy(update={"pool_ttl_s": 0}), fake_modal)
+    await no_ttl.fill_pool(base, "2", 1, 0)
+    call = world.create_calls[-1]
+    assert call["timeout"] == settings.run_timeout_s and call["idle_timeout"] is None
+
+
+@pytest.mark.security
+async def test_non_run_spend_is_persisted_and_counted_today_only(
+    db_settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    from coverset.db.models import ExecutorSpend
+    from coverset.orchestrator import budget
+
+    executor = ModalExecutor(db_settings, client_factory=lambda: fake_modal, slots=SandboxSlots(8))
+    _OPEN.append(executor)
+    executor.stats.untracked_usd = 10 * db_settings.modal_daily_budget_usd  # a stat, not the budget
+    base = SnapshotRef(env=env_ref(spec), sha="a" * 40, image_id="im-snap", snapshot_id=1)
+    assert await executor.fill_pool(base, "1", 2, 600) == 2
+    await executor.acquire(base, 1, RESOURCES, 600, LABELS)  # claims one: its idle time is recorded
+    await executor.drain_pool()  # terminates the other: recorded too
+    sandbox, terminate = await executor.create_sandbox(fake_modal.Image.debian_slim("3.13"), role="smoke")
+    await terminate()
+    await asyncio.gather(*executor._db_tasks)
+    database = Database.from_url(db_settings.database_url)
+    try:
+        async with database.session() as session:
+            rows = list(await session.scalars(select(ExecutorSpend).order_by(ExecutorSpend.id)))
+            assert sorted(r.kind for r in rows) == ["pool", "pool", "smoke"]
+            assert {r.day for r in rows} == {db_settings.now().date()} and all(r.usd >= 0 for r in rows)
+            assert {r.executor for r in rows} == {"modal"} and all(r.sandbox_id for r in rows)
+            total = sum(r.usd for r in rows)
+            assert await budget.spent_today(session, db_settings) == pytest.approx(total)
+            tomorrow = db_settings.model_copy(update={"fake_now": db_settings.now() + timedelta(days=1)})
+            assert await budget.spent_today(session, tomorrow) == 0.0
+    finally:
+        await database.engine.dispose()
+    restarted = ModalExecutor(db_settings, client_factory=lambda: fake_modal, slots=SandboxSlots(8))
+    _OPEN.append(restarted)
+    assert await restarted.spent_today_usd() == pytest.approx(total), "a restart remembers it"
+
+
+@pytest.mark.security
+async def test_image_builds_pass_the_budget_and_the_daily_cap(
+    db_settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    from coverset.db.models import ExecutorSpend
+
+    async def broke() -> float:
+        return 1e9
+
+    exhausted = make_executor(db_settings, fake_modal, budget_probe=broke)
+    with pytest.raises(CapacityError, match="budget exhausted"):
+        await exhausted.ensure_env(spec)
+    assert world.builds == []
+    capped = db_settings.model_copy(update={"max_image_builds_per_day": 1})
+    executor = ModalExecutor(capped, client_factory=lambda: fake_modal, slots=SandboxSlots(4))
+    _OPEN.append(executor)
+    await executor.ensure_env(spec)
+    other = dataclasses.replace(spec, env_hash="9" * 64, requirements_txt="pytest==9.1.1\nrich==14.0\n")
+    with pytest.raises(CapacityError, match="image build cap reached"):
+        await executor.ensure_env(other)
+    assert len(world.builds) == 1 and executor.stats.build_usd >= 0
+    await asyncio.gather(*executor._db_tasks)
+    database = Database.from_url(db_settings.database_url)
+    try:
+        async with database.session() as session:
+            kinds = list(await session.scalars(select(ExecutorSpend.kind)))
+    finally:
+        await database.engine.dispose()
+    assert kinds == ["build"]
+
+
+@pytest.mark.security
+async def test_cached_env_never_builds(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    executor = make_executor(settings, fake_modal)
+    assert await executor.cached_env(spec) is None and world.builds == []
+    built = await executor.ensure_env(spec)
+    assert (await executor.cached_env(spec)) == built and len(world.builds) == 1
+
+
+@pytest.mark.security
+async def test_a_plain_reap_keeps_other_processes_young_pool_and_snapshot_sandboxes(
+    settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
+) -> None:
+    serve = make_executor(settings, fake_modal)
+    base = SnapshotRef(env=env_ref(spec), sha="a" * 40, image_id="im-snap", snapshot_id=1)
+    assert await serve.fill_pool(base, "1", 4, 600) == 4
+    await serve.create_sandbox(
+        fake_modal.Image.debian_slim("3.13"), role="snapshot", repo="1", run="snapshot"
+    )
+    old = int(time.time()) - settings.run_timeout_s - 1
+    stale_pool = world.add_foreign(
+        {"coverset_instance": serve.instance_id, "run": "pool", "role": "pool", "created": str(old)}
+    )
+    cli = make_executor(settings, fake_modal)  # `coverset modal reap` in another process
+    report = await cli.reap(active_run_ids=set())
+    assert (report.found, report.terminated, report.kept) == (6, 1, 5) and stale_pool.terminated
+    assert serve.pool_size("1") == 4 and len(world.live()) == 5
+    report = await cli.reap(active_run_ids=set(), all=True)
+    assert report.terminated == 5 and world.live() == []
+
+
+@pytest.mark.security
+async def test_reap_any_instance_reaches_other_data_dirs_only_for_coverset_sandboxes(
+    settings: Settings, fake_modal: Any, world: Any
+) -> None:
+    from coverset.orchestrator.reaper import reap
+
+    executor = make_executor(settings, fake_modal)
+    bench = world.add_foreign({"coverset_instance": "bench-dir", "run": "run_x", "role": "shard"})
+    unrelated = world.add_foreign({"team": "someone-else"})
+    report = await executor.reap(active_run_ids=set())
+    assert report.found == 0 and not bench.terminated
+    report = await reap(executor, any_instance=True)
+    assert (report.found, report.terminated) == (1, 1) and bench.terminated and not unrelated.terminated

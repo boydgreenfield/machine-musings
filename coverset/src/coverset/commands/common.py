@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -33,18 +35,53 @@ def load(**overrides: Any) -> Settings:
     return load_settings(**clean)
 
 
+SIGTERM_EXIT_CODE = 128 + signal.SIGTERM
+"""How a command stopped by SIGTERM exits (the shell convention)."""
+
+
 def run_async[T](factory: Callable[[], Awaitable[T]]) -> T:
-    """Run a coroutine to completion, turning domain errors into click errors."""
+    """Run a coroutine to completion, turning domain errors into click errors.
+
+    SIGTERM (and SIGINT, which ``asyncio.run`` already handles the same way) cancels the coroutine
+    instead of killing the process, so its ``finally`` blocks run: inline runs are finalized and
+    their Modal sandboxes terminated. The command then exits with 143.
+    """
+    received: list[int] = []
     try:
-        return asyncio.run(_call(factory))
+        return asyncio.run(_call(factory, received))
+    except asyncio.CancelledError:
+        if received:
+            raise SystemExit(SIGTERM_EXIT_CODE) from None
+        raise
     except (LookupError, ValueError, RuntimeError) as exc:
         if isinstance(exc, click.ClickException):
             raise
         raise click.ClickException(str(exc)) from exc
 
 
-async def _call[T](factory: Callable[[], Awaitable[T]]) -> T:
-    return await factory()
+async def _call[T](factory: Callable[[], Awaitable[T]], received: list[int]) -> T:
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    installed: list[int] = []
+
+    def stop(signum: int) -> None:
+        received.append(signum)
+        if task is not None:
+            task.cancel()
+
+    signals = [signal.SIGTERM]
+    if signal.getsignal(signal.SIGINT) in (signal.SIG_DFL, signal.SIG_IGN):
+        signals.append(signal.SIGINT)  # asyncio.run did not take SIGINT over: do it here
+    for signum in signals:
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(signum, stop, signum)
+            installed.append(signum)
+    try:
+        return await factory()
+    finally:
+        for signum in installed:
+            with contextlib.suppress(Exception):
+                loop.remove_signal_handler(signum)
 
 
 async def prepare_db(settings: Settings) -> None:

@@ -5,14 +5,21 @@
 1. **Claim and policy.** The run becomes ``running`` with ``claimed_by`` set to this process (inline
    CLI runs are inserted that way) and a ``heartbeat_at`` refreshed every 10 s; the cancel watcher
    starts. Untrusted runs and (unless allowed) webhook-triggered runs never use the local executor;
-   Modal runs stop at the daily budget, and an admitted Modal run reserves its predicted cost in
-   ``cost_estimate`` until its real cost replaces it. An admitted PR run with a forge gets its
+   Modal runs stop at the daily budget: a run is admitted only if today's spend plus what it
+   reserves fits (:func:`coverset.orchestrator.budget.reserve`), first one worker for ten minutes,
+   then, after planning, its worst case (``workers x COVERSET_RUN_TIMEOUT_S`` at the limit rate,
+   capped by ``COVERSET_MAX_RUN_COST_USD``), which stays in ``cost_estimate`` until the real cost
+   replaces it. The cap is also enforced live: when the held workers' cost passes it (checked on
+   every progress tick and heartbeat), the shards get STOP files and are cancelled and the run ends
+   ``error``/``neutral`` with reason "run cost cap $X reached". An admitted PR run with a forge gets its
    ``coverset`` check created ``in_progress`` (:func:`coverset.forge.verdict.start_check`,
    ``external_id`` = the run id, ``details_url`` = the run page) before planning; the id is stored in
    ``runs.check_run_id`` so the verdict completes that same check.
 2. **Plan** (:func:`coverset.orchestrator.planner.plan_run`): workers hold the source and their
    shard files; ``timeline.sandbox_ready`` is set. Planning never holds the execution lock or a
-   write transaction, so the run's events keep flowing; a cancellation interrupts it.
+   write transaction, so the run's events keep flowing; a cancellation interrupts it. An untrusted
+   run that would need a new environment image is refused there
+   (:class:`~coverset.orchestrator.planner.PlanRefused`: ``skipped``/``neutral``).
 3. **Shards.** Each shard execs the adapter's test command with ``COVERSET_EVENT_NONCE`` (a fresh
    128-bit value per exec), ``PYTHONPATH`` and the run's ``extra_env``. Lines that start with the exact
    nonce prefix are events (``collected``, ``test``, ``heartbeat``, ``bundle_written``, ``done``);
@@ -115,6 +122,7 @@ from coverset.orchestrator.planner import (
     WRITE_RETRY_DELAY_S,
     EnvSpecBuilder,
     PlanError,
+    PlanRefused,
     RunPlan,
     ShardSpec,
     WorkerLifetimes,
@@ -160,9 +168,8 @@ NO_TESTS_EXIT_CODE = 5
 HEARTBEAT_S = 10.0
 """How often a running run refreshes ``runs.heartbeat_at``."""
 PRE_PLAN_RESERVE_S = 600.0
-"""Worker-seconds a budgeted run reserves before it is planned (one worker for ten minutes)."""
-PER_SHARD_OVERHEAD_S = 30.0
-"""Seconds added to each shard's predicted duration when the reservation is re-estimated."""
+"""Worker-seconds a budgeted run reserves before it is planned (one worker for ten minutes, at most
+the per-run cost cap)."""
 MAX_LOG_LINES_PER_SHARD = 2000
 MAX_LOG_CHARS = 2000
 MAX_LONGREPR_CHARS = 8 * 1024
@@ -213,6 +220,8 @@ class OrchestratorContext:
     """The :class:`~coverset.orchestrator.pool.PoolMaintainer` ``serve`` runs, else None (no pool)."""
     background: set[asyncio.Task[Any]] = field(default_factory=set)
     """Post-run work still in flight (re-snapshots); :meth:`close` waits for it."""
+    on_executor_built: Callable[[str, Executor], None] | None = None
+    """Called with each executor :meth:`executor` builds (``serve`` starts its reaper and pool)."""
 
     @classmethod
     def from_settings(cls, settings: Settings, **overrides: Any) -> OrchestratorContext:
@@ -254,6 +263,11 @@ class OrchestratorContext:
 
                 found = get_executor(self.settings, kind)
             self.executors[kind] = found
+            if self.on_executor_built is not None:
+                try:
+                    self.on_executor_built(kind, found)
+                except Exception:  # upkeep is best effort: the run still gets its executor
+                    log.exception("starting the upkeep of the %s executor failed", kind)
         return found
 
     def get_forge(self) -> Any:
@@ -803,6 +817,8 @@ class _Execution:
         self.early_verdict: asyncio.Task[None] | None = None
         self.stop_requested = False
         self.cancel_reason: str | None = None
+        self.cost_capped: str | None = None
+        """Set when the run passed ``COVERSET_MAX_RUN_COST_USD`` (the reason it ends with)."""
         self.released = False
         """The workers are gone (bundles pulled): nothing may be sent to them any more."""
         self.base_sigs: set[bytes] = set()
@@ -840,9 +856,17 @@ class _Execution:
                     await self._start_check(run)
                     await self._execute_plan(run)
             except _Cancelled:
-                await self._finish("cancelled", "cancelled", self.cancel_reason or "cancelled")
+                if self.cost_capped is not None:
+                    await self._finish("error", "neutral", self.cost_capped)
+                else:
+                    await self._finish("cancelled", "cancelled", self.cancel_reason or "cancelled")
+            except PlanRefused as exc:
+                await self._finish("skipped", "neutral", str(exc))
             except PlanError as exc:
-                await self._finish("error", "neutral", f"{exc.reason}: {exc}")
+                if self.cost_capped is not None:
+                    await self._finish("error", "neutral", self.cost_capped)
+                else:
+                    await self._finish("error", "neutral", f"{exc.reason}: {exc}")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -968,6 +992,50 @@ class _Execution:
         while True:
             await asyncio.sleep(self.ctx.heartbeat_s)
             self.sink.run_fields(heartbeat_at=self.settings.now())
+            self._check_cost_cap()
+
+    def _check_cost_cap(self) -> None:
+        """Stop the run once its held workers cost more than ``COVERSET_MAX_RUN_COST_USD``."""
+        run, sink = self.run, self.sink
+        if self.cost_capped is not None or run is None or sink is None or self.executor is None:
+            return
+        if self.released:  # the workers are gone: the cost cannot grow any more
+            return
+        if run.executor not in budget.BUDGETED_EXECUTORS or not len(self.lifetimes):
+            return
+        cap = budget.run_cost_cap(self.settings)
+        cost = self._cost()
+        if cost <= cap:
+            return
+        self.cost_capped = f"run cost cap ${cap:.2f} reached"
+        self.cancel_reason = self.cost_capped
+        log.warning("run %s: estimated cost $%.4f passed the cap $%.2f: stopping", self.run_id, cost, cap)
+        sink.event(
+            "log",
+            {
+                "text": f"estimated cost ${cost:.2f} passed COVERSET_MAX_RUN_COST_USD (${cap:.2f}): "
+                "stopping every shard",
+                "warning": "cost_cap",
+                "cost_usd": round(cost, 6),
+                "cap_usd": cap,
+            },
+        )
+        self.tasks.append(asyncio.get_running_loop().create_task(self._stop_for_cost()))
+
+    async def _stop_for_cost(self) -> None:
+        """The cost cap tripped: interrupt planning, STOP files to running shards, then cancel them."""
+        if self.plan_task is not None and not self.plan_task.done():
+            self.plan_task.cancel()
+        if self.released:
+            return
+        self.stop_requested = True
+        running = [s for s in self.shard_states.values() if not s.finished.is_set()]
+        for state in running:
+            with contextlib.suppress(ExecutorError):
+                await state.spec.worker.write_file(LAYOUT.stop_file, b"stop\n")
+        for state in running:
+            with contextlib.suppress(ExecutorError):
+                await state.spec.worker.cancel()
 
     async def _policy(self, run: Run) -> tuple[str, str, str] | None:
         if run.executor == "local" and not run.trusted:
@@ -1047,7 +1115,8 @@ class _Execution:
         try:
             executor = self.ctx.executor(run.executor)
             seconds = min(float(self.settings.run_timeout_s), PRE_PLAN_RESERVE_S)
-            return round(executor.cost_usd(self._resources(run), seconds), 6)
+            cost = executor.cost_usd(self._resources(run), seconds)
+            return round(min(cost, budget.run_cost_cap(self.settings)), 6)
         except Exception as exc:  # no executor yet: the check above still applies
             log.warning("cannot price run %s before planning: %s", run.id, exc)
             return 0.0
@@ -1080,11 +1149,9 @@ class _Execution:
         self.plan = plan
         if self.cancel_reason is not None:
             raise _Cancelled()
-        if run.executor in budget.BUDGETED_EXECUTORS:
-            predicted = self.lifetimes.cost_usd(executor) + sum(
-                executor.cost_usd(plan.resources, s.predicted_s + PER_SHARD_OVERHEAD_S) for s in plan.shards
-            )
-            sink.run_fields(cost_estimate=round(predicted, 6))
+        if run.executor in budget.BUDGETED_EXECUTORS and not await self._reserve_planned(run, plan, executor):
+            await self._finish("completed", "neutral", "budget exhausted")
+            return
         sink.event(
             "status",
             {
@@ -1109,6 +1176,18 @@ class _Execution:
             raise _Cancelled()
         outcomes = await self._collect_bundles(plan)
         await self._conclude(plan, outcomes, executor)
+
+    async def _reserve_planned(self, run: Run, plan: RunPlan, executor: Executor) -> bool:
+        """Re-admit the planned run at its worst case: every worker for the full run timeout at the
+        limit rate, at most ``COVERSET_MAX_RUN_COST_USD``; False when today's budget cannot take it."""
+        sink = self.sink
+        assert sink is not None
+        worst = len(plan.workers) * executor.cost_usd(plan.resources, float(self.settings.run_timeout_s))
+        amount = round(min(worst, budget.run_cost_cap(self.settings)), 6)
+        async with self.ctx.budget_lock:
+            return await sink.transact(
+                lambda session: budget.reserve(session, self.settings, run.id, run.executor, amount)
+            )
 
     async def _plan(self, run: Run, executor: Executor) -> RunPlan:
         sink = self.sink
@@ -1367,6 +1446,7 @@ class _Execution:
                 "elapsed_s": round(now - self.started, 3),
             },
         )
+        self._check_cost_cap()
 
     # -- failures, retries, fail-fast -------------------------------------------------------------
 

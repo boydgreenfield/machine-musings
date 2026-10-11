@@ -81,8 +81,8 @@ SCENARIOS = (
 )
 POOLED_IDLE_S = 10.0
 QUIET_TIMEOUT_S = 120.0
-SERIAL_SUITE_S = 175.0
-"""The bench suite's drawn serial runtime (examples/bench-suite/README.md), for the cost estimate."""
+SERIAL_SUITE_S = 173.7
+"""The bench suite's measured serial runtime (examples/bench-suite/README.md), for the cost estimate."""
 COVERAGE_OVERHEAD = 1.8
 """Assumed slowdown of the instrumented run for the estimate only (the README reports the measured one)."""
 
@@ -154,17 +154,28 @@ class Bench:
         self.ctx: Any = None
         self.bench_repo: dict[str, Any] = {}
         self.demo: dict[str, Any] = {}
+        self.build_usd = 0.0
+        """Estimated spend of the image builds the scenarios run directly (not through the executor)."""
 
     @property
     def modal(self) -> Any:
         return self.executor.modal
 
     def spent(self) -> float:
-        """Estimated spend so far: every sandbox lifetime at its rate (limits; requests while pooled)."""
+        """Estimated spend so far: every sandbox lifetime at its rate (limits; requests while pooled)
+        plus every image build at the limit rate for its wall time (Modal's build billing is unverified)."""
         return (
             self.executor.stats.lifetime_usd
             + self.executor.live_cost_usd()
+            + self.executor.stats.build_usd
+            + self.build_usd
             + self.raw.get("_spent_before", 0.0)
+        )
+
+    def add_build(self, seconds: float) -> None:
+        """Count a direct image build (``build_and_record``) as spend: limit rate x wall time."""
+        self.build_usd += (
+            rate_usd_per_s(self.settings.shard_cpu_limit, self.settings.shard_memory_mib) * seconds
         )
 
     def save(self) -> None:
@@ -317,8 +328,11 @@ async def scenario_image_cold(bench: Bench) -> dict[str, Any]:
     os.environ["MODAL_IGNORE_CACHE"] = "1"
     try:
         started = time.perf_counter()
-        image_id = await build_and_record(app, image, modal=bench.modal)
-        seconds = time.perf_counter() - started
+        try:
+            image_id = await build_and_record(app, image, modal=bench.modal)
+        finally:
+            seconds = time.perf_counter() - started
+            bench.add_build(seconds)
     finally:
         os.environ.pop("MODAL_IGNORE_CACHE", None)
     return {"seconds": [seconds], "image_id": image_id, "n": 1, "note": "MODAL_IGNORE_CACHE=1, n=1"}
@@ -333,8 +347,11 @@ async def scenario_image_cached(bench: Bench) -> dict[str, Any]:
     for _ in range(bench.args.repetitions):
         image = await asyncio.to_thread(env_image, info["spec"], info["spec"].plugin_wheel, modal=bench.modal)
         started = time.perf_counter()
-        image_id = await build_and_record(app, image, modal=bench.modal)
-        seconds.append(time.perf_counter() - started)
+        try:
+            image_id = await build_and_record(app, image, modal=bench.modal)
+        finally:
+            seconds.append(time.perf_counter() - started)
+            bench.add_build(seconds[-1])
     env = await bench.executor.ensure_env(info["spec"])
     return {"seconds": seconds, "image_id": image_id, "env_image": env.location}
 
@@ -929,8 +946,8 @@ def write_markdown(raw: dict[str, Any], numbers: dict[str, Any], args: argparse.
         "Live Modal measurements behind the README numbers paragraph, written by `scripts/bench_modal.py`.",
         "Medians and p90 over the listed repetitions; every value is in seconds unless marked.",
         "The bench suite is **synthetic** (`examples/bench-suite`: 1,200 CPU-bound tests, 173.7 s of drawn",
-        "serial work); the cold path is a fresh `debian_slim` sandbox that installs dependencies and runs",
-        "plain `pytest` in file order. It is a measured stand-in for a cold CI job, not GitHub Actions.",
+        "serial work); the cold path is a fresh `debian_slim` sandbox with a plain install, which is what a",
+        "cold CI runner does, followed by plain `pytest` in file order.",
         "",
         "## Environment",
         "",
@@ -1056,19 +1073,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+CEILING_KEYS = ("modal_daily_budget_usd", "max_shards", "max_sandboxes", "max_run_cost_usd")
+"""Settings the benchmark raises for itself, but never above a value the environment (or .env) sets."""
+
+
 def make_settings(args: argparse.Namespace) -> Settings:
     data_dir = args.data_dir.resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
-    return Settings(
-        data_dir=data_dir,
-        database_url=f"sqlite+aiosqlite:///{data_dir / 'coverset.db'}",
-        executor="modal",
-        github_webhook_secret=secrets.token_hex(24),
-        max_shards=max(32, *args.shards),
-        max_sandboxes=max(48, max(args.shards) + 8),
-        modal_daily_budget_usd=max(5.0, args.max_cost_usd * 2),
-        forge="fake",
-    )
+    common: dict[str, Any] = {
+        "data_dir": data_dir,
+        "database_url": f"sqlite+aiosqlite:///{data_dir / 'coverset.db'}",
+        "executor": "modal",
+        "github_webhook_secret": secrets.token_hex(24),
+        "forge": "fake",
+    }
+    configured = Settings(**common)  # what the environment and .env say, before the bench's own values
+    ceilings = {k: getattr(configured, k) for k in CEILING_KEYS if k in configured.model_fields_set}
+    wanted: dict[str, Any] = {
+        "max_shards": max(32, *args.shards),
+        "max_sandboxes": max(48, max(args.shards) + 8),
+        "modal_daily_budget_usd": max(5.0, args.max_cost_usd * 2),
+    }
+    values = {k: min(v, ceilings[k]) if k in ceilings else v for k, v in wanted.items()}
+    if "max_run_cost_usd" in ceilings:
+        values["max_run_cost_usd"] = min(ceilings["max_run_cost_usd"], values["modal_daily_budget_usd"])
+    return Settings(**common, **values)
 
 
 def main(argv: list[str] | None = None) -> int:

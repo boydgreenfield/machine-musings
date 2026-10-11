@@ -276,8 +276,11 @@ class PoolingExecutor(Executor, Protocol):
 class ReapingExecutor(Executor, Protocol):
     """An executor whose workers can outlive the control plane and must be reaped (Modal)."""
 
-    async def reap(self, *, active_run_ids: set[str], all: bool = False) -> ReapReport:
-        """Terminate workers not tied to an active run (every worker with ``all``)."""
+    async def reap(
+        self, *, active_run_ids: set[str], all: bool = False, any_instance: bool = False
+    ) -> ReapReport:
+        """Terminate workers not tied to an active run (every worker with ``all``); with
+        ``any_instance``, look beyond this installation's workers (every data dir's)."""
         ...
 
 

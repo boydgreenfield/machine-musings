@@ -7,11 +7,13 @@ One image per :class:`~coverset.lang.base.EnvSpec` (``env_hash``)::
       .env({"UV_COMPILE_BYTECODE": "1", "PYTHONUNBUFFERED": "1"})
       .uv_pip_install(requirements=[<requirements.txt>])      # the repo's locked third-party deps
       .add_local_file(<wheel>, "/opt/wheels/<name>", copy=True)
-      .run_commands("pip install /opt/wheels/<name>")         # pytest-coverset WITH its dependencies
+      .run_commands("pip install --no-deps /opt/wheels/<name>")  # pytest-coverset, no dependencies
 
 Everything lands in the system interpreter, so a worker runs ``python -m pytest ...`` with
 ``PYTHONPATH`` pointing at the checkout; the project itself is never installed. The plugin wheel is
-installed with its dependencies (``coverage``) because a target's lockfile need not pin coverage.
+installed with ``--no-deps``, exactly as the LocalExecutor does: its runtime dependencies are already
+in the requirements, because :func:`coverset.executors.env_export.with_plugin_pins` appends an exact
+``coverage`` pin (and ``pytest`` when the lock has none) to a target lockfile that lacks them.
 
 **Image builder version.** Modal workspaces default to Image Builder Version 2023.12, whose
 ``debian_slim`` supports Python up to 3.12 only; coverset's demo targets 3.13. The client honours a
@@ -131,7 +133,9 @@ def env_image(
         if not wheel.is_file():
             raise ExecutorError(f"plugin wheel not found: {wheel}")
         remote = f"{WHEEL_DIR}/{wheel.name}"
-        image = image.add_local_file(str(wheel), remote, copy=True).run_commands(f"pip install {remote}")
+        image = image.add_local_file(str(wheel), remote, copy=True).run_commands(
+            f"pip install --no-deps {remote}"
+        )
     return image
 
 

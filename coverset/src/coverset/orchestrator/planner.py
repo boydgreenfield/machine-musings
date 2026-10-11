@@ -6,9 +6,16 @@ its shard's files, in this order:
 1. refresh the repo's bare mirror; resolve the merge-base; export the head commit into a temporary
    control-plane checkout (for the environment export, function indexing and bundle conversion);
 2. build the :class:`~coverset.lang.base.EnvSpec` (``uv export`` + the pytest-coverset wheel) and
-   ``executor.ensure_env``; use the newest ready trusted snapshot when the executor has them;
-3. acquire workers (as many as the last run of the repo needed, at least one) and ``put_tree`` the
-   head archive into each: ``sandbox_ready``;
+   ``executor.ensure_env``; use the newest ready trusted snapshot when the executor has them. An
+   untrusted run never builds an environment the executor does not have yet (executors with
+   ``cached_env``, i.e. Modal): without approval it is refused with :class:`PlanRefused` ("untrusted
+   PR changes the environment: approve to build"), and even an approved one is refused when the
+   requirements carry direct URL, VCS or index references
+   (:func:`~coverset.executors.env_export.direct_references`), because an image build installs them
+   with network access;
+3. acquire workers (as many as the last run of the repo needed, at least one; ``coverset run
+   --shards N`` asks for N, capped by ``COVERSET_MAX_SHARDS``) and ``put_tree`` the head archive into
+   each: ``sandbox_ready``;
 4. collect on worker 0 (``pytest --collect-only`` with pytest-coverset, read back ``collect.json``;
    the ``-q`` node id listing is the fallback);
 5. diff ``base...head`` on the mirror and classify changed functions; pick the prior run (the PR's
@@ -81,7 +88,7 @@ from coverset.executors.base import (
     Worker,
     release_all,
 )
-from coverset.executors.env_export import build_env_spec, build_plugin_wheel
+from coverset.executors.env_export import build_env_spec, build_plugin_wheel, direct_references
 from coverset.facts.queries import ParquetPriorRun
 from coverset.facts.store import FactsStore
 from coverset.lang.base import CollectedItem, EnvSpec, LanguageAdapter, PriorRun
@@ -101,6 +108,7 @@ __all__ = [
     "REPO_DIR",
     "RUN_DIR",
     "PlanError",
+    "PlanRefused",
     "RunPlan",
     "ShardSpec",
     "WorkerLayout",
@@ -201,6 +209,10 @@ class PlanError(RuntimeError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class PlanRefused(PlanError):
+    """A policy refuses the run (nothing failed): it concludes ``neutral`` with the message as reason."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,7 +383,7 @@ async def plan_run(
         await asyncio.to_thread(extract_archive, tarball, checkout)
         config = await asyncio.to_thread(_load_config, adapter, checkout)
         head_paths = frozenset(await asyncio.to_thread(tree_paths, mirror, run.head_sha))
-        env = await _ensure_env(db, settings, executor, adapter, checkout, config, env_spec_builder)
+        env = await _ensure_env(db, settings, executor, adapter, checkout, config, env_spec_builder, run)
         base_ref = await _snapshot_or_env(db, executor, env, repo, run)
         resources = Resources(
             cpu=settings.shard_cpu_limit,
@@ -380,6 +392,8 @@ async def plan_run(
             timeout_s=settings.run_timeout_s,
         )
         labels = {"coverset_run": run.id, "repo": str(repo.id), "role": "shard"}
+        if shards_override is not None:
+            shards_override = max(1, min(shards_override, settings.max_shards))
         want = shards_override or await _estimated_shards(db, repo.id, config, settings)
         workers = await _acquire(executor, base_ref, want, resources, settings, labels)
         lifetimes.acquired(workers, resources)
@@ -498,6 +512,7 @@ async def _ensure_env(
     checkout: Path,
     config: CoversetConfig,
     builder: EnvSpecBuilder | None,
+    run: Run,
 ) -> EnvRef:
     try:
         if builder is not None:
@@ -507,11 +522,39 @@ async def _ensure_env(
             spec = await asyncio.to_thread(
                 build_env_spec, adapter, checkout, {"python": config.python}, wheel
             )
-        env = await executor.ensure_env(spec)
+        env = await _untrusted_env(executor, spec, run) if not run.trusted else None
+        if env is None:
+            env = await executor.ensure_env(spec)
+    except PlanError:
+        raise
     except (ExecutorError, RuntimeError, ValueError, OSError) as exc:
         raise PlanError("environment", f"cannot build the test environment: {exc}") from exc
     await _record_env(db, settings, env)
     return env
+
+
+async def _untrusted_env(executor: Executor, spec: EnvSpec, run: Run) -> EnvRef | None:
+    """An untrusted run's environment: an existing one, or None when a build is allowed.
+
+    Executors without ``cached_env`` (no image builds with network: the local one, which untrusted
+    runs never use, and test fakes) return None, so ``ensure_env`` proceeds as for a trusted run.
+    """
+    lookup = getattr(executor, "cached_env", None)
+    if not callable(lookup):
+        return None
+    cached = await lookup(spec)
+    if cached is not None:
+        return cached
+    if run.approved_by is None:
+        raise PlanRefused("environment", "untrusted PR changes the environment: approve to build")
+    refs = direct_references(spec.requirements_txt)
+    if refs:
+        raise PlanRefused(
+            "environment",
+            f"untrusted PR's environment has {len(refs)} direct URL, VCS or index reference(s): "
+            "coverset never builds those for an untrusted PR, even an approved one",
+        )
+    return None
 
 
 async def _record_env(db: Database, settings: Settings, env: EnvRef) -> None:
