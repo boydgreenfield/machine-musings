@@ -4,7 +4,7 @@ Live Modal measurements behind the README numbers paragraph, written by `scripts
 Medians and p90 over the listed repetitions; every value is in seconds unless marked.
 The bench suite is **synthetic** (`examples/bench-suite`: 1,200 CPU-bound tests, 173.7 s of drawn
 serial work); the cold path is a fresh `debian_slim` sandbox that installs dependencies and runs
-plain `pytest` in file order. It is a measured stand-in for a cold CI job, not GitHub Actions.
+plain `pytest` in file order: a fresh sandbox with a plain install, which is what a cold CI runner does.
 
 ## Environment
 
@@ -21,7 +21,7 @@ plain `pytest` in file order. It is a measured stand-in for a cold CI job, not G
 | python | 3.13 |
 | image_builder_version | 2025.06 |
 | repetitions | 5 (image_cold: 1) |
-| estimated spend of this benchmark | $0.695 (sandbox lifetimes at the CPU/memory limits; an upper bound) |
+| estimated spend of this benchmark | $0.695 (sandbox lifetimes at the limit rate) |
 
 ## Results
 
@@ -46,9 +46,13 @@ plain `pytest` in file order. It is a measured stand-in for a cold CI job, not G
 | cold path, bench suite: first test result | 5 | 5.71 | 6.40 | 4.42 | 6.62 | 5.71, 6.62, 6.07, 4.49, 4.42 |
 | cold path, demo refunds PR: total | 5 | 7.28 | 8.71 | 6.80 | 9.20 | 9.20, 7.98, 6.93, 7.28, 6.80 |
 | cold path, demo refunds PR: first failure reported | 5 | 6.40 | 7.77 | 5.92 | 8.28 | 8.28, 7.02, 6.05, 6.40, 5.92 |
-| webhook -> first test (pooled sandbox, demo rerun) | 5 | 4.14 | 4.63 | 3.04 | 4.89 | 4.89, 4.25, 3.04, 3.04, 4.14 |
-| webhook -> sandbox ready | 5 | 0.94 | 1.31 | 0.67 | 1.47 | 1.47, 1.07, 0.80, 0.67, 0.94 |
-| webhook -> first confirmed failure (incl. its retry) | 5 | 5.33 | 6.37 | 3.85 | 6.47 | 6.47, 6.21, 3.85, 3.92, 5.33 |
+| cold path, demo refunds PR: sandbox + install | 5 | 3.22 | 4.04 | - | - | in that run's bench-raw.json |
+| cold path, demo refunds PR: first test result | 5 | 4.59 | 5.81 | - | - | in that run's bench-raw.json |
+| webhook -> first test (pooled sandbox, demo rerun) | 5 | 3.77 | 4.67 | 3.02 | 5.27 | 3.77, 5.27, 3.77, 3.02, 3.20 |
+| webhook -> sandbox ready | 5 | 0.77 | 1.19 | 0.75 | 1.29 | 0.76, 1.29, 0.77, 0.75, 1.03 |
+| webhook -> the failing test's first result | 5 | 3.90 | 5.20 | 3.02 | 5.77 | 4.34, 5.77, 3.90, 3.02, 3.20 |
+| webhook -> first confirmed failure (incl. its retry) = verdict | 5 | 5.00 | 6.59 | 3.87 | 7.17 | 5.73, 7.17, 5.00, 3.87, 3.96 |
+| webhook run's file-order estimate (`t_first_failure_file_order_est`) | 5 | 3.33 | 3.78 | 3.24 | 3.92 | 3.33, 3.92, 3.28, 3.24, 3.56 |
 
 ## Fan-out runs
 
@@ -93,9 +97,10 @@ Largest shard count that succeeded on every repetition: 32.
 
 Modal bills `max(request, usage)` per second: $0.142 per core-hour, $0.024 per GiB-hour. Every
 sandbox requests 0.125 core and 512 MiB with limits of `COVERSET_SHARD_CPU_LIMIT` (2.0) and
-`COVERSET_SHARD_MEMORY_MIB` (2048). `cost_bench_N` prices each sandbox's whole lifetime at its
-limits (an upper bound); `cost_bench_N_exec` is what the run records (`runs.cost_estimate`:
-the time it held each worker, at the limits). A single-threaded pytest uses about one core and
+`COVERSET_SHARD_MEMORY_MIB` (2048). `cost_bench_N` prices each sandbox's whole lifetime at the
+limit rate; `cost_bench_N_exec` is the recorded estimate (`runs.cost_estimate`: the time the run
+held each worker, at the limit rate). Neither bounds the other: the recorded estimate is the
+higher one in the 16- and 32-shard runs. A single-threaded pytest uses about one core and
 far less than 2 GiB, so the bill is lower than either.
 
 ## Commands
@@ -111,3 +116,108 @@ Raw per-repetition data (timelines, run ids) is kept in `<data-dir>/bench-raw.js
 A scenario that failed is measured again on its own with `--resume --data-dir <same dir>` (the
 2026-10-11 run did this for `webhook`, whose first attempt hit an import error in a module that
 was being edited at the time); `--docs-only` rewrites these files from the raw data.
+
+## Webhook to verdict
+
+The README's refunds-PR sentence and every `t_webhook_*` key come from one session of 5 trials on
+2026-10-11. The demo was seeded on Modal
+(`COVERSET_DATA_DIR=<scratch> uv run coverset demo --executor modal --no-serve`), then the
+`webhook` scenario of `scripts/bench_modal.py` ran on its own against the same data dir
+(`--scenarios webhook --repetitions 5 --no-docs --max-cost-usd 0.30`): a trusted snapshot of `main`,
+the warm pool filled (`COVERSET_POOL_SIZE` 4; the serve-time pool maintainer kept it topped up, so
+trials 2 and 4 found it already full), 3 s idle, then a re-signed `check_run.rerequested` delivery
+for the refunds PR posted to the in-process app. Every run took all 4 of its workers from the pool.
+These trials replace the `t_webhook_*` values of the full benchmark run above (same scenario, same
+day: 4.14, 0.94 and 5.33 s there), so no two README numbers come from different sessions.
+
+Every time is seconds from `timeline.webhook_received`, read from the `runs` table and, for the
+failing test's first result, from its first `test` event with outcome `failed` in `run_events`.
+"Confirmed" is `timeline.first_failure`: the retry failed too and the early verdict was posted in the
+same moment (`timeline.verdict`). The file-order estimate is the run's own
+`t_first_failure_file_order_est`, from the same origin: `(sandbox_ready - webhook_received) + Σ p50`
+of the 65 tests before the failing one in collection order. It counts no collection: in these runs
+collection and planning (`first_test - sandbox_ready`) took 2.2 to 4.0 s, about as long as the whole
+demo suite's tests (3.55 s, `demo_suite_s`: the sum of the 97 test durations of the `main-6`
+baseline on Modal). On a suite this small the saving shows in the rank, not the clock. The measured
+cold path on the same PR (`cold_path_demo` above: a fresh sandbox, dependency install, plain pytest
+in file order) reports the failure after 6.40 s from its own start.
+
+Modal, executor `modal`, 4 shards, pooled sandboxes:
+
+| trial | run | sandbox ready | first test | failing test's first result | confirmed = verdict | file-order estimate | rank coverset / executed / file order |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | `run_01M4NR11XFDK623025D5C2YDNK` | 0.76 | 3.77 | 4.34 | 5.73 | 3.33 | 1 / 63 / 66 |
+| 2 | `run_01M4NR1C7N2W4XZZ2DZD7Q6W91` | 1.29 | 5.27 | 5.77 | 7.17 | 3.92 | 1 / 29 / 66 |
+| 3 | `run_01M4NR1R4F5BDFQY1NBCA9E4R4` | 0.77 | 3.77 | 3.90 | 5.00 | 3.28 | 1 / 26 / 66 |
+| 4 | `run_01M4NR22ETQ0P3WAAQCY1EJDCA` | 0.75 | 3.02 | 3.02 | 3.87 | 3.24 | 1 / 1 / 66 |
+| 5 | `run_01M4NR2BE5S9RWDPRF62X829TG` | 1.03 | 3.20 | 3.20 | 3.96 | 3.56 | 1 / 1 / 66 |
+| median | | 0.77 | 3.77 | 3.90 | 5.00 | 3.33 | |
+| p90 | | 1.19 | 4.67 | 5.20 | 6.59 | 3.78 | |
+
+In trials 4 and 5 the failing test was the run's first result. `rank_executed` is how many results
+had arrived when the failure was confirmed: the four shards run at once, so other shards keep
+reporting while the failing test's retry runs.
+
+Local executor, for comparison (`coverset demo --executor local --no-serve`, then the same delivery
+replayed five times through the in-process app with `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true`),
+3 shards:
+
+| trial | run | sandbox ready | first test | confirmed = verdict | file-order estimate | rank coverset / executed / file order |
+| ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 1 | `run_01M4NQW7A6EM7EXB30PP4EZYFB` | 0.18 | 0.84 | 1.07 | 1.81 | 1 / 1 / 66 |
+| 2 | `run_01M4NQWD6W0W4PX1CACQ4MNPRT` | 0.14 | 0.76 | 1.00 | 1.77 | 1 / 7 / 66 |
+| 3 | `run_01M4NQWJKPSSRVYWQD1632JQYZ` | 0.13 | 0.75 | 0.99 | 1.75 | 1 / 1 / 66 |
+| 4 | `run_01M4NQWR0BV1FPQM227FP4HGZ5` | 0.14 | 0.77 | 1.01 | 1.75 | 1 / 1 / 66 |
+| 5 | `run_01M4NQWXD53F12EVS23X5BG0VP` | 0.14 | 0.79 | 1.04 | 1.76 | 1 / 3 / 66 |
+| median | | 0.14 | 0.77 | 1.01 | 1.76 | |
+| p90 | | 0.16 | 0.82 | 1.06 | 1.79 | |
+
+Cost: the Modal seeding and the five trials recorded $0.028 of `runs.cost_estimate`; the script's
+own tracker put the trials at $0.013, against its pre-run estimate of $0.265 at the limit rate
+(which assumes the demo is seeded inside the scenario). Afterwards `uv run coverset modal reap --all`
+found 0 sandboxes.
+
+## Instrumentation overhead
+
+`overhead_x` in the README: the demo app's suite (97 tests) run in three modes, interleaved, in a
+temporary copy, by `packages/pytest-coverset/scripts/measure_overhead.py --target examples/demo-app
+--source ledger --repeats 5` on 2026-10-11 (local, Python 3.13.0, Apple silicon). Each time is the
+wall time of a `python -m pytest` subprocess, interpreter start-up and imports included.
+
+| mode | median s | runs |
+| --- | ---: | --- |
+| plain pytest | 2.914 | 2.915, 2.907, 2.916, 2.914, 2.880 |
+| per-test coverage (ctrace core, branch, one context per test) | 3.370 | 3.370, 3.335, 3.375, 3.385, 3.369 |
+| per-test coverage plus argument shapes | 3.388 | 3.392, 3.385, 3.401, 3.388, 3.386 |
+
+`overhead_x` = 3.388 / 2.914 = 1.16 (coverage alone 1.16). The demo suite is small and its wall time
+is mostly start-up, so this is a floor: suites that spend their time in tight Python loops pay more
+under the ctrace core. The bench suite does not measure overhead at all. Its `busy(ms)` bodies
+calibrate their loop size at import time, under whatever tracer is active, so every test spends its
+drawn milliseconds with or without coverage; its fan-out numbers measure parallelism, not
+instrumentation cost.
+
+## README keys added in phase 9
+
+Every value below is in `docs/numbers.json`; `scripts/check_readme.py` renders the README's numbers
+paragraph and the root README's bullet from that file. Medians with p90 in brackets.
+
+| key | value | source |
+| --- | --- | --- |
+| `demo_tests` | 97 | tests collected at the demo's `main` head (`main-6` run) |
+| `pr1_tests` | 100 | tests collected at the refunds PR's head |
+| `demo_runs` | 8 | runs behind the screenshots: six `main` baselines and two PRs, local executor |
+| `shapes_runs` | 5 | baseline runs `coverset shapes` pools (`main-2` to `main-6`) |
+| `demo_suite_s` | 3.55 | sum of the 97 test durations of the `main-6` baseline on Modal |
+| `rank_coverset`, `rank_file_order` | 1, 66 (n = 5) | the refunds PR's failing test in all five webhook trials |
+| `t_webhook_sandbox_ready` | 0.77 (1.19) | webhook trials above |
+| `t_webhook_first_test` | 3.77 (4.67) | webhook trials above |
+| `t_webhook_collect` | 3.0 (3.59) | `first_test - sandbox_ready` in the webhook trials |
+| `t_webhook_first_failed_result` | 3.9 (5.2) | the failing test's first `test` event |
+| `t_webhook_first_failure` | 5.0 (6.59) | confirmed after the retry (`timeline.first_failure`) |
+| `t_verdict` | 5.0 (6.59) | `timeline.verdict`; `t_verdict_executor` is `modal`, `t_verdict_origin` is `webhook_received` |
+| `t_first_failure_file_order_est` (alias `t_verdict_file_order_est`) | 3.33 (3.78) | the runs' own estimate |
+| `t_verdict_local`, `t_verdict_file_order_est_local` | 1.01 (1.06), 1.76 (1.79) | local trials above |
+| `overhead_x` | 1.16 | `overhead_full_s` 3.388 / `overhead_plain_s` 2.914 (`overhead_cov_s` 3.37), `overhead_repeats` 5, `overhead_target` `examples/demo-app` |
+| `missing_classes`, `expected_classes` | 16, 34 | the three `coverset shapes --markdown` tables in the README (2 of 10, 7 of 11, 7 of 13 missing) |
+| `screenshot_date`, `t_verdict_date` | 2026-10-11 | |

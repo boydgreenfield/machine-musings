@@ -1,0 +1,419 @@
+"""Take the README screenshots: seven pages of the local demo, light (``docs/<name>.jpg``) and dark
+(``docs/<name>-dark.jpg``).
+
+Seeds a scratch demo with the LocalExecutor (``coverset demo --executor local --no-serve``), serves
+it with ``coverset serve`` on a free loopback port with ``COVERSET_FAKE_NOW`` pinned on the serving
+process only (so "3 min ago" texts are stable and the runs themselves keep real timelines), and drives
+Chromium through Playwright at 1440×900, device scale 1. Full-size PNGs land in ``shots/``
+(gitignored); the JPEGs are resized to 1200 px wide at quality 82, lowered stepwise until each is at
+most 250 KB. The recipe per page is in docs/ui.md ("Screenshots").
+
+    uv run python scripts/screenshots.py                       # seed a temp demo, shoot everything
+    uv run python scripts/screenshots.py --data-dir <dir>      # reuse <dir> when it holds a demo
+    uv run python scripts/screenshots.py --only pr,map --scheme light
+
+Needs a Playwright Chromium (``uv run playwright install chromium-headless-shell`` once).
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import shutil
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+DOCS = ROOT / "docs"
+SHOTS = ROOT / "shots"
+VIEWPORT = {"width": 1440, "height": 900}
+SOURCE_HEIGHT = 1000
+OUT_WIDTH = 1200
+QUALITY = 82
+MIN_QUALITY = 50
+MAX_BYTES = 250 * 1024
+READY = 'body[data-ready="1"]'
+SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment")
+VALIDATE_EMAIL_PATH = "src/ledger/accounts/emailcheck.py"
+PARSE_PATH = "src/ledger/durations/parse.py"
+
+
+@dataclass(frozen=True)
+class DemoIds:
+    """What the shots need from the demo database."""
+
+    repo_id: int
+    pr1_run: str
+    pr2_run: str
+    freeze_s: float
+    fake_now: str
+
+
+def log(message: str) -> None:
+    print(f"[screenshots] {message}", flush=True)
+
+
+def coverset_bin() -> str:
+    """The ``coverset`` console script of this environment."""
+    found = Path(sys.executable).with_name("coverset")
+    if found.is_file():
+        return str(found)
+    which = shutil.which("coverset")
+    if which is None:
+        raise SystemExit("coverset is not installed in this environment: run `uv sync` first")
+    return which
+
+
+def child_env(data_dir: Path, **extra: str) -> dict[str, str]:
+    """The environment for a coverset child: this one minus any COVERSET_* setting, plus ours."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("COVERSET_")}
+    env.update({"COVERSET_DATA_DIR": str(data_dir), "COVERSET_EXECUTOR": "local", **extra})
+    return env
+
+
+# -- the demo data ----------------------------------------------------------------------------------
+
+
+def seed(data_dir: Path) -> None:
+    """Run the local demo into ``data_dir`` (history, both PRs, the replayed webhook)."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log(f"seeding the demo into {data_dir} (about 20 s)")
+    logfile = data_dir / "screenshots-seed.log"
+    with logfile.open("w", encoding="utf-8") as out:
+        result = subprocess.run(
+            [coverset_bin(), "demo", "--executor", "local", "--no-serve"],
+            cwd=ROOT,
+            env=child_env(data_dir),
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if result.returncode != 0:
+        raise SystemExit(f"coverset demo failed (exit {result.returncode}); see {logfile}")
+
+
+def _ts(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def demo_ids(data_dir: Path) -> DemoIds:
+    """Run ids, the replay freeze point and the pinned clock, from ``<data_dir>/coverset.db``."""
+    con = sqlite3.connect(data_dir / "coverset.db")
+    try:
+
+        def pr_run(number: int) -> tuple[str, dict[str, Any]]:
+            row = con.execute(
+                "SELECT r.id, r.timeline FROM runs r JOIN pull_requests p ON p.id = r.pr_id "
+                "WHERE p.number = ? ORDER BY r.created_at DESC LIMIT 1",
+                (number,),
+            ).fetchone()
+            if row is None:
+                raise SystemExit(f"no run of PR #{number} in {data_dir}: seed the demo first")
+            return str(row[0]), json.loads(row[1] or "{}")
+
+        pr1, timeline = pr_run(1)
+        pr2, _ = pr_run(2)
+        repo_id = int(con.execute("SELECT id FROM repos ORDER BY id LIMIT 1").fetchone()[0])
+        newest = con.execute("SELECT MAX(created_at) FROM runs").fetchone()[0]
+    finally:
+        con.close()
+    t0 = _ts(timeline.get("webhook_received")) or _ts(timeline.get("queued"))
+    verdict = _ts(timeline.get("verdict"))
+    if t0 is None or verdict is None:
+        raise SystemExit(f"PR #1's run {pr1} has no verdict in its timeline")
+    freeze = round((verdict - t0).total_seconds() + 0.1, 2)
+    # Pin "now" a few minutes after the newest run, on a whole minute: relative times read "N min ago".
+    last = datetime.fromisoformat(str(newest)).replace(tzinfo=UTC)
+    now = (last + timedelta(minutes=4)).replace(second=0, microsecond=0)
+    return DemoIds(repo_id, pr1, pr2, freeze, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+# -- the server ---------------------------------------------------------------------------------------
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextlib.contextmanager
+def serve(data_dir: Path, fake_now: str) -> Iterator[str]:
+    """``coverset serve`` on a free port with the clock pinned; stopped (and its group killed) on exit."""
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    logfile = (data_dir / "screenshots-serve.log").open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [coverset_bin(), "serve", "--bind", f"127.0.0.1:{port}"],
+        cwd=ROOT,
+        env=child_env(data_dir, COVERSET_FAKE_NOW=fake_now, COVERSET_PUBLIC_URL=base),
+        stdout=logfile,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while True:
+            if proc.poll() is not None:
+                raise SystemExit(f"coverset serve exited with {proc.returncode}; see {logfile.name}")
+            try:
+                with urllib.request.urlopen(f"{base}/healthz", timeout=2) as response:
+                    if response.status == 200:
+                        break
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                pass
+            if time.monotonic() > deadline:
+                raise SystemExit("coverset serve did not answer /healthz within 30 s")
+            time.sleep(0.2)
+        log(f"serving {data_dir} on {base} (COVERSET_FAKE_NOW={fake_now})")
+        yield base
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+        logfile.close()
+
+
+# -- the browser ----------------------------------------------------------------------------------------
+
+
+def launch(playwright: Any) -> Any:
+    """Chromium from Playwright's cache; falls back to any cached build if the pinned one is missing."""
+    try:
+        return playwright.chromium.launch()
+    except Exception as exc:  # the pinned browser build is not installed
+        cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+        if not cache.is_dir():
+            cache = Path.home() / ".cache" / "ms-playwright"
+        candidates = sorted(cache.glob("chromium_headless_shell-*/*/chrome-headless-shell"), reverse=True)
+        candidates += sorted(cache.glob("chromium-*/*/Chromium.app/Contents/MacOS/Chromium"), reverse=True)
+        candidates += sorted(cache.glob("chromium-*/chrome-*/chrome"), reverse=True)
+        if not candidates:
+            raise SystemExit(
+                f"no Chromium for Playwright ({exc}); run `uv run playwright install chromium-headless-shell`"
+            ) from None
+        log(f"default launch failed; using {candidates[0]}")
+        return playwright.chromium.launch(executable_path=str(candidates[0]))
+
+
+def wait_ready(page: Any, timeout_ms: float = 30_000) -> None:
+    page.wait_for_selector(READY, state="attached", timeout=timeout_ms)
+
+
+def goto(page: Any, url: str) -> None:
+    page.goto(url, wait_until="load")
+    wait_ready(page)
+    page.wait_for_timeout(200)
+
+
+def function_key(page: Any, base: str, repo_id: int) -> str:
+    """The func_key of ``validate_email`` from the PR #2 page's cards (``/prs/2/functions/<key>``)."""
+    goto(page, f"{base}/repos/{repo_id}/prs/2")
+    cards = page.eval_on_selector_all(
+        "[hx-get*='/functions/'], a[href*='/functions/']",
+        """els => els.map(e => [
+            e.getAttribute('hx-get') || e.getAttribute('href'),
+            (e.querySelector('.fn-name') || e).textContent,
+        ])""",
+    )
+    for url, text in cards:
+        if "/prs/2/functions/" in (url or "") and (text or "").strip() == "validate_email":
+            return str(url).split("/functions/", 1)[1].split("?", 1)[0].split("/", 1)[0]
+    raise SystemExit(f"no validate_email card on /repos/{repo_id}/prs/2")
+
+
+def shoot_page(page: Any, path: Path) -> None:
+    page.screenshot(path=str(path), full_page=False)
+
+
+def take_shots(base: str, ids: DemoIds, schemes: list[str], only: set[str]) -> list[Path]:
+    from playwright.sync_api import sync_playwright
+
+    SHOTS.mkdir(exist_ok=True)
+    pngs: list[Path] = []
+    with sync_playwright() as playwright:
+        browser = launch(playwright)
+        try:
+            for scheme in schemes:
+                context = browser.new_context(
+                    viewport=VIEWPORT, device_scale_factor=1, color_scheme=scheme, reduced_motion="reduce"
+                )
+                page = context.new_page()
+                page.set_default_timeout(30_000)
+                func_key = function_key(page, base, ids.repo_id) if "shapes" in only else ""
+                recipes = shot_recipes(base, ids, func_key)
+                for name in SHOT_NAMES:
+                    if name not in only:
+                        continue
+                    suffix = "" if scheme == "light" else "-dark"
+                    target = SHOTS / f"{name}{suffix}.png"
+                    log(f"{scheme}: {name}")
+                    recipes[name](page, target)
+                    pngs.append(target)
+                context.close()
+        finally:
+            browser.close()
+    return pngs
+
+
+def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[Any, Path], None]]:
+    rid = ids.repo_id
+
+    def pr(page: Any, path: Path) -> None:
+        goto(page, f"{base}/repos/{rid}/prs/2")
+        shoot_page(page, path)
+
+    def run_live(page: Any, path: Path) -> None:
+        page.goto(f"{base}/runs/{ids.pr1_run}?replay=1&speed=0.25&freeze={ids.freeze_s}", wait_until="load")
+        page.wait_for_selector('[data-replay="frozen"]', state="attached", timeout=60_000)
+        wait_ready(page)
+        page.wait_for_timeout(300)
+        shoot_page(page, path)
+
+    def why_order(page: Any, path: Path) -> None:
+        goto(page, f"{base}/runs/{ids.pr1_run}")
+        panel = page.locator("#why-order")
+        panel.scroll_into_view_if_needed()
+        page.wait_for_timeout(150)
+        panel.screenshot(path=str(path))
+
+    def shapes(page: Any, path: Path) -> None:
+        goto(page, f"{base}/repos/{rid}/functions/{func_key}?run={ids.pr2_run}")
+        shoot_page(page, path)
+
+    def source(page: Any, path: Path) -> None:
+        # The tests popover opens below line 18 only with 280 px free under it, and the page is too
+        # short to scroll: a 100 px taller viewport keeps the chips under `def parse_duration` visible.
+        page.set_viewport_size({"width": VIEWPORT["width"], "height": SOURCE_HEIGHT})
+        try:
+            goto(page, f"{base}/repos/{rid}/files/{PARSE_PATH}?run={ids.pr2_run}")
+            page.locator("#L18 button.gt").click()
+            page.wait_for_selector("#line-tests-body .test-list", state="attached")
+            wait_ready(page)
+            page.wait_for_timeout(250)
+            bottom = page.evaluate(
+                "() => Math.max(document.getElementById('line-tests').getBoundingClientRect().bottom,"
+                " document.querySelector('footer') ? document.querySelector('footer').getBoundingClientRect().bottom : 0)"
+            )
+            height = min(SOURCE_HEIGHT, int(bottom) + 24)
+            page.screenshot(
+                path=str(path), clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height}
+            )
+        finally:
+            page.set_viewport_size(VIEWPORT)
+
+    def treemap(page: Any, path: Path) -> None:
+        goto(page, f"{base}/repos/{rid}/map")
+        # The whole treemap, down to the "Largest gaps" table, rather than a viewport cut through it.
+        bottom = page.evaluate(
+            "() => { const t = document.querySelector('.map-table');"
+            " return t ? t.getBoundingClientRect().top + window.scrollY : document.body.scrollHeight; }"
+        )
+        height = max(VIEWPORT["height"], int(bottom) - 8)
+        page.screenshot(
+            path=str(path),
+            full_page=True,
+            clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
+        )
+
+    def comment(page: Any, path: Path) -> None:
+        goto(page, f"{base}/forge/outbox?method=upsert_pr_comment")
+        shoot_page(page, path)
+
+    return {
+        "pr": pr,
+        "run-live": run_live,
+        "why-order": why_order,
+        "shapes": shapes,
+        "source": source,
+        "map": treemap,
+        "comment": comment,
+    }
+
+
+# -- JPEGs ---------------------------------------------------------------------------------------------
+
+
+def to_jpeg(png: Path, out_dir: Path = DOCS) -> tuple[Path, int, int]:
+    """``png`` resized to 1200 px wide (never upscaled) as a JPEG of at most 250 KB: (path, bytes, quality)."""
+    from PIL import Image
+
+    target = out_dir / f"{png.stem}.jpg"
+    with Image.open(png) as image:
+        rgb = image.convert("RGB")
+        if rgb.width > OUT_WIDTH:
+            height = round(rgb.height * OUT_WIDTH / rgb.width)
+            rgb = rgb.resize((OUT_WIDTH, height), Image.Resampling.LANCZOS)
+        quality = QUALITY
+        while True:
+            rgb.save(target, "JPEG", quality=quality, optimize=True, progressive=True)
+            size = target.stat().st_size
+            if size <= MAX_BYTES or quality <= MIN_QUALITY:
+                return target, size, quality
+            quality -= 4
+
+
+# -- main -------------------------------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--data-dir", type=Path, help="demo data dir (seeded when it has no coverset.db; default: a temp dir)"
+    )
+    parser.add_argument("--only", default=",".join(SHOT_NAMES), help="comma-separated shot names")
+    parser.add_argument("--scheme", choices=["light", "dark", "both"], default="both")
+    parser.add_argument("--keep", action="store_true", help="keep the temporary data dir")
+    args = parser.parse_args(argv)
+    args.only = {x for x in args.only.split(",") if x}
+    unknown = args.only - set(SHOT_NAMES)
+    if unknown:
+        parser.error(f"unknown shots: {sorted(unknown)}")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    temporary = args.data_dir is None
+    data_dir = (args.data_dir or Path(tempfile.mkdtemp(prefix="coverset-shots-")) / "data").resolve()
+    try:
+        if not (data_dir / "coverset.db").is_file():
+            seed(data_dir)
+        ids = demo_ids(data_dir)
+        log(f"PR #1 run {ids.pr1_run} (freeze {ids.freeze_s} s), PR #2 run {ids.pr2_run}")
+        schemes = ["light", "dark"] if args.scheme == "both" else [args.scheme]
+        with serve(data_dir, ids.fake_now) as base:
+            pngs = take_shots(base, ids, schemes, args.only)
+        for png in pngs:
+            jpg, size, quality = to_jpeg(png)
+            flag = "" if size <= MAX_BYTES else "  (over 250 KB at the lowest quality)"
+            log(f"{jpg.relative_to(ROOT)}  {size / 1024:.0f} KB  q{quality}{flag}")
+    finally:
+        if temporary and not args.keep:
+            shutil.rmtree(data_dir.parent, ignore_errors=True)
+        elif temporary:
+            log(f"kept {data_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
