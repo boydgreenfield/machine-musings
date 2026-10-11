@@ -49,8 +49,15 @@ queued ──▶ claim + policy ──▶ plan ───────────
    fallback). Then the diff `base...head` is classified into changed functions, the prior run is
    chosen (the PR's previous head, else the merge-base, else the latest default-branch baseline),
    every test is scored, wave 1 (the change-covering set) is computed and the tests are dealt into
-   shards (never more shards than assignment units; an empty shard is dropped, because pytest given an
-   empty args file runs the whole suite). If fewer workers are available than shards, the plan is
+   shards (`analysis/sharding.py`, `plan_shards`): `K = ceil(Σ p50 / target_shard_seconds)`, capped by
+   `max_shards`, by the number of assignment units (a fixture group in one priority decile is one
+   unit) and by `max(1, n_tests // 3)` unless the *measured* p50s alone exceed `target_shard_seconds`
+   times that many shards. A test nobody has timed counts as the repo's median p50, or 0.05 s when no
+   test has been timed yet, so the first baseline of a small suite runs in one shard instead of
+   fanning out (14 untimed tests used to become 7 shards). `--shards N` asks for `N` shards (still at
+   most one per assignment unit) and lifts the three-tests-per-shard cap. Wave-1 tests are dealt first, one to each least-loaded shard, then the
+   rest in priority order (longest-processing-time balancing); an empty shard is dropped, because
+   pytest given an empty args file runs the whole suite. If fewer workers are available than shards, the plan is
    re-dealt over the workers obtained; none at all fails the run with reason `capacity` (the local
    executor first waits up to 10 minutes for another run to release one).
    Planning holds no write transaction while it works (the environment build and collection can
@@ -80,6 +87,17 @@ queued ──▶ claim + policy ──▶ plan ───────────
    one transaction, retried with backoff while SQLite is busy; then the verdict is posted to the forge
    for PR runs (check run + sticky comment). A report that cannot be built degrades to a verdict
    without its extras rather than failing the run.
+8. **Afterwards.** A PR run applies the per-PR retention rule (outside `COVERSET_ENV=test`). A trusted
+   baseline (`baseline` or `push` trigger, no PR) of the repo's default branch that completed with
+   verdict `success` or `failure`, on an executor whose `capabilities().fs_snapshot` is true (Modal),
+   schedules a background re-snapshot: if its head is still the branch tip in the mirror,
+   `executor.ensure_snapshot(env, repo, head_sha)` builds (or finds) the trusted snapshot and records
+   the `snapshots` row, then the warm pool of that repo is refilled from it when `serve` maintains one
+   (see below). PR runs, untrusted runs, errored or cancelled runs, other branches and superseded heads
+   (the demo replaying older `main` commits) never snapshot, and a failed build (budget, capacity) is
+   logged and leaves the previous snapshot in use. The task lives in
+   `OrchestratorContext.background`; a CLI context waits for it before closing its executors, so
+   `coverset run --executor modal` of the default branch's tip builds the snapshot before it exits.
 
 Every failure path (planning, environment, capacity, an internal error, cancellation) ends the run
 `error` or `cancelled` with a reason, a `verdict` event and a `done` event, so SSE clients and
@@ -215,6 +233,27 @@ through `put_tree`. Backends whose workers can outlive the control plane impleme
 loop); backends with warm pools implement `PoolingExecutor.fill_pool/drain_pool`
 (`orchestrator/pool.py` calls them only when `capabilities().warm_pool` is true).
 
+## Serving: the warm pool, the reaper and re-snapshots
+
+`create_app` starts these only outside tests and only when `COVERSET_EXECUTOR=modal`
+(`app.schedule_executor_upkeep`; tests call it explicitly). Both loops use the executor instance the
+app's runs use (`OrchestratorContext.from_app(app).executor(...)`), because the pool lives in that
+process.
+
+| Loop | Every | What it does | Code |
+|---|---|---|---|
+| reaper | 60 s, starting when serving starts | terminates sandboxes tagged with this installation's `coverset_instance` whose `run` tag is not a queued or running run and that this process does not hold (pool, shards, snapshot builds) | `orchestrator/reaper.py` (`reap_forever`) |
+| pool maintainer | 30 s, starting when serving starts | for each repo with a run on this executor in the last `COVERSET_POOL_TTL_S` (600) seconds, tops the pool up to `COVERSET_POOL_SIZE` (4) sandboxes from the repo's newest ready, unexpired trusted snapshot (a repo without one gets no pool); drains the pools of repos that went quiet; while today's spend has reached `COVERSET_MODAL_DAILY_BUDGET_USD` it fills nothing and drains every pool | `orchestrator/pool.py` (`PoolMaintainer`) |
+
+Fills go through `ModalExecutor.fill_pool`, so they count against the process-wide sandbox semaphore
+(`COVERSET_MAX_SANDBOXES`, shared with shards and snapshot builds) and its own budget guard, which
+also counts the idle cost of pooled sandboxes. The runner calls `PoolMaintainer.refill(repo_id)` after
+a re-snapshot, so a new snapshot replaces the pool at once (pooled sandboxes of an older image are
+terminated). `COVERSET_POOL_SIZE=0` disables the maintainer. When serving stops, re-snapshots still in
+flight are cancelled, the pool is drained and the executors are closed, so no sandbox this process
+created is left running; anything a crash leaves behind is ended by Modal's `idle_timeout`
+(`COVERSET_POOL_TTL_S`) and `timeout`, or by the next reaper pass.
+
 ## Commands
 
 * `coverset run --repo PATH|URL --head SHA|branch [--base SHA|branch] [--pr N] [--executor local|modal] [--shards N] [--trigger pr|baseline] [--wait/--no-wait]`:
@@ -224,5 +263,19 @@ loop); backends with warm pools implement `PoolingExecutor.fill_pool/drain_pool`
   registers it under the webhook fixtures' identity (`coverset-demo/ledger`), runs the six `main`
   commits as baselines and both PRs, replays `fixtures/webhooks/pr_opened.json` in-process (a
   duplicate of PR #1's run, so nothing reruns) and serves. Re-running reuses every completed run.
+* `coverset invariants scan [--repo PATH|NAME] [--executor local|modal]`: reviews every invariant with
+  a `verify: {kind: review}` entry at the head of the latest completed, trusted baseline run of the
+  default branch whose facts exist (`--executor` restricts the run to that executor). Each target
+  function becomes a review target in a bundle built from that run's facts (covering tests with their
+  bodies, input classes, shapes, linked tests) and the head sources, reviewed with
+  `get_review_client(settings, repo_enabled=...)` (the offline fake unless `COVERSET_AI=anthropic` and
+  the repo opted in); new findings go into `review_findings` under that run (a matching
+  `(func_key, bundle_hash)` is reused), and `analysis/invariants.evaluate` turns the review evidence
+  into statuses written to that run's `invariant_results` rows with `trigger = 'scan'`. An invariant
+  verified only by review becomes `satisfied` or `needs_review`; one that also has test, property or
+  runtime entries keeps the status its tests decided in the run (a review never overrides tests and
+  never yields `violated`) and gains the review entry in its evidence. Prints a table of invariant,
+  target, verify kinds, review finding, the run's status and the scan's status. Code:
+  `commands/invariants.py`.
 * `coverset seed-demo`, `coverset warm`, `coverset facts query SQL`, `coverset shapes FUNC [--markdown] [--suggest]`,
   `coverset invariants check`, `coverset gc [--dry-run]`, `coverset repo purge NAME`, `coverset modal reap [--all]`.

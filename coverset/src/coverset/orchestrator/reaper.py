@@ -4,7 +4,8 @@ Executors whose workers can outlive the control plane (Modal sandboxes) implemen
 :class:`~coverset.executors.base.ReapingExecutor`; :func:`reap` hands them the ids of runs that are
 still active so they terminate everything else (or everything with ``all=True``). Local workers die
 with their process and are swept from the temp directory at start-up, so for them this is a no-op.
-``coverset modal reap [--all]`` and the 60 s loop in ``serve`` call :func:`reap`.
+``coverset modal reap [--all]`` and the 60 s loop that ``coverset serve`` starts when the executor is
+Modal (:func:`reap_forever`, via :func:`coverset.app.schedule_executor_upkeep`) call :func:`reap`.
 """
 
 from __future__ import annotations
@@ -40,15 +41,34 @@ async def reap(executor: Executor, *, all: bool = False, active: set[str] | None
     return await executor.reap(active_run_ids=set() if all else set(active or ()), all=all)
 
 
-async def reap_forever(db: Database, executor: Executor, *, interval_s: float = REAP_INTERVAL_S) -> None:
-    """Reap every ``interval_s`` until cancelled (errors are logged, never raised)."""
+async def reap_forever(
+    db: Database,
+    executor: Executor,
+    *,
+    interval_s: float = REAP_INTERVAL_S,
+    stop: asyncio.Event | None = None,
+) -> int:
+    """Reap now and every ``interval_s`` until ``stop`` is set or the task is cancelled.
+
+    Errors are logged, never raised. Returns the number of passes made (0 for executors that do not
+    reap).
+    """
     if not isinstance(executor, ReapingExecutor):
-        return
-    while True:
-        with contextlib.suppress(Exception):
+        return 0
+    stop = stop or asyncio.Event()
+    passes = 0
+    while not stop.is_set():
+        passes += 1
+        try:
             async with db.session() as session:
                 active = await active_run_ids(session)
             report = await reap(executor, active=active)
             if report.terminated:
                 log.info("reaped %d of %d workers", report.terminated, report.found)
-        await asyncio.sleep(interval_s)
+            for error in report.errors:
+                log.warning("reaping failed: %s", error)
+        except Exception as exc:
+            log.warning("reaper pass failed: %s: %s", type(exc).__name__, exc)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+    return passes

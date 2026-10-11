@@ -1,8 +1,7 @@
 """The ``coverset`` command line.
 
-Commands that later build phases implement are registered here as placeholders that exit with
-"<name> arrives in phase N"; a phase replaces its placeholder by registering the real command
-under the same name on the same group.
+The groups, ``init-db``, ``serve``, ``replay`` and ``forge calls`` live here; the orchestrator's commands are
+registered on these groups by :func:`coverset.commands.register_commands`.
 """
 
 from __future__ import annotations
@@ -107,27 +106,6 @@ def repo() -> None:
     """Manage repositories known to coverset."""
 
 
-def _placeholder(group: click.Group, name: str, phase: str, summary: str) -> None:
-    """Register ``name`` on ``group`` as a command that reports which phase delivers it."""
-    full_name = name if group is cli else f"{group.name} {name}"
-
-    @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-    def command(args: tuple[str, ...]) -> None:
-        raise click.ClickException(f"{full_name} arrives in phase {phase}")
-
-    group.command(
-        name,
-        help=f"{summary} (arrives in phase {phase}).",
-        context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
-    )(command)
-
-
-for _group, _name, _phase, _summary in (
-    (invariants, "scan", "7", "Scan the default branch and record invariant statuses"),
-):
-    _placeholder(_group, _name, _phase, _summary)
-
-
 def _register_modal_commands() -> None:
     """modal smoke and modal images (modal reap is registered with the orchestrator's commands)."""
     from coverset.commands.modal import register_modal_commands
@@ -139,7 +117,7 @@ _register_modal_commands()
 
 
 def _register_orchestrator_commands() -> None:
-    """run, warm, seed-demo, demo, shapes, gc, facts query, invariants check, repo purge, modal reap."""
+    """run, warm, seed-demo, demo, shapes, gc, facts query, invariants check|scan, repo purge, modal reap."""
     from coverset.commands import register_commands
 
     register_commands(cli, facts=facts, invariants=invariants, repo=repo, modal=modal)

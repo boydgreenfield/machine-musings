@@ -1,12 +1,18 @@
 """Priority-snake LPT sharding with wave 1 at the head of every shard.
 
-``K = clamp(ceil(Σ p50 / target_shard_seconds), 1, max_shards)`` (and never more shards than
-assignment units, so no shard is planned empty: a fixture group of many tests is one unit). Wave-1 tests are dealt first, one by one in wave-1 order, each to the least-loaded shard,
+``K = clamp(ceil(Σ p50 / target_shard_seconds), 1, max_shards)``, never more shards than assignment
+units (so no shard is planned empty: a fixture group of many tests is one unit), and never more than
+``max(1, n_tests // min_tests_per_shard)`` (3 tests per shard by default) unless the *measured* p50s
+alone exceed ``target_shard_seconds`` times that many shards: guessed durations never justify a swarm
+of one-test shards. Unknown durations count as ``median_s``: the repo's median p50, or
+:data:`UNKNOWN_DURATION_S` (0.05 s) when no test has been timed yet, so a first baseline without
+history does not fan a small suite out. Wave-1 tests are dealt first, one by one in wave-1 order, each
+to the least-loaded shard,
 so every shard starts with part of the change-covering set. The remaining tests follow in priority
 order (the order :func:`~coverset.analysis.scoring.score_tests` returned), each to the
 least-loaded shard; members of a fixture group that fall in the same priority decile move together
 so module- and class-scoped fixtures still set up once. Every shard's list keeps assignment order,
-so it stays in priority order with its wave-1 tests first. Unknown durations count as the median.
+so it stays in priority order with its wave-1 tests first.
 
 pytest-coverset re-sorts each shard by the ``--coverset-scores`` file, so the runner must write
 :func:`shard_scores` (rank-derived) rather than the raw :class:`ScoredTest` scores: those know
@@ -25,9 +31,22 @@ from dataclasses import dataclass, field
 from coverset.analysis.cover import CoverSet
 from coverset.analysis.scoring import ScoredTest
 
-__all__ = ["ShardPlan", "ShardUnit", "plan_shards", "reshard", "shard_scores"]
+__all__ = [
+    "MIN_TESTS_PER_SHARD",
+    "UNKNOWN_DURATION_S",
+    "ShardPlan",
+    "ShardUnit",
+    "plan_shards",
+    "reshard",
+    "shard_scores",
+]
 
 type GroupKey = Hashable
+
+UNKNOWN_DURATION_S = 0.05
+"""Seconds assumed for a test nobody has timed, when no test of the repo has been timed either."""
+MIN_TESTS_PER_SHARD = 3
+"""Fewest tests per shard unless measured durations call for more shards (see the module docstring)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,12 +73,16 @@ def plan_shards(
     *,
     target_shard_seconds: float,
     max_shards: int,
-    median_s: float,
+    median_s: float = UNKNOWN_DURATION_S,
     groups: Mapping[str, GroupKey] | None = None,
+    min_tests_per_shard: int = MIN_TESTS_PER_SHARD,
 ) -> ShardPlan:
-    """Split ``scored`` (in priority order) into shards; see the module docstring."""
-    if target_shard_seconds <= 0 or max_shards < 1:
-        raise ValueError("target_shard_seconds must be > 0 and max_shards >= 1")
+    """Split ``scored`` (in priority order) into shards; see the module docstring.
+
+    ``min_tests_per_shard=1`` lifts the small-suite cap (the planner does so for a forced shard count).
+    """
+    if target_shard_seconds <= 0 or max_shards < 1 or min_tests_per_shard < 1:
+        raise ValueError("target_shard_seconds must be > 0, max_shards and min_tests_per_shard >= 1")
     durations = {t.nodeid: (t.p50_s if t.p50_s is not None else median_s) for t in scored}
     first = list(dict.fromkeys(wave1.tests))
     units = [ShardUnit((n,), durations.get(n, median_s)) for n in first]
@@ -67,7 +90,13 @@ def plan_shards(
     rest = [t.nodeid for t in scored if t.nodeid not in wave1_set]
     units += _group_units(rest, durations, groups or {})
     total = sum(u.seconds for u in units)
-    k = min(max(math.ceil(total / target_shard_seconds), 1), max_shards, max(len(units), 1))
+    k = max(math.ceil(total / target_shard_seconds), 1)
+    n_tests = len({n for u in units for n in u.nodeids})
+    small = max(1, n_tests // min_tests_per_shard)
+    measured = sum(t.p50_s for t in scored if t.p50_s is not None)
+    if k > small and measured <= target_shard_seconds * small:
+        k = small
+    k = min(k, max_shards, max(len(units), 1))
     return _deal(units, k)
 
 

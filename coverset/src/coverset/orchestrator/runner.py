@@ -40,6 +40,15 @@
    event saying per-test contexts may be incomplete (``tracer_mismatch`` in its ``ingest_log``).
 6. **Retention.** After a PR run, :func:`coverset.orchestrator.history.expire_pr_runs` applies the
    per-PR rule (outside ``COVERSET_ENV=test``).
+7. **Re-snapshot.** After a trusted baseline run of the default branch that completed (verdict
+   ``success`` or ``failure``: its tests ran and its facts landed) on an executor with
+   ``capabilities().fs_snapshot`` (Modal), a background task checks that the head is still the
+   branch tip in the mirror, calls ``executor.ensure_snapshot(plan.env, repo, head_sha)`` (which
+   records the ``snapshots`` row) and then
+   :meth:`~coverset.orchestrator.pool.PoolMaintainer.refill` when ``serve`` maintains a warm pool.
+   PR runs, untrusted runs, errored or cancelled runs, other branches and superseded heads (the demo's
+   history replay) never snapshot. The task is kept in :attr:`OrchestratorContext.background`;
+   :meth:`OrchestratorContext.close` waits for it.
 
 Every failure path ends the run as ``error`` or ``cancelled`` with a reason and a ``done`` event, so
 SSE clients and ``coverset-ci wait`` always finish; if even that write fails,
@@ -85,7 +94,7 @@ from coverset.db.models import (
     WebhookDelivery,
 )
 from coverset.db.session import Database
-from coverset.executors.base import Executor, ExecutorError, Resources, RunResult
+from coverset.executors.base import EnvRef, Executor, ExecutorError, Resources, RunResult, SnapshotRef
 from coverset.facts.ingest import RunContext, finalize_run, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.lang.base import LanguageAdapter
@@ -135,6 +144,7 @@ __all__ = [
     "exit_code_for",
     "finalize_crashed",
     "process_claimant",
+    "resnapshot",
     "retry_env",
 ]
 
@@ -199,6 +209,10 @@ class OrchestratorContext:
     budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Serialises the budget check and reservation of concurrent runs in this process."""
     heartbeat_s: float = HEARTBEAT_S
+    pool_maintainer: Any = None
+    """The :class:`~coverset.orchestrator.pool.PoolMaintainer` ``serve`` runs, else None (no pool)."""
+    background: set[asyncio.Task[Any]] = field(default_factory=set)
+    """Post-run work still in flight (re-snapshots); :meth:`close` waits for it."""
 
     @classmethod
     def from_settings(cls, settings: Settings, **overrides: Any) -> OrchestratorContext:
@@ -266,8 +280,33 @@ class OrchestratorContext:
             self.ingest = shared_ingest_pool("process")
         return self.ingest
 
+    def spawn(self, work: Awaitable[Any], *, name: str) -> asyncio.Task[Any]:
+        """Run ``work`` in the background, tracked in :attr:`background` (errors are logged)."""
+
+        async def guarded() -> None:
+            try:
+                await work
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("%s failed", name)
+
+        task = asyncio.get_running_loop().create_task(guarded(), name=name)
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+        return task
+
+    async def finish_background(self, *, cancel: bool = False) -> None:
+        """Wait for (or, with ``cancel``, cancel) the background work in :attr:`background`."""
+        tasks = list(self.background)
+        if cancel:
+            for task in tasks:
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def close(self) -> None:
-        """Close executors and, when owned, the database engine."""
+        """Wait for background work, then close executors and, when owned, the database engine."""
+        await self.finish_background()
         for executor in self.executors.values():
             with contextlib.suppress(Exception):
                 await executor.close()
@@ -829,7 +868,41 @@ class _Execution:
                 await finalize_crashed(self.ctx.db, self.settings, self.run_id, crash, after_seq=sink.seq)
         if run.pr_id is not None and self.settings.env != "test":
             await self._expire_pr_runs(run.pr_id)
-        return await self._outcome()
+        outcome = await self._outcome()
+        self._schedule_resnapshot(run, outcome)
+        return outcome
+
+    def _schedule_resnapshot(self, run: Run, outcome: RunOutcome) -> None:
+        """Re-snapshot the default branch after a trusted baseline (see the module docstring, step 7)."""
+        plan, executor = self.plan, self.executor
+        if plan is None or executor is None:
+            return
+        if not (
+            run.trigger in history.BASELINE_TRIGGERS
+            and run.trusted
+            and run.pr_id is None
+            and run.branch == plan.default_branch
+            and outcome.status == "completed"
+            and outcome.conclusion in ("success", "failure")
+        ):
+            return
+        try:
+            if not executor.capabilities().fs_snapshot:
+                return
+        except Exception:
+            return
+        self.ctx.spawn(
+            resnapshot(
+                self.ctx,
+                executor,
+                plan.env,
+                plan.repo_id,
+                plan.head_sha,
+                mirror=plan.mirror,
+                branch=plan.default_branch,
+            ),
+            name=f"re-snapshot after run {run.id}",
+        )
 
     async def _expire_pr_runs(self, pr_id: int) -> None:
         """The per-PR retention rule (best effort: retention never fails a run)."""
@@ -1818,6 +1891,56 @@ class _Execution:
         for kind, payload in notes:
             sink.notify(kind, payload)
         await self._post(summary)
+
+
+async def resnapshot(
+    ctx: OrchestratorContext,
+    executor: Executor,
+    env: EnvRef,
+    repo_id: int,
+    sha: str,
+    *,
+    mirror: Path | None = None,
+    branch: str | None = None,
+) -> SnapshotRef | None:
+    """Build (or find) the trusted snapshot of ``sha`` and refill the repo's warm pool from it.
+
+    With ``mirror`` and ``branch``, nothing is built unless ``sha`` is still the tip of ``branch``.
+    """
+    from coverset.orchestrator.repos import default_branch_sha
+
+    started = time.monotonic()
+    if mirror is not None and branch is not None:
+        try:
+            tip = await asyncio.to_thread(default_branch_sha, mirror, branch)
+        except Exception as exc:
+            log.warning("re-snapshot of repo %s skipped: cannot resolve %s: %s", repo_id, branch, exc)
+            return None
+        if tip != sha:
+            log.info(
+                "re-snapshot of repo %s skipped: %s is no longer the tip of %s", repo_id, sha[:12], branch
+            )
+            return None
+    try:
+        snapshot = await executor.ensure_snapshot(env, str(repo_id), sha)
+    except ExecutorError as exc:  # budget, capacity or a non-default-branch commit: keep the old one
+        log.warning("re-snapshot of repo %s at %s skipped: %s", repo_id, sha[:12], exc)
+        return None
+    if snapshot is None:
+        return None
+    log.info(
+        "trusted snapshot %s of repo %s at %s ready after %.1f s",
+        snapshot.image_id,
+        repo_id,
+        sha[:12],
+        time.monotonic() - started,
+    )
+    maintainer = ctx.pool_maintainer
+    if maintainer is not None:
+        created = await maintainer.refill(repo_id)
+        if created:
+            log.info("warm pool of repo %s refilled with %d workers", repo_id, created)
+    return snapshot
 
 
 def _app_forge(app: Any) -> Any:

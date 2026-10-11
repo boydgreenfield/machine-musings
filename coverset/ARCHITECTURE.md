@@ -15,7 +15,7 @@ This page is the map. Each part has its own page:
 | [docs/ai-review.md](docs/ai-review.md) | the advisory AI review |
 | [docs/security.md](docs/security.md) | the threat model and the hardening checklist |
 | [docs/extending.md](docs/extending.md) | adding an executor, a forge, a language, a review client, input classes |
-| [docs/modal.md](docs/modal.md) | the Modal executor (being written alongside this page) |
+| [docs/modal.md](docs/modal.md) | the Modal executor: images, trusted snapshots, the warm pool, the reaper, cost guards |
 | [docs/ui.md](docs/ui.md) | the web UI (being written alongside this page) |
 
 Status words used throughout: **verified** means read in the committed code on branch `boyd/testing` and covered by a test; **in progress** means another agent is building it on the same branch right now; **designed, not built** means the plan describes it and no code exists.
@@ -60,7 +60,7 @@ flowchart LR
 
   subgraph ex["Executor"]
     LE["LocalExecutor<br/>(subprocess, not a sandbox)"]
-    ME["ModalExecutor<br/>(in progress)"]
+    ME["ModalExecutor<br/>(Modal Sandboxes)"]
   end
 
   subgraph wk["Worker"]
@@ -93,17 +93,21 @@ The full walk-through, with every event kind, is in [docs/orchestrator.md](docs/
 | 1 | GitHub posts a `pull_request` webhook. The signature is checked over the raw body before anything is parsed or stored. | `web/webhooks.py`, `forge/signing.py` | `webhook_received` |
 | 2 | Intake upserts the repository and PR, decides trust, and inserts a `runs` row: `queued`, `paused`, or `awaiting_approval` for untrusted PRs. The answer is HTTP 202. | `orchestrator/intake.py` | `queued` or `awaiting_approval` |
 | 2a | Untrusted only: someone presses **Approve run**; coverset checks their permission, then queues the run with the network blocked. | `orchestrator/intake.py` | `approval_requested`, `approved`, `queued` |
-| 3 | The dispatcher claims the run (an atomic `UPDATE ... WHERE status = 'queued'`) under `COVERSET_MAX_CONCURRENT_RUNS`. Policy checks run: untrusted runs never use the LocalExecutor; Modal runs stop at the daily budget. | `orchestrator/queue.py`, `orchestrator/runner.py` | none |
-| 4 | Planning: refresh the mirror, export the head, build or find the environment, acquire workers, `put_tree` the source into each. | `orchestrator/planner.py`, `executors/` | `sandbox_ready` |
+| 3 | The dispatcher claims the run (an atomic `UPDATE ... WHERE status = 'queued'`) under `COVERSET_MAX_CONCURRENT_RUNS`, setting `runs.claimed_by` (`<role>@<host>:<pid>:<nonce>`) and `runs.heartbeat_at`, which is refreshed every 10 s while the run executes. Policy checks run: untrusted runs never use the LocalExecutor, local webhook runs need `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS`, and Modal runs stop at the daily budget (an admitted Modal run reserves its predicted cost). | `orchestrator/queue.py`, `orchestrator/runner.py`, `orchestrator/budget.py` | none |
+| 3a | A PR run with a forge gets its `coverset` check created `in_progress` before planning; its id goes into `runs.check_run_id`, and the verdict later completes that same check. | `orchestrator/runner.py` (`_start_check`), `forge/verdict.py` (`start_check`) | none |
+| 4 | Planning: refresh the mirror, export the head, build or find the environment, pick the newest ready trusted snapshot (Modal) or the environment image, acquire workers (pooled ones first on Modal), `put_tree` the source into each. | `orchestrator/planner.py`, `executors/` | `sandbox_ready` |
 | 5 | Worker 0 collects. The diff `base...head` is classified into changed functions. The prior run is chosen. Every test is scored, wave 1 is computed, and the tests are dealt into shards. | `analysis/diff.py`, `analysis/prior.py`, `analysis/scoring.py`, `analysis/cover.py`, `analysis/sharding.py` | none |
 | 6 | Each shard runs `python -m pytest @run/shard.args` with the plugin. Events stream back on stdout. | `orchestrator/runner.py`, `pytest_coverset/plugin.py` | `first_test`, `wave1_finished` |
 | 7 | The first failure of a non-quarantined test starts one retry. A second failure confirms it; the early verdict is posted at once. | `orchestrator/runner.py` | `first_failure`, `verdict` |
-| 8 | Bundles are pulled before workers are released, then extracted, converted and ingested into Parquet. The run is finalised. | `orchestrator/bundles.py`, `facts/` | none |
-| 9 | The report adds patch coverage, input-class coverage, invariants and the advisory AI review. The verdict is stored, posted, and closed with a `done` event. | `orchestrator/verdict.py`, `forge/verdict.py` | `verdict` (if not set at step 7), `finished` |
+| 8 | Bundles are pulled before workers are released, then extracted, converted and ingested into Parquet. A shard whose coverage came from a tracer other than coverage.py's C tracer gets a `log` event (`warning: tracer_mismatch`, also recorded in its `ingest_log`). The run is finalised. | `orchestrator/bundles.py`, `orchestrator/runner.py` (`tracer_warning`), `facts/` | none |
+| 9 | The report adds patch coverage, input-class coverage, invariants and the advisory AI review. The verdict is stored, posted, and closed with a `done` event that carries the exit code. | `orchestrator/verdict.py`, `forge/verdict.py` | `verdict` (if not set at step 7), `finished` |
+| 10 | Afterwards a PR run applies the per-PR retention rule (outside `COVERSET_ENV=test`), and a trusted baseline of the default branch that completed with verdict `success` or `failure` on an executor with filesystem snapshots (Modal) schedules a re-snapshot of its head, if it is still the branch tip, and then refills that repo's warm pool when `serve` maintains one. | `orchestrator/runner.py` (`_expire_pr_runs`, `resnapshot`), `orchestrator/pool.py` | none |
 
-Three run columns sit beside the timeline. `rank_coverset` is the first confirmed failure's position in the priority order. `rank_file_order` is its position in plain collection order. `t_first_failure_file_order_est` is an estimate of when file-order CI would have reached it: `(sandbox_ready - t0) + Σ p50` of the tests before it in file order, where `t0` is `webhook_received`, else `queued` (`orchestrator/verdict.py`, `file_order_estimate`). `runs.ci_first_contact_at` records the first `/v1/verdict` answer for the run (`web/api.py`).
+Three run columns sit beside the timeline. `rank_coverset` is the first confirmed failure's position in the priority order the planner wrote. `rank_executed` is how many tests had reported a result when it was confirmed (shards run concurrently, so it can differ from `rank_coverset`). `rank_file_order` is its position in plain collection order. `t_first_failure_file_order_est` is an estimate of when file-order CI would have reached it: `(sandbox_ready - t0) + Σ p50` of the tests before it in file order, where `t0` is `webhook_received`, else `queued` (`orchestrator/verdict.py`, `file_order_estimate`). `runs.ci_first_contact_at` records the first `/v1/verdict` answer for the run (`web/api.py`).
 
-Committed exit-code mapping: the `done` event carries `exit_code` 5 for "no tests collected", 2 when the run ends `error` or `cancelled` through an early exit, 1 for `failure`, and 0 for `success`. A run that reaches the final verdict with shard errors concludes `neutral`, and the committed `EXIT_CODES` table maps `neutral` to 0; `coverset-ci wait` turns any 0 that comes with a non-`success` conclusion into 2. The orchestrator fix pass in progress changes this to error → 2 and no tests → 5 throughout (its uncommitted `runner.py` maps `neutral` to 2).
+Exit codes (`orchestrator/runner.py`, `exit_code_for`): the `done` event carries 0 for `success`, 1 for `failure`, 5 when no tests were collected, and 2 for everything else (`error`, `cancelled` and `abandoned` runs, and `neutral` conclusions such as an incomplete run or "budget exhausted"). `coverset-ci wait` exits 1 for any `failure`, otherwise with the server's code, and never turns a non-`success` conclusion into 0 (`pytest_coverset/ci.py`).
+
+Background work while `serve` runs (`app.py`): the run dispatcher; the retention pass once at start-up and then every 24 h (`schedule_gc`, the same pass as `coverset gc`); and, when `COVERSET_EXECUTOR=modal`, the reaper every 60 s and the warm-pool maintainer every 30 s (`schedule_executor_upkeep`). At boot, `queued` runs left by a previous process are abandoned (or kept queued with `COVERSET_REQUEUE_ON_BOOT=true`), and a `running` run is taken over only when nothing executes it any more: an earlier `serve` on this host claimed it, its claiming process on this host is gone, nobody claimed it, or its heartbeat is older than 5 minutes; a live `coverset run` keeps its runs. With the Modal upkeep running, shutdown cancels re-snapshots in flight, drains the pool and closes the executors.
 
 ## Glossary
 
@@ -129,14 +133,14 @@ These terms are used the same way in code, UI and docs.
 | `pytest_coverset/ordering.py`, `events.py`, `bundle.py`, `outcomes.py`, `paths.py` | Priority order, framed stdout events, bundle files, result folding, one path normaliser | `priority_order`, `EventWriter`, `parse_event_line`, `make_tarball`, `fold_reports`, `norm_path` | `test_ordering.py`, `test_events.py`, `test_plugin.py` |
 | `pytest_coverset/ci.py`, `ci_http.py`, `junit.py` | `coverset-ci wait` (stdlib only) | `main`, `exit_code_for` | `packages/pytest-coverset/tests/test_ci.py`, `tests/forge/test_forge_ci_wait.py` |
 | `src/coverset/config.py`, `logging.py` | Every `COVERSET_*` setting; secret redaction | `Settings`, `get_settings`, `redact`, `RedactingFilter`, `configure_logging` | `tests/test_config.py`, `tests/test_redaction.py` |
-| `src/coverset/app.py`, `cli.py`, `commands/` | App factory, security headers, the `coverset` CLI | `create_app`, `cli`, `register_commands` | `tests/test_app.py`, `tests/orchestrator/test_commands.py` |
+| `src/coverset/app.py`, `cli.py`, `commands/` | App factory, security headers, background upkeep (gc, reaper, warm pool), the `coverset` CLI (including `invariants scan`) | `create_app`, `schedule_gc`, `schedule_executor_upkeep`, `cli`, `register_commands`, `scan_invariants` | `tests/test_app.py`, `tests/orchestrator/test_commands.py`, `tests/orchestrator/test_pool_upkeep.py`, `tests/orchestrator/test_invariants_scan.py` |
 | `src/coverset/db/` | SQLAlchemy models, SQLite pragmas, Alembic migrations | the models in `db/models.py`, `Database`, `init_db` | `tests/test_models.py` |
 | `src/coverset/facts/` | Untrusted-bundle reading, per-shard Parquet ingest, run aggregates, DuckDB queries, retention | `read_python_bundle`, `extract_bundle`, `BundleLimits`, `FactsStore`, `ingest_shard`, `finalize_run`, `patch_coverage`, `tests_covering`, `treemap`, `shapes_for_function`, `ParquetPriorRun`, `expire_runs` | `tests/facts/` |
 | `src/coverset/lang/` | Language-neutral contracts and the Python adapter | `LanguageAdapter`, `NeutralBundle`, `PriorRun`, `PythonAdapter`, `read_tool_config` | `tests/analysis/test_analysis_python_adapter.py` |
 | `src/coverset/analysis/` | Diff to changed functions, prior run, impact, scoring, wave 1, sharding, patch coverage, input classes, invariants | `run_git_diff`, `changed_functions`, `index_functions`, `select_prior_run`, `score_tests`, `change_covering_set`, `plan_shards`, `patch_report`, `Catalogue`, `load_invariants`, `evaluate` | `tests/analysis/` |
-| `src/coverset/orchestrator/` | Intake, queue, planning, execution, verdicts, bundles, history, mirrors, budget, pool, reaper | `intake`, `RunDispatcher`, `plan_run`, `execute_run`, `build_report`, `build_summary` | `tests/orchestrator/`, `tests/forge/test_forge_intake.py`, `tests/e2e/test_demo_local.py` |
+| `src/coverset/orchestrator/` | Intake, queue, planning, execution, verdicts, bundles, history, mirrors, budget, pool, reaper | `intake`, `RunDispatcher`, `plan_run`, `execute_run`, `build_report`, `build_summary`, `PoolMaintainer`, `reap_forever` | `tests/orchestrator/`, `tests/forge/test_forge_intake.py`, `tests/e2e/test_demo_local.py` |
 | `src/coverset/executors/base.py`, `local.py`, `env_export.py` | The executor contract, the local subprocess executor, environment hashing and the plugin wheel | `Executor`, `Worker`, `LocalExecutor`, `sanitize_env`, `build_env_spec`, `get_executor` | `tests/executors/` |
-| `src/coverset/executors/modal_.py`, `modal_images.py` | Modal Sandboxes (in progress) | `ModalExecutor` | in progress, see [docs/modal.md](docs/modal.md) |
+| `src/coverset/executors/modal_.py`, `modal_images.py` | Modal Sandboxes: env images, trusted snapshots, the warm pool, reaping, budget guard | `ModalExecutor`, `SandboxSlots` | `tests/executors/test_modal_executor.py` (fake `modal` module), `test_modal_live.py`; see [docs/modal.md](docs/modal.md) |
 | `src/coverset/forge/` | Forge contract, GitHub App and token adapters, fake forge, signatures, OIDC, sticky comment, App manifest, composite action | `Forge`, `GitHubForge`, `FakeForge`, `verify_signature`, `verify_actions_oidc`, `post_verdict` | `tests/forge/` |
 | `src/coverset/ai/` | Redacted review bundles, fake and Anthropic reviewers, findings | `ReviewClient`, `get_review_client`, `build_review_bundle`, `review_changes` | `tests/ai/` |
 | `src/coverset/web/` (committed part) | Access guard, `/v1` API, webhook route, `/setup` | `register_blueprints`, `access_guard`, `authorize_repo` | `tests/test_auth.py`, `tests/forge/test_forge_api.py`, `test_forge_api_hardening.py`, `test_forge_webhooks.py`, `test_forge_setup.py` |
@@ -157,7 +161,7 @@ coverset runs code it does not trust and reads data that code wrote. The rule is
 | AI review output | the model, which reads PR text | Schema-validated, redacted, advisory: it never changes pass or fail. |
 | `/v1` callers | CI jobs and strangers | Admin, a GitHub Actions OIDC token bound to the repository, or anonymous with a reduced, rate-limited view (`web/api.py`). |
 
-What never enters a worker: forge credentials (the App private key, installation tokens, `COVERSET_GITHUB_TOKEN`), the webhook secret, the admin token, `ANTHROPIC_API_KEY`, Modal tokens, the control database and the git mirror. The LocalExecutor builds each child environment from scratch (`executors/local.py`, `LocalWorker.child_env`) and `sanitize_env` drops denied names and prefixes (`executors/base.py`). Mirror tokens travel only as `git -c http.extraHeader=...` on the control plane (`orchestrator/repos.py`). The Modal executor in progress creates sandboxes with `secrets=[]` and `include_oidc_identity_token=False` (see [docs/modal.md](docs/modal.md)).
+What never enters a worker: forge credentials (the App private key, installation tokens, `COVERSET_GITHUB_TOKEN`), the webhook secret, the admin token, `ANTHROPIC_API_KEY`, Modal tokens, the control database and the git mirror. The LocalExecutor builds each child environment from scratch (`executors/local.py`, `LocalWorker.child_env`) and `sanitize_env` drops denied names and prefixes (`executors/base.py`). Mirror tokens travel only as `git -c http.extraHeader=...` on the control plane (`orchestrator/repos.py`). The Modal executor creates sandboxes with `secrets=[]` and `include_oidc_identity_token=False` (`executors/modal_.py`, `sandbox_options`; see [docs/modal.md](docs/modal.md)).
 
 One control plane is one trust domain. Every repository shares its database, facts directory, credentials and admin token. The full checklist is [docs/security.md](docs/security.md).
 
@@ -167,7 +171,7 @@ Each seam is a `typing.Protocol`. The how-to is [docs/extending.md](docs/extendi
 
 | Seam | Protocol | Implementations today |
 |---|---|---|
-| Where tests run | `coverset.executors.base.Executor` and `coverset.executors.base.Worker`; optional `PoolingExecutor` and `ReapingExecutor` | `LocalExecutor`; `ModalExecutor` in progress |
+| Where tests run | `coverset.executors.base.Executor` and `coverset.executors.base.Worker`; optional `PoolingExecutor` and `ReapingExecutor` | `LocalExecutor`, `ModalExecutor` |
 | Code host | `coverset.forge.base.Forge` | `GitHubForge` (App and token modes), `FakeForge` |
 | Language | `coverset.lang.base.LanguageAdapter`, with `NeutralBundle` as the bundle contract and `PriorRun` for prior facts | `PythonAdapter` |
 | Reviewer | `coverset.ai.client.ReviewClient` | `FakeReviewClient`, `AnthropicReviewClient` (unit-tested against a stubbed SDK only) |
@@ -179,7 +183,7 @@ Each seam is a `typing.Protocol`. The how-to is [docs/extending.md](docs/extendi
 |---|---|
 | Postgres for the control database | `COVERSET_DATABASE_URL` takes any SQLAlchemy async URL; only SQLite is exercised, and the migrations are written with `render_as_batch` for SQLite. |
 | DuckLake, content-addressed per-(test, blob) bitsets, Postgres with `pg_roaringbitmap` for facts | Everything reads facts through `FactsStore` and `facts/queries.py`; see [docs/data-model.md](docs/data-model.md#scale-out-path). |
-| Modal Functions with memory snapshots as an executor | A second `Executor` implementation; the Sandbox executor is in progress. |
+| Modal Functions with memory snapshots as an executor | A second `Executor` implementation beside the Sandbox-based `ModalExecutor`. |
 | Daytona, E2B and Docker executors | `Executor` and `Worker` in `executors/base.py`, registered in `executors.get_executor`. |
 | GitLab and Bitbucket | `Forge` in `forge/base.py`, route names in `forge/registry.py`, and the `ForgeKind` literal in `db/models.py` (today `github`, `fake`, `local`). |
 | TypeScript adapter | `LanguageAdapter` and `NeutralBundle`; the route is in [docs/extending.md](docs/extending.md#adding-a-language). |
@@ -189,7 +193,6 @@ Each seam is a `typing.Protocol`. The how-to is [docs/extending.md](docs/extendi
 | Treemap minimap | UI. |
 | `merge_group` (merge queues) | Not in `forge/github_events.ALLOWED_EVENTS`; see [docs/github.md](docs/github.md#future-work-merge-queues). |
 | Check-run buttons beyond `rerun-failed`, `rerun-all` and `approve-run` | `CheckAction` and `ACTION_IDENTIFIERS` in `forge/base.py`, dispatched in `intake._action_button`. |
-| `coverset invariants scan` | Registered in `cli.py` as a placeholder that exits with "arrives in phase 7"; `invariant_results.trigger` already allows `scan`. |
 
 ## Numbers
 

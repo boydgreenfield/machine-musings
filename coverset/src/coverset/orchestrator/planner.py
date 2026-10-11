@@ -61,7 +61,14 @@ from coverset.analysis.functions import FunctionChange, FunctionRegion
 from coverset.analysis.invariants import InvariantError, load_invariants, resolve_target
 from coverset.analysis.prior import PriorChoice, select_prior_run
 from coverset.analysis.scoring import ScoredTest, ScoringContext, exploration_seed, score_tests
-from coverset.analysis.sharding import ShardPlan, plan_shards, reshard, shard_scores
+from coverset.analysis.sharding import (
+    MIN_TESTS_PER_SHARD,
+    UNKNOWN_DURATION_S,
+    ShardPlan,
+    plan_shards,
+    reshard,
+    shard_scores,
+)
 from coverset.config import Settings
 from coverset.db.models import Env, Repo, Run, Shard, Snapshot, TestResult, TestStats
 from coverset.db.session import Database
@@ -110,7 +117,7 @@ REPO_DIR = "repo"
 RUN_DIR = "run"
 COLLECT_TIMEOUT_S = 300.0
 MAX_NODEID_CHARS = 512
-DEFAULT_MEDIAN_S = 0.5
+DEFAULT_MEDIAN_S = UNKNOWN_DURATION_S
 """Duration assumed for a test nobody has timed yet, when no other test has been timed either."""
 
 WRITE_ATTEMPTS = 5
@@ -736,6 +743,7 @@ class _Analysis:
             max_shards=max(1, max_shards),
             median_s=self.median_s,
             groups=self.groups,
+            min_tests_per_shard=1 if forced else MIN_TESTS_PER_SHARD,
         )
 
 

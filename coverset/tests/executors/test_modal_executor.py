@@ -458,6 +458,108 @@ async def test_a_new_snapshot_replaces_the_stale_pool(
     await executor.close()
 
 
+async def _seed_pool_repo(settings: Settings, *, cost: float = 0.0) -> int:
+    """A repo with a recent Modal run, its env and a ready trusted snapshot ``im-snap``."""
+    from datetime import timedelta
+
+    from coverset.db.models import Run
+
+    database = Database.from_url(settings.database_url)
+    now = settings.now()
+    async with database.session() as session:
+        repo = Repo(forge="local", external_id="p", full_name="local/p", default_branch="main")
+        session.add(repo)
+        session.add(Env(env_hash="e" * 64, python="3.13", image_id="im-env", created_at=now))
+        await session.flush()
+        session.add(
+            Run(
+                repo_id=repo.id,
+                head_sha="a" * 40,
+                trigger="baseline",
+                executor="modal",
+                cost_estimate=cost,
+                created_at=now,
+            )
+        )
+        session.add(
+            Snapshot(
+                repo_id=repo.id,
+                env_hash="e" * 64,
+                sha="a" * 40,
+                image_id="im-snap",
+                status="ready",
+                created_at=now,
+                expires_at=now + timedelta(days=6),
+            )
+        )
+        await session.commit()
+        repo_id = repo.id
+    await database.engine.dispose()
+    return repo_id
+
+
+async def test_serve_fills_the_pool_reaps_and_drains_on_shutdown(
+    db_settings: Settings, fake_modal: Any, world: Any
+) -> None:
+    from coverset.app import create_app, schedule_executor_upkeep
+    from coverset.orchestrator.runner import OrchestratorContext
+
+    repo_id = await _seed_pool_repo(db_settings)
+    settings = db_settings.model_copy(update={"pool_size": 2, "executor": "modal"})
+    executor = make_executor(settings, fake_modal)
+    app = create_app(settings)
+    ctx = OrchestratorContext.from_app(app)
+    ctx.executor_factory = lambda kind: executor
+    schedule_executor_upkeep(app, reap_interval_s=0.05, pool_interval_s=0.05)
+    orphan = world.add_foreign({"coverset_instance": executor.instance_id, "run": "gone", "role": "shard"})
+
+    def pooled() -> list[Any]:
+        return [sb for sb in world.live() if sb.tags.get("role") == "pool"]
+
+    async with app.test_app():
+        for _ in range(250):
+            if len(pooled()) == 2 and orphan.terminated:
+                break
+            await asyncio.sleep(0.02)
+        assert len(pooled()) == 2 and executor.pool_size(str(repo_id)) == 2
+        assert {sb.image.object_id for sb in pooled()} == {"im-snap"}
+        assert all(sb.tags["repo"] == str(repo_id) and sb.execs == [] for sb in pooled())
+        assert orphan.terminated, "the reaper runs while serving"
+    assert world.live() == [], "shutdown drains the pool: nothing is left running"
+
+
+async def test_pool_maintainer_respects_the_daily_budget(
+    db_settings: Settings, fake_modal: Any, world: Any
+) -> None:
+    from coverset.orchestrator.pool import PoolMaintainer
+
+    await _seed_pool_repo(db_settings, cost=db_settings.modal_daily_budget_usd)
+    executor = make_executor(db_settings, fake_modal)
+    database = Database.from_url(db_settings.database_url)
+    try:
+        assert await PoolMaintainer(database, db_settings, executor).maintain_once() == {}
+    finally:
+        await database.engine.dispose()
+    assert world.create_calls == []
+
+
+async def test_pool_fills_share_the_sandbox_semaphore(
+    db_settings: Settings, fake_modal: Any, world: Any
+) -> None:
+    from coverset.orchestrator.pool import PoolMaintainer
+
+    repo_id = await _seed_pool_repo(db_settings)
+    executor = make_executor(db_settings, fake_modal, slots=SandboxSlots(3))
+    database = Database.from_url(db_settings.database_url)
+    try:
+        maintainer = PoolMaintainer(database, db_settings, executor)
+        assert await maintainer.maintain_once() == {str(repo_id): 3}, "pool_size 4 capped by 3 slots"
+        assert await maintainer.drain() == 3
+    finally:
+        await database.engine.dispose()
+    assert world.live() == []
+
+
 # -- workers ---------------------------------------------------------------------------------------------
 
 

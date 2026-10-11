@@ -61,8 +61,11 @@ then rebuilds the image once and remembers the new id.
 
 ### Trusted snapshots: one per default-branch commit
 
-`coverset warm` (and `ModalExecutor.ensure_snapshot`) builds a snapshot only for a commit reachable
-from the repository's default branch; a PR head is refused. A sandbox from the env image receives
+`coverset warm` and the runner (after a trusted baseline of the default branch's tip completes with
+verdict `success` or `failure`; see [orchestrator.md](orchestrator.md#how-a-run-flows), step 8) call
+`ModalExecutor.ensure_snapshot`, which reuses a ready, unexpired snapshot of the same commit and
+environment and otherwise builds one, only for a commit reachable from the repository's default
+branch; a PR head is refused. A sandbox from the env image receives
 the commit as a `git archive` tarball, runs `python -m pytest --collect-only -q -p no:cacheprovider`
 and `python -m compileall --invalidation-mode checked-hash` into `PYTHONPYCACHEPREFIX=/work/.pycache`
 (hash-checked bytecode survives the next checkout: unchanged files reuse it whatever their mtime),
@@ -93,9 +96,20 @@ them; `acquire` claims matching ones first (same repo, image, network policy and
 running), retags them with the run, and creates the rest. A claimed sandbox serves exactly one run
 and is terminated afterwards. Unclaimed ones expire after `COVERSET_POOL_TTL_S` (600 s): the
 executor drops them and Modal's `idle_timeout` terminates them on its side even if the control
-plane is gone. `coverset.orchestrator.pool.maintain_pool` is the generic entry point; as of this
-phase nothing calls it automatically after a baseline run (the benchmark fills the pool itself), so
-runs without a filled pool create their sandboxes on demand.
+plane is gone. A new snapshot replaces the pool: a fill terminates pooled sandboxes of any other
+image before topping up.
+
+`coverset serve` keeps the pool filled when `COVERSET_EXECUTOR=modal` (`app.schedule_executor_upkeep`,
+not started under `COVERSET_ENV=test`). Every 30 s its `PoolMaintainer` (`orchestrator/pool.py`) looks
+for repos with a Modal run created in the last `COVERSET_POOL_TTL_S` seconds and tops each one's pool
+up to `COVERSET_POOL_SIZE` from that repo's newest ready, unexpired trusted snapshot; a repo without
+one gets no pool, and the pool of a repo that went quiet is drained. After a re-snapshot the runner
+refills that repo's pool at once. While today's spend has reached `COVERSET_MODAL_DAILY_BUDGET_USD`
+nothing is filled and every pool is drained; fills also go through `fill_pool`'s own budget check and
+take slots from the `COVERSET_MAX_SANDBOXES` counter like any other sandbox. When `serve` stops, it
+cancels snapshot builds in flight, drains the pool and closes the executor, so nothing it created
+keeps running. `COVERSET_POOL_SIZE=0` turns the pool off. `coverset run` and `coverset demo
+--no-serve` keep no pool: their runs create sandboxes on demand (the benchmark fills a pool itself).
 
 ## Cost guards (every one enforced in code)
 
@@ -109,7 +123,8 @@ runs without a filled pool create their sandboxes on demand.
 | shards per run | `COVERSET_MAX_SHARDS` (32) | planner |
 | concurrent runs | `COVERSET_MAX_CONCURRENT_RUNS` (4) | queue |
 | retries per run | `COVERSET_RETRY_BUDGET_PER_RUN` (5) | runner |
-| pool size per active repo | `COVERSET_POOL_SIZE` (4) | `fill_pool` |
+| pool size per active repo (repos with a run in the last `COVERSET_POOL_TTL_S`); 0 disables the pool | `COVERSET_POOL_SIZE` (4) | `fill_pool`, `PoolMaintainer` |
+| pool maintenance interval and reaper interval while serving | 30 s and 60 s (constants `POOL_INTERVAL_S`, `REAP_INTERVAL_S`) | `orchestrator/pool.py`, `orchestrator/reaper.py` |
 | daily budget: no new sandboxes once today's spend reaches it; the run concludes `neutral`, "budget exhausted" | `COVERSET_MODAL_DAILY_BUDGET_USD` (5.00) | runner policy and `ModalExecutor._guard_budget` |
 | kill switch: webhooks stored, no runs start | `COVERSET_PAUSED` (false) | queue |
 | network: `block_network=True` unless the policy says otherwise; `allowlist` uses `outbound_domain_allowlist`; untrusted PRs are always blocked | `COVERSET_SANDBOX_NETWORK` (blocked), `COVERSET_SANDBOX_DOMAIN_ALLOWLIST` | `sandbox_options` |
@@ -134,9 +149,10 @@ with it. `coverset modal reap` lists the App's sandboxes with that tag
 tag is not a queued or running run; `--all` terminates all of them. A reap keeps the sandboxes its
 own process holds (pool, running shards, snapshot builds); a reap from another process (the CLI)
 does not know a server's pool and terminates it, and the pool is refilled on the next fill.
-`coverset.orchestrator.reaper.reap_forever` runs the pass every 60 s for a long-lived process; as of
-this phase `coverset serve` does not start it yet, so run `coverset modal reap` from cron (or wire
-`reap_forever` into the app's startup). Every sandbox also carries `timeout` and `idle_timeout`, so
+`coverset serve` with `COVERSET_EXECUTOR=modal` runs the same pass (`orchestrator.reaper.reap_forever`)
+when it starts and then every 60 s, keeping its own pool, shards and snapshot builds. Run
+`coverset modal reap` by hand (or from cron) when no `serve` is running, for example after
+`coverset run` or `coverset demo --no-serve` processes that were killed. Every sandbox also carries `timeout` and `idle_timeout`, so
 Modal ends a forgotten one on its own within `COVERSET_RUN_TIMEOUT_S` at the latest. `terminate()` is asynchronous: a terminated
 sandbox can stay listed for a few seconds.
 

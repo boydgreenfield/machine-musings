@@ -42,7 +42,8 @@ def create_app(settings: Settings | None = None) -> Quart:
     ``app.extensions["db"]`` the :class:`~coverset.db.session.Database`. The database is migrated
     when the app starts serving (unless ``settings.skip_migrations``) and the engine is disposed
     when it stops. Outside tests, serving also starts the run dispatcher and the in-process gc
-    (:func:`schedule_gc`: once at startup, then every 24 h).
+    (:func:`schedule_gc`: once at startup, then every 24 h), and with ``COVERSET_EXECUTOR=modal`` the
+    reaper and the warm-pool maintainer (:func:`schedule_executor_upkeep`).
     """
     settings = settings or get_settings()
     configure_logging(settings)
@@ -90,6 +91,8 @@ def create_app(settings: Settings | None = None) -> Quart:
 
         install_run_queue(app)
         schedule_gc(app)
+        if settings.executor == "modal":
+            schedule_executor_upkeep(app)
     return app
 
 
@@ -116,6 +119,68 @@ def schedule_gc(app: Quart, *, interval_s: float | None = None) -> None:
             app.shutdown_event,
             interval_s=GC_INTERVAL_S if interval_s is None else interval_s,
         )
+
+
+def schedule_executor_upkeep(
+    app: Quart, *, reap_interval_s: float | None = None, pool_interval_s: float | None = None
+) -> None:
+    """Reap and keep the warm pool filled while the app serves; drain the pool when it stops.
+
+    For ``settings.executor`` (the executor the app's runs use, shared through
+    :meth:`~coverset.orchestrator.runner.OrchestratorContext.from_app`):
+
+    * :func:`~coverset.orchestrator.reaper.reap_forever` runs at startup and then every
+      ``reap_interval_s`` (60 s), terminating workers tagged with this installation that no queued or
+      running run holds (executors that do not reap skip it);
+    * a :class:`~coverset.orchestrator.pool.PoolMaintainer` tops the pools of recently active repos up
+      to ``COVERSET_POOL_SIZE`` every ``pool_interval_s`` (30 s) and is handed to the runner, which
+      refills a repo's pool after re-snapshotting it (executors without a pool skip it);
+    * when serving stops, re-snapshots in flight are cancelled, the pool is drained and the
+      executors are closed, so no worker this process created is left running.
+
+    ``create_app`` calls this outside tests when the executor is Modal; tests call it explicitly.
+    """
+    from coverset.orchestrator.pool import POOL_INTERVAL_S, PoolMaintainer
+    from coverset.orchestrator.reaper import REAP_INTERVAL_S, reap_forever
+    from coverset.orchestrator.runner import OrchestratorContext
+
+    settings: Settings = app.extensions["settings"]
+    ctx = OrchestratorContext.from_app(app)
+    state: dict[str, PoolMaintainer] = {}
+
+    @app.before_serving
+    async def _start_executor_upkeep() -> None:
+        executor = ctx.executor(settings.executor)
+        maintainer = PoolMaintainer(ctx.db, settings, executor)
+        state["maintainer"] = maintainer
+        app.add_background_task(
+            reap_forever,
+            ctx.db,
+            executor,
+            interval_s=REAP_INTERVAL_S if reap_interval_s is None else reap_interval_s,
+            stop=app.shutdown_event,
+        )
+        if maintainer.enabled:
+            ctx.pool_maintainer = maintainer
+            app.add_background_task(
+                maintainer.run_forever,
+                app.shutdown_event,
+                interval_s=POOL_INTERVAL_S if pool_interval_s is None else pool_interval_s,
+            )
+
+    @app.after_serving
+    async def _stop_executor_upkeep() -> None:
+        ctx.pool_maintainer = None
+        await ctx.finish_background(cancel=True)
+        maintainer = state.pop("maintainer", None)
+        if maintainer is not None and maintainer.enabled:
+            try:
+                drained = await maintainer.drain()
+            except Exception:
+                app.logger.exception("draining the warm pool failed")
+            else:
+                app.logger.info("warm pool drained (%d workers)", drained)
+        await ctx.close()
 
 
 async def _http_error(error: HTTPException) -> HTTPException | tuple[Response, int]:

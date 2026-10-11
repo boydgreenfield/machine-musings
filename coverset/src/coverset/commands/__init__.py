@@ -10,6 +10,7 @@ import click
 
 from coverset.commands.demo import demo_command, seed_demo_command
 from coverset.commands.facts import facts_query_command, shapes_command
+from coverset.commands.invariants import invariants_scan_command
 from coverset.commands.maintenance import (
     gc_command,
     invariants_check_command,
@@ -38,5 +39,6 @@ def register_commands(
     cli.add_command(gc_command, "gc")
     facts.add_command(facts_query_command, "query")
     invariants.add_command(invariants_check_command, "check")
+    invariants.add_command(invariants_scan_command, "scan")
     repo.add_command(repo_purge_command, "purge")
     modal.add_command(modal_reap_command, "reap")
