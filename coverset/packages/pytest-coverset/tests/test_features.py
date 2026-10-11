@@ -123,6 +123,7 @@ class ExplosiveList(list):
         raise AssertionError("__len__ called")
 
 
+@pytest.mark.security
 def test_user_dunders_are_never_called() -> None:
     boom = Explosive()
     assert shape_key(boom) == f"obj:{__name__}.Explosive"
@@ -136,6 +137,7 @@ def test_user_dunders_are_never_called() -> None:
     assert example_repr("x", boom, "all") is None
 
 
+@pytest.mark.security
 def test_example_redaction() -> None:
     assert example_repr("password", "hunter2hunter2", "scalars") == "<redacted:len=14>"
     assert example_repr("api_key", 12345, "scalars") == "<redacted>"
@@ -148,6 +150,7 @@ def test_example_redaction() -> None:
     assert scrub("Authorization: Bearer abc.def") == "Authorization: Bearer [REDACTED]"
 
 
+@pytest.mark.security
 def test_return_values_of_secret_named_functions_are_redacted() -> None:
     secret = "ghx_supersecretvalue1234567890"
     assert example_repr("return", secret, "scalars", func_name="make_reset_token") == "<redacted:len=30>"
@@ -156,6 +159,7 @@ def test_return_values_of_secret_named_functions_are_redacted() -> None:
     assert example_repr("text", "abc", "scalars", func_name="make_token") == "'abc'"
 
 
+@pytest.mark.security
 def test_secret_dict_keys_are_redacted_in_container_examples() -> None:
     kwargs = {"password": "hunter2", "api_key": "abc", "name": "bob", "nested": {"session_id": [1, 2]}}
     assert example_repr("**kw", kwargs, "all") == (

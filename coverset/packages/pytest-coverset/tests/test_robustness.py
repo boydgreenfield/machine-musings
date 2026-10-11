@@ -136,6 +136,7 @@ def test_non_ascii_results_on_an_ascii_stdout(
     assert stream[-1]["kind"] == "done" and stream[-1]["counts"]["not_run"] == 0
 
 
+@pytest.mark.security
 def test_nonce_is_hidden_from_tests_and_their_subprocesses(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:

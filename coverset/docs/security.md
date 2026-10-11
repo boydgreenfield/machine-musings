@@ -2,7 +2,7 @@
 
 coverset runs other people's code and reports on it. This page is the threat model and the checklist the hardening phase runs. Every control names the module that implements it and the test that covers it. "No test" marks a control that is in the code but not pinned by a test; "designed" marks parts that do not exist yet.
 
-The tests named below carry `@pytest.mark.security`, so `uv run pytest -m security` runs the security suite on its own (252 tests at the time of writing; the exact count follows the test files). Controls marked "no test" are still open.
+The tests named below carry `@pytest.mark.security`, so `uv run pytest -m security` runs the security suite on its own (252 tests at the time of writing; the exact count follows the test files), and `uv run pytest packages/pytest-coverset/tests -m security` runs the plugin's five (the root `testpaths` does not include the plugin's tests). Controls marked "no test" are still open.
 
 ## Threat model
 

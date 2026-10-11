@@ -28,3 +28,6 @@ packages = ["src/pytest_coverset"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
+markers = [
+  "security: security-focused tests (run with -m security)",
+]
