@@ -38,3 +38,14 @@
 {%- if parts.changed_uncovered %} · changed lines not covered by linked tests{% endif %}</p>
 {%- endif -%}
 {%- endmacro %}
+
+{# A nodeid that links to its test page (by control-DB id when known, else through by-nodeid). #}
+{% macro test_link(rid, nodeid, run_id=None, test_id=None) -%}
+{%- if test_id -%}{%- set href = url_for('testpage.test_page', rid=rid, test_id=test_id, run=run_id) -%}
+{%- else -%}{%- set href = url_for('testpage.by_nodeid', rid=rid, nodeid=nodeid, run=run_id) -%}{%- endif -%}
+<a class="nodeid test-link" href="{{ href }}">{{ nodeid|nodeid }}</a>
+{%- endmacro %}
+
+{% macro outcome_glyph(value, flaky=False) -%}
+{%- if flaky -%}≈{%- else -%}{{ {'passed': '✓', 'failed': '✕', 'error': '!', 'skipped': '–', 'xfailed': 'x', 'xpassed': 'X'}.get(value, '·') }}{%- endif -%}
+{%- endmacro %}

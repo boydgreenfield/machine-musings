@@ -1,11 +1,11 @@
 {% extends layout %}
-{% from "_macros.html" import outcome %}
+{% from "_macros.html" import outcome, test_link %}
 {% block title %}Tests of {{ path }}:{{ line }}{% endblock %}
 {% block main %}
 <h3>{{ rows|length }} test{{ '' if rows|length == 1 else 's' }} ran <code>{{ path }}:{{ line }}</code></h3>
 {% if rows %}
 <ul class="test-list">
-{% for nodeid, r in rows %}<li>{{ outcome(r.get('outcome')) }}<span class="nodeid">{{ nodeid|nodeid }}</span>{% if r.get('rank') %}<span class="muted">ran {{ r.rank|ordinal }}</span>{% endif %}</li>{% endfor %}
+{% for nodeid, r in rows %}<li>{{ outcome(r.get('outcome')) }}{{ test_link(repo.id, nodeid, run.id) }}{% if r.get('rank') %}<span class="muted">ran {{ r.rank|ordinal }}</span>{% endif %}</li>{% endfor %}
 </ul>
 {% endif %}
 {% if at_import %}<p class="muted">Also executed at import time.</p>{% endif %}

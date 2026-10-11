@@ -1,5 +1,5 @@
 {% extends layout %}
-{% from "_macros.html" import outcome %}
+{% from "_macros.html" import outcome, test_link %}
 {% block title %}Run {{ run.id[-8:] }}{% endblock %}
 {% block main %}
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a>{% if pr %} / <a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number) }}">PR #{{ pr.number }}</a>{% endif %} / run</div>
@@ -60,7 +60,7 @@
     {% for r in results %}
       <tr>
         <td>{{ outcome(r.outcome) }}{% if r.flaky %} <span class="badge">flaky</span>{% endif %}</td>
-        <td class="nodeid">{{ r.nodeid|nodeid }}</td>
+        <td class="nodeid">{{ test_link(repo.id, r.nodeid, run.id) }}</td>
         <td class="num">{{ r.rank or '–' }}</td>
         <td class="num">{{ r.file_rank or '–' }}</td>
         <td class="num">{{ r.duration_ms|ms }}</td>

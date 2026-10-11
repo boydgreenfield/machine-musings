@@ -207,8 +207,29 @@ uv run coverset facts query "SELECT path, statements, covered, branches, branche
 | Shape history | `shapes_for_function(func_key, last_n_runs=5, branch=None)` | pick the newest runs from `runs_dim` first (only runs whose `runs_dim.branch` is `branch` when given; `coverset shapes` passes the default branch unless `--branch any`), then read only those runs' `call_shapes`, grouped by `(param, shape_id)`: summed samples, run count, test ids, and the example that sorts first by (repr length, repr, test node id), so the choice does not depend on run or test order |
 | Run headline | `run_summary` | `runs_dim`, outcome counts from `tests_dim` (a test seen by several shards takes the most recently committed one), totals from `file_cov` |
 | Prior-run facts for scoring and wave 1 | `ParquetPriorRun` | loads `functions`, `test_lines`, `file_static` and `tests_dim` of one run into sorted numpy arrays |
+| What one test ran (the test page, `coverset facts test`) | `test_touched(nodeid)` | the test's ids from `tests_dim`, its `test_lines` joined to `files` and `file_static`; each line goes to the innermost callable in `functions` whose body contains it (the treemap's rule), else it is module-level; per file the lines and statement count, per function (by `def_line`) the body lines run and the body's statements |
+| What one test passed in | `test_shapes(nodeid)` | `call_shapes` rows whose `test_ids` hold the test (or whose caller is the test), with `shapes` for the key and the region triple from `functions` (else `func_sampling`); returned as `ShapeObs`, whose `samples` count every test of the row |
+| One test's outcomes over recent runs | `test_history(nodeid, last_n)` | the newest runs from `runs_dim` first, then their `tests_dim` (the most recently committed shard wins) left-joined, newest first; first-attempt outcomes (`test_results` in the control database has the final outcome and the flaky flag) |
+| Inventory of a run (`coverset facts tables`) | `run_inventory` | one `count(*)` per view in one `UNION ALL`, plus the sizes of the visible (committed) files per table |
+| Ingest history of a run (`coverset facts explain`) | `ingest_record` | every `ingest_log` row by shard and attempt, the committed attempt marked, `convert_json` parsed into tracer notes, dropped records and bundle bytes |
 
 As an example, on the PR #2 run of a local demo, `SELECT count(DISTINCT tl.test_id) FROM functions f JOIN test_lines tl ON tl.file_id = f.file_id AND tl.line BETWEEN f.body_start AND f.end_line WHERE f.qualname = 'validate_email' AND tl.test_id <> 0` returned 24, and `file_cov` showed `src/ledger/accounts/emailcheck.py` and `src/ledger/billing/allocate.py` at 100.0% line and branch coverage.
+
+### Debugging a run
+
+Five `coverset facts` subcommands answer the usual "what did this run record?" questions without
+SQL. Each takes `--repo` (id, full name or path; default the only repository), `--run` (default
+the newest completed default-branch baseline, as on the UI pages; required for `explain` and
+`export`) and `--json` for machine output (`commands/facts.py`; tests
+`tests/orchestrator/test_commands_facts.py`).
+
+| Command | Shows |
+|---|---|
+| `uv run coverset facts tables --repo coverset-demo/ledger --run <run_id>` | every facts table of the run: kind (run or shard), visible files, rows, bytes |
+| `uv run coverset facts explain --repo coverset-demo/ledger --run <run_id>` | the run row, the timeline in seconds, shards, the ingest log per attempt with tracer notes and dropped records, `coverage_complete`, sample caps hit, bundle sizes and the run it was scored against |
+| `uv run coverset facts test tests/test_refund.py::test_refund_partial --run <run_id>` | the result, the files and functions the test ran with their body lines, what it passed in per parameter, its outcomes in the last runs |
+| `uv run coverset facts line src/ledger/billing/refund.py:12 --run <run_id>` | the function the line belongs to and the tests that ran it, in run order (rank), with outcomes |
+| `uv run coverset facts export --repo coverset-demo/ledger --run <run_id> --to /tmp/run-facts` | every table as `<table>.jsonl`, a `tables.json` index (rows, columns, source files) and the repo's `dictionary.json`; facts hold no secrets (example values are redacted by the tracer and failure text is not in facts) |
 
 ## Retention and gc
 

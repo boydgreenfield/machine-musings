@@ -1,10 +1,10 @@
-{% if failures %}
+{% from "_macros.html" import test_link %}{% if failures %}
 {% for f in failures %}
   {% set c = confirmed.get(f.nodeid) %}
   {# One id per nodeid so the morph keeps each failure's element; stream frames never emit "open",
      and app.js keeps the reader's open/closed state across morphs. #}
   <details class="section failure" id="failure-{{ f.nodeid|domid }}" data-keep-open{% if first_render and loop.first %} open{% endif %}>
-    <summary><span class="oc oc-failed">{{ f.outcome }}</span> <span class="nodeid">{{ f.nodeid|nodeid }}</span>
+    <summary><span class="oc oc-failed">{{ f.outcome }}</span> {{ test_link(repo.id, f.nodeid, run.id) }}
       <span class="muted">{% if f.failed_phase %} in {{ f.failed_phase }}{% endif %} · shard {{ f.shard }}{% if c %} · {{ 'confirmed by a retry' if c.get('retried') else 'confirmed' }}{% if c.get('rank') %}, ran {{ c.rank|ordinal }}{% endif %}{% if c.get('preexisting') %} · also fails on the base branch{% endif %}{% elif f.flaky %} · passed on retry{% elif live %} · retrying to confirm{% endif %}</span></summary>
     <div class="body">{% if f.longrepr %}<pre class="longrepr">{{ f.longrepr }}</pre>{% else %}<p class="empty">No traceback recorded.</p>{% endif %}</div>
   </details>

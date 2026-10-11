@@ -1,5 +1,5 @@
 {# The expanded content of a changed-function card and the body of the function page. #}
-{% from "_macros.html" import outcome %}
+{% from "_macros.html" import outcome, test_link %}
 {% set fk = detail.region.func_key %}
 <div class="detail-grid">
   <div>
@@ -10,7 +10,7 @@
     <section>
       <h3>Top covering tests <span class="muted">· {{ detail.test_total }} in all, in run order</span></h3>
       {% if detail.top_tests %}
-      <ul class="test-list">{% for nodeid, oc in detail.top_tests %}<li>{{ outcome(oc) }}<span class="nodeid">{{ nodeid|nodeid }}</span></li>{% endfor %}</ul>
+      <ul class="test-list">{% for nodeid, oc in detail.top_tests %}<li>{{ outcome(oc) }}{{ test_link(repo.id, nodeid, run.id) }}</li>{% endfor %}</ul>
       {% else %}<p class="empty">No test calls this function.</p>{% endif %}
     </section>
   </div>

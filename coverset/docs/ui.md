@@ -21,7 +21,9 @@ that produce trusted markup).
 | `/repos/<rid>/functions/<func_key>` | One function: shape grid, flow ribbon, source with coverage, covering tests, invariants on it, AI finding. |
 | `/repos/<rid>/functions/<func_key>/shapes` | Fragment: the shape grid; with `&cls=<param>:<class>` one cell's detail. |
 | `/repos/<rid>/map` | Treemap, `?mode=gap` (default) `\|lines\|inputs`, `?path=` zooms into a directory or file, `?run=`. A "largest gaps" table ranks called functions by gap, lists the functions no test called apart, and only counts what has nothing to compare (module-level code, functions that expect no input classes). |
-| `/repos/<rid>/tests` | Every test: runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. |
+| `/repos/<rid>/tests` | Every test (each nodeid links to its test page): runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. |
+| `/repos/<rid>/tests/<test_id>` | One test: identity, its result in `?run=` (default: the newest completed default-branch baseline), the last 12 results as squares, and its data flow in that run (see [The test page](#the-test-page)). `test_id` is the control database's test id. |
+| `/repos/<rid>/tests/by-nodeid?nodeid=&run=` | Redirects (302) to the test page of that nodeid, keeping `run`. Every nodeid in the UI links through the `test_link` macro: the tests table, the run page's failures and "All tests", the PR page's tests, the line popover, a shape cell's tests and the function page's covering tests. |
 | `/repos/<rid>/invariants` | Every declared invariant: statement, status chip, the last 12 statuses, the coverage lens and per-verification evidence. `?run=<PR run>` adds the PR-vs-base comparison and "Invariants changed by this PR". |
 | `/forge/outbox` | Every recorded forge call, newest first; sticky comments and check-run summaries rendered as GitHub-flavoured markdown under "Would be posted to GitHub (fake forge)". `?method=` filters. |
 | `/setup` | GitHub App manifest flow, token mode, sandbox settings. Plain HTML, no scripts. The "Create the GitHub App" button is disabled, with the reason, while the public URL is a loopback address. |
@@ -98,6 +100,40 @@ fails to load shows "Could not load this section (HTTP n)" where it would have g
   is hidden for the local executor.
 * An untrusted run awaiting approval shows the Approve run button to admins
   (`POST /runs/<id>/approve`).
+
+### The test page
+
+`/repos/<rid>/tests/<test_id>?run=` (`web/testpage.py`, `templates/test.html`). The run is chosen
+like the other pages: `?run=` (a run of this repository, else 404), default the newest completed
+default-branch baseline; each history square opens the page for its run.
+
+* **Identity**: the nodeid, its file, the markers and whether it is property-based (`@given`),
+  read from the test's source at the run's head commit (module `pytestmark`, class `pytestmark`
+  and decorators; "unknown" when the run's facts do not list the file, since the plugin's
+  collected markers are not stored), the invariants that link it in this run with their status,
+  and the rolling statistics.
+* **In this run**: outcome, duration, attempts (each one listed when retried), the flaky flag, rank
+  and shard, and the failure text from the run's `test` events (already redacted). Under it the
+  last 12 results as squares in the invariants page's style, oldest first, with a glyph and a
+  title each (✓ passed, ✕ failed, ! error, ≈ flaky, – skipped); the selected run is ringed.
+* **Data flow**: an SVG (`render/flow.py`, the ribbon's visual grammar) with four columns: the
+  test → in-repo callers in between ("via", only when the shape observations show a call came
+  through another function) → the functions it called → their parameters, each labelled with how
+  many input classes this test carried. Ribbon width is sampled calls (a `call_shapes` row
+  aggregates every test of a caller, so a row's samples are shared evenly among its tests; a
+  function the tracer never sampled for this test gets a hairline); the shade steps with the
+  classes carried (1, 2, 3–4, 5+). Every bar is a link: the test to its file's source view, the
+  functions and parameters to the function page.
+* **Functions it called**: per file, the functions whose body the test ran (from `test_lines` ∩
+  function bodies, `facts/queries.py` `test_touched`, ordered by file then `def` line), "body
+  lines run 5 of 7", the line ranges (each a link into the source view), module-level lines, and
+  per parameter two strips drawn with `render_strip`: **this test** (filled = a class this test
+  passed in; hollow dashed = a class no test ever passed in; classes only other tests reached are
+  left out and counted "N more by other tests") and **any test** (the function's whole picture),
+  with the redacted example this test passed when it was the example's test.
+* The source-view links carry `&test=<id>`, which the source view does not filter on yet; the
+  page holds the same lines per path as JSON in `<div hidden id="test-lines" data-test-lines>` for
+  a later "dim the lines this test did not run" mode.
 
 ## The data-flow overlay
 
@@ -189,7 +225,7 @@ text alone). URLs pass `safe_href` (same-site paths and http(s) only). Markdown 
 markdown-it-py with `html=False`, images off and links limited to http(s); the sticky comment's
 fixed `<details><summary>` skeleton is rebuilt from whole lines and its hidden marker dropped.
 `tests/web/test_render_xss.py` feeds `<script>`, `"onmouseover=` and `javascript:` to every
-renderer. The CSP (`script-src 'self'`) forbids inline and eval'd script, so the htmx config sets
+renderer. The test page's flow renderer (`render/flow.py`) and the page itself (hostile nodeids, failure text and example reprs) are tested the same way in `tests/web/test_web_testpage.py`. The CSP (`script-src 'self'`) forbids inline and eval'd script, so the htmx config sets
 `allowEval: false` and no `hx-on` or trigger filters are used. Pages need the admin token whenever
 one is configured; the quarantine toggle and approval are POSTs carrying the CSRF token from
 `hx-headers` on `<body>` (or a hidden form field).
@@ -221,6 +257,7 @@ or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 | `source.jpg` | `/repos/1/files/src/ledger/durations/parse.py?run=<PR 2 run>` | Chips under `def parse_duration`; then click `#L18 button.gt` and wait for `#line-tests-body .test-list` to show the tests popover. Shot at 1440×1000 and clipped just under the last test row that is fully visible in the popover (the popover scrolls inside a capped height, so its own bottom edge would cut a row in half): at 900 px the popover opens above line 18 and covers the chips. |
 | `map.jpg` | `/repos/1/map` | Gap mode is the default. Full-page shot clipped just above the "Largest gaps" table, so the whole treemap is in it. The pointer is parked at (1, 1) after every navigation: Playwright keeps it where the source shot's click left it, and a treemap tile under it would show its hover outline. |
 | `comment.jpg` | `/forge/outbox?method=upsert_pr_comment` | The rendered sticky comments. |
+| `test.jpg` | `/repos/1/tests/by-nodeid?nodeid=tests/test_refund.py::test_refund_partial&run=<PR 1 run>` | Follows the 302 to `/repos/1/tests/<id>?run=<PR 1 run>`. Wait for `body[data-ready="1"]` and `#test-flow svg.flow-test`. PR #1's failing test: failed, `cents_conserved` violated, the data flow test → `refund` → `allocate_cents` and both functions' strips. Full page at 1440 wide (about 1330 px tall). |
 
 Times on pages are relative to `settings.now()`, so `COVERSET_FAKE_NOW=2026-10-11T14:00:00Z` pins
 "3 min ago" texts for stable shots. Set it for the serving process only after the demo data

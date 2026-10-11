@@ -1,5 +1,6 @@
 {% extends layout %}
 {% block title %}{{ cell.name }}{% endblock %}
+{% from "_macros.html" import test_link %}
 {% block main %}
 {% if cell.is_return %}
 <p><strong><code>{{ cell.name }}</code></strong>: returned in {{ cell.samples }} sampled call{{ '' if cell.samples == 1 else 's' }}{% if cell.description %} ({{ cell.description }}){% endif %}.</p>
@@ -9,7 +10,7 @@
 {% if example %}<p>Example (redacted): <code>{{ example }}</code></p>{% endif %}
 {% if tests %}
 <p>Tests that passed this class in{% if tests|length > 12 %} (first 12 of {{ tests|length }}){% endif %}:</p>
-<ul class="test-list">{% for t in tests[:12] %}<li><span class="nodeid">{{ t|nodeid }}</span></li>{% endfor %}</ul>
+<ul class="test-list">{% for t in tests[:12] %}<li>{{ test_link(repo.id, t, run.id) }}</li>{% endfor %}</ul>
 {% endif %}
 {% else %}
 <p><strong><code>{{ cell.name }}</code></strong>: {{ missing_reason }}{% if cell.description %}. {{ cell.description }}{% endif %}.</p>

@@ -17,7 +17,7 @@ import dataclasses
 import json
 import threading
 from collections import OrderedDict, defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
@@ -41,7 +41,7 @@ from coverset.web.render.ribbon import Flow
 from coverset.web.render.shapegrid import GridCell, GridModel, GridRow
 from coverset.web.render.source import LineFacts
 
-__all__ = ["FunctionView", "RunFacts", "run_facts"]
+__all__ = ["FunctionView", "ParamReach", "RunFacts", "param_reach", "reached_classes", "run_facts"]
 
 CACHE_SIZE = 24
 SPECIFIC_FAMILIES = frozenset(
@@ -561,3 +561,61 @@ def group_missing(cov: FunctionInputCov) -> dict[str, list[InputClass]]:
     for cls in cov.missing:
         out[cls.param].append(cls)
     return dict(out)
+
+
+# -- one test's view of a function (the test page) -------------------------------------------------
+
+
+def reached_classes(view: FunctionView, observations: Sequence[ShapeObs]) -> dict[str, frozenset[str]]:
+    """The function's expected input classes that ``observations`` (one test's) carried, by
+    parameter (receiver and return rows left out, as in :meth:`FunctionView.flows`)."""
+    expected = {c.name for c in view.cov.expected}
+    out: dict[str, set[str]] = defaultdict(set)
+    for obs in observations:
+        if obs.param in ("<receiver>", "return"):
+            continue
+        out[obs.param.lstrip("*")] |= view.catalogue.observed_classes([obs]) & expected
+    return {param: frozenset(found) for param, found in out.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class ParamReach:
+    """One parameter on the test page: the classes this test passed in, the function's classes."""
+
+    param: str
+    this_test: tuple[GridCell, ...]
+    """Classes this test reached (filled) and the function's never-exercised classes (hollow)."""
+    any_test: tuple[GridCell, ...]
+    """Every expected class of the parameter: filled when any test reached it."""
+    reached: tuple[str, ...]
+    others_only: int
+    """Classes other tests reached but this one did not (left out of ``this_test``)."""
+
+
+def param_reach(view: FunctionView, reached: Mapping[str, frozenset[str]]) -> list[ParamReach]:
+    """Per parameter (signature order, then any other parameter with expected classes) the strips
+    the test page draws: "this test" and "any test"."""
+    missing = {c.name for c in view.cov.missing}
+    params = [p.lstrip("*") for p in view.region.params]
+    params += [c.param for c in view.cov.expected if c.param not in params]
+    out = []
+    for param in dict.fromkeys(params):
+        cells = view.cells(param)
+        if not cells:
+            continue
+        mine = reached.get(param, frozenset())
+        this_test = tuple(
+            dataclasses.replace(cell, observed=cell.name in mine)
+            for cell in cells
+            if cell.name in mine or cell.name in missing
+        )
+        out.append(
+            ParamReach(
+                param=param,
+                this_test=this_test,
+                any_test=tuple(cells),
+                reached=tuple(sorted(c.short for c in cells if c.name in mine)),
+                others_only=sum(1 for c in cells if c.observed and c.name not in mine),
+            )
+        )
+    return out

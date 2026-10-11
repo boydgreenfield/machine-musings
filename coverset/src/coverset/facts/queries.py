@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cached_property
-from typing import Literal
+from typing import Any, Literal
 
 import duckdb
 import numpy as np
@@ -26,21 +26,31 @@ from coverset.analysis.shapes import example_sort_key
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.facts.store import FactsStore
-from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion
+from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion, ShapeObs
 
 __all__ = [
     "MODULE_LEAF",
     "FuncInputCov",
+    "IngestRecord",
     "ParquetPriorRun",
     "PatchCoverage",
     "RunSummary",
     "ShapeRow",
+    "TableInventory",
+    "TestOutcomeRow",
+    "TouchedFile",
+    "TouchedFunction",
     "TreeNode",
     "function_input_cov",
+    "ingest_record",
     "line_tests",
     "patch_coverage",
+    "run_inventory",
     "run_summary",
     "shapes_for_function",
+    "test_history",
+    "test_shapes",
+    "test_touched",
     "tests_covering",
     "treemap",
 ]
@@ -727,3 +737,392 @@ class ParquetPriorRun:
     def durations(self) -> dict[str, float]:
         """Recorded duration in seconds by nodeid (one run, so the p50 is the value itself)."""
         return dict(self._durations)
+
+
+# -- one test's data flow ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TouchedFunction:
+    """One function (or method) a test called, with the lines of its body the test ran.
+
+    A line belongs to the innermost callable whose body ``[body_start, end_line]`` contains it (the
+    treemap's rule), so running a nested function does not make its enclosing function "called".
+    """
+
+    func_key: str
+    qualname: str
+    kind: str
+    def_line: int
+    body_start: int
+    end_line: int
+    lines: tuple[int, ...]
+    body_statements: int
+    """Statements of the body (the innermost-owner rule applies here too)."""
+
+
+@dataclass(frozen=True, slots=True)
+class TouchedFile:
+    """What one test ran in one file: every line, how many were statements, and the functions."""
+
+    path: str
+    lines: tuple[int, ...]
+    statements: int
+    functions: tuple[TouchedFunction, ...]
+    module_lines: tuple[int, ...]
+    """Lines outside every callable (module- or class-level code the test ran)."""
+
+
+_TEST_ID_CTE = """
+t AS (SELECT DISTINCT test_id FROM tests_dim WHERE nodeid = $nodeid AND test_id <> 0)
+"""
+
+_TOUCHED_SQL = f"""
+WITH {_TEST_ID_CTE}, paths AS (
+    SELECT file_id, any_value(path) AS path FROM files GROUP BY file_id
+), st AS (
+    SELECT file_id, any_value(statements) AS statements, any_value(excluded) AS excluded
+    FROM file_static GROUP BY file_id
+), hit AS (
+    SELECT DISTINCT tl.file_id, tl.line FROM test_lines tl JOIN t USING (test_id)
+), fn AS (
+    SELECT DISTINCT func_key, file_id, qualname, kind, def_line, body_start, end_line FROM functions
+    WHERE kind IN {CALLABLE_KINDS!r}
+), owner AS (
+    SELECT h.file_id, h.line, arg_max(fn.func_key, fn.body_start) AS func_key
+    FROM hit h LEFT JOIN fn ON fn.file_id = h.file_id AND h.line BETWEEN fn.body_start AND fn.end_line
+    GROUP BY h.file_id, h.line
+), stl AS (
+    SELECT file_id, unnest(statements) AS line FROM st WHERE file_id IN (SELECT file_id FROM hit)
+), stl_owner AS (
+    SELECT stl.file_id, stl.line, arg_max(fn.func_key, fn.body_start) AS func_key
+    FROM stl JOIN fn ON fn.file_id = stl.file_id AND stl.line BETWEEN fn.body_start AND fn.end_line
+    WHERE fn.func_key IN (SELECT func_key FROM owner)
+    GROUP BY stl.file_id, stl.line
+), body AS (
+    SELECT func_key, count(*) AS body_statements FROM stl_owner GROUP BY func_key
+)
+SELECT p.path, o.line, o.func_key, fn.qualname, fn.kind, fn.def_line, fn.body_start, fn.end_line,
+       coalesce(body.body_statements, 0) AS body_statements,
+       coalesce(list_contains(st.statements, o.line)
+                AND NOT list_contains(coalesce(st.excluded, []), o.line), false) AS is_statement
+FROM owner o
+JOIN paths p USING (file_id)
+LEFT JOIN fn ON fn.func_key = o.func_key
+LEFT JOIN body ON body.func_key = o.func_key
+LEFT JOIN st ON st.file_id = o.file_id
+ORDER BY p.path, fn.def_line NULLS FIRST, o.line
+"""
+
+
+def test_touched(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[TouchedFile]:
+    """What ``nodeid`` ran in a run: per file (sorted by path) the lines, the statement count and
+    the functions it called (in ``def_line`` order) with the body lines it ran in each.
+
+    Lines come from ``test_lines`` (the test's own contexts, never ``<import>``), joined to
+    ``files`` for paths, ``file_static`` for statements and ``functions`` for bodies. A test whose
+    coverage another shard recorded first (``tests_dim.has_lines = false``) still resolves: the
+    lines are stored under the same ``test_id``.
+    """
+    rows = _query(
+        store,
+        _TOUCHED_SQL,
+        {"nodeid": nodeid},
+        repo_id=repo_id,
+        run_id=run_id,
+        tables=("tests_dim", "files", "file_static", "test_lines", "functions"),
+    ).to_pylist()
+    by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_path[row["path"]].append(row)
+    out: list[TouchedFile] = []
+    for path, items in by_path.items():
+        functions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        module: list[int] = []
+        for row in items:
+            if row["func_key"] is None:
+                module.append(int(row["line"]))
+            else:
+                functions[str(row["func_key"])].append(row)
+        touched = [
+            TouchedFunction(
+                func_key=key,
+                qualname=str(first["qualname"]),
+                kind=str(first["kind"]),
+                def_line=int(first["def_line"]),
+                body_start=int(first["body_start"]),
+                end_line=int(first["end_line"]),
+                lines=tuple(sorted(int(r["line"]) for r in group)),
+                body_statements=int(first["body_statements"]),
+            )
+            for key, group in functions.items()
+            for first in (group[0],)
+        ]
+        touched.sort(key=lambda f: (f.def_line, f.qualname))
+        out.append(
+            TouchedFile(
+                path=path,
+                lines=tuple(sorted(int(r["line"]) for r in items)),
+                statements=sum(1 for r in items if r["is_statement"]),
+                functions=tuple(touched),
+                module_lines=tuple(sorted(module)),
+            )
+        )
+    return out
+
+
+_TEST_SHAPES_SQL = f"""
+WITH {_TEST_ID_CTE}, sh AS (
+    SELECT shape_id, any_value(shape_key) AS shape_key FROM shapes GROUP BY shape_id
+), fn AS (
+    SELECT func_key, any_value(path) AS path, any_value(qualname) AS qualname, any_value(def_line) AS line
+    FROM functions GROUP BY func_key
+), fs AS (
+    SELECT func_key, any_value(path) AS path, any_value(qualname) AS qualname,
+           any_value(firstlineno) AS line
+    FROM func_sampling GROUP BY func_key
+)
+SELECT cs.func_key, coalesce(fn.path, fs.path) AS path, coalesce(fn.qualname, fs.qualname) AS qualname,
+       coalesce(fn.line, fs.line) AS line, cs.param, sh.shape_key, cs.caller_kind, cs.caller_key,
+       cs.caller_path, cs.caller_qualname, cs.caller_line, cs.samples, cs.test_ids, cs.truncated,
+       cs.example_test_id, cs.example_repr
+FROM call_shapes cs
+JOIN sh USING (shape_id)
+LEFT JOIN fn USING (func_key)
+LEFT JOIN fs USING (func_key)
+WHERE list_has_any(cs.test_ids, (SELECT coalesce(list(test_id), []) FROM t))
+   OR (cs.caller_kind = 'test' AND cs.caller_key = $nodeid)
+ORDER BY path, line, cs.param, sh.shape_key, cs.caller_kind, cs.caller_key
+"""
+
+
+def test_shapes(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[ShapeObs]:
+    """The run's ``call_shapes`` observations made while ``nodeid`` ran (its id is in ``test_ids``,
+    or it is the direct caller), as :class:`~coverset.lang.base.ShapeObs`.
+
+    ``func`` is the region triple ``(path, qualname, def_line)`` from ``functions`` (else the
+    tracer's triple from ``func_sampling``), so it maps back to a ``func_key`` through the run's
+    regions. ``samples`` counts every test of the row, not only this one: a row is aggregated per
+    ``(function, parameter, shape, caller)``. Functions without a known triple are left out, as on
+    the function page.
+    """
+    rows = _query(
+        store,
+        _TEST_SHAPES_SQL,
+        {"nodeid": nodeid},
+        repo_id=repo_id,
+        run_id=run_id,
+        tables=("tests_dim", "call_shapes", "shapes", "functions", "func_sampling"),
+    ).to_pylist()
+    if not rows:
+        return []
+    ids = store.dictionary(repo_id)
+    out: list[ShapeObs] = []
+    for row in rows:
+        if row["path"] is None:
+            continue
+        caller: tuple[str, str, int] | str
+        if row["caller_kind"] == "test":
+            caller = row["caller_key"] or ""
+        else:
+            caller = (row["caller_path"] or "", row["caller_qualname"] or "?", row["caller_line"] or 0)
+        example_test = row["example_test_id"]
+        out.append(
+            ShapeObs(
+                func=(row["path"], row["qualname"], row["line"]),
+                param=row["param"],
+                shape_key=row["shape_key"],
+                caller=caller,
+                samples=int(row["samples"] or 0),
+                tests=tuple(ids.nodeid(t) for t in row["test_ids"] or ()),
+                truncated=bool(row["truncated"]),
+                example=row["example_repr"],
+                example_test=ids.nodeid(example_test) if example_test is not None else None,
+            )
+        )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class TestOutcomeRow:
+    """A test's outcome in one run (None when the run's facts do not record the test)."""
+
+    __test__ = False
+
+    run_id: str
+    created_at: datetime
+    branch: str | None
+    pr_number: int | None
+    head_sha: str
+    outcome: str | None
+    duration_s: float | None
+
+
+_TEST_HISTORY_SQL = """
+WITH shard_at AS (
+    SELECT run_id, shard_id, max(ingested_at) FILTER (WHERE status = 'ok') AS at
+    FROM ingest_log GROUP BY run_id, shard_id
+), t AS (
+    SELECT td.run_id, arg_max(td.outcome, s.at) AS outcome, arg_max(td.duration_s, s.at) AS duration_s
+    FROM tests_dim td JOIN shard_at s USING (run_id, shard_id)
+    WHERE td.nodeid = $nodeid AND td.test_id <> 0
+    GROUP BY td.run_id
+)
+SELECT r.run_id, r.created_at, r.branch, r.pr_number, r.head_sha, t.outcome, t.duration_s
+FROM runs_dim r LEFT JOIN t USING (run_id)
+ORDER BY r.created_at DESC, r.run_id DESC
+"""
+
+
+def test_history(store: FactsStore, repo_id: int, nodeid: str, last_n: int = 12) -> list[TestOutcomeRow]:
+    """``nodeid``'s outcome in each of the repo's ``last_n`` most recent runs, newest first.
+
+    The runs are picked from ``runs_dim`` first (every branch), then only their ``tests_dim`` and
+    ``ingest_log`` are read; a test recorded by several shards of a run takes the most recently
+    committed one (as :func:`run_summary`). These are the bundles' first-attempt outcomes: a retry
+    that passed shows here as ``failed``; the control database's ``test_results`` has the final
+    outcome and the flaky flag.
+    """
+    recent = _query(
+        store,
+        _RECENT_RUNS_SQL,
+        {"last_n": last_n, "branch": None},
+        repo_id=repo_id,
+        tables=("runs_dim",),
+    ).column("run_id")
+    if not len(recent):
+        return []
+    rows = _query(
+        store,
+        _TEST_HISTORY_SQL,
+        {"nodeid": nodeid},
+        repo_id=repo_id,
+        run_ids=recent.to_pylist(),
+        tables=("runs_dim", "tests_dim", "ingest_log"),
+    ).to_pylist()
+    return [TestOutcomeRow(**row) for row in rows]
+
+
+# Plain functions whose names start with ``test_``: keep pytest from collecting them where a test
+# module imports them.
+for _query_fn in (test_touched, test_shapes, test_history):
+    _query_fn.__test__ = False  # type: ignore[attr-defined]
+
+
+# -- inventory and ingest record (``coverset facts tables|explain``) -----------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TableInventory:
+    """One facts table of a run: visible files, their bytes on disk, and rows (DuckDB count)."""
+
+    table: str
+    kind: Literal["run", "shard"]
+    files: int
+    rows: int
+    bytes: int
+
+
+def run_inventory(store: FactsStore, repo_id: int, run_id: str) -> dict[str, TableInventory]:
+    """Every facts table of a run (in :data:`~coverset.facts.schema.TABLES` order) with its row
+    count, from one ``count(*)`` per view, and the size of its visible (committed) files."""
+    from coverset.facts.schema import RUN_TABLES, TABLES
+
+    sql = " UNION ALL ".join(f"SELECT '{t}' AS name, count(*) AS n FROM {t}" for t in TABLES)
+    counts = {
+        row["name"]: int(row["n"])
+        for row in _query(store, sql, repo_id=repo_id, run_id=run_id, tables=TABLES).to_pylist()
+    }
+    out: dict[str, TableInventory] = {}
+    for table in TABLES:
+        files = store.table_files(repo_id, run_id, table)
+        size = 0
+        for path in files:
+            try:
+                size += path.stat().st_size
+            except FileNotFoundError:
+                continue
+        out[table] = TableInventory(
+            table=table,
+            kind="run" if table in RUN_TABLES else "shard",
+            files=len(files),
+            rows=counts.get(table, 0),
+            bytes=size,
+        )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class IngestRecord:
+    """One ``ingest_log`` row: an ingest attempt of one shard and what the converter reported."""
+
+    shard_id: int
+    attempt: int
+    status: str
+    bundle_sha256: str | None
+    ingested_at: datetime | None
+    n_tests: int | None
+    n_test_lines: int | None
+    committed: bool
+    """This is the shard's latest ``ok`` attempt (the one readers see)."""
+    details: dict[str, object]
+
+    @property
+    def tracer_notes(self) -> list[str]:
+        """Human-readable notes about the coverage tracer and the converter's drops."""
+        notes = []
+        if self.details.get("tracer_mismatch"):
+            notes.append(f"coverage was collected with {self.details.get('tracer') or 'another tracer'}")
+        if error := self.details.get("error"):
+            notes.append(f"error: {error}")
+        dropped = self.details.get("dropped")
+        if isinstance(dropped, dict):
+            hits = {k: v for k, v in dropped.items() if v}
+            if hits:
+                notes.append("dropped " + ", ".join(f"{k}={v}" for k, v in sorted(hits.items())))
+        for key in ("unmatched_functions", "duplicate_tests"):
+            if self.details.get(key):
+                notes.append(f"{key.replace('_', ' ')}: {self.details[key]}")
+        return notes
+
+    @property
+    def bundle_bytes(self) -> int | None:
+        """The bundle's size as the converter measured it."""
+        value = self.details.get("bundle_bytes")
+        return value if isinstance(value, int) else None
+
+
+_INGEST_SQL = """
+SELECT shard_id, attempt, status, bundle_sha256, ingested_at, n_tests, n_test_lines, convert_json
+FROM ingest_log ORDER BY shard_id, attempt
+"""
+
+
+def ingest_record(store: FactsStore, repo_id: int, run_id: str) -> list[IngestRecord]:
+    """Every ingest attempt of the run's shards (``ingest_log``), by shard then attempt, with the
+    converter's details parsed from ``convert_json`` (tracer, dropped records, bundle bytes)."""
+    rows = _query(store, _INGEST_SQL, repo_id=repo_id, run_id=run_id, tables=("ingest_log",)).to_pylist()
+    committed: dict[int, int] = {}
+    for row in rows:
+        if row["status"] == "ok":
+            committed[row["shard_id"]] = max(row["attempt"], committed.get(row["shard_id"], 0))
+    out = []
+    for row in rows:
+        try:
+            details = json.loads(row["convert_json"]) if row["convert_json"] else {}
+        except ValueError:
+            details = {"unparsed": row["convert_json"]}
+        out.append(
+            IngestRecord(
+                shard_id=row["shard_id"],
+                attempt=row["attempt"],
+                status=row["status"],
+                bundle_sha256=row["bundle_sha256"],
+                ingested_at=row["ingested_at"],
+                n_tests=row["n_tests"],
+                n_test_lines=row["n_test_lines"],
+                committed=committed.get(row["shard_id"]) == row["attempt"],
+                details=details if isinstance(details, dict) else {"value": details},
+            )
+        )
+    return out

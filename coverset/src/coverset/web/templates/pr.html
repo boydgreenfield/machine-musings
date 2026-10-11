@@ -1,5 +1,5 @@
 {% extends layout %}
-{% from "_macros.html" import run_status, outcome, inv_chip, lens %}
+{% from "_macros.html" import run_status, outcome, inv_chip, lens, test_link %}
 {% block title %}PR #{{ pr.number }} {{ pr.title }}{% endblock %}
 {% block main %}
 {% set s = summary %}
@@ -84,7 +84,7 @@
     {% for r in results[:200] %}
       <tr>
         <td>{{ outcome(r.outcome) }}{% if r.flaky %} <span class="badge">flaky</span>{% endif %}{% if r.quarantined %} <span class="badge">quarantined</span>{% endif %}</td>
-        <td class="nodeid">{{ r.nodeid|nodeid }}</td>
+        <td class="nodeid">{{ test_link(repo.id, r.nodeid, run.id) }}</td>
         <td class="num">{{ r.rank or '–' }}</td>
         <td class="num">{{ r.file_rank or '–' }}</td>
         <td class="num">{{ r.duration_ms|ms }}</td>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from quart import Quart, Response, request
 from werkzeug.exceptions import HTTPException, InternalServerError, NotFound
 
-from coverset.web import api, auth, dashboard, files, outbox, pages, repos, runs, setup, webhooks
+from coverset.web import api, auth, dashboard, files, outbox, pages, repos, runs, setup, testpage, webhooks
 
 MACHINE_PREFIXES = ("/v1/", "/webhooks/", "/healthz", "/static/")
 """Paths answered by machines: their errors stay JSON (``/v1``) or the framework's default."""
@@ -21,6 +21,7 @@ def register_blueprints(app: Quart) -> None:
     app.register_blueprint(repos.bp)
     app.register_blueprint(runs.bp)
     app.register_blueprint(files.bp)
+    app.register_blueprint(testpage.bp)
     app.register_blueprint(outbox.bp)
     app.register_blueprint(webhooks.bp)
     app.register_blueprint(setup.bp)
