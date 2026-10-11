@@ -8,18 +8,29 @@ bump or a plugin change each produce a new environment, and anything else reuses
 The wheel is built once per plugin source tree: ``uv build --wheel packages/pytest-coverset`` into
 ``~/.cache/coverset/wheels/<source hash>/``, under an exclusive file lock and an atomic rename, and
 memoised for the life of the process.
+
+Executors install the wheel with ``--no-deps``, so its runtime dependencies come from the
+requirements: :func:`build_env_spec` appends ``coverage==<the version in coverset's own uv.lock>``
+(and ``pytest==...`` when the repo's lock has no pytest at all) unless the repo's lock already pins
+them, which is respected. Added pins are part of the identity: ``env_hash`` becomes
+``sha256(adapter env_hash \0 added pins)``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import hashlib
+import importlib.metadata
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import tomllib
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +43,18 @@ __all__ = [
     "build_plugin_wheel",
     "env_hash",
     "file_lock",
+    "plugin_runtime_pins",
     "plugin_source_hash",
+    "with_plugin_pins",
 ]
 
 PLUGIN_DIR = Path(__file__).resolve().parents[3] / "packages" / "pytest-coverset"
 """The pytest-coverset source tree in a coverset checkout."""
 
+COVERSET_LOCK = PLUGIN_DIR.parents[1] / "uv.lock"
+"""coverset's own lockfile: the versions of the plugin's runtime dependencies it is tested with."""
+PLUGIN_RUNTIME_DEPS = ("coverage", "pytest")
+_PIN_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:===?|@)")
 UV_BUILD_TIMEOUT_S = 300
 _SKIP_PARTS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", "dist", "build", ".venv"})
 _wheel_memo: dict[str, Path] = {}
@@ -100,7 +117,81 @@ def build_env_spec(
     values = dict(cfg)
     if plugin_wheel is not None:
         values["plugin_wheel"] = str(plugin_wheel)
-    return adapter.env_spec(checkout_dir, values)
+    spec = adapter.env_spec(checkout_dir, values)
+    return with_plugin_pins(spec) if plugin_wheel is not None else spec
+
+
+def _normalise(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pinned_packages(requirements_txt: str) -> set[str]:
+    """Normalised names of the packages ``requirements_txt`` pins exactly (``==``/``===``/``@``)."""
+    names = set()
+    for line in requirements_txt.splitlines():
+        match = _PIN_RE.match(line)
+        if match:
+            names.add(_normalise(match.group(1)))
+    return names
+
+
+def listed_packages(requirements_txt: str) -> set[str]:
+    """Normalised names of every package a requirements file mentions (pinned or not)."""
+    names = set()
+    for line in requirements_txt.splitlines():
+        match = re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if match and not line.lstrip().startswith(("#", "-")):
+            names.add(_normalise(match.group(1)))
+    return names
+
+
+@cache
+def plugin_runtime_pins(lock: Path = COVERSET_LOCK) -> dict[str, str]:
+    """``{name: version}`` of the plugin's runtime dependencies in coverset's ``uv.lock``.
+
+    Falls back to the versions installed next to coverset when the lock is not there (an installed
+    coverset rather than a checkout).
+    """
+    versions: dict[str, str] = {}
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8"))
+        for package in data.get("package", []):
+            name = _normalise(str(package.get("name", "")))
+            if name in PLUGIN_RUNTIME_DEPS and isinstance(package.get("version"), str):
+                versions[name] = package["version"]
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+    for name in PLUGIN_RUNTIME_DEPS:
+        if name not in versions:
+            try:
+                versions[name] = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                continue
+    return versions
+
+
+def with_plugin_pins(spec: EnvSpec, pins: Mapping[str, str] | None = None) -> EnvSpec:
+    """``spec`` with exact pins for the plugin's runtime dependencies the repo's lock lacks.
+
+    ``coverage`` is pinned unless the requirements pin it already; ``pytest`` only when the
+    requirements do not mention it at all (a repo's own pytest is never replaced). The added pins
+    go into ``env_hash``.
+    """
+    versions = dict(pins if pins is not None else plugin_runtime_pins())
+    pinned, listed = pinned_packages(spec.requirements_txt), listed_packages(spec.requirements_txt)
+    added = []
+    if "coverage" not in pinned and "coverage" in versions:
+        added.append(f"coverage=={versions['coverage']}")
+    if "pytest" not in listed and "pytest" in versions:
+        added.append(f"pytest=={versions['pytest']}")
+    if not added:
+        return spec
+    text = spec.requirements_txt
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += "".join(f"{pin}\n" for pin in added)
+    digest = hashlib.sha256("\0".join((spec.env_hash, *added)).encode()).hexdigest()
+    return dataclasses.replace(spec, requirements_txt=text, env_hash=digest)
 
 
 @contextmanager

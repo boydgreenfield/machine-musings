@@ -181,7 +181,10 @@ class Script:
     ``outcomes`` maps nodeid → outcome for the first attempt (default ``passed``, except
     ``test_zero_fails`` which fails unless ``zero_passes``); ``retry_outcomes`` the same for retries
     (default: the first-attempt outcome). ``decide`` overrides both: ``(nodeid, env, retry) -> outcome``.
-    ``delay_s`` is slept before each test; ``collected`` overrides the collection.
+    ``delay_s`` is slept before each test; ``collected`` overrides the collection (nodeids the
+    fixture does not know are synthesised); ``collect_delay_s`` is slept during collection;
+    ``inject`` lines are emitted, nonce-framed, before a shard's first test; ``bundle_outcomes``
+    overrides outcomes in the bundle's ``results.jsonl`` only (what the stream said stays).
     """
 
     outcomes: dict[str, Outcome] = field(default_factory=dict)
@@ -191,6 +194,9 @@ class Script:
     collected: tuple[str, ...] | None = None
     zero_passes: bool = False
     fail_sig: str = FAIL_SIG
+    collect_delay_s: float = 0.0
+    inject: list[str] = field(default_factory=list)
+    bundle_outcomes: dict[str, Outcome] = field(default_factory=dict)
     envs: list[dict[str, str]] = field(default_factory=list)
     commands: list[list[str]] = field(default_factory=list)
 
@@ -241,9 +247,22 @@ class FakeWorker:
         out = Path(cmd[cmd.index("--coverset-out") + 1])
         out.mkdir(parents=True, exist_ok=True)
         if "--collect-only" in cmd:
+            if self.script.collect_delay_s:
+                await asyncio.sleep(self.script.collect_delay_s)
             nodeids = self.script.collected if self.script.collected is not None else NODEIDS
             items = json.loads((FIXTURE / "bundle" / "collect.json").read_text())["items"]
-            chosen = [i for i in items if i["nodeid"] in nodeids]
+            known = {i["nodeid"] for i in items}
+            chosen = [i for i in items if i["nodeid"] in nodeids] + [
+                {
+                    "nodeid": n,
+                    "file": n.split("::", 1)[0],
+                    "line": k + 100,
+                    "markers": [],
+                    "invariant_ids": [],
+                }
+                for k, n in enumerate(nodeids)
+                if n not in known
+            ]
             (out / "collect.json").write_text(json.dumps({"items": chosen, "errors": []}))
             emit(prefix + json.dumps({"kind": "collected", "count": len(chosen)}), "stdout")
             return RunResult(0 if chosen else 5, started, time.time(), 10, False)
@@ -255,6 +274,9 @@ class FakeWorker:
         exit_code = 0
         stopped = False
         emit("============================= test session starts ==============================", "stdout")
+        if not retry:
+            for line in self.script.inject:
+                emit(prefix + line, "stdout")
         for nodeid in nodeids:
             if self._cancelled.is_set():
                 return RunResult(-15, started, time.time(), 10, False, cancelled=True)
@@ -284,7 +306,14 @@ class FakeWorker:
             exit_code = 1 if failed else exit_code
         if stopped:
             exit_code = 2
-        bundle = _bundle(results)
+        bundle = _bundle(
+            [
+                {**r, "outcome": self.script.bundle_outcomes[r["nodeid"]]}
+                if r["nodeid"] in self.script.bundle_outcomes
+                else r
+                for r in results
+            ]
+        )
         (out / "bundle.tar.gz").write_bytes(bundle)
         emit(
             prefix + json.dumps({"kind": "bundle_written", "sha256": "0" * 64, "bytes": len(bundle)}),

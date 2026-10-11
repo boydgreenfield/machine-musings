@@ -9,7 +9,10 @@ allow-list (:func:`~coverset.facts.convert.read_python_bundle`) and a one-shard 
 :func:`~coverset.facts.ingest.record_shard_failure` and the run's coverage is then partial.
 
 Conversion is CPU-bound (seconds for a large shard), so :class:`IngestPool` runs different shards
-in parallel, in worker processes by default; ingest itself serialises on the facts run lock.
+in parallel, in worker processes by default; ingest itself serialises on the facts run lock. A worker
+process that dies breaks a ``ProcessPoolExecutor`` for good, so the pool is then recreated and the
+affected jobs retried once; a job that still fails becomes a failed outcome (and a recorded shard
+failure), never an exception, and the next run gets a working pool.
 :func:`ingest_one` returns only what the verdict needs from the bundle (authoritative results,
 collected items, static facts and line unions of the changed files, shapes of the functions of
 interest), never the full per-test coverage.
@@ -19,12 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import shutil
 import tempfile
 from collections.abc import Sequence
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import Executor as FuturesExecutor
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -54,6 +58,8 @@ __all__ = [
 ]
 
 type PoolMode = Literal["process", "thread"]
+
+log = logging.getLogger(__name__)
 
 
 def bundle_limits(settings: Settings) -> BundleLimits:
@@ -157,20 +163,50 @@ class IngestPool:
         return self._executor
 
     async def run(self, jobs: Sequence[IngestJob]) -> list[IngestOutcome]:
-        """Ingest every job concurrently; a crashed job becomes a failed outcome, never an exception."""
-        loop = asyncio.get_running_loop()
-        pool = self._pool()
-        futures = [loop.run_in_executor(pool, ingest_one, job) for job in jobs]
-        results = await asyncio.gather(*futures, return_exceptions=True)
+        """Ingest every job concurrently; a crashed job becomes a failed outcome, never an exception.
+
+        Jobs hit by a broken pool (a worker process died) are retried once on a fresh pool.
+        """
+        if not jobs:
+            return []
+        results = await self._run_once(jobs)
+        broken = [i for i, result in enumerate(results) if isinstance(result, BrokenExecutor)]
+        if broken:
+            log.warning("the ingest pool broke; recreating it and retrying %d job(s)", len(broken))
+            self._reset()
+            retried = await self._run_once([jobs[i] for i in broken])
+            for index, result in zip(broken, retried, strict=True):
+                results[index] = result
+            if any(isinstance(result, BrokenExecutor) for result in retried):
+                self._reset()  # leave a working pool for the next run
         outcomes: list[IngestOutcome] = []
         for job, result in zip(jobs, results, strict=True):
             if isinstance(result, BaseException):
-                outcomes.append(
-                    IngestOutcome(shard_id=job.shard_id, ok=False, error=f"ingest crashed: {result!r}"[:500])
-                )
+                reason = f"ingest crashed: {result!r}"[:500]
+                await asyncio.to_thread(_record_failure, job, reason)
+                outcomes.append(IngestOutcome(shard_id=job.shard_id, ok=False, error=reason))
             else:
                 outcomes.append(result)
         return outcomes
+
+    async def _run_once(self, jobs: Sequence[IngestJob]) -> list[IngestOutcome | BaseException]:
+        loop = asyncio.get_running_loop()
+        futures: list[asyncio.Future[IngestOutcome]] = []
+        for job in jobs:
+            try:
+                futures.append(loop.run_in_executor(self._pool(), ingest_one, job))
+            except (BrokenExecutor, RuntimeError) as exc:  # broken or shut down: submit raises
+                failed: asyncio.Future[IngestOutcome] = loop.create_future()
+                failed.set_exception(exc if isinstance(exc, BrokenExecutor) else BrokenExecutor(str(exc)))
+                futures.append(failed)
+        return list(await asyncio.gather(*futures, return_exceptions=True))
+
+    def _reset(self) -> None:
+        """Drop the current (broken) executor; the next submit starts a fresh one."""
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            with contextlib.suppress(Exception):
+                executor.shutdown(wait=False, cancel_futures=True)
 
     def close(self) -> None:
         """Shut the pool down (idempotent)."""
@@ -188,6 +224,12 @@ def shared_ingest_pool(mode: PoolMode = "process") -> IngestPool:
     if pool is None:
         pool = _shared[mode] = IngestPool(mode)
     return pool
+
+
+def _record_failure(job: IngestJob, reason: str) -> None:
+    """Best-effort shard-failure record for a job whose worker never got to record one."""
+    with contextlib.suppress(Exception):
+        record_shard_failure(FactsStore(Path(job.facts_dir)), job.ctx, job.shard_id, reason=reason)
 
 
 def merge_sampling(rows: Sequence[FuncSampling]) -> dict[FuncTriple, FuncSampling]:

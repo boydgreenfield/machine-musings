@@ -16,8 +16,17 @@ its shard's files, in this order:
 6. score every test, compute wave 1 (the change-covering set), deal shards (priority-snake LPT) and
    acquire more workers or re-shard to the number obtained (none at all fails the run with reason
    ``capacity``);
-7. write each shard's args file, scores file and the full-trace list into its worker, and record
-   per-test score, explanation, rank and file-order rank in ``test_results``.
+7. drop empty shards (an empty args file would make pytest run the whole suite), write each shard's
+   args file, scores file and the full-trace list into its worker, and record per-test score,
+   explanation, rank and file-order rank in ``test_results``.
+
+**Database discipline.** Planning takes minutes at worst (environment build, collection), so it never
+holds a write transaction open across that work: everything up to step 6 only *reads* (sessions with
+``no_autoflush`` that never add or modify rows); the ``envs`` row and the ``tests`` rows are written in
+their own short committed transactions; and the plan's run fields, ``shards`` and ``test_results`` are
+written at the end in one short transaction through ``transact`` (the runner passes its event sink's,
+so the run's own events keep flushing while it plans). CPU-bound analysis (indexing, scoring, wave 1,
+sharding, YAML) runs in a thread, off the event loop.
 
 Worker layout (paths relative to the worker root): ``repo/`` the checkout, ``run/`` the run's
 files (``shard.args``, ``shard.scores.json``, ``full-trace.txt``, ``out/``, ``retry-<n>/``,
@@ -27,6 +36,7 @@ files (``shard.args``, ``shard.scores.json``, ``full-trace.txt``, ``out/``, ``re
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -34,13 +44,15 @@ import secrets
 import shutil
 import statistics
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.analysis.cover import CoverSet, change_covering_set
@@ -52,6 +64,7 @@ from coverset.analysis.scoring import ScoredTest, ScoringContext, exploration_se
 from coverset.analysis.sharding import ShardPlan, plan_shards, reshard, shard_scores
 from coverset.config import Settings
 from coverset.db.models import Env, Repo, Run, Shard, Snapshot, TestResult, TestStats
+from coverset.db.session import Database
 from coverset.executors.base import (
     EnvRef,
     Executor,
@@ -84,8 +97,10 @@ __all__ = [
     "RunPlan",
     "ShardSpec",
     "WorkerLayout",
+    "WorkerLifetimes",
     "plan_run",
     "pythonpath",
+    "run_transaction",
     "worker_env",
 ]
 
@@ -98,7 +113,79 @@ MAX_NODEID_CHARS = 512
 DEFAULT_MEDIAN_S = 0.5
 """Duration assumed for a test nobody has timed yet, when no other test has been timed either."""
 
+WRITE_ATTEMPTS = 5
+WRITE_RETRY_DELAY_S = 0.2
+
 type EnvSpecBuilder = Callable[[Path, CoversetConfig], EnvSpec]
+type Work[T] = Callable[[AsyncSession], Awaitable[T]]
+type Transact = Callable[[Work[Any]], Awaitable[Any]]
+"""Runs one unit of database work in a short transaction (with retries) and returns its result."""
+
+
+async def run_transaction[T](
+    db: Database,
+    work: Work[T],
+    *,
+    lock: asyncio.Lock | None = None,
+    attempts: int = WRITE_ATTEMPTS,
+    delay_s: float = WRITE_RETRY_DELAY_S,
+) -> T:
+    """Run ``work(session)`` and commit, retrying with backoff while the database is busy.
+
+    ``work`` must be safe to repeat: a failed attempt is rolled back before the next one.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            async with lock if lock is not None else contextlib.nullcontext(), db.session() as session:
+                result = await work(session)
+                await session.commit()
+                return result
+        except OperationalError:
+            if attempt == attempts:
+                raise
+            log.warning("database busy (attempt %d of %d); retrying", attempt, attempts)
+            await asyncio.sleep(delay_s * 2 ** (attempt - 1))
+    raise AssertionError("unreachable")
+
+
+class WorkerLifetimes:
+    """When each worker of a run was acquired and released: the basis of ``runs.cost_estimate``.
+
+    Cost is ``Σ executor.cost_usd(resources, released - acquired)`` over every worker the run held,
+    including extras released right after sharding; a worker not yet released counts until now.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._spans: dict[str, list[Any]] = {}
+
+    def acquired(self, workers: Sequence[Worker], resources: Resources) -> None:
+        """Start the clock of ``workers``."""
+        now = self._clock()
+        for worker in workers:
+            self._spans.setdefault(worker.id, [resources, now, None])
+
+    def released(self, workers: Sequence[Worker]) -> None:
+        """Stop the clock of ``workers`` (the first release counts)."""
+        now = self._clock()
+        for worker in workers:
+            span = self._spans.get(worker.id)
+            if span is not None and span[2] is None:
+                span[2] = now
+
+    def spans(self) -> list[tuple[Resources, float]]:
+        """``(resources, seconds held)`` per worker."""
+        now = self._clock()
+        return [
+            (r, max(0.0, (end if end is not None else now) - start)) for r, start, end in self._spans.values()
+        ]
+
+    def cost_usd(self, executor: Executor) -> float:
+        """The run's worker cost on ``executor``'s rate card."""
+        return sum(executor.cost_usd(resources, seconds) for resources, seconds in self.spans())
+
+    def __len__(self) -> int:
+        return len(self._spans)
 
 
 class PlanError(RuntimeError):
@@ -184,6 +271,8 @@ class RunPlan:
     diff_text: dict[str, str] = field(default_factory=dict)
     """Each changed file's own unified diff text, by head path."""
     invariant_targets: dict[str, FunctionRegion] = field(default_factory=dict)
+    snapshot_id: int | None = None
+    lifetimes: WorkerLifetimes = field(default_factory=WorkerLifetimes)
 
     @property
     def ranks(self) -> dict[str, int]:
@@ -203,7 +292,10 @@ class RunPlan:
     async def release_workers(self) -> None:
         """Release every worker of the plan (idempotent)."""
         workers, self.workers = self.workers, []
-        await release_all(workers)
+        try:
+            await release_all(workers)
+        finally:
+            self.lifetimes.released(workers)
 
     async def cleanup(self) -> None:
         """Release the workers and delete the temporary checkout."""
@@ -227,7 +319,7 @@ def worker_env(
 
 
 async def plan_run(
-    session: AsyncSession,
+    db: Database,
     settings: Settings,
     store: FactsStore,
     run: Run,
@@ -239,11 +331,20 @@ async def plan_run(
     forge: Any = None,
     clock: Callable[[], datetime] | None = None,
     on_sandbox_ready: Callable[[datetime], Any] | None = None,
+    transact: Transact | None = None,
+    lifetimes: WorkerLifetimes | None = None,
 ) -> RunPlan:
-    """Plan ``run`` (see the module docstring). Raises :class:`PlanError` with a reason."""
+    """Plan ``run`` (see the module docstring). Raises :class:`PlanError` with a reason.
+
+    ``run`` is only read (a detached row is fine). ``transact`` runs the final write (default: a
+    retried transaction on ``db``); ``lifetimes`` records when workers are acquired and released.
+    """
     adapter = adapter or PythonAdapter()
     now = clock or settings.now
-    repo = await session.get(Repo, run.repo_id)
+    lifetimes = lifetimes if lifetimes is not None else WorkerLifetimes()
+    write: Transact = transact or (lambda work: run_transaction(db, work))
+    async with db.session() as session:
+        repo = await session.get(Repo, run.repo_id)
     if repo is None:
         raise PlanError("repo", f"run {run.id} has no repo")
     try:
@@ -261,10 +362,10 @@ async def plan_run(
     workers: list[Worker] = []
     try:
         await asyncio.to_thread(extract_archive, tarball, checkout)
-        config = _load_config(adapter, checkout)
+        config = await asyncio.to_thread(_load_config, adapter, checkout)
         head_paths = frozenset(await asyncio.to_thread(tree_paths, mirror, run.head_sha))
-        env = await _ensure_env(session, settings, executor, adapter, checkout, config, env_spec_builder, run)
-        base_ref = await _snapshot_or_env(session, executor, env, repo, run)
+        env = await _ensure_env(db, settings, executor, adapter, checkout, config, env_spec_builder)
+        base_ref = await _snapshot_or_env(db, executor, env, repo, run)
         resources = Resources(
             cpu=settings.shard_cpu_limit,
             memory_mib=settings.shard_memory_mib,
@@ -272,15 +373,16 @@ async def plan_run(
             timeout_s=settings.run_timeout_s,
         )
         labels = {"coverset_run": run.id, "repo": str(repo.id), "role": "shard"}
-        want = shards_override or await _estimated_shards(session, repo.id, config, settings)
+        want = shards_override or await _estimated_shards(db, repo.id, config, settings)
         workers = await _acquire(executor, base_ref, want, resources, settings, labels)
+        lifetimes.acquired(workers, resources)
         await asyncio.gather(*(w.put_tree(tarball, REPO_DIR) for w in workers))
         sandbox_ready = now()
         if on_sandbox_ready is not None:
             await _maybe_await(on_sandbox_ready(sandbox_ready))
         collected, collect_errors = await _collect(workers[0], config, run, settings)
         analysis = await _analyse(
-            session,
+            db,
             settings,
             store,
             run,
@@ -295,17 +397,26 @@ async def plan_run(
             now=now(),
         )
         limit = min(shards_override or config.max_shards, settings.max_shards)
-        shard_plan = analysis.shard_plan(limit, forced=shards_override is not None)
+        shard_plan = await asyncio.to_thread(analysis.shard_plan, limit, forced=shards_override is not None)
+        dealt = [list(nodeids) for nodeids in shard_plan.shards if nodeids]
+        predicted = [
+            p for nodeids, p in zip(shard_plan.shards, shard_plan.predicted_s, strict=True) if nodeids
+        ]
         workers = await _fit_workers(
-            executor, base_ref, workers, len(shard_plan.shards), resources, settings, labels, tarball
+            executor, base_ref, workers, len(dealt), resources, settings, labels, tarball, lifetimes
         )
-        if len(workers) < len(shard_plan.shards):
+        if len(workers) < len(dealt):
             shard_plan = reshard(shard_plan, len(workers))
-        shards = [
-            ShardSpec(
-                shard_id=k, nodeids=list(nodeids), predicted_s=shard_plan.predicted_s[k], worker=workers[k]
+            dealt = [list(nodeids) for nodeids in shard_plan.shards if nodeids]
+            predicted = [
+                p for nodeids, p in zip(shard_plan.shards, shard_plan.predicted_s, strict=True) if nodeids
+            ]
+            workers = await _fit_workers(
+                executor, base_ref, workers, len(dealt), resources, settings, labels, tarball, lifetimes
             )
-            for k, nodeids in enumerate(shard_plan.shards)
+        shards = [
+            ShardSpec(shard_id=k, nodeids=nodeids, predicted_s=predicted[k], worker=workers[k])
+            for k, nodeids in enumerate(dealt)
         ]
         result = RunPlan(
             run_id=run.id,
@@ -340,13 +451,18 @@ async def plan_run(
             sandbox_ready_at=sandbox_ready,
             collect_errors=collect_errors,
             invariant_targets=analysis.invariant_targets,
+            snapshot_id=base_ref.snapshot_id if isinstance(base_ref, SnapshotRef) else None,
+            lifetimes=lifetimes,
         )
         await _write_shard_files(result)
-        await _record_plan(session, run, result, base_ref)
+        await write(_plan_writer(run.id, result))
         return result
     except BaseException:
-        await release_all(workers)
-        await asyncio.to_thread(shutil.rmtree, checkout, True)
+        try:
+            await release_all(workers)
+        finally:
+            lifetimes.released(workers)
+            await asyncio.to_thread(shutil.rmtree, checkout, True)
         raise
 
 
@@ -368,14 +484,13 @@ def _load_config(adapter: LanguageAdapter, checkout: Path) -> CoversetConfig:
 
 
 async def _ensure_env(
-    session: AsyncSession,
+    db: Database,
     settings: Settings,
     executor: Executor,
     adapter: LanguageAdapter,
     checkout: Path,
     config: CoversetConfig,
     builder: EnvSpecBuilder | None,
-    run: Run,
 ) -> EnvRef:
     try:
         if builder is not None:
@@ -388,43 +503,55 @@ async def _ensure_env(
         env = await executor.ensure_env(spec)
     except (ExecutorError, RuntimeError, ValueError, OSError) as exc:
         raise PlanError("environment", f"cannot build the test environment: {exc}") from exc
-    if await session.get(Env, env.env_hash) is None:
-        session.add(Env(env_hash=env.env_hash, python=env.python, image_id=None, created_at=settings.now()))
-        await session.flush()
-    run.env_hash = env.env_hash
+    await _record_env(db, settings, env)
     return env
 
 
+async def _record_env(db: Database, settings: Settings, env: EnvRef) -> None:
+    """Insert the ``envs`` row in its own short transaction (a concurrent insert of it is fine)."""
+
+    async def work(session: AsyncSession) -> None:
+        if await session.get(Env, env.env_hash) is None:
+            session.add(
+                Env(env_hash=env.env_hash, python=env.python, image_id=None, created_at=settings.now())
+            )
+            await session.flush()
+
+    with contextlib.suppress(IntegrityError):  # another run inserted the same environment first
+        await run_transaction(db, work)
+
+
 async def _snapshot_or_env(
-    session: AsyncSession, executor: Executor, env: EnvRef, repo: Repo, run: Run
+    db: Database, executor: Executor, env: EnvRef, repo: Repo, run: Run
 ) -> EnvRef | SnapshotRef:
     """The newest ready, unexpired trusted snapshot for this env (never waits for one), else ``env``."""
     if not executor.capabilities().fs_snapshot:
         return env
-    snapshot = await session.scalar(
-        select(Snapshot)
-        .where(
-            Snapshot.repo_id == repo.id,
-            Snapshot.env_hash == env.env_hash,
-            Snapshot.status == "ready",
-            Snapshot.image_id.is_not(None),
+    async with db.session() as session:
+        snapshot = await session.scalar(
+            select(Snapshot)
+            .where(
+                Snapshot.repo_id == repo.id,
+                Snapshot.env_hash == env.env_hash,
+                Snapshot.status == "ready",
+                Snapshot.image_id.is_not(None),
+            )
+            .order_by(Snapshot.created_at.desc())
+            .limit(1)
         )
-        .order_by(Snapshot.created_at.desc())
-        .limit(1)
-    )
     if snapshot is None or snapshot.image_id is None:
         return env
     if snapshot.expires_at is not None and snapshot.expires_at <= run.created_at:
         return env
-    run.snapshot_id = snapshot.id
     return SnapshotRef(env=env, sha=snapshot.sha, image_id=snapshot.image_id, snapshot_id=snapshot.id)
 
 
-async def _estimated_shards(
-    session: AsyncSession, repo_id: int, config: CoversetConfig, settings: Settings
-) -> int:
+async def _estimated_shards(db: Database, repo_id: int, config: CoversetConfig, settings: Settings) -> int:
     """Workers to ask for before collection: what the repo's timed tests need, at least one."""
-    total_ms = await session.scalar(select(func.sum(TestStats.p50_ms)).where(TestStats.repo_id == repo_id))
+    async with db.session() as session:
+        total_ms = await session.scalar(
+            select(func.sum(TestStats.p50_ms)).where(TestStats.repo_id == repo_id)
+        )
     cap = max(1, min(config.max_shards, settings.max_shards))
     if not total_ms:
         return 1
@@ -457,11 +584,15 @@ async def _fit_workers(
     settings: Settings,
     labels: Mapping[str, str],
     tarball: bytes,
+    lifetimes: WorkerLifetimes,
 ) -> list[Worker]:
     """Acquire more workers or release extras so there is one per shard (fewer if capacity is short)."""
     if len(workers) > wanted:
         extra = workers[wanted:]
-        await release_all(extra)
+        try:
+            await release_all(extra)
+        finally:
+            lifetimes.released(extra)
         return workers[:wanted]
     if len(workers) < wanted:
         try:
@@ -469,8 +600,16 @@ async def _fit_workers(
         except ExecutorError as exc:
             log.warning("could not acquire %d more workers: %s", wanted - len(workers), exc)
             more = []
+        lifetimes.acquired(more, resources)
         if more:
-            await asyncio.gather(*(w.put_tree(tarball, REPO_DIR) for w in more))
+            try:
+                await asyncio.gather(*(w.put_tree(tarball, REPO_DIR) for w in more))
+            except BaseException:
+                try:
+                    await release_all(list(more))
+                finally:
+                    lifetimes.released(more)
+                raise
         return [*workers, *more]
     return workers
 
@@ -510,8 +649,8 @@ async def _collect(
         raise PlanError("collection", f"pytest --collect-only exited {result.exit_code}: {tail}")
     try:
         raw = await worker.get_file(f"{LAYOUT.collect_dir}/collect.json")
-        items, errors = parse_collect_json(raw)
-    except (ExecutorError, ValueError) as exc:
+        items, errors = await asyncio.to_thread(parse_collect_json, raw)
+    except (ExecutorError, ValueError, RecursionError) as exc:
         log.warning("collect.json unavailable (%s); falling back to the -q listing", exc)
         items, errors = parse_collect_listing(lines), []
     return items, errors
@@ -601,7 +740,7 @@ class _Analysis:
 
 
 async def _analyse(
-    session: AsyncSession,
+    db: Database,
     settings: Settings,
     store: FactsStore,
     run: Run,
@@ -616,29 +755,34 @@ async def _analyse(
     head_paths: frozenset[str],
     now: datetime,
 ) -> _Analysis:
-    """Diff, functions, prior run, history, scores and wave 1."""
+    """Diff, functions, prior run, history, scores and wave 1 (reads only, plus the ``tests`` rows)."""
     diffs, diff_text = (
         await asyncio.to_thread(_diff, mirror, base_commit, run.head_sha) if base_commit else ({}, {})
     )
     changed_files = {d.path for d in diffs.values() if d.status != "deleted"}
     changed_lines = {d.path: set(d.added) for d in diffs.values() if d.status != "deleted" and d.added}
-    measured_sources = _measured_sources(checkout, config, head_paths)
+    measured_sources, head_functions, invariant_targets = await asyncio.to_thread(
+        _index_head, adapter, checkout, config, head_paths
+    )
     changes = await asyncio.to_thread(_changes, adapter, mirror, base_commit, checkout, diffs, head_paths)
-    head_functions = [
-        r for path, text in measured_sources.items() for r in adapter.index_functions(path, text)
-    ]
 
-    prior_choice, prior = await _prior(session, store, run, repo, base_commit)
-    tests = await history.register_tests(session, repo.id, [i.nodeid for i in collected], run.id)
-    test_ids = {nodeid: row.id for nodeid, row in tests.items()}
-    quarantined = {nodeid for nodeid, row in tests.items() if row.quarantined}
-    previous = await history.previous_pr_run(session, run)
-    if previous is None:
-        baseline = await history.latest_baseline(session, repo.id, repo.default_branch, exclude=run.id)
-        previous_id = baseline.id if baseline is not None else None
-    else:
-        previous_id = previous.id
-    test_history = await history.load_test_history(session, repo.id, test_ids, previous_run_id=previous_id)
+    tests = await _register_tests(db, repo.id, [i.nodeid for i in collected], run.id)
+    test_ids = {nodeid: test_id for nodeid, (test_id, _) in tests.items()}
+    quarantined = {nodeid for nodeid, (_, flag) in tests.items() if flag}
+    async with db.session() as session:
+        with session.no_autoflush:
+            prior_choice, prior = await _prior(session, store, run, repo, base_commit)
+            previous = await history.previous_pr_run(session, run)
+            if previous is None:
+                baseline = await history.latest_baseline(
+                    session, repo.id, repo.default_branch, exclude=run.id
+                )
+                previous_id = baseline.id if baseline is not None else None
+            else:
+                previous_id = previous.id
+            test_history = await history.load_test_history(
+                session, repo.id, test_ids, previous_run_id=previous_id
+            )
     scoring_ctx = ScoringContext(
         prior=prior,
         changed=changes,
@@ -647,14 +791,9 @@ async def _analyse(
         now=now,
         rng_seed=exploration_seed(run.id),
     )
-    scored_list = score_tests(collected, scoring_ctx)
-    durations = {t.nodeid: t.p50_s for t in scored_list if t.p50_s is not None}
-    wave1 = change_covering_set(collected, changes, prior, durations, changed_files=changed_files)
-    order = list(dict.fromkeys([*wave1.tests, *(t.nodeid for t in scored_list)]))
-    known = [d for d in durations.values() if d > 0]
-    median_s = statistics.median(known) if known else DEFAULT_MEDIAN_S
-
-    invariant_targets = _invariant_targets(checkout, config, head_functions)
+    scored_list, wave1, order, durations, median_s = await asyncio.to_thread(
+        _score, collected, changes, prior, scoring_ctx, changed_files
+    )
     full_trace = sorted(
         {p for p in changed_files if p.endswith(".py") and p in measured_sources}
         | {r.path for r in invariant_targets.values()}
@@ -679,6 +818,57 @@ async def _analyse(
         median_s=median_s,
         target_shard_seconds=config.target_shard_seconds,
     )
+
+
+def _index_head(
+    adapter: LanguageAdapter, checkout: Path, config: CoversetConfig, head_paths: frozenset[str]
+) -> tuple[dict[str, str], list[FunctionRegion], dict[str, FunctionRegion]]:
+    """Measured sources, their function regions and the invariant targets (CPU and file I/O)."""
+    measured_sources = _measured_sources(checkout, config, head_paths)
+    head_functions = [
+        r for path, text in measured_sources.items() for r in adapter.index_functions(path, text)
+    ]
+    return measured_sources, head_functions, _invariant_targets(checkout, config, head_functions)
+
+
+def _score(
+    collected: list[CollectedItem],
+    changes: list[FunctionChange],
+    prior: PriorRun | None,
+    scoring_ctx: ScoringContext,
+    changed_files: set[str],
+) -> tuple[list[ScoredTest], CoverSet, list[str], dict[str, float], float]:
+    """Scores, wave 1, the global order, known p50s and their median (pure CPU)."""
+    scored_list = score_tests(collected, scoring_ctx)
+    durations = {t.nodeid: t.p50_s for t in scored_list if t.p50_s is not None}
+    wave1 = change_covering_set(collected, changes, prior, durations, changed_files=changed_files)
+    order = list(dict.fromkeys([*wave1.tests, *(t.nodeid for t in scored_list)]))
+    known = [d for d in durations.values() if d > 0]
+    median_s = statistics.median(known) if known else DEFAULT_MEDIAN_S
+    return scored_list, wave1, order, durations, median_s
+
+
+async def _register_tests(
+    db: Database, repo_id: int, nodeids: list[str], run_id: str
+) -> dict[str, tuple[int, bool]]:
+    """``(test id, quarantined)`` by nodeid, creating missing ``tests`` rows in a short transaction.
+
+    Two runs registering the same new tests race on the unique key; the loser retries and finds
+    the winner's rows.
+    """
+
+    async def work(session: AsyncSession) -> dict[str, tuple[int, bool]]:
+        rows = await history.register_tests(session, repo_id, nodeids, run_id)
+        return {nodeid: (row.id, bool(row.quarantined)) for nodeid, row in rows.items()}
+
+    for attempt in range(1, 4):
+        try:
+            return await run_transaction(db, work)
+        except IntegrityError:
+            if attempt == 3:
+                raise
+            await asyncio.sleep(0.05 * attempt)
+    raise AssertionError("unreachable")
 
 
 def _diff(mirror: Path, base: str, head: str) -> tuple[dict[str, FileDiff], dict[str, str]]:
@@ -815,27 +1005,24 @@ async def _write_shard_files(plan: RunPlan) -> None:
     await asyncio.gather(*writes)
 
 
-async def _record_plan(
-    session: AsyncSession, run: Run, plan: RunPlan, base_ref: EnvRef | SnapshotRef
-) -> None:
-    """Persist the plan: run fields, shard rows and one ``test_results`` row per collected test."""
-    run.scoring_basis_run_id = plan.prior.run_id if plan.prior is not None else None
-    run.shard_count = len(plan.shards)
+def _plan_writer(run_id: str, plan: RunPlan) -> Work[None]:
+    """The final write of a plan: run fields, shard rows and one ``test_results`` row per collected test."""
     ranks, file_ranks = plan.ranks, plan.file_ranks
     shard_of = {n: s.shard_id for s in plan.shards for n in s.nodeids}
     basis = plan.prior.describe() if plan.prior is not None else "no prior run"
-    for shard in plan.shards:
-        session.add(
-            Shard(
-                run_id=run.id,
-                shard_id=shard.shard_id,
-                status="pending",
-                worker_ref=shard.worker.id,
-                test_count=len(shard.nodeids),
-                predicted_s=shard.predicted_s,
-            )
-        )
     wave1 = set(plan.wave1.tests)
+    shard_rows = [
+        {
+            "run_id": run_id,
+            "shard_id": shard.shard_id,
+            "status": "pending",
+            "worker_ref": shard.worker.id,
+            "test_count": len(shard.nodeids),
+            "predicted_s": shard.predicted_s,
+        }
+        for shard in plan.shards
+    ]
+    result_rows = []
     for item in plan.collected:
         scored = plan.scored.get(item.nodeid)
         explanation = {
@@ -845,17 +1032,35 @@ async def _record_plan(
             "wave1": item.nodeid in wave1,
             "file_rank": file_ranks[item.nodeid],
         }
-        session.add(
-            TestResult(
-                run_id=run.id,
-                test_id=plan.test_ids[item.nodeid],
-                outcome="not_run",
-                shard_id=shard_of.get(item.nodeid),
-                quarantined=item.nodeid in plan.quarantined,
-                score=scored.score if scored else None,
-                score_explanation=explanation,
-                rank=ranks.get(item.nodeid),
-                attempts=0,
-            )
+        result_rows.append(
+            {
+                "run_id": run_id,
+                "test_id": plan.test_ids[item.nodeid],
+                "outcome": "not_run",
+                "shard_id": shard_of.get(item.nodeid),
+                "quarantined": item.nodeid in plan.quarantined,
+                "score": scored.score if scored else None,
+                "score_explanation": explanation,
+                "rank": ranks.get(item.nodeid),
+                "attempts": 0,
+                "flaky": False,
+            }
         )
-    await session.flush()
+
+    async def work(session: AsyncSession) -> None:
+        live = await session.get(Run, run_id)
+        if live is None:
+            raise PlanError("run", f"run {run_id} disappeared while planning")
+        live.env_hash = plan.env.env_hash
+        live.snapshot_id = plan.snapshot_id
+        live.scoring_basis_run_id = plan.prior.run_id if plan.prior is not None else None
+        live.shard_count = len(plan.shards)
+        timeline = dict(live.timeline or {})
+        timeline.setdefault("sandbox_ready", plan.sandbox_ready_at.isoformat())
+        live.timeline = timeline
+        if shard_rows:
+            await session.execute(insert(Shard), shard_rows)
+        if result_rows:
+            await session.execute(insert(TestResult), result_rows)
+
+    return work

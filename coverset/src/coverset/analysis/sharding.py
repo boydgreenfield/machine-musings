@@ -1,7 +1,7 @@
 """Priority-snake LPT sharding with wave 1 at the head of every shard.
 
 ``K = clamp(ceil(Σ p50 / target_shard_seconds), 1, max_shards)`` (and never more shards than
-tests). Wave-1 tests are dealt first, one by one in wave-1 order, each to the least-loaded shard,
+assignment units, so no shard is planned empty: a fixture group of many tests is one unit). Wave-1 tests are dealt first, one by one in wave-1 order, each to the least-loaded shard,
 so every shard starts with part of the change-covering set. The remaining tests follow in priority
 order (the order :func:`~coverset.analysis.scoring.score_tests` returned), each to the
 least-loaded shard; members of a fixture group that fall in the same priority decile move together
@@ -67,8 +67,7 @@ def plan_shards(
     rest = [t.nodeid for t in scored if t.nodeid not in wave1_set]
     units += _group_units(rest, durations, groups or {})
     total = sum(u.seconds for u in units)
-    n_tests = sum(len(u.nodeids) for u in units)
-    k = min(max(math.ceil(total / target_shard_seconds), 1), max_shards, max(n_tests, 1))
+    k = min(max(math.ceil(total / target_shard_seconds), 1), max_shards, max(len(units), 1))
     return _deal(units, k)
 
 
@@ -81,7 +80,7 @@ def reshard(plan: ShardPlan, n_workers: int) -> ShardPlan:
         raise ValueError("no workers available (capacity)")
     if n_workers >= len(plan.shards):
         return plan
-    return _deal(list(plan.units), n_workers)
+    return _deal(list(plan.units), min(n_workers, max(len(plan.units), 1)))
 
 
 def shard_scores(plan: ShardPlan) -> list[dict[str, float]]:
@@ -119,7 +118,11 @@ def _group_units(
 
 
 def _deal(units: Sequence[ShardUnit], k: int) -> ShardPlan:
-    """Give each unit, in order, to the least-loaded shard (lowest index on ties)."""
+    """Give each unit, in order, to the least-loaded shard (lowest index on ties).
+
+    A shard can still end up empty when units have zero predicted duration (callers that need one
+    worker per shard drop empty shards).
+    """
     shards: list[list[str]] = [[] for _ in range(k)]
     loads = [0.0] * k
     heap = [(0.0, i) for i in range(k)]

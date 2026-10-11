@@ -87,7 +87,13 @@ async def test_requeue_on_boot(ctx: OrchestratorContext, repo: TestRepo, repo_id
         await session.commit()
     ctx.settings = ctx.settings.model_copy(update={"requeue_on_boot": True})
     await RunDispatcher(ctx).on_boot()
-    assert (await load_run(ctx, run_id)).status == "queued"
+    old = await load_run(ctx, run_id)
+    assert old.status == "abandoned" and "re-queued as run" in (old.reason or "")
+    assert [e.kind for e in await events(ctx, run_id)][-2:] == ["verdict", "done"]
+    async with ctx.db.session() as session:
+        (fresh,) = list(await session.scalars(select(Run).where(Run.status == "queued")))
+    assert fresh.id != run_id and fresh.timeline["requeued_from"] == run_id
+    assert (fresh.head_sha, fresh.trigger, fresh.extra_env) == (old.head_sha, old.trigger, old.extra_env)
 
 
 async def test_dispatcher_runs_real_runs(

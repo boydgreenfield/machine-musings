@@ -5,9 +5,14 @@ reach the network. What the executor does guarantee:
 
 * **Cached environments.** One virtualenv per ``env_hash`` under ``~/.cache/coverset/venvs/``,
   built by ``uv venv --relocatable`` + ``uv pip install -r requirements.txt`` + the pytest-coverset
-  wheel in a staging directory under an exclusive ``flock``, marked ready, then renamed into place
-  atomically, so concurrent runs (in-process or from another CLI) never see a half-built venv. The
-  project under test is never installed: tests import it through ``PYTHONPATH``.
+  wheel *without its dependencies* (the requirements already carry an exact ``coverage`` pin, see
+  :func:`~coverset.executors.env_export.build_env_spec`, so the repo's locked ``pytest`` is never
+  upgraded behind its back) in a staging directory under an exclusive ``flock``, marked ready, then
+  renamed into place atomically, so concurrent runs (in-process or from another CLI) never see a
+  half-built venv. ``uv`` runs with ``--no-config`` and an allow-listed environment (``PATH``,
+  ``HOME``, cache directories, ``UV_*``, proxy and TLS variables): an sdist build hook never sees the
+  control plane's secrets. The project under test is never installed: tests import it through
+  ``PYTHONPATH``.
 * **A scrubbed child environment** built from scratch: ``PATH=<venv>/bin:/usr/bin:/bin``, ``HOME``
   and ``TMPDIR`` inside the worker's private directory, ``PYTHONUNBUFFERED=1``, ``LANG``, ``TZ``,
   plus what the caller passes after :func:`~coverset.executors.base.sanitize_env` (``PYTHONPATH``,
@@ -15,7 +20,15 @@ reach the network. What the executor does guarantee:
   control plane's environment, so tokens such as ``COVERSET_GITHUB_*``, ``ANTHROPIC_API_KEY`` or
   ``MODAL_TOKEN_*`` never reach a test.
 * **Process-group control.** Every exec starts a new session; cancelling sends ``SIGTERM`` to the
-  group (pytest-coverset then writes its bundle) and ``SIGKILL`` after a 5 s grace period.
+  group (pytest-coverset then writes its bundle) and ``SIGKILL`` after a 5 s grace period. When an
+  exec ends (normally or not) its whole group gets ``SIGKILL``, and so does every group the worker
+  ever started when it is released, so background processes a test suite leaves behind do not
+  outlive their exec (a child that calls ``setsid`` itself escapes; this is not a sandbox).
+* **Waiting for capacity.** ``acquire`` hands out at most ``local_max_workers`` workers at once. A
+  run that holds none waits (up to ``acquire_wait_s``) for one to be released instead of failing;
+  a run that already holds workers gets only what is free right now (the planner re-shards).
+* **Released means gone.** After ``release`` every worker method raises
+  :class:`~coverset.executors.base.ExecutorError`; nothing recreates the deleted directory.
 * **Cleanup.** Each worker owns a ``tempfile.mkdtemp(prefix="coverset-run-")`` directory outside the
   project, removed on release; executor start-up removes leftovers older than an hour.
 """
@@ -26,6 +39,7 @@ import asyncio
 import contextlib
 import io
 import json
+import logging
 import os
 import shutil
 import signal
@@ -64,17 +78,53 @@ __all__ = [
     "LocalWorker",
     "VenvBuilder",
     "sweep_stale_run_dirs",
+    "uv_environment",
     "uv_venv_builder",
 ]
 
 RUN_DIR_PREFIX = "coverset-run-"
 READY_MARKER = ".coverset-ready.json"
 KILL_GRACE_S = 5.0
+ACQUIRE_WAIT_S = 600.0
+"""How long a run holding no worker waits for a local worker to be released."""
+UV_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NIX_SSL_CERT_FILE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "SYSTEMROOT",
+    }
+)
+"""Variables of the control plane's environment that ``uv`` may see when it builds a venv (plus ``UV_*``)."""
+UV_ENV_DENIED = frozenset({"UV_PROJECT_ENVIRONMENT", "UV_PYTHON_INSTALL_DIR_OVERRIDE"})
 STALE_RUN_DIR_S = 3600.0
 MAX_GET_FILE_BYTES = 1024 * 1024 * 1024
 UV_TIMEOUT_S = 900
 _READ_CHUNK = 64 * 1024
 _DRAIN_AFTER_EXIT_S = 5.0
+
+log = logging.getLogger(__name__)
 
 type VenvBuilder = Callable[[EnvSpec, Path], None]
 """Builds a venv for ``spec`` in the (empty, existing) directory it is given; raises on failure."""
@@ -95,6 +145,7 @@ class LocalExecutor:
         venv_builder: VenvBuilder | None = None,
         kill_grace_s: float = KILL_GRACE_S,
         sweep: bool = True,
+        acquire_wait_s: float = ACQUIRE_WAIT_S,
     ) -> None:
         default_workers = settings.local_max_workers if settings is not None else min(8, os.cpu_count() or 1)
         self.max_workers = max_workers or default_workers
@@ -102,7 +153,11 @@ class LocalExecutor:
         self.temp_dir = Path(os.path.realpath(temp_dir or tempfile.gettempdir()))
         self.kill_grace_s = kill_grace_s
         self._builder = venv_builder or uv_venv_builder
+        self.acquire_wait_s = acquire_wait_s
         self._workers: dict[str, LocalWorker] = {}
+        self._run_of: dict[str, str] = {}
+        self._freed: asyncio.Condition | None = None
+        self._freed_loop: asyncio.AbstractEventLoop | None = None
         if sweep:
             sweep_stale_run_dirs(self.temp_dir)
 
@@ -148,11 +203,25 @@ class LocalExecutor:
         ttl_s: int,
         labels: Mapping[str, str],
     ) -> list[Worker]:
-        """Up to ``n`` workers, limited by ``local_max_workers`` minus the workers already out."""
+        """Up to ``n`` workers, limited by ``local_max_workers`` minus the workers already out.
+
+        When none is free and the caller (``labels["coverset_run"]``) holds no worker yet, waits up
+        to ``acquire_wait_s`` for a release; a caller that already holds workers never waits.
+        """
         env = base.env if isinstance(base, SnapshotRef) else base
         venv = Path(env.location)
         if not (venv / READY_MARKER).is_file():
             raise ExecutorError(f"environment {env.env_hash[:12]} is not built")
+        run = labels.get("coverset_run", "")
+        holds = bool(run) and run in self._run_of.values()
+        if n > 0 and not holds and self.max_workers - len(self._workers) <= 0:
+            freed = self._condition()
+            async with freed:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        freed.wait_for(lambda: self.max_workers - len(self._workers) > 0),
+                        timeout=self.acquire_wait_s,
+                    )
         count = max(0, min(n, self.max_workers - len(self._workers)))
         workers: list[Worker] = []
         for _ in range(count):
@@ -165,11 +234,35 @@ class LocalExecutor:
                 on_release=self._forget,
             )
             self._workers[worker.id] = worker
+            self._run_of[worker.id] = run
             workers.append(worker)
         return workers
 
+    def _condition(self) -> asyncio.Condition:
+        loop = asyncio.get_running_loop()
+        if self._freed is None or self._freed_loop is not loop:
+            self._freed, self._freed_loop = asyncio.Condition(), loop
+        return self._freed
+
     def _forget(self, worker_id: str) -> None:
         self._workers.pop(worker_id, None)
+        self._run_of.pop(worker_id, None)
+        freed, loop = self._freed, self._freed_loop
+        if freed is None or loop is None or loop.is_closed():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(self._notify(freed))
+        else:
+            loop.call_soon_threadsafe(lambda: loop.create_task(self._notify(freed)))
+
+    @staticmethod
+    async def _notify(freed: asyncio.Condition) -> None:
+        async with freed:
+            freed.notify_all()
 
     @property
     def active_workers(self) -> int:
@@ -211,10 +304,15 @@ class LocalWorker:
         self._kill_grace_s = kill_grace_s
         self._on_release = on_release
         self._procs: set[asyncio.subprocess.Process] = set()
+        self._groups: set[int] = set()
         self._cancelled: set[int] = set()
         self._released = False
         (root / "home").mkdir(exist_ok=True)
         (root / "tmp").mkdir(exist_ok=True)
+
+    def _check(self) -> None:
+        if self._released:
+            raise ExecutorError(f"worker {self.id} was released")
 
     def path(self, rel: str) -> str:
         """Absolute path of ``rel``; absolute paths and ``..`` segments are refused."""
@@ -245,9 +343,11 @@ class LocalWorker:
         on_line: LineCallback | None = None,
         stdout_cap: int,
     ) -> RunResult:
-        """Run ``cmd`` in its own session; stream lines; kill on timeout, cap or :meth:`cancel`."""
-        if self._released:
-            raise ExecutorError(f"worker {self.id} was released")
+        """Run ``cmd`` in its own session; stream lines; kill on timeout, cap or :meth:`cancel`.
+
+        The exec's process group is killed when it ends, whatever is left in it.
+        """
+        self._check()
         started = time.time()
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -262,6 +362,7 @@ class LocalWorker:
         except OSError as exc:
             raise ExecutorError(f"cannot start {cmd[0]!r}: {exc}") from exc
         self._procs.add(proc)
+        self._groups.add(proc.pid)
         pump = _Pump(on_line, stdout_cap, on_overflow=lambda: self._spawn_kill(proc))
         readers = [
             asyncio.create_task(pump.read(proc.stdout, "stdout")),  # type: ignore[arg-type]
@@ -274,6 +375,7 @@ class LocalWorker:
             except TimeoutError:
                 timed_out = True
                 await self._kill(proc)
+            _signal_group(proc.pid, signal.SIGKILL)  # whatever the exec left running in its group
             done, pending = await asyncio.wait(readers, timeout=_DRAIN_AFTER_EXIT_S)
             if pending:  # a grandchild still holds the pipes open
                 _signal_group(proc.pid, signal.SIGKILL)
@@ -287,6 +389,9 @@ class LocalWorker:
             raise
         finally:
             self._procs.discard(proc)
+            if proc.returncode is not None:
+                _signal_group(proc.pid, signal.SIGKILL)
+                self._groups.discard(proc.pid)
         cancelled = proc.pid in self._cancelled
         self._cancelled.discard(proc.pid)
         return RunResult(
@@ -315,15 +420,18 @@ class LocalWorker:
 
     async def put_tree(self, tar_bytes: bytes, dest: str) -> None:
         """Extract a ``.tar.gz`` into ``dest`` with the ``data`` filter (no links out, no devices)."""
+        self._check()
         target = Path(self.path(dest))
         await asyncio.to_thread(_extract_tar, tar_bytes, target)
 
     async def get_file(self, path: str) -> bytes:
         """Read a regular file without following symlinks."""
+        self._check()
         return await asyncio.to_thread(_read_regular, Path(self.path(path)))
 
     async def write_file(self, path: str, data: bytes) -> None:
         """Write ``data`` atomically (temp file in the same directory, then rename)."""
+        self._check()
         target = Path(self.path(path))
         await asyncio.to_thread(_write_atomic, target, data)
 
@@ -342,6 +450,9 @@ class LocalWorker:
         try:
             await self.cancel()
         finally:
+            for group in list(self._groups):  # leftovers of execs that ended
+                _signal_group(group, signal.SIGKILL)
+            self._groups.clear()
             await asyncio.to_thread(shutil.rmtree, self._root, True)
             if self._on_release is not None:
                 self._on_release(self.id)
@@ -356,6 +467,7 @@ class _Pump:
         self._on_overflow = on_overflow
         self.total = 0
         self.overflowed = False
+        self.callback_errors = 0
 
     async def read(self, stream: asyncio.StreamReader, name: Stream) -> None:
         buffer = bytearray()
@@ -394,7 +506,12 @@ class _Pump:
         if self._on_line is None:
             return
         text = line.decode("utf-8", "replace").rstrip("\r")
-        self._on_line(text, name)
+        try:
+            self._on_line(text, name)
+        except Exception:  # a failing callback must not stop the reader (the pipe would fill up)
+            self.callback_errors += 1
+            if self.callback_errors == 1:
+                log.exception("on_line raised; later errors of this exec are not logged")
 
 
 def _signal_group(pid: int, sig: signal.Signals) -> None:
@@ -459,28 +576,64 @@ def sweep_stale_run_dirs(temp_dir: Path, *, max_age_s: float = STALE_RUN_DIR_S) 
     return removed
 
 
-def uv_venv_builder(spec: EnvSpec, target: Path) -> None:
-    """Build a relocatable venv in ``target`` with uv: requirements, then the plugin wheel (with deps).
+def uv_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The allow-listed environment ``uv`` builds venvs with (no tokens, no ``VIRTUAL_ENV``)."""
+    source = os.environ if environ is None else environ
+    return {
+        key: value
+        for key, value in source.items()
+        if (key in UV_ENV_NAMES or key.startswith("UV_")) and key not in UV_ENV_DENIED
+    }
 
-    The wheel is installed *with* its dependencies (``coverage``), resolved against the already
-    installed requirements, because a target repo's lockfile need not pin coverage at all.
+
+def uv_venv_builder(spec: EnvSpec, target: Path) -> None:
+    """Build a relocatable venv in ``target`` with uv: requirements, then the plugin wheel (no deps).
+
+    The requirements already hold the plugin's runtime dependencies at exact versions (the repo's
+    own ``pytest`` and ``coverage`` pins, or the ``coverage`` pin coverset adds, which is part of
+    ``env_hash``), so installing the wheel with ``--no-deps`` can never change the locked
+    environment. uv runs with ``--no-config`` and :func:`uv_environment`.
     """
     uv = shutil.which("uv")
     if uv is None:
         raise ExecutorError("uv is not installed or not on PATH")
-    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")}
+    env = uv_environment()
     python = str(target / "bin" / "python")
     _uv(
         uv,
-        ["venv", "--quiet", "--relocatable", "--allow-existing", "--python", spec.python, str(target)],
+        [
+            "venv",
+            "--no-config",
+            "--quiet",
+            "--relocatable",
+            "--allow-existing",
+            "--python",
+            spec.python,
+            str(target),
+        ],
         env,
     )
     requirements = target / ".coverset-requirements.txt"
     requirements.write_text(spec.requirements_txt, encoding="utf-8")
     if any(line.strip() and not line.lstrip().startswith("#") for line in spec.requirements_txt.splitlines()):
-        _uv(uv, ["pip", "install", "--quiet", "--python", python, "-r", str(requirements)], env)
+        _uv(
+            uv, ["pip", "install", "--no-config", "--quiet", "--python", python, "-r", str(requirements)], env
+        )
     if spec.plugin_wheel is not None:
-        _uv(uv, ["pip", "install", "--quiet", "--python", python, str(spec.plugin_wheel)], env)
+        _uv(
+            uv,
+            [
+                "pip",
+                "install",
+                "--no-config",
+                "--quiet",
+                "--no-deps",
+                "--python",
+                python,
+                str(spec.plugin_wheel),
+            ],
+            env,
+        )
 
 
 def _uv(uv: str, args: list[str], env: Mapping[str, str]) -> None:

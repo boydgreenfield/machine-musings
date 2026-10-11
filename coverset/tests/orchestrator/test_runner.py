@@ -77,9 +77,11 @@ async def test_confirmed_failure_posts_verdict_first(
             "retried": True,
             "preexisting": False,
             "rank": run.rank_coverset,
+            "executed": run.rank_executed,
             "note": None,
         }
     ]
+    assert run.rank_executed == 5  # the one shard reported it fifth
     rows = await results(ctx, run_id)
     assert rows[ZERO].outcome == "failed" and rows[ZERO].attempts == 2 and not rows[ZERO].flaky
     async with ctx.db.session() as session:

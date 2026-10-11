@@ -26,17 +26,9 @@ async def _plan(ctx: OrchestratorContext, executor: FakeExecutor, run_id: str, *
     async with ctx.db.session() as session:
         run = await session.get(Run, run_id)
         assert run is not None
-        plan = await plan_run(
-            session,
-            ctx.settings,
-            ctx.store,
-            run,
-            executor=executor,
-            env_spec_builder=fake_env_spec,
-            **kwargs,
-        )
-        await session.commit()
-    return plan
+    return await plan_run(
+        ctx.db, ctx.settings, ctx.store, run, executor=executor, env_spec_builder=fake_env_spec, **kwargs
+    )
 
 
 async def test_first_pr_without_prior_run(

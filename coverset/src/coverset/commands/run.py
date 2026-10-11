@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import sys
 import tempfile
@@ -79,7 +80,7 @@ async def _run(
     printer: StreamPrinter,
 ) -> int:
     from coverset.orchestrator.repos import ensure_mirror_async, resolve_commit
-    from coverset.orchestrator.runner import OrchestratorContext, create_run, execute_run
+    from coverset.orchestrator.runner import OrchestratorContext, create_run, execute_run, finalize_crashed
 
     await prepare_db(settings)
     ctx = OrchestratorContext.from_settings(settings)
@@ -101,6 +102,7 @@ async def _run(
             executor=settings.executor,
             pr_number=pr_number,
             base_ref=base if base and not _is_sha(base) else None,
+            claim=wait,  # inline: inserted running and ours, so a concurrent serve never takes it
         )
         click.echo(
             f"run {run_id}: {repo.full_name} {head_sha[:12]}" + (f" vs {base_sha[:12]}" if base_sha else "")
@@ -108,14 +110,22 @@ async def _run(
         if not wait:
             click.echo("queued (a running `coverset serve` picks it up)")
             return 0
-        outcome = await execute_run(ctx, run_id, on_event=printer, shards=shards)
+        try:
+            outcome = await execute_run(ctx, run_id, on_event=printer, shards=shards)
+        except BaseException as exc:  # crashed or interrupted: never leave the run "running"
+            reason = (
+                "interrupted"
+                if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
+                else f"internal error: {type(exc).__name__}: {exc}"
+            )
+            with contextlib.suppress(Exception):
+                await finalize_crashed(ctx.db, settings, run_id, reason)
+            raise
         click.echo(f"{outcome.status}: {outcome.conclusion} - {outcome.reason}")
         click.echo(f"details: {settings.public_url}/runs/{run_id}")
         if printer.done is not None:
             return int(printer.done.get("exit_code", 2))
-        return (
-            0 if outcome.conclusion in ("success", "neutral") else 1 if outcome.conclusion == "failure" else 2
-        )
+        return 0 if outcome.conclusion == "success" else 1 if outcome.conclusion == "failure" else 2
     finally:
         await ctx.close()
 

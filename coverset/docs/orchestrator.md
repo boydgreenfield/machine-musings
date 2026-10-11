@@ -14,15 +14,31 @@ queued ──▶ claim + policy ──▶ plan ───────────
                                (planner.py)                                                            invariants
 ```
 
-1. **Queue.** A run row is created `queued` by the forge intake (webhooks), `coverset run`, or the demo.
+1. **Queue.** A run row is created `queued` by the forge intake (webhooks) or `coverset run --no-wait`.
    The dispatcher (`RunDispatcher`, installed on the web app as `app.extensions["run_queue"]`) claims
-   queued runs oldest first while fewer than `COVERSET_MAX_CONCURRENT_RUNS` execute. Claiming is an
-   atomic `UPDATE ... WHERE status = 'queued'`, so a run never executes twice. `COVERSET_PAUSED=true`
-   starts nothing. At boot, runs a previous process left `queued` or `running` become `abandoned`
-   (with `verdict` and `done` events), or go back to `queued` with `COVERSET_REQUEUE_ON_BOOT=true`.
+   queued runs oldest first while fewer than `COVERSET_MAX_CONCURRENT_RUNS` execute; a queued run of a
+   PR that already has a newer queued or running run is cancelled instead (`superseded by run <id>`,
+   with `COVERSET_CANCEL_SUPERSEDED=true`). Claiming is an atomic
+   `UPDATE ... WHERE status = 'queued'` that also sets `runs.claimed_by` (`<role>@<host>:<pid>:<nonce>`,
+   role `serve` or `cli`) and `runs.heartbeat_at` (refreshed every 10 s while the run executes), so a
+   run never executes twice. Inline runs (`coverset run`, `coverset demo`) are inserted already
+   `running` and claimed by their CLI process, so a `serve` sharing the database never picks them up.
+   `COVERSET_PAUSED=true` starts nothing.
+   At boot, `serve` handles what earlier processes left: `queued` runs become `abandoned` (or stay
+   queued with `COVERSET_REQUEUE_ON_BOOT=true`); a `running` run is taken over only when its executor
+   is gone (claimed by an earlier `serve` on this host, by a process on this host that no longer
+   exists, by nobody, or with a heartbeat older than 5 minutes), never while a live CLI runs it. A
+   taken-over run becomes `abandoned` with `verdict` and `done` events; with
+   `COVERSET_REQUEUE_ON_BOOT=true` a fresh queued copy (same trigger, PR, `extra_env`, webhook arrival
+   time; `timeline.requeued_from` names the old run) is created first, since the old run's shard and
+   result rows already exist.
 2. **Policy.** Untrusted runs never use the local executor; webhook-triggered runs use it only with
    `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true`; Modal runs past `COVERSET_MODAL_DAILY_BUDGET_USD` (the sum
-   of today's `runs.cost_estimate`) conclude `neutral` with reason "budget exhausted".
+   of today's `runs.cost_estimate`, which includes the reservations of runs still in flight) conclude
+   `neutral` with reason "budget exhausted". An admitted Modal run reserves its predicted cost (one
+   worker for 10 minutes before planning, then the plan's predicted shard durations plus 30 s each)
+   until its real cost replaces it, so concurrent runs see each other's spend. The cancel watcher
+   starts right after the claim, so cancelling or superseding a run also interrupts its planning.
 3. **Plan.** The repo's bare mirror (`data/mirrors/<repo_id>.git`) is refreshed; the head commit is
    exported with `git archive` into a temporary control-plane checkout. The environment spec is the
    repo's `uv export` plus the pytest-coverset wheel (`executors/env_export.py`), and the executor
@@ -33,8 +49,15 @@ queued ──▶ claim + policy ──▶ plan ───────────
    fallback). Then the diff `base...head` is classified into changed functions, the prior run is
    chosen (the PR's previous head, else the merge-base, else the latest default-branch baseline),
    every test is scored, wave 1 (the change-covering set) is computed and the tests are dealt into
-   shards. If fewer workers are available than shards, the plan is re-dealt over the workers
-   obtained; none at all fails the run with reason `capacity`.
+   shards (never more shards than assignment units; an empty shard is dropped, because pytest given an
+   empty args file runs the whole suite). If fewer workers are available than shards, the plan is
+   re-dealt over the workers obtained; none at all fails the run with reason `capacity` (the local
+   executor first waits up to 10 minutes for another run to release one).
+   Planning holds no write transaction while it works (the environment build and collection can
+   take minutes): it only reads, the `envs` and `tests` rows are written in their own short
+   transactions, and the plan's run fields, `shards` and `test_results` land in one short final
+   transaction together with whatever events the run queued meanwhile. Scoring, wave 1, sharding,
+   function indexing, YAML and shape catalogues run in threads, off the event loop.
 4. **Shards.** Each worker gets `run/shard.args` (its nodeids, in priority order),
    `run/shard.scores.json` (rank-derived scores that make the plugin reproduce that order) and
    `run/full-trace.txt` (the PR's changed source files plus every invariant target's file, traced
@@ -52,13 +75,24 @@ queued ──▶ claim + policy ──▶ plan ───────────
    Hypothesis snippet), invariant statuses (head definitions plus base definitions the PR removed,
    with their coverage lens) and the PR's changes to `invariants.yaml`, the optional AI review
    (advisory; its absence or failure is recorded as `ai_source = unavailable`), `test_stats`
-   (recomputed over each test's last 50 executed results), and the cost estimate. The verdict is
-   stored in `runs.verdict/reason/summary_json`, posted to the forge for PR runs (check run + sticky
-   comment), and closed with a `done` event.
+   (recomputed over each test's last 50 executed results), and the cost estimate. The terminal status,
+   the verdict (`runs.verdict/reason/summary_json`) and the `verdict` and `done` events are written in
+   one transaction, retried with backoff while SQLite is busy; then the verdict is posted to the forge
+   for PR runs (check run + sticky comment). A report that cannot be built degrades to a verdict
+   without its extras rather than failing the run.
 
 Every failure path (planning, environment, capacity, an internal error, cancellation) ends the run
 `error` or `cancelled` with a reason, a `verdict` event and a `done` event, so SSE clients and
-`coverset-ci wait` always finish.
+`coverset-ci wait` always finish. If even that write fails, or the run's task dies, a last-resort
+finalizer (in the runner, the dispatcher and the CLI) marks the run `error` with both events.
+
+`done.exit_code` (what `coverset-ci wait` and `coverset run` exit with): `0` success, `1` a confirmed
+failure (also when shards errored too), `5` no tests collected, `2` for everything else (error,
+cancelled, abandoned, neutral such as "budget exhausted" or a skipped run).
+
+**Cost.** `runs.cost_estimate = Σ executor.cost_usd(resources, seconds the worker was held)` over
+every worker the run acquired, from `acquire` to `release` (extras released right after sharding
+count for the time they were held), recorded on every terminal path. Local runs cost 0.
 
 ## Events
 
@@ -85,8 +119,11 @@ shard and wave-1 counts and the prior run), `shard` (per-shard status and exit c
 | `finished` | the run reached its terminal status |
 
 The verdict's clock starts at `webhook_received`, else `queued` (`t0`). `first_failure_s =
-first_failure - t0`. `rank_coverset` is the failing test's position in the global priority order
-(wave 1 first, then by score), `rank_file_order` its position in plain collection order, and
+first_failure - t0`. `rank_coverset` is the failing test's **planned** position in the global
+priority order (wave 1 first, then by score); `rank_executed` is the position at which it actually
+reported: how many tests (across all shards, first attempts) had reported a result when it did. The
+two differ when shards run in parallel or when the plugin keeps a module's or class's tests together
+behind their best-ranked member. `rank_file_order` is its position in plain collection order, and
 `t_first_failure_file_order_est = (sandbox_ready - t0) + Σ p50` of the tests before it in file
 order: an **estimate** of when plain file-order CI would have reached it (unknown p50s count as the
 median), always labelled as estimated.
@@ -103,7 +140,7 @@ the shard: `--coverset-out run/retry-<n> --coverset-shapes off`, the nodeid alon
   `test_attempts` rows); it does not fail the run.
 * It fails again: the failure is **confirmed**. If the same `fail_sig` (exception type + crash
   location) failed in the base-branch run, it is **pre-existing** and does not count. Otherwise the
-  first confirmed failure records `rank_coverset`, sets `timeline.first_failure` and posts a
+  first confirmed failure records `rank_coverset` and `rank_executed`, sets `timeline.first_failure` and posts a
   `failure` verdict immediately; later ones are added to the final verdict.
 
 `[tool.coverset] fail_fast` picks what happens next:
@@ -118,7 +155,7 @@ A newer queued or running run for the same PR cancels the current one when
 `COVERSET_CANCEL_SUPERSEDED=true` (reason `superseded by run <id>`); so does setting a run's status to
 `cancelled`. Cancelled runs are not ingested.
 
-Exit codes: 0/1 are normal shard ends; 5 (no tests) concludes the run `neutral` ("no tests
+Shard exit codes: 0/1 are normal shard ends; 5 (no tests) concludes the run `neutral` ("no tests
 collected", `done.exit_code = 5`); 2 without a STOP request, any other code, a timeout or the output
 cap are shard errors (`status = error`, conclusion `neutral` unless a confirmed failure exists). The
 verdict notes shards whose pytest exit code disagrees with the results they reported.
@@ -141,11 +178,17 @@ child environment (built from scratch: `PATH=<venv>/bin:/usr/bin:/bin`, `HOME` a
 worker's private directory, `PYTHONPATH`, `PYTHONUNBUFFERED`, `LANG`, `TZ`, the plugin's `COVERSET_*`
 options and the run's `extra_env`; never `COVERSET_GITHUB_*`, `ANTHROPIC_API_KEY`, `MODAL_TOKEN_*`,
 `VIRTUAL_ENV`, `PYTEST_*` or `COVERAGE_*`), starts every exec in its own session (cancel =
-`SIGTERM` to the group, `SIGKILL` 5 s later), extracts source with the tarfile `data` filter, keeps
-each worker in its own `coverset-run-*` temp directory (removed on release; leftovers older than an
-hour are swept at start-up) and caches one virtualenv per environment hash under
-`~/.cache/coverset/venvs/` (built under a file lock and renamed into place atomically). None of
-that stops hostile test code from reading your files or calling out. Untrusted PRs never run on it,
+`SIGTERM` to the group, `SIGKILL` 5 s later; when an exec ends, and when its worker is released,
+whatever is left in its process group is killed, so a test suite's background processes do not
+outlive it), extracts source with the tarfile `data` filter, keeps each worker in its own
+`coverset-run-*` temp directory (removed on release, after which every worker call raises; leftovers
+older than an hour are swept at start-up) and caches one virtualenv per environment hash under
+`~/.cache/coverset/venvs/` (built under a file lock and renamed into place atomically). `uv` builds
+the venv with `--no-config` and an allow-listed environment (`PATH`, `HOME`, cache dirs, `UV_*`,
+proxy and TLS variables: no tokens reach an sdist's build hooks), installs the requirements, then
+the plugin wheel with `--no-deps`. At most `COVERSET_LOCAL_MAX_WORKERS` workers exist at once; a run
+that holds none waits for one (up to 10 minutes) rather than failing with `capacity`. None of that
+stops hostile test code from reading your files or calling out. Untrusted PRs never run on it,
 and webhook-triggered runs need `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true`.
 
 ## Writing a new executor backend
@@ -155,16 +198,16 @@ Implement `coverset.executors.base.Executor` and `Worker` (and register the kind
 
 | method | contract |
 |---|---|
-| `ensure_env(EnvSpec) -> EnvRef` | build or find the environment for `spec.env_hash`: Python `spec.python`, `spec.requirements_txt`, then the plugin wheel `spec.plugin_wheel` (with its dependencies; the project itself is never installed) |
+| `ensure_env(EnvSpec) -> EnvRef` | build or find the environment for `spec.env_hash`: Python `spec.python`, `spec.requirements_txt`, then the plugin wheel `spec.plugin_wheel` **without its dependencies** (`build_env_spec` already appended `coverage==<coverset's locked version>`, and `pytest==...` when the repo has no pytest, unless the repo's lock pins them; those pins are part of `env_hash`; the project itself is never installed) |
 | `ensure_snapshot(env, repo, sha) -> SnapshotRef \| None` | a trusted filesystem snapshot of a default-branch commit, or None when unsupported |
 | `acquire(base, n, resources, ttl_s, labels) -> list[Worker]` | up to `n` workers (fewer under capacity pressure; raise `CapacityError` only when none at all can be had). `resources.network` is `blocked` for untrusted runs. `labels` carry `coverset_run`, `repo`, `role` for reaping |
 | `capabilities()` | `egress`, `warm_pool`, `fs_snapshot`, `max_workers`, `name` |
-| `cost_usd(resources, seconds)` | the rate card; summed into `runs.cost_estimate` and the daily budget |
+| `cost_usd(resources, seconds)` | the rate card; the runner calls it with each worker's lifetime (acquire to release) and sums it into `runs.cost_estimate` and the daily budget, and prices reservations with it |
 | `close()` | release everything |
 | `Worker.path(rel)` | the absolute in-worker path of a worker-relative path |
-| `Worker.run(cmd, *, cwd, env, timeout_s, on_line, stdout_cap) -> RunResult` | run in `cwd` (worker-relative) with **only** the fixed base environment plus `sanitize_env(env)`; call `on_line(text, "stdout" \| "stderr")` per line as it arrives (cut at 1 MiB); kill on timeout, on `stdout_cap` (then `truncated=True`) and on `cancel()` (then `cancelled=True`); never raise for a non-zero exit |
+| `Worker.run(cmd, *, cwd, env, timeout_s, on_line, stdout_cap) -> RunResult` | run in `cwd` (worker-relative) with **only** the fixed base environment plus `sanitize_env(env)`; call `on_line(text, "stdout" \| "stderr")` per line as it arrives (cut at 1 MiB); kill on timeout, on `stdout_cap` (then `truncated=True`) and on `cancel()` (then `cancelled=True`); an exception raised by `on_line` must not stop reading; never raise for a non-zero exit |
 | `put_tree(tar_gz, dest)` / `get_file(path)` / `write_file(path, data)` | file transfer relative to the worker root; refuse absolute paths, `..`, links out of the tree |
-| `cancel()` / `release()` | stop running execs (graceful signal first: the plugin writes its bundle on SIGTERM); release frees the worker, idempotently |
+| `cancel()` / `release()` | stop running execs (graceful signal first: the plugin writes its bundle on SIGTERM); release frees the worker, idempotently; after release every other method raises `ExecutorError` |
 
 Workers never run git against a remote and never receive forge credentials: source arrives only
 through `put_tree`. Backends whose workers can outlive the control plane implement

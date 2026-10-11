@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import signal
@@ -67,18 +68,25 @@ async def _demo(settings: Settings, executor: str, *, serve: bool, printer: Stre
     from coverset.demo.flow import format_table, run_demo
     from coverset.demo.seed import PR_OPENED_FIXTURE
     from coverset.orchestrator.queue import install_run_queue
-    from coverset.orchestrator.runner import OrchestratorContext
+    from coverset.orchestrator.runner import OrchestratorContext, finalize_crashed
 
     await prepare_db(settings)
     ctx = OrchestratorContext.from_settings(settings)
+    current: list[str] = []
+
+    def on_run(name: str, run_id: str) -> None:
+        current[:] = [run_id]
+        click.echo(f"\n--- {name}: run {run_id}")
+
     try:
         result = await run_demo(
-            ctx,
-            out=settings.data_dir / "demo.git",
-            executor=executor,
-            on_event=printer,
-            on_run=lambda name, run_id: click.echo(f"\n--- {name}: run {run_id}"),
+            ctx, out=settings.data_dir / "demo.git", executor=executor, on_event=printer, on_run=on_run
         )
+    except BaseException as exc:  # crashed or interrupted: never leave the current run "running"
+        for run_id in current:
+            with contextlib.suppress(Exception):
+                await finalize_crashed(ctx.db, settings, run_id, f"interrupted: {type(exc).__name__}")
+        raise
     finally:
         await ctx.close()
     click.echo("")

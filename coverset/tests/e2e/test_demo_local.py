@@ -1,18 +1,22 @@
 """End to end on the demo app with the LocalExecutor: six baseline runs, both PRs, a replayed webhook.
 
-Real subprocesses, a real virtualenv (cached under ~/.cache/coverset), real pytest-coverset bundles,
-the real facts store and the fake forge. About 20 s once the venv exists.
+Real subprocesses, a real virtualenv (cached under ~/.cache/coverset), real pytest-coverset bundles
+ingested by a real (spawned) process pool, the real facts store and the fake forge. About 20 s once
+the venv exists. Pins the README's claims: the refund test runs first (rank 1) and the verdict posts
+before the shard finishes, sooner than the file-order estimate.
 """
 
 from __future__ import annotations
 
+import ast
 import shutil
+import subprocess
 
 import pytest
 from sqlalchemy import select
 
 from coverset.config import Settings
-from coverset.db.models import ForgeCall, PullRequest, Run, TestCase, TestResult
+from coverset.db.models import ForgeCall, PullRequest, Run, RunEvent, TestCase, TestResult
 from coverset.db.session import init_db
 from coverset.demo.flow import format_table, run_demo
 from coverset.demo.seed import PR_OPENED_FIXTURE
@@ -31,6 +35,7 @@ FIVE_CLASSES = {
     ("merge_intervals", "intervals:unsorted"),
 }
 FLAKY = "tests/test_windows.py::test_hold_survives_clock_skew"
+REFUND = "tests/test_refund.py::test_refund_partial"
 
 
 @pytest.fixture(scope="module")
@@ -49,7 +54,7 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type
 
     async def scenario() -> dict:  # type: ignore[type-arg]
         await init_db(settings)
-        ctx = OrchestratorContext.from_settings(settings, ingest=IngestPool("thread", max_workers=4))
+        ctx = OrchestratorContext.from_settings(settings, ingest=IngestPool("process", max_workers=2))
         ctx.forge = FakeForge(session_factory=ctx.db.sessionmaker)
         try:
             result = await run_demo(ctx, out=root / "data" / "demo.git")
@@ -66,6 +71,24 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type
                         .where(TestResult.flaky.is_(True))
                     )
                 )
+                nodeids = {
+                    run_id: [n for _, n in rows]
+                    for run_id, rows in _group(
+                        await session.execute(
+                            select(TestResult.run_id, TestCase.nodeid).join(
+                                TestCase, TestCase.id == TestResult.test_id
+                            )
+                        )
+                    ).items()
+                }
+                run_events = {
+                    run_id: list(
+                        await session.scalars(
+                            select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)
+                        )
+                    )
+                    for run_id in {s.run_id for s in result.runs}
+                }
             return {
                 "result": result,
                 "again": again,
@@ -73,6 +96,9 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type
                 "calls": calls,
                 "comment_ids": comment_ids,
                 "flaky": flaky,
+                "nodeids": nodeids,
+                "events": run_events,
+                "demo_git": root / "data" / "demo.git",
                 "replay": replay,
             }
         finally:
@@ -81,6 +107,33 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type
             ctx.ingest.close()
 
     return asyncio.run(scenario())
+
+
+def _group(rows: object) -> dict[str, list[tuple[str, str]]]:
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for run_id, nodeid in rows:  # type: ignore[attr-defined]
+        grouped.setdefault(run_id, []).append((run_id, nodeid))
+    return grouped
+
+
+def _file_order_position(nodeids: list[str], demo_git: object, sha: str, target: str) -> int:
+    """Where plain pytest collection puts ``target``: files in name order, then definition order."""
+    path, _, name = target.partition("::")
+    before = sum(1 for n in nodeids if n.split("::", 1)[0] < path)
+    source = subprocess.run(
+        ["git", "--git-dir", str(demo_git), "show", f"{sha}:{path}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    functions = [
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith("test")
+    ]
+    in_file = [n for n in nodeids if n.split("::", 1)[0] == path]
+    earlier = functions[: functions.index(name)]
+    return before + sum(1 for n in in_file if n.split("::", 1)[1].split("[", 1)[0] in earlier) + 1
 
 
 async def _replay(settings: Settings) -> dict:  # type: ignore[type-arg]
@@ -111,13 +164,28 @@ def test_pr1_fails_fast_with_the_refund_test_first(demo: dict) -> None:  # type:
     pr1 = _by_name(demo)["pr-1"]
     summary = pr1.summary_json
     assert pr1.verdict == "failure" and summary is not None
-    assert summary["failures"][0]["nodeid"] == "tests/test_refund.py::test_refund_partial"
-    assert [f["nodeid"] for f in summary["failures"]] == ["tests/test_refund.py::test_refund_partial"]
-    assert pr1.rank_coverset is not None and pr1.rank_coverset <= 5
-    assert pr1.rank_file_order is not None and pr1.rank_file_order > pr1.rank_coverset
+    assert summary["failures"][0]["nodeid"] == REFUND
+    assert [f["nodeid"] for f in summary["failures"]] == [REFUND]
+    assert pr1.rank_coverset == 1
+    assert pr1.rank_executed is not None and pr1.rank_executed >= 1
+    assert pr1.rank_file_order == _file_order_position(
+        demo["nodeids"][pr1.id], demo["demo_git"], pr1.head_sha, REFUND
+    )
+    assert pr1.rank_file_order > pr1.rank_coverset
     assert pr1.t_first_failure_file_order_est is not None
     assert "first_failure" in pr1.timeline and summary["first_failure_s"] is not None
+    assert summary["first_failure_s"] < pr1.t_first_failure_file_order_est
     assert pr1.scoring_basis_run_id == _by_name(demo)["main-6"].id
+
+
+def test_pr1_verdict_posts_before_the_shards_finish(demo: dict) -> None:  # type: ignore[type-arg]
+    log = demo["events"][_by_name(demo)["pr-1"].id]
+    early = [e for e in log if e.kind == "verdict" and e.payload.get("early")]
+    shard_ends = [e for e in log if e.kind == "shard" and e.payload.get("status") != "running"]
+    assert early and shard_ends
+    assert early[0].seq < shard_ends[-1].seq
+    assert [e.kind for e in log][-2:] == ["verdict", "done"]
+    assert log[-1].payload["exit_code"] == 1
 
 
 def test_pr2_passes_with_gaps(demo: dict) -> None:  # type: ignore[type-arg]
@@ -130,6 +198,7 @@ def test_pr2_passes_with_gaps(demo: dict) -> None:  # type: ignore[type-arg]
     assert missing >= FIVE_CLASSES
     statuses = {i["id"]: i["status"] for i in summary["invariants"]}
     assert statuses["signup_rejects_existing_domain"] == "untested"
+    assert summary["ai_source"] == "fixture"  # fixtures/ai/ledger/ found for coverset-demo/ledger
 
 
 def test_main4_flaky_test_is_recorded(demo: dict) -> None:  # type: ignore[type-arg]

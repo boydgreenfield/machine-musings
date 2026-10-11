@@ -5,11 +5,14 @@ ingested: patch and changed-function coverage (:func:`coverset.analysis.patch.pa
 run's facts), input-class coverage of the changed functions and of every invariant's target
 (classes missing with ``missing_reason == "never exercised"`` are listed, each with a Hypothesis
 snippet), invariant statuses (head definitions plus base definitions the PR removed, each with its
-coverage lens), the PR's changes to ``invariants.yaml``, and the optional AI review.
+coverage lens: whether the linked tests ran the target's changed lines comes from the run's facts),
+plus the base definition of every invariant the PR weakened or removed (from
+:func:`~coverset.analysis.invariants.diff_invariants`), the PR's changes to ``invariants.yaml``, and
+the optional AI review. CPU-heavy pieces (shape catalogues, test bodies) run in threads.
 
 :func:`build_summary` adds the run-level numbers: the first confirmed failure's ``rank_coverset``
-(its position in the global priority order), ``rank_file_order`` (its position in plain collection
-order) and ``t_first_failure_file_order_est = (sandbox_ready - t0) + Σ p50 of the tests before it in
+(its planned position in the global priority order; ``runs.rank_executed`` keeps the position at
+which it actually reported), ``rank_file_order`` (its position in plain collection order) and ``t_first_failure_file_order_est = (sandbox_ready - t0) + Σ p50 of the tests before it in
 file order`` (an estimate, labelled as such), where ``t0`` is when the webhook arrived or else when
 the run was queued. :func:`persist_verdict` writes ``runs.verdict/reason/summary_json`` and
 :func:`post_summary` sends it through the forge when the run belongs to a PR.
@@ -105,6 +108,8 @@ class TestState:
     flaky: bool = False
     confirmed: bool = False
     preexisting: bool = False
+    exec_index: int | None = None
+    """How many first-attempt results (all shards) had arrived when this one did (1-based)."""
 
 
 @dataclass(slots=True)
@@ -210,9 +215,11 @@ async def build_report(
             patch_report, plan.changed_lines, statics, dict(union), source_changes(plan), covering
         )
     interest = functions_of_interest(plan)
-    report.input_cov, report.observations = _input_coverage(interest, ok, catalogue)
+    report.input_cov, report.observations = await asyncio.to_thread(_input_coverage, interest, ok, catalogue)
     report.ai_source, evidence = await _ai_review(session, settings, run, plan, report)
-    invariant_rows, by_target = await _invariants(session, run, plan, states, report.input_cov, evidence)
+    invariant_rows, by_target = await _invariants(
+        session, run, plan, states, report.input_cov, evidence, store=store
+    )
     report.invariants = tuple(invariant_rows)
     report.invariants_changed = tuple(await _invariant_changes(plan, run))
     report.function_rows = tuple(_function_rows(report.patch, report.input_cov, by_target))
@@ -308,7 +315,7 @@ async def _base_invariants(plan: RunPlan) -> list[Invariant]:
 async def _invariant_changes(plan: RunPlan, run: Run) -> list[InvariantRow]:
     if run.base_sha is None:
         return []
-    changes = diff_invariants(await _base_invariants(plan), _head_invariants(plan))
+    changes = diff_invariants(await _base_invariants(plan), await asyncio.to_thread(_head_invariants, plan))
     return [
         InvariantRow(change.inv_id, change.kind, "; ".join(change.reasons) or None)
         for change in changes
@@ -323,16 +330,25 @@ async def _invariants(
     states: Mapping[str, TestState],
     input_cov: Mapping[str, FunctionInputCov],
     review: Mapping[str, ReviewEvidence],
+    *,
+    store: FactsStore | None = None,
 ) -> tuple[list[InvariantRow], dict[str, list[InvariantRow]]]:
-    """Evaluate head invariants (plus base ones the PR removed), persist them, return summary rows."""
-    head = _head_invariants(plan)
-    removed = [inv for inv in await _base_invariants(plan) if inv.id not in {h.id for h in head}]
+    """Evaluate head invariants plus the base definitions the PR weakened or removed, persist them,
+    return summary rows (a base definition's row reads ``<id> (base)``)."""
+    head = await asyncio.to_thread(_head_invariants, plan)
+    base = await _base_invariants(plan)
+    changes = diff_invariants(base, head) if base else []
+    base_specs = [
+        (c.base, c.kind) for c in changes if c.base is not None and c.kind in ("weakened", "removed")
+    ]
     results = {nodeid: state.outcome for nodeid, state in states.items()}
     links: dict[str, tuple[str, ...]] = {i.nodeid: i.invariant_ids for i in plan.collected if i.invariant_ids}
     hypothesis = {i.nodeid: i.hypothesis for i in plan.collected}
     rows: list[InvariantRow] = []
     by_target: dict[str, list[InvariantRow]] = defaultdict(list)
-    for inv in [*head, *removed]:
+    evaluations: list[tuple[Invariant, str | None]] = [(inv, None) for inv in head]
+    evaluations += [(inv, kind) for inv, kind in base_specs]
+    for inv, base_kind in evaluations:
         region = resolve_target(inv, plan.head_functions, plan.config.source_root)
         model = await _invariant_row(session, run, inv)
         previous = await _previous_result(session, run, inv)
@@ -354,13 +370,12 @@ async def _invariants(
             if inv.id in ids or any(v.marker in ids for v in inv.verify if v.marker)
         ]
         cov = input_cov.get(region.func_key) if region is not None else None
-        changed = region is not None and any(
-            c.region is not None and c.region.func_key == region.func_key for c in plan.changes
-        )
-        lens = invariant_lens(inv, cov, linked, covers_changed_lines=None if not changed else bool(linked))
+        covers = await _covers_changed_lines(store, run, plan, region, linked)
+        lens = invariant_lens(inv, cov, linked, covers_changed_lines=covers)
         evidence = {**result.evidence, "lens": lens.summary}
-        if inv in removed:
-            evidence["removed_in_head"] = True
+        if base_kind is not None:
+            evidence["base_definition"] = True
+            evidence[f"{base_kind}_in_head"] = True
         session.add(
             InvariantResultModel(
                 run_id=run.id,
@@ -373,12 +388,63 @@ async def _invariants(
                 evidence=evidence,
             )
         )
-        row = InvariantRow(inv.id, result.status, lens.summary)
+        label = inv.id if base_kind is None or base_kind == "removed" else f"{inv.id} (base)"
+        row = InvariantRow(label, result.status, lens.summary)
         rows.append(row)
         if region is not None:
             by_target[region.func_key].append(row)
     await session.flush()
     return rows, by_target
+
+
+async def _covers_changed_lines(
+    store: FactsStore | None,
+    run: Run,
+    plan: RunPlan,
+    region: FunctionRegion | None,
+    linked: Sequence[str],
+) -> bool | None:
+    """Whether a linked test executed one of the target's changed lines (None: target unchanged).
+
+    Read from the run's facts (``test_lines``); a changed target without added lines (only
+    deletions) counts its whole span.
+    """
+    if region is None or not any(
+        c.region is not None and c.region.func_key == region.func_key for c in plan.changes
+    ):
+        return None
+    if not linked:
+        return False
+    if store is None:
+        return None
+    lines = sorted(
+        n for n in plan.changed_lines.get(region.path, ()) if region.def_line <= n <= region.end_line
+    )
+    spans = _spans(lines) if lines else [(region.def_line, region.end_line)]
+    wanted = set(linked)
+
+    def query() -> bool:
+        for start, end in spans:
+            if wanted.intersection(tests_covering(store, run.repo_id, run.id, region.path, start, end)):
+                return True
+        return False
+
+    try:
+        return await asyncio.to_thread(query)
+    except Exception as exc:  # facts unavailable (partial ingest): unknown, not "no"
+        log.warning("cannot read covering tests of %s: %s", region.qualname, exc)
+        return None
+
+
+def _spans(lines: Sequence[int]) -> list[tuple[int, int]]:
+    """Sorted line numbers as inclusive ``(start, end)`` runs."""
+    spans: list[tuple[int, int]] = []
+    for line in lines:
+        if spans and line == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], line)
+        else:
+            spans.append((line, line))
+    return spans
 
 
 async def _invariant_row(session: AsyncSession, run: Run, inv: Invariant) -> InvariantModel:
@@ -491,10 +557,10 @@ async def _ai_review(
             sources=plan.measured_sources,
             diff_hunks=plan.diff_text,
             patch_rows=report.patch.function_rows if report.patch is not None else None,
-            covering_tests=_covering_tests(plan, report),
+            covering_tests=await asyncio.to_thread(_covering_tests, plan, report),
             input_covs=report.input_cov,
             shapes=report.observations,
-            invariants=_head_invariants(plan),
+            invariants=await asyncio.to_thread(_head_invariants, plan),
             settings=settings,
             invariant_links=_invariant_links(plan),
             source_root=plan.config.source_root,
@@ -681,7 +747,9 @@ async def persist_verdict(session: AsyncSession, run: Run, summary: VerdictSumma
     """Store the conclusion, reason and the full summary on the run row."""
     run.verdict = summary.conclusion
     run.reason = summary.reason
-    run.summary_json = summary_to_json(summary)
+    data = summary_to_json(summary)
+    data["rank_executed"] = run.rank_executed
+    run.summary_json = data
     await session.flush()
 
 

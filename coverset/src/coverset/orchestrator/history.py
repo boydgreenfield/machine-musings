@@ -7,7 +7,7 @@
   :class:`~coverset.analysis.scoring.TestHistory` for scoring (with a parametrize-``family``
   fallback for new ids).
 * :func:`update_test_stats` recomputes ``test_stats`` over each test's last 50 executed results
-  (``not_run`` never counts; untrusted runs never update priors).
+  (``not_run`` never counts; untrusted runs never update priors) and writes them in one upsert.
 * :func:`seed_history` replays the six demo ``main`` commits as baseline runs and then both demo
   PRs through the normal planner and runner.
 """
@@ -55,6 +55,22 @@ COFAIL_RUNS = 20
 BASELINE_TRIGGERS = frozenset({"baseline", "push"})
 FAILED = frozenset({"failed", "error"})
 _IN_CHUNK = 500
+_STATS_COLUMNS = (
+    "repo_id",
+    "test_id",
+    "runs_n",
+    "fails_n",
+    "last_fail_run_id",
+    "last_fail_at",
+    "last_run_at",
+    "fail_ewma",
+    "dur_ewma_ms",
+    "p50_ms",
+    "p95_ms",
+    "flaky_n",
+    "flaky_score",
+    "updated_run_id",
+)
 
 
 def nodeid_hash(nodeid: str) -> bytes:
@@ -328,18 +344,48 @@ async def update_test_stats(session: AsyncSession, run: Run, test_ids: Sequence[
         )
         for test_id, outcome, duration_ms, flaky, run_id, at in rows:
             executed[test_id].append(_Executed(outcome, duration_ms, bool(flaky), run_id, at))
-    written = 0
+    stat_rows: list[dict[str, Any]] = []
     for test_id, results in executed.items():
         results.sort(key=lambda r: (r.at, r.run_id))
-        window = results[-HISTORY_WINDOW:]
-        row = await session.get(TestStats, (run.repo_id, test_id))
-        if row is None:
-            row = TestStats(repo_id=run.repo_id, test_id=test_id)
-            session.add(row)
-        _fill_stats(row, window, run.id)
-        written += 1
-    await session.flush()
-    return written
+        stats = TestStats(repo_id=run.repo_id, test_id=test_id)
+        _fill_stats(stats, results[-HISTORY_WINDOW:], run.id)
+        stat_rows.append({column: getattr(stats, column) for column in _STATS_COLUMNS})
+    # one upsert: concurrent runs of a repo may both create a test's first stats row
+    await upsert_rows(session, TestStats, stat_rows, ("repo_id", "test_id"))
+    return len(stat_rows)
+
+
+async def upsert_rows(
+    session: AsyncSession, model: type[Any], rows: Sequence[Mapping[str, Any]], keys: Sequence[str]
+) -> None:
+    """Insert ``rows`` into ``model``'s table, replacing the other columns where ``keys`` exist.
+
+    One statement per distinct column set (SQLite and PostgreSQL); other dialects merge row by row.
+    """
+    if not rows:
+        return
+    dialect = session.get_bind().dialect.name
+    if dialect not in ("sqlite", "postgresql"):  # pragma: no cover - documented, not tested
+        for row in rows:
+            await session.merge(model(**row))
+        await session.flush()
+        return
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+    groups: dict[tuple[str, ...], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[tuple(sorted(row))].append(row)
+    for columns, group in groups.items():
+        stmt = dialect_insert(model)
+        changed = [c for c in columns if c not in keys]
+        stmt = (
+            stmt.on_conflict_do_update(index_elements=list(keys), set_={c: stmt.excluded[c] for c in changed})
+            if changed
+            else stmt.on_conflict_do_nothing(index_elements=list(keys))
+        )
+        await session.execute(stmt, list(group))
 
 
 def _fill_stats(row: TestStats, window: Sequence[_Executed], run_id: str) -> None:
@@ -415,7 +461,9 @@ async def seed_history(
     with ``number``, ``title``, ``head_sha``, ``base_sha`` and ``branch`` (the demo's
     ``<out>.shas.json`` entries); PR runs leave ``extra_env`` empty. A commit or PR head that already
     has a completed run of the same trigger is reused, so seeding is idempotent. ``on_event`` gets
-    every run event; ``on_run(name, run_id)`` is called before each new run starts.
+    every run event; ``on_run(name, run_id)`` is called before each new run starts. Runs are
+    inserted already claimed by ``ctx`` (``running``), so a ``serve`` sharing the database never
+    picks them up and never abandons them at boot.
     """
     from coverset.orchestrator.runner import create_run, execute_run
 
@@ -442,6 +490,7 @@ async def seed_history(
             executor=executor,
             extra_env={retry_key: str(ordinal)},
             retry_increment_keys=[retry_key],
+            claim=True,
         )
         if on_run is not None:
             on_run(name, run_id)
@@ -466,6 +515,7 @@ async def seed_history(
             pr_number=number,
             pr_title=str(pr.get("title") or ""),
             base_ref=branch,
+            claim=True,
         )
         if on_run is not None:
             on_run(f"pr-{number}", run_id)

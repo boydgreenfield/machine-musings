@@ -203,6 +203,10 @@ class Run(Base):
     pr_id: Mapped[int | None] = mapped_column(ForeignKey("pull_requests.id", ondelete="SET NULL"), index=True)
     trigger: Mapped[RunTrigger] = mapped_column(str_enum(RunTrigger))
     status: Mapped[RunStatus] = mapped_column(str_enum(RunStatus), default="queued")
+    claimed_by: Mapped[str | None] = mapped_column(String(KEY_LEN))
+    """The process executing the run (``<role>@<host>:<pid>:<nonce>``); None while queued."""
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    """Refreshed every few seconds while the run executes; a stale one marks a dead executor."""
     verdict: Mapped[Conclusion | None] = mapped_column(str_enum(Conclusion))
     reason: Mapped[str | None] = mapped_column(Text)
     trusted: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -229,6 +233,9 @@ class Run(Base):
     cost_estimate: Mapped[float] = mapped_column(Float, default=0.0)
     rank_coverset: Mapped[int | None] = mapped_column(Integer)
     rank_file_order: Mapped[int | None] = mapped_column(Integer)
+    rank_executed: Mapped[int | None] = mapped_column(Integer)
+    """How many tests had reported a result (across all shards) when the first confirmed failure
+    did: its position in actual execution order (``rank_coverset`` is its planned position)."""
     t_first_failure_file_order_est: Mapped[float | None] = mapped_column(Float)
     timeline: Mapped[dict[str, str]] = mapped_column(JSONDict, default=dict)
     ci_first_contact_at: Mapped[datetime | None] = mapped_column(UTCDateTime)

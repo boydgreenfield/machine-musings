@@ -2,10 +2,14 @@
 
 :func:`execute_run` drives one ``queued`` run to a terminal status:
 
-1. **Claim and policy.** The run becomes ``running``; untrusted runs and (unless allowed)
-   webhook-triggered runs never use the local executor; Modal runs stop at the daily budget.
+1. **Claim and policy.** The run becomes ``running`` with ``claimed_by`` set to this process (inline
+   CLI runs are inserted that way) and a ``heartbeat_at`` refreshed every 10 s; the cancel watcher
+   starts. Untrusted runs and (unless allowed) webhook-triggered runs never use the local executor;
+   Modal runs stop at the daily budget, and an admitted Modal run reserves its predicted cost in
+   ``cost_estimate`` until its real cost replaces it.
 2. **Plan** (:func:`coverset.orchestrator.planner.plan_run`): workers hold the source and their
-   shard files; ``timeline.sandbox_ready`` is set.
+   shard files; ``timeline.sandbox_ready`` is set. Planning never holds the execution lock or a
+   write transaction, so the run's events keep flowing; a cancellation interrupts it.
 3. **Shards.** Each shard execs the adapter's test command with ``COVERSET_EVENT_NONCE`` (a fresh
    128-bit value per exec), ``PYTHONPATH`` and the run's ``extra_env``. Lines that start with the exact
    nonce prefix are events (``collected``, ``test``, ``heartbeat``, ``bundle_written``, ``done``);
@@ -19,17 +23,25 @@
    incremented; retries are never ingested and capped by ``retry_budget_per_run``). A pass makes the
    test *flaky*; a second failure *confirms* it unless its ``fail_sig`` also failed on the base
    branch (*pre-existing*). The first confirmed failure posts a verdict immediately and records
-   ``rank_coverset``; with ``fail_fast = "cancel_remaining"`` the shards then get STOP files, up to
+   ``rank_coverset`` (planned position) and ``rank_executed`` (how many tests had reported when it
+   did); with ``fail_fast = "cancel_remaining"`` the shards then get STOP files, up to
    20 s to write their bundles, and are cancelled; with ``finish_in_background`` (the default) they
    run on so the facts land. A newer queued run for the same PR cancels this one
    (``cancel_superseded``).
 5. **Ingest and verdict.** Bundles are pulled before the workers are released, converted and
    ingested concurrently, the run is finalized, ``results.jsonl`` overrides streamed outcomes, then
    the patch report, input classes, invariants, AI review, ``test_stats`` and cost feed the final
-   verdict, which is stored, posted to the forge and closed with a ``done`` event.
+   verdict. The status change, the verdict and the ``verdict`` and ``done`` events are written in
+   one transaction (retried with backoff while the database is busy), then the verdict is posted.
 
 Every failure path ends the run as ``error`` or ``cancelled`` with a reason and a ``done`` event, so
-SSE clients and ``coverset-ci wait`` always finish.
+SSE clients and ``coverset-ci wait`` always finish; if even that write fails,
+:func:`finalize_crashed` (also called by the dispatcher and the CLI for a crashed task) marks the run
+``error`` with ``verdict``/``done`` events. ``done.exit_code`` is 0 for success, 1 for a failure, 5
+when no tests were collected and 2 otherwise (error, cancelled, neutral).
+
+``cost_estimate`` is ``Σ executor.cost_usd(resources, seconds each worker was held)``, from acquire
+to release (see :class:`~coverset.orchestrator.planner.WorkerLifetimes`), on every terminal path.
 """
 
 from __future__ import annotations
@@ -38,11 +50,14 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import secrets
 import shutil
+import socket
 import time
+import uuid
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -54,7 +69,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coverset.config import ExecutorKind, Settings
 from coverset.db.models import PullRequest, Run, RunEvent, Shard, TestAttempt, TestResult, WebhookDelivery
 from coverset.db.session import Database
-from coverset.executors.base import Executor, ExecutorError, RunResult
+from coverset.executors.base import Executor, ExecutorError, Resources, RunResult
 from coverset.facts.ingest import RunContext, finalize_run, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.lang.base import LanguageAdapter
@@ -71,11 +86,15 @@ from coverset.orchestrator.bundles import (
 from coverset.orchestrator.planner import (
     LAYOUT,
     REPO_DIR,
+    WRITE_ATTEMPTS,
+    WRITE_RETRY_DELAY_S,
     EnvSpecBuilder,
     PlanError,
     RunPlan,
     ShardSpec,
+    WorkerLifetimes,
     plan_run,
+    run_transaction,
     worker_env,
 )
 from coverset.orchestrator.verdict import (
@@ -97,6 +116,9 @@ __all__ = [
     "RunOutcome",
     "create_run",
     "execute_run",
+    "exit_code_for",
+    "finalize_crashed",
+    "process_claimant",
     "retry_env",
 ]
 
@@ -106,8 +128,15 @@ RECORD_SEPARATOR = "\x1e"
 OUTCOMES = frozenset({"passed", "failed", "error", "skipped", "xfailed", "xpassed"})
 FAILED = frozenset({"failed", "error"})
 PHASES = frozenset({"setup", "call", "teardown"})
-EXIT_CODES = {"success": 0, "failure": 1, "neutral": 0, "cancelled": 2, "timed_out": 2, "error": 2}
+EXIT_CODES = {"success": 0, "failure": 1, "neutral": 2, "cancelled": 2, "timed_out": 2, "error": 2}
 """``done.exit_code`` per conclusion (pytest's codes, as ``coverset-ci wait`` exits)."""
+NO_TESTS_EXIT_CODE = 5
+HEARTBEAT_S = 10.0
+"""How often a running run refreshes ``runs.heartbeat_at``."""
+PRE_PLAN_RESERVE_S = 600.0
+"""Worker-seconds a budgeted run reserves before it is planned (one worker for ten minutes)."""
+PER_SHARD_OVERHEAD_S = 30.0
+"""Seconds added to each shard's predicted duration when the reservation is re-estimated."""
 MAX_LOG_LINES_PER_SHARD = 2000
 MAX_LOG_CHARS = 2000
 MAX_LONGREPR_CHARS = 8 * 1024
@@ -119,6 +148,17 @@ type EventCallback = Callable[[str, dict[str, Any]], None]
 
 
 # -- context --------------------------------------------------------------------------------------
+
+
+def process_claimant(role: str) -> str:
+    """``claimed_by`` of runs this process executes: ``<role>@<host>:<pid>:<nonce>``.
+
+    ``role`` is ``serve`` for the web app's dispatcher and ``cli`` for inline runs; at boot, ``serve``
+    abandons runs a previous ``serve`` on the same host claimed, runs whose claiming process is gone,
+    and runs whose heartbeat is stale, never a live CLI run.
+    """
+    host = socket.gethostname()[:64] or "localhost"
+    return f"{role}@{host}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
 @dataclass(slots=True)
@@ -138,6 +178,11 @@ class OrchestratorContext:
     stop_wait_s: float = 20.0
     owns_db: bool = False
     executors: dict[str, Executor] = field(default_factory=dict)
+    claimant: str = field(default_factory=lambda: process_claimant("cli"))
+    """This process's ``runs.claimed_by`` value."""
+    budget_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Serialises the budget check and reservation of concurrent runs in this process."""
+    heartbeat_s: float = HEARTBEAT_S
 
     @classmethod
     def from_settings(cls, settings: Settings, **overrides: Any) -> OrchestratorContext:
@@ -158,7 +203,12 @@ class OrchestratorContext:
         existing = app.extensions.get("orchestrator")
         if existing is None:
             settings = app.extensions["settings"]
-            existing = cls(settings=settings, db=app.extensions["db"], store=FactsStore(settings.facts_dir))
+            existing = cls(
+                settings=settings,
+                db=app.extensions["db"],
+                store=FactsStore(settings.facts_dir),
+                claimant=process_claimant("serve"),
+            )
             existing.forge = _app_forge(app)
             app.extensions["orchestrator"] = existing
         return existing
@@ -220,6 +270,17 @@ class RunOutcome:
     reason: str | None
 
 
+def exit_code_for(status: str, conclusion: str, override: int | None = None) -> int:
+    """``done.exit_code``: 1 for any failure, 2 for error/cancelled/abandoned/neutral, 0 for success."""
+    if override is not None:
+        return override
+    if conclusion == "failure":
+        return 1
+    if status in ("error", "cancelled", "abandoned"):
+        return 2
+    return EXIT_CODES.get(conclusion, 2)
+
+
 # -- run creation ---------------------------------------------------------------------------------
 
 
@@ -238,8 +299,14 @@ async def create_run(
     extra_env: Mapping[str, str] | None = None,
     retry_increment_keys: list[str] | None = None,
     trusted: bool = True,
+    claim: bool = False,
 ) -> str:
-    """Insert a ``queued`` run (and find or create its pull request); return the run id."""
+    """Insert a run (and find or create its pull request); return the run id.
+
+    The run is ``queued`` for the dispatcher, or with ``claim`` already ``running`` and claimed by
+    this context (an inline run: no dispatcher can pick it up, and :func:`execute_run` in this
+    process starts it).
+    """
     now = ctx.settings.now()
     async with ctx.db.session() as session:
         pr_id = None
@@ -273,7 +340,8 @@ async def create_run(
             branch=branch,
             pr_id=pr_id,
             trigger=trigger,
-            status="queued",
+            status="running" if claim else "queued",
+            claimed_by=ctx.claimant if claim else None,
             executor=executor,
             trusted=trusted,
             extra_env=dict(extra_env or {}),
@@ -296,15 +364,76 @@ def retry_env(extra_env: Mapping[str, str], increment_keys: list[str]) -> dict[s
     return env
 
 
+async def finalize_crashed(
+    db: Database, settings: Settings, run_id: str, reason: str, *, after_seq: int = 0
+) -> bool:
+    """Last resort for a run whose execution died: ``error`` with ``verdict`` and ``done`` events.
+
+    Does nothing (returns False) when the run already reached a terminal status. ``after_seq`` is
+    the highest event sequence number the dead execution may have handed out.
+    """
+
+    async def work(session: AsyncSession) -> bool:
+        run = await session.get(Run, run_id)
+        if run is None or run.status not in ("queued", "running"):
+            return False
+        now = settings.now()
+        run.status = "error"
+        run.verdict = "neutral"
+        run.reason = reason[:1000]
+        timeline = dict(run.timeline or {})
+        timeline.setdefault("verdict", now.isoformat())
+        timeline["finished"] = now.isoformat()
+        run.timeline = timeline
+        seq = max(after_seq, int(await session.scalar(_max_seq_query(run_id)) or 0))
+        session.add_all(
+            [
+                RunEvent(
+                    run_id=run_id,
+                    seq=seq + 1,
+                    kind="verdict",
+                    payload={"conclusion": "neutral", "reason": run.reason},
+                    at=now,
+                ),
+                RunEvent(
+                    run_id=run_id,
+                    seq=seq + 2,
+                    kind="done",
+                    payload={"conclusion": "neutral", "exit_code": 2, "counts": {}},
+                    at=now,
+                ),
+            ]
+        )
+        return True
+
+    return await run_transaction(db, work)
+
+
+def _max_seq_query(run_id: str) -> Any:
+    return select(func.max(RunEvent.seq)).where(RunEvent.run_id == run_id)
+
+
 # -- batched writes -------------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _Batch:
+    events: list[RunEvent]
+    results: dict[int, dict[str, Any]]
+    attempts: dict[tuple[int, int], dict[str, Any]]
+    run_fields: dict[str, Any]
+    timeline: dict[str, str]
+    shards: dict[int, dict[str, Any]]
 
 
 class EventSink:
     """Batches ``run_events``, ``test_results``/``test_attempts`` and run/shard field updates.
 
     Writes are flushed every ``interval_s`` or as soon as ``max_batch`` rows are pending, under the
-    execution's database lock (so a concurrent verdict write never loses a timeline key). Event
-    payload strings are redacted before they are stored.
+    execution's database lock (so a concurrent verdict write never loses a timeline key), as bulk
+    statements (one per table). :meth:`transact` writes whatever is pending plus a caller's own
+    work in one transaction, retried with backoff while the database is busy. Event payload strings
+    are redacted before they are stored.
     """
 
     def __init__(
@@ -342,6 +471,11 @@ class EventSink:
         """Rows waiting for the next flush."""
         return len(self._events) + len(self._results) + len(self._attempts)
 
+    @property
+    def seq(self) -> int:
+        """The last sequence number handed out."""
+        return self._seq
+
     def start(self) -> None:
         """Start the periodic flusher."""
         if self._task is None:
@@ -349,16 +483,26 @@ class EventSink:
 
     def event(self, kind: str, payload: Mapping[str, Any]) -> int:
         """Queue one run event; returns its sequence number."""
+        row, clean = self.event_row(kind, payload)
+        self._events.append(row)
+        self.notify(kind, clean)
+        self._maybe_wake()
+        return row.seq
+
+    def event_row(self, kind: str, payload: Mapping[str, Any]) -> tuple[RunEvent, dict[str, Any]]:
+        """A run event with the next sequence number, for the caller to add to its own transaction.
+
+        Call :meth:`notify` with the returned payload once that transaction commits.
+        """
         self._seq += 1
         clean = _redacted(dict(payload))
-        self._events.append(
-            RunEvent(run_id=self._run_id, seq=self._seq, kind=kind, payload=clean, at=self._now())
-        )
+        return RunEvent(run_id=self._run_id, seq=self._seq, kind=kind, payload=clean, at=self._now()), clean
+
+    def notify(self, kind: str, payload: dict[str, Any]) -> None:
+        """Hand a stored event to ``on_event`` (errors there never reach the run)."""
         if self._on_event is not None:
             with contextlib.suppress(Exception):
-                self._on_event(kind, clean)
-        self._maybe_wake()
-        return self._seq
+                self._on_event(kind, payload)
 
     def result(self, test_id: int, **fields: Any) -> None:
         """Queue field updates of one ``test_results`` row."""
@@ -396,78 +540,103 @@ class EventSink:
             except Exception:  # a failed flush keeps its rows for the next attempt
                 log.exception("flushing run events of %s failed", self._run_id)
 
-    async def flush(self) -> None:
-        """Write everything pending in one transaction."""
+    def _take(self) -> _Batch | None:
         if not (
             self._events or self._results or self._attempts or self._run or self._timeline or self._shards
         ):
-            return
-        events, self._events = self._events, []
-        results, self._results = self._results, {}
-        attempts, self._attempts = self._attempts, {}
-        run_fields, self._run = self._run, {}
-        timeline, self._timeline = self._timeline, {}
-        shards, self._shards = self._shards, {}
-        async with self._lock, self._db.session() as session:
+            return None
+        batch = _Batch(self._events, self._results, self._attempts, self._run, self._timeline, self._shards)
+        self._events, self._results, self._attempts = [], {}, {}
+        self._run, self._timeline, self._shards = {}, {}, {}
+        return batch
+
+    async def flush(self) -> None:
+        """Write everything pending in one transaction (one attempt; failed rows are kept)."""
+        if self._take_peek():
+            await self._transact_once(None)
+
+    def _take_peek(self) -> bool:
+        return bool(
+            self._events or self._results or self._attempts or self._run or self._timeline or self._shards
+        )
+
+    async def transact[T](
+        self, work: Callable[[AsyncSession], Awaitable[T]], *, attempts: int = WRITE_ATTEMPTS
+    ) -> T:
+        """Write what is pending plus ``work(session)`` in one transaction; retry while busy.
+
+        ``work`` must be safe to repeat (a failed attempt is rolled back and the pending rows are
+        put back first).
+        """
+        from sqlalchemy.exc import OperationalError
+
+        for attempt in range(1, attempts + 1):
             try:
-                await self._write(session, events, results, attempts, run_fields, timeline, shards)
+                return await self._transact_once(work)
+            except OperationalError:
+                if attempt == attempts:
+                    raise
+                log.warning("run %s: database busy (attempt %d of %d)", self._run_id, attempt, attempts)
+                await asyncio.sleep(WRITE_RETRY_DELAY_S * 2 ** (attempt - 1))
+        raise AssertionError("unreachable")
+
+    async def _transact_once(self, work: Callable[[AsyncSession], Awaitable[Any]] | None) -> Any:
+        async with self._lock, self._db.session() as session:
+            batch = self._take()
+            try:
+                if batch is not None:
+                    await self._write(session, batch)
+                result = await work(session) if work is not None else None
                 await session.commit()
             except BaseException:
-                await session.rollback()
-                self._requeue(events, results, attempts, run_fields, timeline, shards)
+                with contextlib.suppress(Exception):
+                    await session.rollback()
+                if batch is not None:
+                    self._requeue(batch)
                 raise
+        return result
 
-    async def _write(
-        self,
-        session: AsyncSession,
-        events: list[RunEvent],
-        results: dict[int, dict[str, Any]],
-        attempts: dict[tuple[int, int], dict[str, Any]],
-        run_fields: dict[str, Any],
-        timeline: dict[str, str],
-        shards: dict[int, dict[str, Any]],
-    ) -> None:
-        session.add_all(events)
-        for test_id, values in results.items():
+    async def _write(self, session: AsyncSession, batch: _Batch) -> None:
+        session.add_all(batch.events)
+        if batch.results:
             await session.execute(
-                update(TestResult)
-                .where(TestResult.run_id == self._run_id, TestResult.test_id == test_id)
-                .values(**values)
+                update(TestResult),
+                [{"run_id": self._run_id, "test_id": tid, **values} for tid, values in batch.results.items()],
             )
-        for (test_id, number), values in attempts.items():
-            await session.merge(TestAttempt(run_id=self._run_id, test_id=test_id, attempt=number, **values))
-        for shard_id, values in shards.items():
+        if batch.attempts:
+            await _upsert_attempts(
+                session,
+                [
+                    {"run_id": self._run_id, "test_id": tid, "attempt": number, **values}
+                    for (tid, number), values in batch.attempts.items()
+                ],
+            )
+        if batch.shards:
             await session.execute(
-                update(Shard).where(Shard.run_id == self._run_id, Shard.shard_id == shard_id).values(**values)
+                update(Shard),
+                [{"run_id": self._run_id, "shard_id": sid, **values} for sid, values in batch.shards.items()],
             )
-        if run_fields or timeline:
+        if batch.run_fields or batch.timeline:
             run = await session.get(Run, self._run_id)
             if run is not None:
-                for name, value in run_fields.items():
+                for name, value in batch.run_fields.items():
                     setattr(run, name, value)
-                for key, value in timeline.items():
-                    run.timeline[key] = value
+                if batch.timeline:
+                    run.timeline = {**(run.timeline or {}), **batch.timeline}
 
-    def _requeue(
-        self,
-        events: list[RunEvent],
-        results: dict[int, dict[str, Any]],
-        attempts: dict[tuple[int, int], dict[str, Any]],
-        run_fields: dict[str, Any],
-        timeline: dict[str, str],
-        shards: dict[int, dict[str, Any]],
-    ) -> None:
+    def _requeue(self, batch: _Batch) -> None:
         """Put the rows of a failed flush back in front of anything queued since."""
         fresh = [
-            RunEvent(run_id=e.run_id, seq=e.seq, kind=e.kind, payload=e.payload, at=e.at) for e in events
+            RunEvent(run_id=e.run_id, seq=e.seq, kind=e.kind, payload=e.payload, at=e.at)
+            for e in batch.events
         ]
         self._events = fresh + self._events
-        for test_id, values in results.items():
+        for test_id, values in batch.results.items():
             self._results[test_id] = {**values, **self._results.get(test_id, {})}
-        self._attempts = {**attempts, **self._attempts}
-        self._run = {**run_fields, **self._run}
-        self._timeline = {**timeline, **self._timeline}
-        for shard_id, values in shards.items():
+        self._attempts = {**batch.attempts, **self._attempts}
+        self._run = {**batch.run_fields, **self._run}
+        self._timeline = {**batch.timeline, **self._timeline}
+        for shard_id, values in batch.shards.items():
             self._shards[shard_id] = {**values, **self._shards.get(shard_id, {})}
 
     async def close(self) -> None:
@@ -478,7 +647,17 @@ class EventSink:
             with contextlib.suppress(Exception):
                 await self._task
             self._task = None
-        await self.flush()
+        if self._take_peek():
+            await self.transact(_nothing)
+
+
+async def _nothing(session: AsyncSession) -> None:
+    return None
+
+
+async def _upsert_attempts(session: AsyncSession, rows: list[dict[str, Any]]) -> None:
+    """Insert or replace ``test_attempts`` rows in one statement (per distinct column set)."""
+    await history.upsert_rows(session, TestAttempt, rows, ("run_id", "test_id", "attempt"))
 
 
 def _redacted(value: Any) -> Any:
@@ -505,7 +684,8 @@ async def execute_run(
 
     ``app_or_ctx`` is an :class:`OrchestratorContext` or a Quart app; ``on_event`` receives every
     stored event (``kind``, redacted payload) as it is queued, for CLI streaming; ``shards`` forces a
-    shard count.
+    shard count. A run created with ``create_run(..., claim=True)`` by the same context is executed
+    too (once).
     """
     ctx = (
         app_or_ctx
@@ -527,10 +707,11 @@ class _ShardState:
     error: str | None = None
     log_lines: int = 0
     exec_seconds: float = 0.0
+    line_errors: int = 0
 
 
 class _Cancelled(Exception):
-    """The run was cancelled (externally or superseded) while its shards ran."""
+    """The run was cancelled (externally or superseded) while it was planned or its shards ran."""
 
 
 class _Execution:
@@ -553,15 +734,22 @@ class _Execution:
         self.sink: EventSink | None = None
         self.plan: RunPlan | None = None
         self.run: Run | None = None
+        self.executor: Executor | None = None
+        self.lifetimes = WorkerLifetimes()
         self.states: dict[str, TestState] = {}
         self.shard_states: dict[int, _ShardState] = {}
         self.counts: Counter[str] = Counter()
         self.retries_used = 0
         self.tasks: list[asyncio.Task[Any]] = []
+        self.plan_task: asyncio.Task[RunPlan] | None = None
+        self.watcher: asyncio.Task[None] | None = None
+        self.heartbeat: asyncio.Task[None] | None = None
         self.first_failure: str | None = None
         self.early_verdict: asyncio.Task[None] | None = None
         self.stop_requested = False
         self.cancel_reason: str | None = None
+        self.released = False
+        """The workers are gone (bundles pulled): nothing may be sent to them any more."""
         self.base_sigs: set[bytes] = set()
         self.wave1_pending: set[str] = set()
         self.last_progress = 0.0
@@ -574,7 +762,7 @@ class _Execution:
         if run is None:
             return await self._outcome()
         self.run = run
-        self.sink = EventSink(
+        sink = self.sink = EventSink(
             self.ctx.db,
             self.run_id,
             lock=self.lock,
@@ -582,48 +770,89 @@ class _Execution:
             start_seq=await self._max_seq(),
             on_event=self.on_event,
         )
-        self.sink.start()
-        self.sink.event("status", {"status": "running", "executor": run.executor})
+        sink.start()
+        sink.event("status", {"status": "running", "executor": run.executor})
+        loop = asyncio.get_running_loop()
+        self.watcher = loop.create_task(self._watch_cancel())
+        self.heartbeat = loop.create_task(self._heartbeat())
+        crash: str | None = None
         try:
-            refusal = await self._policy(run)
-            if refusal is not None:
-                status, conclusion, reason = refusal
-                await self._finish(status, conclusion, reason)
-                return await self._outcome()
-            await self._execute_plan(run)
-        except _Cancelled:
-            await self._finish("cancelled", "cancelled", self.cancel_reason or "cancelled")
-        except PlanError as exc:
-            await self._finish("error", "neutral", f"{exc.reason}: {exc}")
-        except Exception as exc:
-            log.exception("run %s failed", self.run_id)
-            await self._finish("error", "neutral", f"internal error: {type(exc).__name__}: {exc}"[:1000])
+            try:
+                refusal = await self._policy(run)
+                if refusal is not None:
+                    await self._finish(*refusal)
+                else:
+                    await self._execute_plan(run)
+            except _Cancelled:
+                await self._finish("cancelled", "cancelled", self.cancel_reason or "cancelled")
+            except PlanError as exc:
+                await self._finish("error", "neutral", f"{exc.reason}: {exc}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("run %s failed", self.run_id)
+                await self._finish("error", "neutral", f"internal error: {type(exc).__name__}: {exc}"[:1000])
+        except asyncio.CancelledError:
+            raise  # the process is stopping: the run is abandoned at the next boot
+        except Exception as exc:  # even the terminal write failed: the last resort below
+            log.exception("finishing run %s failed", self.run_id)
+            crash = f"internal error: {type(exc).__name__}: {exc}"
         finally:
-            for task in self.tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            await self._stop_background()
             if self.plan is not None:
-                await self.plan.cleanup()
-            await self.sink.close()
+                with contextlib.suppress(Exception):
+                    await self.plan.cleanup()
+            try:
+                await sink.close()
+            except Exception:
+                log.exception("closing the event sink of run %s failed", self.run_id)
             await asyncio.to_thread(shutil.rmtree, self.settings.runs_dir / self.run_id, True)
+        if crash is not None:
+            with contextlib.suppress(Exception):
+                await finalize_crashed(self.ctx.db, self.settings, self.run_id, crash, after_seq=sink.seq)
         return await self._outcome()
 
+    async def _stop_background(self) -> None:
+        tasks = [t for t in (self.watcher, self.heartbeat, self.plan_task, *self.tasks) if t is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _claim(self) -> Run | None:
-        """Atomically move the run from ``queued`` to ``running``; None if someone else has it."""
-        async with self.ctx.db.session() as session:
+        """Atomically make the run ``running`` and ours; None if someone else has it (or had it).
+
+        A ``queued`` run is claimed; so is a ``running`` run this context inserted with
+        ``create_run(claim=True)`` and nobody started yet (no heartbeat).
+        """
+        now = self.settings.now()
+
+        async def work(session: AsyncSession) -> int:
             claimed = await session.execute(
-                update(Run).where(Run.id == self.run_id, Run.status == "queued").values(status="running")
+                update(Run)
+                .where(
+                    Run.id == self.run_id,
+                    (Run.status == "queued")
+                    | (
+                        (Run.status == "running")
+                        & (Run.claimed_by == self.ctx.claimant)
+                        & Run.heartbeat_at.is_(None)
+                    ),
+                )
+                .values(status="running", claimed_by=self.ctx.claimant, heartbeat_at=now)
             )
-            await session.commit()
+            return int(claimed.rowcount)  # type: ignore[attr-defined]
+
+        rowcount = await run_transaction(self.ctx.db, work)
+        async with self.ctx.db.session() as session:
             run = await session.get(Run, self.run_id)
-            if run is None:
-                raise LookupError(f"no run {self.run_id}")
-            return run if claimed.rowcount == 1 else None
+        if run is None:
+            raise LookupError(f"no run {self.run_id}")
+        return run if rowcount == 1 else None
 
     async def _max_seq(self) -> int:
         async with self.ctx.db.session() as session:
-            value = await session.scalar(select(func.max(RunEvent.seq)).where(RunEvent.run_id == self.run_id))
+            value = await session.scalar(_max_seq_query(self.run_id))
             return int(value or 0)
 
     async def _outcome(self) -> RunOutcome:
@@ -632,37 +861,92 @@ class _Execution:
             assert run is not None
             return RunOutcome(run.id, run.status, run.verdict, run.reason)
 
+    async def _heartbeat(self) -> None:
+        assert self.sink is not None
+        while True:
+            await asyncio.sleep(self.ctx.heartbeat_s)
+            self.sink.run_fields(heartbeat_at=self.settings.now())
+
     async def _policy(self, run: Run) -> tuple[str, str, str] | None:
         if run.executor == "local" and not run.trusted:
             return "skipped", "neutral", "untrusted PR runs never use the local executor"
         if run.executor == "local" and not self.settings.local_allow_webhook_runs:
-            async with self.ctx.db.session() as session:
-                delivery = await session.scalar(
-                    select(WebhookDelivery.id).where(WebhookDelivery.run_id == run.id).limit(1)
-                )
-            if delivery is not None:
+            webhook = "webhook_received" in (run.timeline or {})
+            if not webhook:
+                async with self.ctx.db.session() as session:
+                    webhook = (
+                        await session.scalar(
+                            select(WebhookDelivery.id).where(WebhookDelivery.run_id == run.id).limit(1)
+                        )
+                        is not None
+                    )
+            if webhook:
                 return (
                     "skipped",
                     "neutral",
                     "webhook runs need COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true locally",
                 )
-        async with self.ctx.db.session() as session:
-            if await budget.budget_exhausted(session, self.settings, run.executor):
+        if run.executor in budget.BUDGETED_EXECUTORS:
+            amount = self._pre_plan_reservation(run)
+            async with self.ctx.budget_lock:
+                admitted = await run_transaction(
+                    self.ctx.db,
+                    lambda session: budget.reserve(session, self.settings, run.id, run.executor, amount),
+                )
+            if not admitted:
                 return "completed", "neutral", "budget exhausted"
         return None
+
+    def _resources(self, run: Run) -> Resources:
+        return Resources(
+            cpu=self.settings.shard_cpu_limit,
+            memory_mib=self.settings.shard_memory_mib,
+            network=run.network or self.settings.sandbox_network,
+            timeout_s=self.settings.run_timeout_s,
+        )
+
+    def _pre_plan_reservation(self, run: Run) -> float:
+        try:
+            executor = self.ctx.executor(run.executor)
+            seconds = min(float(self.settings.run_timeout_s), PRE_PLAN_RESERVE_S)
+            return round(executor.cost_usd(self._resources(run), seconds), 6)
+        except Exception as exc:  # no executor yet: the check above still applies
+            log.warning("cannot price run %s before planning: %s", run.id, exc)
+            return 0.0
+
+    def _cost(self) -> float:
+        if self.executor is None or not len(self.lifetimes):
+            return 0.0
+        try:
+            return round(self.lifetimes.cost_usd(self.executor), 6)
+        except Exception as exc:  # a broken rate card never blocks the verdict
+            log.warning("cannot price run %s: %s", self.run_id, exc)
+            return 0.0
 
     # -- the happy path -------------------------------------------------------------------------
 
     async def _execute_plan(self, run: Run) -> None:
         sink = self.sink
         assert sink is not None
-        executor = self.ctx.executor(run.executor)
-        async with self.lock, self.ctx.db.session() as session:
-            live = await session.get(Run, run.id)
-            assert live is not None
-            self.plan = plan = await self._plan(session, live, executor)
-            await session.commit()
-            self.run = live
+        if self.cancel_reason is not None:
+            raise _Cancelled()
+        executor = self.executor = self.ctx.executor(run.executor)
+        self.plan_task = asyncio.get_running_loop().create_task(self._plan(run, executor))
+        try:
+            plan = await self.plan_task
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if self.cancel_reason is not None and (task is None or task.cancelling() == 0):
+                raise _Cancelled() from None
+            raise
+        self.plan = plan
+        if self.cancel_reason is not None:
+            raise _Cancelled()
+        if run.executor in budget.BUDGETED_EXECUTORS:
+            predicted = self.lifetimes.cost_usd(executor) + sum(
+                executor.cost_usd(plan.resources, s.predicted_s + PER_SHARD_OVERHEAD_S) for s in plan.shards
+            )
+            sink.run_fields(cost_estimate=round(predicted, 6))
         sink.event(
             "status",
             {
@@ -674,32 +958,36 @@ class _Execution:
             },
         )
         if not plan.collected:
-            await self._finish("completed", "neutral", "no tests collected", exit_code=5)
+            await self._finish("completed", "neutral", "no tests collected", exit_code=NO_TESTS_EXIT_CODE)
             return
         self.states = {i.nodeid: TestState(i.nodeid) for i in plan.collected}
         self.wave1_pending = set(plan.wave1.tests)
         await self._load_base_failures(run)
         await self._run_shards(plan)
+        if self.watcher is not None:
+            self.watcher.cancel()
+            await asyncio.gather(self.watcher, return_exceptions=True)
         if self.cancel_reason is not None:
             raise _Cancelled()
         outcomes = await self._collect_bundles(plan)
         await self._conclude(plan, outcomes, executor)
 
-    async def _plan(self, session: AsyncSession, live: Run, executor: Executor) -> RunPlan:
-        def sandbox_ready(at: datetime) -> None:
-            live.timeline["sandbox_ready"] = at.isoformat()
-
+    async def _plan(self, run: Run, executor: Executor) -> RunPlan:
+        sink = self.sink
+        assert sink is not None
         return await plan_run(
-            session,
+            self.ctx.db,
             self.settings,
             self.ctx.store,
-            live,
+            run,
             executor=executor,
             adapter=self.ctx.adapter,
             env_spec_builder=self.ctx.env_spec_builder,
             shards_override=self.shards_override,
             forge=self.ctx.get_forge(),
-            on_sandbox_ready=sandbox_ready,
+            on_sandbox_ready=lambda at: sink.timeline("sandbox_ready", at),
+            transact=sink.transact,
+            lifetimes=self.lifetimes,
         )
 
     async def _load_base_failures(self, run: Run) -> None:
@@ -718,18 +1006,14 @@ class _Execution:
 
     async def _run_shards(self, plan: RunPlan) -> None:
         self.shard_states = {s.shard_id: _ShardState(spec=s) for s in plan.shards}
-        watcher = asyncio.get_running_loop().create_task(self._watch_cancel())
-        self.tasks.append(watcher)
-        try:
-            await asyncio.gather(*(self._run_shard(state) for state in self.shard_states.values()))
-            while True:
-                pending = [t for t in self.tasks if t is not watcher and not t.done()]
-                if not pending:
-                    break
-                await asyncio.gather(*pending, return_exceptions=True)
-        finally:
-            watcher.cancel()
-            await asyncio.gather(watcher, return_exceptions=True)
+        if self.cancel_reason is not None:  # cancelled between planning and now
+            return
+        await asyncio.gather(*(self._run_shard(state) for state in self.shard_states.values()))
+        while True:
+            pending = [t for t in self.tasks if not t.done()]
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _extra(
         self, plan: RunPlan, worker_path: Callable[[str], str], *, shapes: str = "on"
@@ -752,6 +1036,12 @@ class _Execution:
         plan, sink, run = self.plan, self.sink, self.run
         assert plan is not None and sink is not None and run is not None
         shard, worker = state.spec, state.spec.worker
+        if not shard.nodeids:  # never exec an empty args file: pytest would run the whole suite
+            sink.shard(shard.shard_id, status="completed", finished_at=self.settings.now())
+            sink.event("shard", {"shard": shard.shard_id, "status": "completed", "tests": 0})
+            state.finished.set()
+            state.bundle_written.set()
+            return
         state.nonce = secrets.token_hex(16)
         prefix = f"{RECORD_SEPARATOR}coverset {state.nonce} "
         extra = {**self._extra(plan, worker.path), "stop_file": worker.path(LAYOUT.stop_file)}
@@ -767,15 +1057,20 @@ class _Execution:
         sink.event("shard", {"shard": shard.shard_id, "status": "running", "tests": len(shard.nodeids)})
 
         def on_line(text: str, stream: str) -> None:
-            if stream == "stdout" and text.startswith(prefix):
-                try:
-                    payload = json.loads(text[len(prefix) :])
-                except ValueError:
-                    payload = None
-                if isinstance(payload, dict):
-                    self._on_event(state, payload)
-                    return
-            self._on_log(state, text)
+            try:
+                if stream == "stdout" and text.startswith(prefix):
+                    try:
+                        payload = json.loads(text[len(prefix) :])
+                    except (ValueError, RecursionError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        self._on_event(state, payload)
+                        return
+                self._on_log(state, text)
+            except Exception:  # one bad line (or a bug handling it) never stops the stream
+                state.line_errors += 1
+                if state.line_errors == 1:
+                    log.exception("run %s shard %d: a line could not be handled", self.run_id, shard.shard_id)
 
         try:
             result = await worker.run(
@@ -887,6 +1182,7 @@ class _Execution:
             test_id, 1, outcome=outcome, duration_ms=round(duration * 1000, 3), shard_id=state.spec.shard_id
         )
         self.counts[outcome] += 1
+        test.exec_index = self.counts.total()
         sink.event("test", self._test_payload(test, flaky=False))
         now = self.settings.now()
         if self.counts.total() == 1:
@@ -939,7 +1235,11 @@ class _Execution:
     def _on_failure(self, state: _ShardState, test: TestState) -> None:
         if self.cancel_reason is not None:
             return
-        if self.retries_used < self.settings.retry_budget_per_run and not self.stop_requested:
+        if (
+            self.retries_used < self.settings.retry_budget_per_run
+            and not self.stop_requested
+            and not self.released
+        ):
             self.retries_used += 1
             task = asyncio.get_running_loop().create_task(self._retry(state, test, self.retries_used))
             self.tasks.append(task)
@@ -955,14 +1255,13 @@ class _Execution:
         captured: dict[str, Any] = {}
 
         def on_line(text: str, stream: str) -> None:
-            if stream == "stdout" and text.startswith(prefix):
-                with contextlib.suppress(ValueError):
+            if stream == "stdout" and text.startswith(prefix) and not captured:
+                with contextlib.suppress(ValueError, RecursionError):
                     payload = json.loads(text[len(prefix) :])
                     if (
                         isinstance(payload, dict)
                         and payload.get("kind") == "test"
                         and payload.get("nodeid") == test.nodeid
-                        and not captured
                     ):
                         captured.update(payload)
 
@@ -1027,6 +1326,7 @@ class _Execution:
                 "retried": retried,
                 "preexisting": test.preexisting,
                 "rank": plan.ranks.get(test.nodeid),
+                "executed": test.exec_index,
                 "note": note,
             },
         )
@@ -1039,43 +1339,65 @@ class _Execution:
         sandbox_ready_s = (plan.sandbox_ready_at - t0).total_seconds()
         estimate = file_order_estimate(plan, test.nodeid, sandbox_ready_s)
         self.run.rank_coverset = plan.ranks.get(test.nodeid)
+        self.run.rank_executed = test.exec_index
         self.run.rank_file_order = plan.file_ranks.get(test.nodeid)
         self.run.t_first_failure_file_order_est = estimate
-        self.run.timeline["first_failure"] = now.isoformat()
+        self.run.timeline = {**(self.run.timeline or {}), "first_failure": now.isoformat()}
         sink.timeline("first_failure", now)
         sink.run_fields(
             rank_coverset=self.run.rank_coverset,
+            rank_executed=self.run.rank_executed,
             rank_file_order=self.run.rank_file_order,
             t_first_failure_file_order_est=estimate,
         )
         self.early_verdict = asyncio.get_running_loop().create_task(self._post_early_verdict(test))
         self.tasks.append(self.early_verdict)
-        if plan.config.fail_fast == "cancel_remaining":
+        if plan.config.fail_fast == "cancel_remaining" and not self.released:
             self.tasks.append(asyncio.get_running_loop().create_task(self._stop_remaining()))
 
     async def _post_early_verdict(self, test: TestState) -> None:
-        sink = self.sink
-        assert sink is not None and self.plan is not None
-        await sink.flush()
+        sink, plan = self.sink, self.plan
+        assert sink is not None and plan is not None
         reason = f"first confirmed failure: {test.nodeid}"
         now = self.settings.now()
-        async with self.lock, self.ctx.db.session() as session:
+
+        async def work(session: AsyncSession) -> tuple[Any, dict[str, Any]]:
             run = await session.get(Run, self.run_id)
             assert run is not None
-            run.timeline["verdict"] = now.isoformat()
+            run.timeline = {"verdict": now.isoformat(), **(run.timeline or {})}
             summary = build_summary(
-                self.settings, run, self.plan, self.states, conclusion="failure", reason=reason
+                self.settings, run, plan, self.states, conclusion="failure", reason=reason
             )
             await persist_verdict(session, run, summary)
-            await session.commit()  # the fake forge records its calls through its own session
-            await post_summary(session, run, summary, self.ctx.get_forge())
-            await session.commit()
-        sink.event(
-            "verdict", {"conclusion": "failure", "reason": reason, "label": summary.label, "early": True}
-        )
+            row, clean = sink.event_row(
+                "verdict", {"conclusion": "failure", "reason": reason, "label": summary.label, "early": True}
+            )
+            session.add(row)
+            return summary, clean
+
+        summary, clean = await sink.transact(work)
+        sink.notify("verdict", clean)
+        await self._post(summary)
+
+    async def _post(self, summary: Any) -> None:
+        """Post ``summary`` through the forge (best effort; the run row keeps the check id)."""
+        forge = self.ctx.get_forge()
+        if forge is None:
+            return
+        try:
+            async with self.ctx.db.session() as session:
+                run = await session.get(Run, self.run_id)
+                if run is None:
+                    return
+                await post_summary(session, run, summary, forge)
+                await session.commit()
+        except Exception as exc:  # the forge never fails a run
+            log.warning("posting the verdict of run %s failed: %s", self.run_id, exc)
 
     async def _stop_remaining(self) -> None:
         """``cancel_remaining``: STOP files, up to ``stop_wait_s`` for bundles, then cancel."""
+        if self.released:
+            return
         self.stop_requested = True
         running = [s for s in self.shard_states.values() if not s.finished.is_set()]
         for state in running:
@@ -1092,13 +1414,22 @@ class _Execution:
                     await state.spec.worker.cancel()
 
     async def _watch_cancel(self) -> None:
-        """Cancel the run when someone marks it cancelled or a newer run of the same PR is queued."""
+        """Cancel the run when someone marks it cancelled or a newer run of the same PR exists.
+
+        Runs from the claim until the shards are done, so a cancellation also interrupts planning.
+        """
         while True:
             await asyncio.sleep(self.ctx.cancel_poll_s)
-            reason = await self._cancel_requested()
+            try:
+                reason = await self._cancel_requested()
+            except Exception as exc:  # a busy database only delays the check
+                log.debug("cancel check of run %s failed: %s", self.run_id, exc)
+                continue
             if reason is None:
                 continue
             self.cancel_reason = reason
+            if self.plan_task is not None and not self.plan_task.done():
+                self.plan_task.cancel()
             for state in self.shard_states.values():
                 with contextlib.suppress(ExecutorError):
                     await state.spec.worker.cancel()
@@ -1133,6 +1464,8 @@ class _Execution:
         target.mkdir(parents=True, exist_ok=True)
         pulled: dict[int, Path] = {}
         for shard_id, state in self.shard_states.items():
+            if not state.spec.nodeids:
+                continue
             try:
                 data = await state.spec.worker.get_file(f"{LAYOUT.out_dir}/{BUNDLE_FILE}")
             except ExecutorError as exc:
@@ -1144,6 +1477,7 @@ class _Execution:
             path = target / f"shard-{shard_id}.tar.gz"
             await asyncio.to_thread(path.write_bytes, data)
             pulled[shard_id] = path
+        self.released = True
         await plan.release_workers()
         rctx = await self._run_context(plan)
         interest = functions_of_interest(plan)
@@ -1165,7 +1499,7 @@ class _Execution:
         ]
         outcomes = await self.ctx.ingest_pool().run(jobs) if jobs else []
         for shard_id, state in self.shard_states.items():
-            if shard_id not in pulled:
+            if shard_id not in pulled and state.spec.nodeids:
                 await asyncio.to_thread(
                     record_shard_failure, self.ctx.store, rctx, shard_id, reason=state.error or "no bundle"
                 )
@@ -1237,6 +1571,41 @@ class _Execution:
                 if row.outcome in FAILED and row.nodeid not in plan.quarantined and not test.confirmed:
                     self._confirm(test, retried=False, note="reported only in the bundle")
 
+    async def _report(self, plan: RunPlan, outcomes: list[IngestOutcome], catalogue: Any) -> RunReport:
+        """The report (its own short transaction for invariant and review rows); degraded on error.
+
+        A concurrent run of the repo inserting the same new invariant definition first is retried
+        once (the second attempt finds its row).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        for attempt in (1, 2):
+            try:
+                async with self.ctx.db.session() as session:
+                    run = await session.get(Run, self.run_id)
+                    assert run is not None
+                    report = await build_report(
+                        session,
+                        self.settings,
+                        self.ctx.store,
+                        run,
+                        plan,
+                        outcomes,
+                        self.states,
+                        catalogue=catalogue,
+                    )
+                    await session.commit()
+                    return report
+            except IntegrityError:
+                if attempt == 1:
+                    continue
+                log.exception("building the report of run %s failed", self.run_id)
+                return RunReport(notes=["report unavailable: a concurrent run wrote the same rows"])
+            except Exception as exc:  # the verdict still lands, without the extras
+                log.exception("building the report of run %s failed", self.run_id)
+                return RunReport(notes=[f"report unavailable: {type(exc).__name__}: {exc}"[:300]])
+        raise AssertionError("unreachable")
+
     async def _conclude(self, plan: RunPlan, outcomes: list[IngestOutcome], executor: Executor) -> None:
         sink = self.sink
         assert sink is not None
@@ -1244,42 +1613,56 @@ class _Execution:
         if self.early_verdict is not None:
             await asyncio.gather(self.early_verdict, return_exceptions=True)
         rctx = await self._run_context(plan)
-        catalogue = _catalogue(self.ctx.adapter, plan.measured_sources)
+        catalogue = await asyncio.to_thread(_catalogue, self.ctx.adapter, plan.measured_sources)
         finalized = await asyncio.to_thread(
             finalize_run, self.ctx.store, rctx, expected_shards=len(plan.shards), catalogue=catalogue
         )
         await sink.flush()
         conclusion, status, reason = self._conclusion(plan)
-        cost = sum(
-            executor.cost_usd(plan.resources, state.exec_seconds) for state in self.shard_states.values()
-        )
+        cost = self._cost()
         not_run = sum(1 for t in self.states.values() if t.outcome == "not_run")
-        async with self.lock, self.ctx.db.session() as session:
+        report = await self._report(plan, outcomes, catalogue)
+        code = exit_code_for(status, conclusion)
+        counts = self._counts()
+        test_ids = list(plan.test_ids.values())
+
+        async def work(session: AsyncSession) -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
             run = await session.get(Run, self.run_id)
             assert run is not None
-            report: RunReport = await build_report(
-                session, self.settings, self.ctx.store, run, plan, outcomes, self.states, catalogue=catalogue
-            )
-            await history.update_test_stats(session, run, list(plan.test_ids.values()))
+            await history.update_test_stats(session, run, test_ids)
             run.coverage_complete = finalized.coverage_complete
-            run.cost_estimate = round(cost, 6)
+            run.cost_estimate = cost
             run.cancelled_tests = not_run
-            now = self.settings.now()
-            run.timeline.setdefault("verdict", now.isoformat())
-            run.timeline["finished"] = now.isoformat()
-            run.status = status
+            now = self.settings.now().isoformat()
+            run.timeline = {"verdict": now, **(run.timeline or {}), "finished": now}
+            run.status = status  # type: ignore[assignment]
             summary = build_summary(
                 self.settings, run, plan, self.states, conclusion=conclusion, reason=reason, report=report
             )
             await persist_verdict(session, run, summary)
-            await session.commit()
-            await post_summary(session, run, summary, self.ctx.get_forge())
-            await session.commit()
-        sink.event("verdict", {"conclusion": conclusion, "reason": reason, "label": summary.label})
-        sink.event(
-            "done",
-            {"conclusion": conclusion, "exit_code": self._exit_code(conclusion), "counts": self._counts()},
-        )
+            notes = self._terminal_events(
+                session,
+                {"conclusion": conclusion, "reason": reason, "label": summary.label},
+                {"conclusion": conclusion, "exit_code": code, "counts": counts},
+            )
+            return summary, notes
+
+        summary, notes = await sink.transact(work)
+        for kind, payload in notes:
+            sink.notify(kind, payload)
+        await self._post(summary)
+
+    def _terminal_events(
+        self, session: AsyncSession, verdict: dict[str, Any], done: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Add the ``verdict`` and ``done`` events to the terminal transaction."""
+        assert self.sink is not None
+        notes = []
+        for kind, payload in (("verdict", verdict), ("done", done)):
+            row, clean = self.sink.event_row(kind, payload)
+            session.add(row)
+            notes.append((kind, clean))
+        return notes
 
     def _conclusion(self, plan: RunPlan) -> tuple[str, str, str]:
         """``(conclusion, status, reason)`` from confirmed failures, shard errors and outcomes."""
@@ -1327,42 +1710,43 @@ class _Execution:
             counts[test.outcome] = counts.get(test.outcome, 0) + 1
         return counts
 
-    @staticmethod
-    def _exit_code(conclusion: str) -> int:
-        return EXIT_CODES.get(conclusion, 2)
-
     async def _finish(
         self, status: str, conclusion: str, reason: str, *, exit_code: int | None = None
     ) -> None:
-        """Terminal bookkeeping for every early exit: status, verdict, forge post, ``done`` event."""
+        """Terminal bookkeeping for every early exit: status, cost, verdict and the ``verdict`` and
+        ``done`` events in one (retried) transaction, then the forge post."""
         sink = self.sink
         assert sink is not None
-        with contextlib.suppress(Exception):
-            await sink.flush()
-        now = self.settings.now()
-        summary = None
-        async with self.lock, self.ctx.db.session() as session:
+        code = exit_code_for(status, conclusion, exit_code)
+        cost = self._cost()
+        counts = self._counts()
+
+        async def work(session: AsyncSession) -> tuple[Any, list[tuple[str, dict[str, Any]]]] | None:
             run = await session.get(Run, self.run_id)
             if run is None:
-                return
+                return None
+            now = self.settings.now().isoformat()
             run.status = status  # type: ignore[assignment]
-            run.timeline.setdefault("verdict", now.isoformat())
-            run.timeline["finished"] = now.isoformat()
+            run.cost_estimate = cost
+            run.timeline = {"verdict": now, **(run.timeline or {}), "finished": now}
             summary = build_summary(
                 self.settings, run, self.plan, self.states, conclusion=conclusion, reason=reason
             )
             await persist_verdict(session, run, summary)
-            await session.commit()
-            with contextlib.suppress(Exception):
-                await post_summary(session, run, summary, self.ctx.get_forge())
-                await session.commit()
-        sink.event("verdict", {"conclusion": conclusion, "reason": reason, "label": summary.label})
-        code = (
-            exit_code
-            if exit_code is not None
-            else (2 if status in ("error", "cancelled") else self._exit_code(conclusion))
-        )
-        sink.event("done", {"conclusion": conclusion, "exit_code": code, "counts": self._counts()})
+            notes = self._terminal_events(
+                session,
+                {"conclusion": conclusion, "reason": reason, "label": summary.label},
+                {"conclusion": conclusion, "exit_code": code, "counts": counts},
+            )
+            return summary, notes
+
+        written = await sink.transact(work)
+        if written is None:
+            return
+        summary, notes = written
+        for kind, payload in notes:
+            sink.notify(kind, payload)
+        await self._post(summary)
 
 
 def _app_forge(app: Any) -> Any:

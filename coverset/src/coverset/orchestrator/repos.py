@@ -6,6 +6,9 @@ working repository on disk) the mirror is a ``git clone --mirror`` of it, refres
 (never a URL from a webhook payload) with a short-lived token passed only as ``-c
 http.extraHeader=Authorization: ...`` on the command line: it is never written into a URL, the
 mirror's ``config`` or a log line. Workers never see the mirror: they get ``git archive`` tarballs.
+Clone and fetch of a mirror hold an exclusive lock (``<repo_id>.git.lock`` next to it), so concurrent
+runs of one repo (in this process or another) never race a clone or interleave fetches, and a
+complete mirror is never deleted.
 
 Local repositories are registered with ``forge='local'`` and ``external_id`` = sha256 of the
 resolved source path, so registering the same path twice finds the same row.
@@ -35,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coverset.analysis.diff import GitDiffError, validate_ref
 from coverset.config import Settings
 from coverset.db.models import Repo
+from coverset.executors.env_export import file_lock
 
 if TYPE_CHECKING:
     from coverset.forge.base import Forge, MirrorCredentials
@@ -197,23 +201,26 @@ def ensure_mirror(
         if host is None:
             raise RepoError(f"no git host known for forge {repo_row.forge!r}")
         url = f"{host}/{repo_row.full_name}.git"
-    if not (mirror / "HEAD").is_file():
-        mirror.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=mirror.parent, prefix=f".{mirror.name}.tmp-"))
-        try:
-            target = staging / "repo.git"
-            _git([*secret, "clone", "--mirror", "--quiet", "--", url, str(target)], secret_args=len(secret))
-            if mirror.exists():
-                shutil.rmtree(mirror)
-            target.rename(mirror)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-    else:
-        _git(
-            [*secret, "--git-dir", str(mirror), "fetch", "--prune", "--quiet", "--", url,
-             "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
-            secret_args=len(secret),
-        )  # fmt: skip
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(mirror.parent / f"{mirror.name}.lock"):
+        if not (mirror / "HEAD").is_file():
+            staging = Path(tempfile.mkdtemp(dir=mirror.parent, prefix=f".{mirror.name}.tmp-"))
+            try:
+                target = staging / "repo.git"
+                _git(
+                    [*secret, "clone", "--mirror", "--quiet", "--", url, str(target)], secret_args=len(secret)
+                )
+                if mirror.exists():  # an incomplete leftover (no HEAD): nobody can be reading it
+                    shutil.rmtree(mirror)
+                target.rename(mirror)
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+        else:
+            _git(
+                [*secret, "--git-dir", str(mirror), "fetch", "--prune", "--quiet", "--", url,
+                 "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
+                secret_args=len(secret),
+            )  # fmt: skip
     return mirror
 
 
