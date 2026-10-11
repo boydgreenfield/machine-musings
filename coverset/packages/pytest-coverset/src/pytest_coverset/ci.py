@@ -12,12 +12,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TextIO
 
-from pytest_coverset.ci_http import NETWORK_ERRORS, ApiClient, ServerUnavailable, SseUnavailable, iter_sse
+from pytest_coverset.ci_http import (
+    HEARTBEAT,
+    NETWORK_ERRORS,
+    ApiClient,
+    ServerUnavailable,
+    SseUnavailable,
+    iter_sse,
+    stream_lines,
+)
 from pytest_coverset.junit import write_junit
 
 EXIT_SUCCESS = 0
@@ -38,6 +47,20 @@ OUTCOME_LABELS = {
     "xpassed": "XPASS",
 }
 COUNT_ORDER = ("failed", "error", "passed", "skipped", "xfailed", "xpassed", "not_run")
+
+
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def printable(text: str) -> str:
+    """``text`` without terminal escape sequences and C0/C1 control characters (newline and tab kept).
+
+    Everything ``coverset-ci`` prints from the server (node ids, failure text, log lines, reasons) goes
+    through here, so a hostile or merely colourful payload cannot move the cursor, retitle the
+    terminal or hide lines in the CI log.
+    """
+    return _CONTROL.sub("", _ANSI_ESCAPE.sub("", text))
 
 
 class TimedOut(Exception):
@@ -129,7 +152,7 @@ class Waiter:
             return exc.code
 
     def _print(self, text: str) -> None:
-        self.out.write(text + "\n")
+        self.out.write(printable(text) + "\n")
         self.out.flush()
 
     def _check_deadline(self) -> None:
@@ -191,13 +214,18 @@ class Waiter:
         timeout = max(1.0, min(SSE_READ_TIMEOUT_S, self.client.remaining()))
         response = self.client.open_stream(f"/v1/runs/{run_id}/events", last_id, timeout)
         with response:
-            for event in iter_sse(response):
+            lines = stream_lines(response, lambda: min(SSE_READ_TIMEOUT_S, self.client.remaining()))
+            for event in iter_sse(lines):
+                # Checked on every line, pings included: a queued run whose stream only carries
+                # `: ping` comments must still end at --timeout.
+                self._check_deadline()
+                if event is HEARTBEAT:
+                    continue
                 seq = _int_or_none(event.id)
                 payload = _json_or_none(event.data)
                 code = self._handle(seq, event.event, payload if isinstance(payload, dict) else {})
                 if code is not None:
                     return code
-                self._check_deadline()
         return None
 
     def _follow_polling(self, run_id: str) -> int:

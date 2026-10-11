@@ -221,3 +221,25 @@ paragraph and the root README's bullet from that file. Medians with p90 in brack
 | `overhead_x` | 1.16 | `overhead_full_s` 3.388 / `overhead_plain_s` 2.914 (`overhead_cov_s` 3.37), `overhead_repeats` 5, `overhead_target` `examples/demo-app` |
 | `missing_classes`, `expected_classes` | 16, 34 | the three `coverset shapes --markdown` tables in the README (2 of 10, 7 of 11, 7 of 13 missing) |
 | `screenshot_date`, `t_verdict_date` | 2026-10-11 | |
+
+## Instrumentation overhead on tight loops
+
+`overhead_x` above is a whole-suite figure, mostly interpreter start-up. A single hot function behaves
+differently. Wall time relative to plain pytest, median of 3 repeats on this Mac, 2026-10-11; the
+tight-loop project calls a one-line `add(a, b)` 3 million times from one test (`--coverset-source
+tpkg`), and "full-trace" means `add`'s file is on the full-trace list. Details and the cap itself:
+[docs/instrumentation.md](instrumentation.md#overhead-on-tight-loops).
+
+| Suite | Mode | 3.13 | 3.12 | Measured |
+|---|---|---|---|---|
+| plugin fixture project (24 tests) | coverage + shapes | 1.39× | 1.46× | review |
+| demo app (97 tests) | coverage + shapes | 1.18× (one interpreter) | | review |
+| tight loop | coverage only | 2.5× | 2.5× | review; re-measured 2.45× / 2.51× |
+| tight loop | coverage + shapes, adaptive cap | 2.5× | 2.6× | review; re-measured 2.51× / 2.57× |
+| tight loop | coverage + shapes, full-trace, no cap (before the safety cap) | 10.5× | 12.2× | review |
+| tight loop | coverage + shapes, full-trace, 100,000-call safety cap | 2.8× | 2.9× | after the cap: 2.84× / 2.87× |
+
+The demo-app row (1.18×, 3 repeats) and `overhead_x` above (1.16, 5 repeats) are separate runs of the
+same measurement. "review" rows were measured during the plugin review; the re-measured figures ran
+`measure_overhead.py --python <venv> --target <tight-loop copy> --source tpkg`, adding
+`-- --coverset-full-trace=full.txt` for the full-trace rows.

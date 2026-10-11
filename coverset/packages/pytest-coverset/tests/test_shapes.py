@@ -102,7 +102,7 @@ def test_adaptive_cap_and_full_trace(project: pytest.Pytester) -> None:
     run_with_shapes(project)
     shapes = read_shapes(project.path / "out")
     hot = shapes.sampling_of("hot")
-    assert hot["truncated"] is True
+    assert hot["truncated"] is True and hot["cap"] == "sample"
     assert 64 < hot["calls"] < 80
     assert all(row["trunc"] for row in shapes.rows("hot"))
     full = shapes.sampling_of("hot_full")
@@ -112,6 +112,7 @@ def test_adaptive_cap_and_full_trace(project: pytest.Pytester) -> None:
         "calls": 300,
         "tests": full["tests"],
         "truncated": False,
+        "cap": None,
     }
     assert not any(row["trunc"] for row in shapes.rows("hot_full"))
     assert shapes.sampling_of("validate_email")["truncated"] is False

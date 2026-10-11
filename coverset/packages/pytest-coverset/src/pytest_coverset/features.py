@@ -34,7 +34,17 @@ SCALAR_TYPES: frozenset[type] = frozenset({NoneType, bool, int, float, str, byte
 CONTAINER_TYPES: frozenset[type] = frozenset({list, tuple, dict, set, frozenset})
 BUILTIN_TYPES: frozenset[type] = SCALAR_TYPES | CONTAINER_TYPES
 
-_NUMERIC = (int, float)
+# Membership tests on classes go through these id sets: ``cls in BUILTIN_TYPES`` would hash ``cls``
+# and ``type(x) in (int, float)`` would compare it, calling a user metaclass's ``__hash__``/``__eq__``.
+SCALAR_IDS: frozenset[int] = frozenset(map(id, SCALAR_TYPES))
+CONTAINER_IDS: frozenset[int] = frozenset(map(id, CONTAINER_TYPES))
+BUILTIN_IDS: frozenset[int] = SCALAR_IDS | CONTAINER_IDS
+
+
+def _is_number(value: object) -> bool:
+    cls = type(value)
+    return cls is int or cls is float
+
 
 TWO_LEVEL_SUFFIXES = frozenset(
     {
@@ -89,19 +99,21 @@ def class_name(cls: type) -> str:
     """``module.qualname`` of ``cls`` read through ``type``'s own descriptors (metaclasses cannot interfere)."""
     module = _TYPE_MODULE.__get__(cls)
     qualname = _TYPE_QUALNAME.__get__(cls)
-    return f"{module}.{qualname}" if isinstance(module, str) and module else str(qualname)
+    # ``type(...) is str``, not isinstance(): a class body can set ``__module__`` to any object.
+    return f"{module}.{qualname}" if type(module) is str and module else str(qualname)
 
 
 _TYPE_MODULE = type.__dict__["__module__"]
 _TYPE_QUALNAME = type.__dict__["__qualname__"]
 _TYPE_MRO = type.__dict__["__mro__"]
 _TYPE_DICT = type.__dict__["__dict__"]
+_TYPE_NAME = type.__dict__["__name__"]
 
 
 def type_token(cls: type) -> str:
     """The type token of the shape grammar: a builtin name or ``obj:<module>.<qualname>``."""
-    if cls in BUILTIN_TYPES:
-        return cls.__name__
+    if id(cls) in BUILTIN_IDS:
+        return _TYPE_NAME.__get__(cls)
     return "obj:" + class_name(cls)
 
 
@@ -110,8 +122,11 @@ def _object_features(cls: type) -> tuple[str, ...]:
         namespace = _TYPE_DICT.__get__(klass)
         if "__dataclass_fields__" in namespace:
             return ("dataclass",)
-        if _TYPE_QUALNAME.__get__(klass) == "BaseModel" and str(_TYPE_MODULE.__get__(klass)).startswith(
-            "pydantic"
+        module = _TYPE_MODULE.__get__(klass)
+        if (
+            _TYPE_QUALNAME.__get__(klass) == "BaseModel"
+            and type(module) is str
+            and module.startswith("pydantic")
         ):
             return ("pydantic",)
     return ()
@@ -272,7 +287,7 @@ def _elem_token(sample: list[object]) -> str | None:
 
 def _numeric_features(sample: list[object]) -> list[str]:
     feats: list[str] = []
-    if not sample or not all(type(x) is int or type(x) is float for x in sample):
+    if not sample or not all(_is_number(x) for x in sample):
         return feats
     numbers: list[float | int] = sample  # type: ignore[assignment]
     zeros = [x == 0 for x in numbers]
@@ -286,7 +301,11 @@ def _numeric_features(sample: list[object]) -> list[str]:
         feats.append("any_nan")
     if any(type(x) is float and math.isinf(x) for x in numbers):
         feats.append("any_inf")
-    if sum(numbers) == 0:
+    try:
+        total = sum(numbers)
+    except OverflowError:  # a huge int next to a float: the sum has no float value
+        return feats
+    if total == 0:
         feats.append("sum_zero")
     return feats
 
@@ -295,7 +314,7 @@ def _numeric_pair(item: object) -> tuple[float | int, float | int] | None:
     cls = type(item)
     if (cls is tuple or cls is list) and len(item) == 2:  # type: ignore[arg-type]
         a, b = item[0], item[1]  # type: ignore[index]
-        if type(a) in _NUMERIC and type(b) in _NUMERIC:
+        if _is_number(a) and _is_number(b):
             return (a, b)
     return None
 
@@ -312,7 +331,7 @@ def _pair_features(sample: list[object]) -> tuple[list[str], list[tuple[float | 
 
 def _comparable(sample: list[object]) -> list | None:
     """The sample in a form that compares with builtin semantics only, or None when it cannot."""
-    if all(type(x) is int or type(x) is float for x in sample):
+    if all(_is_number(x) for x in sample):
         return None if any(x != x for x in sample) else sample
     if all(type(x) is str for x in sample) or all(type(x) is bytes for x in sample):
         return sample

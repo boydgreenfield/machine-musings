@@ -8,7 +8,10 @@ Design (plan "pytest-coverset", Addendum B):
   events and are sampled through them.
 * Sampling is adaptive per code object: once ``settle`` consecutive calls produce no new shape, or
   ``max_samples`` calls were sampled, local events are switched off and the function is marked
-  truncated. Code objects in full-trace files are never capped. ``restart_events()`` is never called.
+  truncated (``cap: "sample"``). Code objects in full-trace files skip the adaptive cap and stop only
+  at the much higher safety cap ``full_cap`` (``cap: "full"``). ``restart_events()`` is never called.
+* Only target code objects are remembered. A non-target returns ``DISABLE`` once and is forgotten, so
+  code compiled at run time (``exec``, templating) is not kept alive by the tracer.
 * Every callback is guarded against re-entrancy, wrapped in ``try/except BaseException`` (counted in
   :attr:`ShapeTracer.tracer_errors`), computes features only for exact builtin types, and keeps no
   reference to argument values once it returns. Each parameter is observed in its own ``try`` so one
@@ -48,6 +51,15 @@ _CO_VARARGS = inspect.CO_VARARGS
 _CO_VARKEYWORDS = inspect.CO_VARKEYWORDS
 _CO_NO_RETURN_SHAPE = inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR
 _RECEIVER_NAMES = frozenset({"self", "cls"})
+_LOCALS = "<locals>"
+_LAMBDA = "<lambda>"
+_SKIP_CALLER = -2
+"""``_caller_of`` marker: a generator-expression (or comprehension) frame; the real caller is further out."""
+_MAX_CALLER_HOPS = 8
+_TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_NAME = type.__dict__["__name__"]
+FULL_TRACE_CAP = 100_000
+"""Default safety cap on sampled calls per full-trace code object (``--coverset-full-trace-cap``)."""
 
 
 @dataclass(slots=True)
@@ -59,9 +71,13 @@ class _FuncState:
     params: tuple[tuple[str, str], ...]
     full: bool
     record_return: bool
+    owner: str | None = None
+    """Name of the class the function is defined in when its first parameter may be the receiver."""
     calls: int = 0
     since_new: int = 0
     capped: bool = False
+    cap: str | None = None
+    """Why sampling stopped: ``"sample"`` (adaptive cap) or ``"full"`` (full-trace safety cap)."""
     seen: set[tuple[str, int]] = field(default_factory=set)
     tests: set[int] = field(default_factory=set)
 
@@ -149,6 +165,7 @@ class ShapeTracer:
         repr_mode: ReprMode = "scalars",
         max_samples: int = 2048,
         settle: int = 64,
+        full_cap: int = FULL_TRACE_CAP,
         tool_ids: Sequence[int] = TOOL_ID_PREFERENCE,
     ) -> None:
         self.repo_root = repo_root
@@ -156,6 +173,7 @@ class ShapeTracer:
         self.repr_mode: ReprMode = repr_mode
         self.max_samples = max_samples
         self.settle = settle
+        self.full_cap = full_cap
         self._tool_ids = tuple(tool_ids)
         self.tool_id: int | None = None
         self.disabled_reason: str | None = None
@@ -164,7 +182,7 @@ class ShapeTracer:
         self.events_seen = 0
         self._local = threading.local()
         self._paths: dict[str, str | None] = {}
-        self._decided: dict[int, tuple[CodeType, _FuncState | None]] = {}
+        self._targets: dict[int, _FuncState] = {}
         self._caller_of: dict[int, tuple[CodeType, int]] = {}
         self._funcs: list[_FuncState] = []
         self._shape_index: dict[str, int] = {}
@@ -256,8 +274,8 @@ class ShapeTracer:
         local = self._local
         if getattr(local, "busy", False):
             return None
-        decided = self._decided.get(id(code))
-        if decided is not None and (decided[1] is None or decided[1].capped):
+        state = self._targets.get(id(code))
+        if state is not None and state.capped:
             return sys.monitoring.DISABLE
         started = perf_counter()
         local.busy = True
@@ -266,15 +284,14 @@ class ShapeTracer:
             frame = sys._getframe(1)
             if frame.f_code is not code:
                 return None
-            if decided is None:
+            if state is None:
                 state = self._discover(code, frame)
                 if state is None:
                     return sys.monitoring.DISABLE
             else:
-                state = decided[1]
-                assert state is not None
-                if not state.full and (state.calls >= self.max_samples or state.since_new >= self.settle):
-                    state.capped = True
+                cap = self._cap_reached(state)
+                if cap is not None:
+                    state.capped, state.cap = True, cap
                     sys.monitoring.set_local_events(self.tool_id, code, 0)
                     return sys.monitoring.DISABLE
             self._sample_call(state, frame)
@@ -287,14 +304,20 @@ class ShapeTracer:
             self.callback_seconds += perf_counter() - started
         return None
 
+    def _cap_reached(self, state: _FuncState) -> str | None:
+        if state.full:
+            return "full" if state.calls >= self.full_cap else None
+        if state.calls >= self.max_samples or state.since_new >= self.settle:
+            return "sample"
+        return None
+
     def _on_return(self, code: CodeType, offset: int, retval: object) -> object:
         local = self._local
         if getattr(local, "busy", False):
             return None
-        decided = self._decided.get(id(code))
-        if decided is None or decided[1] is None or decided[1].capped or not decided[1].record_return:
+        state = self._targets.get(id(code))
+        if state is None or state.capped or not state.record_return:
             return sys.monitoring.DISABLE
-        state = decided[1]
         started = perf_counter()
         local.busy = True
         try:
@@ -316,7 +339,11 @@ class ShapeTracer:
         try:
             return self._paths[filename]
         except KeyError:
-            rel = self._paths[filename] = norm_path(filename, self.repo_root)
+            rel = norm_path(filename, self.repo_root)
+            if rel is not None or not filename.startswith("<"):
+                # Pseudo file names (``<string>``, ``<gen 17>`` from exec/compile) are not cached:
+                # code generated at run time could otherwise grow this map without bound.
+                self._paths[filename] = rel
             return rel
 
     def _discover(self, code: CodeType, frame: FrameType) -> _FuncState | None:
@@ -326,13 +353,15 @@ class ShapeTracer:
             rel is not None
             and not is_test_file(rel)
             and code.co_flags & _CO_OPTIMIZED
-            and (not code.co_name.startswith("<") or code.co_name == "<lambda>")
+            and (not code.co_name.startswith("<") or code.co_name == _LAMBDA)
         ):
             full = rel in self.targets.full_trace
             if full or self.targets.matches(rel, _module_name(frame)):
                 state = self._new_state(code, full)
-        self._decided[id(code)] = (code, state)
         if state is not None:
+            # Only targets are remembered (the state keeps the code object alive, so its id stays
+            # unique). A non-target gets DISABLE and is forgotten: CPython stops reporting it.
+            self._targets[id(code)] = state
             events = sys.monitoring.events
             wanted = events.PY_START | (events.PY_RETURN if state.record_return else 0)
             sys.monitoring.set_local_events(self.tool_id, code, wanted)
@@ -348,30 +377,49 @@ class ShapeTracer:
             position += 1
         if code.co_flags & _CO_VARKEYWORDS:
             params.append((names[position], "**" + names[position]))
-        if code.co_argcount and params and params[0][0] in _RECEIVER_NAMES and "." in code.co_qualname:
-            params[0] = (params[0][0], RECEIVER)
+        owner = _owner_class(code) if code.co_argcount and params[0][0] in _RECEIVER_NAMES else None
         state = _FuncState(
             code=code,
             index=len(self._funcs),
             params=tuple(params),
             full=full,
             record_return=not code.co_flags & _CO_NO_RETURN_SHAPE,
+            owner=owner,
         )
         self._funcs.append(state)
         return state
 
     def _caller(self, frame: FrameType | None) -> int:
-        if frame is None:
-            return self._current_test_caller
-        code = frame.f_code
-        known = self._caller_of.get(id(code))
-        if known is None:
-            rel = self._rel_path(code.co_filename)
-            index = -1
-            if rel is not None and not is_test_file(rel) and not is_environment_path(rel):
-                index = self._intern_caller(("func", rel, code.co_qualname, code.co_firstlineno))
-            known = self._caller_of[id(code)] = (code, index)
-        return known[1] if known[1] >= 0 else self._current_test_caller
+        """The caller index for a call made from ``frame``.
+
+        Generator-expression (and, before 3.12, comprehension) frames are skipped: the caller is the
+        function that iterates them. Module and class bodies (``<module>``, import-time calls) and
+        anything outside the repository, in a test file or in a virtualenv map to the running test,
+        or ``<import>`` outside any test.
+        """
+        for _ in range(_MAX_CALLER_HOPS):
+            if frame is None:
+                break
+            code = frame.f_code
+            known = self._caller_of.get(id(code))
+            if known is None:
+                known = self._caller_of[id(code)] = (code, self._classify_caller(code))
+            if known[1] == _SKIP_CALLER:
+                frame = frame.f_back
+                continue
+            return known[1] if known[1] >= 0 else self._current_test_caller
+        return self._current_test_caller
+
+    def _classify_caller(self, code: CodeType) -> int:
+        if not code.co_flags & _CO_OPTIMIZED:
+            return -1  # module or class body
+        name = code.co_name
+        if name.startswith("<") and name != _LAMBDA:
+            return _SKIP_CALLER  # <genexpr>, <listcomp>, <setcomp>, <dictcomp>
+        rel = self._rel_path(code.co_filename)
+        if rel is None or is_test_file(rel) or is_environment_path(rel):
+            return -1
+        return self._intern_caller(("func", rel, code.co_qualname, code.co_firstlineno))
 
     def _intern_caller(self, key: tuple) -> int:
         index = self._caller_index.get(key)
@@ -389,24 +437,34 @@ class ShapeTracer:
             state.tests.add(self._current_test)
         caller = self._caller(frame.f_back)
         values = frame.f_locals
+        snapshot = type(values) is dict
         new = False
-        for name, label in state.params:
-            try:
-                value = values[name]
-            except KeyError:
-                continue
-            try:
-                if label == RECEIVER:
-                    # type(value), never isinstance(): isinstance() falls back to a user __class__.
-                    cls = type(value)
-                    receiver = value if issubclass(cls, type) else cls
-                    new = self._observe(state, label, object_shape_key(receiver), caller, None) or new
-                else:
-                    new = self._observe(state, label, shape_key(value), caller, value) or new
-            except KeyboardInterrupt:
-                raise
-            except Exception:
-                self.tracer_errors += 1
+        try:
+            for index, (name, label) in enumerate(state.params):
+                try:
+                    value = values[name]
+                except KeyError:
+                    continue
+                try:
+                    receiver = _receiver_class(value, state.owner) if index == 0 and state.owner else None
+                    if receiver is not None:
+                        key = object_shape_key(receiver)
+                        new = self._observe(state, RECEIVER, key, caller, None) or new
+                    else:
+                        new = self._observe(state, label, shape_key(value), caller, value) or new
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    self.tracer_errors += 1
+                finally:
+                    value = None
+        finally:
+            if snapshot:
+                # Python 3.12: f_locals is a dict snapshot cached on the frame. Left filled, it would
+                # keep every argument alive until the function returns (a `del arg` inside the
+                # function would not free it). Nothing in the function has run yet at PY_START, and
+                # any later f_locals/locals() call refreshes the snapshot, so clearing is invisible.
+                values.clear()
         state.since_new = 0 if new else state.since_new + 1
 
     def _observe(self, state: _FuncState, label: str, key: str, caller: int, value: object) -> bool:
@@ -467,7 +525,7 @@ class ShapeTracer:
                     "ex": agg.example,
                     "ext": agg.example_test,
                 }
-                out.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+                out.write(json.dumps(row, separators=(",", ":")) + "\n")
                 n_obs += 1
             for state in self._funcs:
                 row = {
@@ -476,6 +534,7 @@ class ShapeTracer:
                     "calls": state.calls,
                     "tests": sorted(state.tests),
                     "truncated": state.capped,
+                    "cap": state.cap,
                 }
                 out.write(json.dumps(row, separators=(",", ":")) + "\n")
         return {"funcs": len(self._funcs), "shapes": len(self._shapes), "obs": n_obs}
@@ -484,3 +543,32 @@ class ShapeTracer:
 def _module_name(frame: FrameType) -> str | None:
     name = frame.f_globals.get("__name__")
     return name if type(name) is str else None
+
+
+def _owner_class(code: CodeType) -> str | None:
+    """The defining class's name when ``code`` is a function defined directly in a class body.
+
+    ``A.method`` and ``outer.<locals>.A.method`` have an owner (``A``); a module-level function, a
+    nested function (``outer.<locals>.inner``) and a lambda do not.
+    """
+    parent, dot, name = code.co_qualname.rpartition(".")
+    if not dot or name == _LAMBDA:
+        return None
+    owner = parent.rpartition(".")[2]
+    return None if owner == _LOCALS or owner.startswith("<") else owner
+
+
+def _receiver_class(value: object, owner: str) -> type | None:
+    """The class to record for ``self``/``cls``, or None when ``value`` is not an ``owner`` receiver.
+
+    ``type(value)`` and type's own ``__mro__``/``__name__`` descriptors only: ``isinstance`` would
+    consult a user ``__class__`` and a metaclass could override attribute lookup. A ``@staticmethod``
+    whose first parameter is named ``self`` gets an unrelated value and is recorded as a normal
+    parameter.
+    """
+    cls = type(value)
+    receiver = value if issubclass(cls, type) else cls
+    for klass in _TYPE_MRO.__get__(receiver):
+        if _TYPE_NAME.__get__(klass) == owner:
+            return receiver  # type: ignore[return-value]
+    return None

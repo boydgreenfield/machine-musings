@@ -15,6 +15,17 @@ aborts the test run: errors while recording a result or emitting an event go to 
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
+if sys.version_info < (3, 12):  # noqa: UP036 - a clear error instead of a TypeError on 3.11
+    raise pytest.UsageError(
+        "pytest-coverset needs Python 3.12 or later (the shape tracer uses sys.monitoring); "
+        f"this is Python {sys.version.split()[0]}. Uninstall pytest-coverset from this environment "
+        "or run the tests on 3.12+."
+    )
+
 import argparse
 import os
 import signal
@@ -27,7 +38,6 @@ from types import FrameType
 from typing import Any
 
 import coverage
-import pytest
 
 from pytest_coverset import __version__
 from pytest_coverset.bundle import (
@@ -49,7 +59,7 @@ from pytest_coverset.ordering import PriorityOrdering, load_scores
 from pytest_coverset.outcomes import exception_name, fold_reports, truncate_utf8
 from pytest_coverset.paths import find_git_root, norm_path
 from pytest_coverset.redact import ReprMode
-from pytest_coverset.shapes import ShapeTracer, TargetSpec, read_full_trace_file
+from pytest_coverset.shapes import FULL_TRACE_CAP, ShapeTracer, TargetSpec, read_full_trace_file
 
 SESSION_PLUGIN = "coverset-session"
 ORDERING_PLUGIN = "coverset-ordering"
@@ -121,6 +131,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help="consecutive calls without a new shape before sampling of a function stops",
     )
+    group.addoption(
+        "--coverset-full-trace-cap",
+        type=_positive_int,
+        default=FULL_TRACE_CAP,
+        metavar="N",
+        help="safety cap on sampled calls per function in a --coverset-full-trace file",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +153,7 @@ class Options:
     stop_file: str | None
     shape_samples: int
     shape_settle: int
+    full_trace_cap: int
 
     @classmethod
     def from_namespace(cls, ns: Any) -> Options:
@@ -150,6 +168,7 @@ class Options:
             stop_file=ns.coverset_stop_file,
             shape_samples=ns.coverset_shape_samples,
             shape_settle=ns.coverset_shape_settle,
+            full_trace_cap=ns.coverset_full_trace_cap,
         )
 
 
@@ -204,6 +223,7 @@ class CoversetSession:
             repr_mode=self.options.repr_mode,
             max_samples=self.options.shape_samples,
             settle=self.options.shape_settle,
+            full_cap=self.options.full_trace_cap,
         )
         self.tracer.start()
 
@@ -338,7 +358,9 @@ class CoversetSession:
             del self._exc_types[(item.nodeid, when)]
         rel = norm_path(item.path, self.repo_root)
         result = fold_reports(item.nodeid, rel or item.location[0], reports, exc_types, self.repo_root)
-        self.results.add(result)
+        # The event does not depend on the file write: a failed write is an error in meta.json,
+        # while the row stays in memory for the bundle and the runner still sees the result.
+        self._attempt(f"results.jsonl {item.nodeid}", lambda: self.results.add(result))
         self._emit("test", **result.as_dict())
         if result.outcome in ("failed", "error"):
             self._attempt("coverage flush", self.coverage.flush)
@@ -366,10 +388,9 @@ class CoversetSession:
             self._attempt("shapes", lambda: write_empty_shapes(out / SHAPES_FILE))
         self.results.close()
         counts = self.results.counts(len(self.collected))
-        self._attempt(
-            "static files",
-            lambda: write_static_files(out, self.collected, self.collect_errors, self.results.results),
-        )
+        for name, exc in write_static_files(out, self.collected, self.collect_errors, self.results.results):
+            self._record_error(name, exc)
+        self._note_tracer_loss()
         self._attempt("meta", lambda: write_json(out / META_FILE, self._meta(exit_code, counts)))
         try:
             path, digest, size = make_tarball(out)
@@ -378,6 +399,31 @@ class CoversetSession:
         else:
             self._emit("bundle_written", path=str(path), sha256=digest, bytes=size)
         self._emit("done", exit_code=exit_code, counts=counts)
+
+    def abort(self, exit_code: int, label: str, exc: BaseException) -> None:
+        """Finalise after pytest gave up before the session ran (a conftest failed to import, ...).
+
+        The bundle is still written, with ``label``'s error in ``meta.errors``, and ``done`` carries
+        ``exit_code``, so the runner sees a finished shard instead of silence.
+        """
+        self._record_error(label, exc)
+        try:
+            self.finalize(exit_code)
+        finally:
+            self.shutdown()
+
+    def _note_tracer_loss(self) -> None:
+        cov = self.coverage
+        if cov.tracer_lost_at is None:
+            return
+        first = cov.tracer_losses[0] if cov.tracer_losses else {}
+        repaired = "re-installed" if first.get("reinstalled") else "not re-installed"
+        message = (
+            f"coverage tracer lost: during {cov.tracer_lost_at} the trace function became "
+            f"{first.get('found', '?')} ({repaired}); {cov.tracer_lost_count} context switch(es) affected"
+        )
+        if message not in self.errors:
+            self.errors.append(message)
 
     def _attempt(self, label: str, action: Callable[[], object]) -> None:
         try:
@@ -396,11 +442,15 @@ class CoversetSession:
             "pytest_version": pytest.__version__,
             "core": "ctrace",
             "tracer": self.coverage.tracer,
+            "tracer_lost_at": self.coverage.tracer_lost_at,
+            "tracer_losses": self.coverage.tracer_losses,
+            "coverage_warnings": self.coverage.warnings,
             "context_format": "nodeid",
             "tool_id": tracer.tool_id if tracer is not None else None,
             "git_root": str(self.git_root) if self.git_root is not None else None,
             "repo_root": self.repo_root,
             "rootdir": str(self.config.rootpath),
+            "configfile": str(self.config.inipath) if self.config.inipath is not None else None,
             "cwd": os.getcwd(),
             "sources": list(self.options.sources),
             "trace_modules": list(self.options.trace_modules),
@@ -410,6 +460,7 @@ class CoversetSession:
             "repr_examples": self.options.repr_mode,
             "shape_samples": self.options.shape_samples,
             "shape_settle": self.options.shape_settle,
+            "full_trace_cap": self.options.full_trace_cap,
             "functions_traced": tracer.functions_traced if tracer is not None else 0,
             "functions_truncated": tracer.functions_truncated if tracer is not None else 0,
             "tracer_errors": tracer.tracer_errors if tracer is not None else 0,
@@ -439,9 +490,45 @@ class CoversetSession:
 def _start_session(config: pytest.Config, namespace: Any) -> None:
     if config.pluginmanager.has_plugin(SESSION_PLUGIN):
         return
+    _refuse_xdist(namespace)
     session = CoversetSession(config, Options.from_namespace(namespace))
     session.start()
     config.pluginmanager.register(session, SESSION_PLUGIN)
+
+
+def _refuse_xdist(namespace: Any) -> None:
+    """``--coverset-out`` with xdist workers would write an empty bundle: refuse it up front."""
+    workers = getattr(namespace, "numprocesses", None)
+    if workers not in (None, 0, "0"):
+        raise pytest.UsageError(
+            f"--coverset-out cannot be combined with pytest-xdist (-n {workers}): per-test coverage, "
+            "shapes and results are recorded in this process only. Run with -n 0 "
+            "(coverset shards the suite across workers itself)."
+        )
+
+
+@pytest.hookimpl(wrapper=True, specname="pytest_load_initial_conftests")
+def pytest_load_initial_conftests_guard(
+    early_config: pytest.Config, parser: pytest.Parser, args: list[str]
+) -> Generator[None]:
+    """When loading the initial conftests fails, pytest exits (4) without a session: write the bundle."""
+    try:
+        return (yield)
+    except BaseException as exc:
+        namespace = early_config.known_args_namespace
+        session = early_config.pluginmanager.get_plugin(SESSION_PLUGIN)
+        if isinstance(session, CoversetSession) and not (
+            getattr(namespace, "help", False) or getattr(namespace, "version", False)
+        ):
+            code = (
+                pytest.ExitCode.USAGE_ERROR
+                if isinstance(exc, (pytest.UsageError, ImportError))
+                or type(exc).__name__ == "ConftestImportFailure"
+                else pytest.ExitCode.INTERNAL_ERROR
+            )
+            session.abort(int(code), "loading conftest files", exc)
+            early_config.pluginmanager.unregister(session, SESSION_PLUGIN)
+        raise
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -458,6 +545,7 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register the invariant marker; enable ordering and (if not yet started) instrumentation."""
     config.addinivalue_line("markers", INVARIANT_MARKER)
     if config.option.coverset_out:
+        _refuse_xdist(config.option)
         _start_session(config, config.option)
     scores_file = config.option.coverset_scores
     if scores_file and not config.pluginmanager.has_plugin(ORDERING_PLUGIN):
@@ -469,9 +557,16 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    """Tear down the shape tracer (free the tool id) and coverage."""
+    """Tear down the shape tracer (free the tool id) and coverage.
+
+    When ``pytest_sessionfinish`` never ran (a later ``pytest_configure`` raised a UsageError, ...),
+    the bundle is finalised here with exit code 4, so the runner still gets a bundle and ``done``.
+    """
     session = config.pluginmanager.get_plugin(SESSION_PLUGIN)
     if isinstance(session, CoversetSession):
+        if not session.finalized:
+            session._record_error("session", RuntimeError("pytest ended before the test session finished"))
+            session._attempt("finalize", lambda: session.finalize(int(pytest.ExitCode.USAGE_ERROR)))
         session.shutdown()
         config.pluginmanager.unregister(session, SESSION_PLUGIN)
     ordering = config.pluginmanager.get_plugin(ORDERING_PLUGIN)

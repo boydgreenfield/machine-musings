@@ -33,10 +33,10 @@ def mode_args(mode: str, out_dir: Path, sources: list[str]) -> list[str]:
     """Extra pytest arguments for one mode."""
     if mode == "plain":
         return []
-    args = ["--coverset-out", str(out_dir)]
-    for source in sources:
-        args += ["--coverset-source", source]
-    return args + ["--coverset-shapes", "on" if mode == "coverage_shapes" else "off"]
+    # `--opt=value` words, as the runner passes them: a separate path word could move pytest's rootdir.
+    args = [f"--coverset-out={out_dir}"]
+    args += [f"--coverset-source={source}" for source in sources]
+    return [*args, "--coverset-shapes=" + ("on" if mode == "coverage_shapes" else "off")]
 
 
 def run_once(python: str, workdir: Path, args: list[str]) -> float:

@@ -123,6 +123,47 @@ class ExplosiveList(list):
         raise AssertionError("__len__ called")
 
 
+METACLASS_CALLS: list[str] = []
+
+
+class RecordingMeta(type):
+    """A metaclass whose dunders record every call: membership tests on classes must not reach them."""
+
+    def __hash__(cls) -> int:
+        METACLASS_CALLS.append("__hash__")
+        return 1
+
+    def __eq__(cls, other: object) -> bool:
+        METACLASS_CALLS.append("__eq__")
+        return False
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        METACLASS_CALLS.append("__instancecheck__")
+        return False
+
+    def __subclasscheck__(cls, subclass: type) -> bool:
+        METACLASS_CALLS.append("__subclasscheck__")
+        return False
+
+
+class Odd(metaclass=RecordingMeta):
+    pass
+
+
+class WeirdModule:
+    """``__module__`` set to a non-str whose ``__str__`` must never be called."""
+
+    def __str__(self) -> str:
+        raise AssertionError("__str__ of __module__ called")
+
+
+class Relocated:
+    pass
+
+
+Relocated.__module__ = WeirdModule()  # type: ignore[assignment]
+
+
 @pytest.mark.security
 def test_user_dunders_are_never_called() -> None:
     boom = Explosive()
@@ -138,6 +179,24 @@ def test_user_dunders_are_never_called() -> None:
 
 
 @pytest.mark.security
+def test_metaclass_dunders_are_never_called() -> None:
+    METACLASS_CALLS.clear()
+    odd = Odd()
+    name = f"obj:{__name__}.Odd"
+    assert shape_key(odd) == name
+    assert shape_key([odd, odd]) == f"list|elem:{name}|len:2-10|order:n/a"
+    assert shape_key([(odd, 1)]) == "list|elem:tuple|len:1"
+    assert shape_key((odd, 1.0)) == "tuple|elem:mixed|len:2-10|order:n/a"
+    assert shape_key({1: odd}) == f"dict|elem:{name}|key:int|len:1"
+    assert shape_key(Odd) == f"obj:{__name__}.RecordingMeta"
+    assert example_repr("v", odd, "scalars") is None
+    assert example_repr("v", [odd], "all") == f"[<{__name__}.Odd>]"
+    assert example_repr("v", {"k": odd}, "all") == f"{{'k': <{__name__}.Odd>}}"
+    assert METACLASS_CALLS == []
+    assert shape_key(Relocated()).startswith("obj:")  # no str() of a non-str __module__
+
+
+@pytest.mark.security
 def test_example_redaction() -> None:
     assert example_repr("password", "hunter2hunter2", "scalars") == "<redacted:len=14>"
     assert example_repr("api_key", 12345, "scalars") == "<redacted>"
@@ -148,6 +207,24 @@ def test_example_redaction() -> None:
     assert example_repr("n", 3, "off") is None
     assert len(example_repr("s", "x" * 500, "scalars") or "") <= 50
     assert scrub("Authorization: Bearer abc.def") == "Authorization: Bearer [REDACTED]"
+
+
+@pytest.mark.security
+def test_secrets_are_scrubbed_before_reprlib_shortens_the_text() -> None:
+    """Scrubbing only the shortened text would leave the tail of a token or part of a local part."""
+    token = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop"
+    assert example_repr("note", token + " end", "scalars") == "'sk-ant-[REDACTED] end'"
+    email = example_repr("note", "please email johnsmith.private@corp.example.com about it", "scalars")
+    assert email is not None and "johnsmit" not in email and "j***@corp.example.com" in email
+    bearer = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCDEF tail"
+    assert example_repr("header", bearer, "scalars") == "'Authorization: Bearer [REDACTED] tail'"
+    long_tail = "x" * 100 + " Authorization: Bearer " + "q" * 60 + " ok"
+    shown = example_repr("note", long_tail, "scalars") or ""
+    assert "qqq" not in shown
+    pem_in_huge = "-----BEGIN RSA PRIVATE KEY-----\n" + "K" * 20_000
+    assert "KKK" not in (example_repr("note", pem_in_huge, "scalars") or "")
+    for value in (token, bearer, long_tail):
+        assert "ABCDEF" not in (example_repr("v", [value, value], "all") or "")
 
 
 @pytest.mark.security
@@ -167,6 +244,12 @@ def test_secret_dict_keys_are_redacted_in_container_examples() -> None:
         "'nested': {'session_id': <redacted:len=2>}}"
     )
     assert example_repr("**kw", {"token": 5}, "all") == "{'token': <redacted>}"
+
+
+def test_sum_of_a_huge_int_and_a_float_does_not_drop_the_value() -> None:
+    assert shape_key([10**400, 1.0]) == "list|elem:mixed|len:2-10|order:reverse"
+    assert shape_key([10**400, -(10**400), 0.5]) == "list|any_neg|elem:mixed|len:2-10|order:unsorted"
+    assert shape_key([0, 0.0]) == "list|all_zero|any_zero|dups|elem:mixed|len:2-10|order:sorted|sum_zero"
 
 
 def test_huge_ints_and_long_bytes_are_summarised() -> None:

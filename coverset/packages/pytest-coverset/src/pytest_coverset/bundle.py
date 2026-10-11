@@ -107,20 +107,33 @@ def hypothesis_info() -> dict[str, Any] | None:
     }
 
 
+def dumps(obj: Any) -> str:
+    """Compact ASCII JSON: a lone surrogate or any odd code point is escaped, never an encode error."""
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
+
+
 def write_json(path: Path, obj: Any) -> None:
-    """Write compact JSON atomically (temp file + rename)."""
+    """Write compact JSON atomically (temp file + rename); no ``.tmp`` file is left behind on error."""
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(dumps(obj), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
-    """Write JSON lines atomically (temp file + rename)."""
+    """Write JSON lines atomically (temp file + rename); no ``.tmp`` file is left behind on error."""
     tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as out:
-        for row in rows:
-            out.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
+    try:
+        with tmp.open("w", encoding="utf-8") as out:
+            for row in rows:
+                out.write(dumps(row) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_empty_shapes(path: Path) -> None:
@@ -146,10 +159,10 @@ class ResultsLog:
         self.results: list[TestResult] = []
 
     def add(self, result: TestResult) -> None:
-        """Record one result and flush it to disk."""
+        """Record one result (kept even if the write fails) and flush it to disk."""
         self.results.append(result)
         if not self._file.closed:
-            self._file.write(json.dumps(result.as_dict(), separators=(",", ":"), ensure_ascii=False) + "\n")
+            self._file.write(dumps(result.as_dict()) + "\n")
             self._file.flush()
 
     def close(self) -> None:
@@ -165,23 +178,50 @@ class ResultsLog:
         return counts
 
 
+def write_collect(
+    out_dir: Path, collected: Iterable[CollectedItem], errors: Iterable[Mapping[str, Any]]
+) -> None:
+    """Write ``collect.json``."""
+    write_json(
+        out_dir / COLLECT_FILE, {"items": [item.as_dict() for item in collected], "errors": list(errors)}
+    )
+
+
+def write_durations(out_dir: Path, results: Iterable[TestResult]) -> None:
+    """Write ``durations.json``."""
+    write_json(out_dir / DURATIONS_FILE, {r.nodeid: r.duration_s for r in results})
+
+
+def write_invariant_links(out_dir: Path, collected: Iterable[CollectedItem]) -> None:
+    """Write ``invariant_links.jsonl``."""
+    write_jsonl(
+        out_dir / INVARIANT_LINKS_FILE,
+        ({"test_id": item.nodeid, "invariant_id": inv} for item in collected for inv in item.invariant_ids),
+    )
+
+
 def write_static_files(
     out_dir: Path,
     collected: Iterable[CollectedItem],
     collect_errors: Iterable[Mapping[str, Any]],
     results: Iterable[TestResult],
-) -> None:
-    """Write ``collect.json``, ``durations.json`` and ``invariant_links.jsonl``."""
+) -> list[tuple[str, Exception]]:
+    """Write ``collect.json``, ``durations.json`` and ``invariant_links.jsonl``, each independently.
+
+    A failure in one file does not stop the others; the failures are returned as ``(file, error)``.
+    """
     items = list(collected)
-    write_json(
-        out_dir / COLLECT_FILE,
-        {"items": [item.as_dict() for item in items], "errors": list(collect_errors)},
-    )
-    write_json(out_dir / DURATIONS_FILE, {r.nodeid: r.duration_s for r in results})
-    write_jsonl(
-        out_dir / INVARIANT_LINKS_FILE,
-        ({"test_id": item.nodeid, "invariant_id": inv} for item in items for inv in item.invariant_ids),
-    )
+    failures: list[tuple[str, Exception]] = []
+    for name, action in (
+        (COLLECT_FILE, lambda: write_collect(out_dir, items, collect_errors)),
+        (DURATIONS_FILE, lambda: write_durations(out_dir, results)),
+        (INVARIANT_LINKS_FILE, lambda: write_invariant_links(out_dir, items)),
+    ):
+        try:
+            action()
+        except Exception as exc:
+            failures.append((name, exc))
+    return failures
 
 
 def _clean_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:

@@ -217,22 +217,27 @@ class PythonAdapter:
         ``extra`` keys (all optional): ``python`` (interpreter, default ``python``), ``sources``,
         ``trace_modules``, ``full_trace_file``, ``shapes`` (``on``/``off``), ``repr_examples``,
         ``stop_file``, and the booleans ``xdist`` / ``pytest_cov`` saying whether those plugins
-        are installed in the target environment (then ``-n 0`` / ``--no-cov`` are added).
+        are installed in the target environment (then ``--numprocesses=0`` / ``--no-cov`` are added).
+
+        Every option that takes a value is emitted as one word, ``--opt=value``. pytest looks for its
+        configuration file (``_initini``) before entry-point plugins have registered their options, so
+        a separate value word (``--coverset-out run/out``) is taken for a positional path: the paths
+        under the worker's sibling ``run/`` directory would move the inferred rootdir to their common
+        ancestor with the repo, no ``pyproject.toml``/``pytest.ini`` would be found, and the target
+        repo's ``xfail_strict``, ``addopts``, ``markers``, ``pythonpath``, ``filterwarnings`` and
+        plugin settings would be silently dropped in every shard.
         """
         cmd = [
             str(extra.get("python") or "python"),
             "-m",
             "pytest",
             "@" + args_file,
-            "--coverset-out",
-            out_dir,
+            f"--coverset-out={out_dir}",
         ]
         if scores_file:
-            cmd += ["--coverset-scores", scores_file]
-        for source in extra.get("sources", ()):
-            cmd += ["--coverset-source", str(source)]
-        for module in extra.get("trace_modules", ()):
-            cmd += ["--coverset-trace-module", str(module)]
+            cmd.append(f"--coverset-scores={scores_file}")
+        cmd += [f"--coverset-source={source}" for source in extra.get("sources", ())]
+        cmd += [f"--coverset-trace-module={module}" for module in extra.get("trace_modules", ())]
         options = {
             "full_trace_file": "--coverset-full-trace",
             "shapes": "--coverset-shapes",
@@ -241,10 +246,10 @@ class PythonAdapter:
         }
         for key, flag in options.items():
             if extra.get(key):
-                cmd += [flag, str(extra[key])]
+                cmd.append(f"{flag}={extra[key]}")
         cmd += ["--continue-on-collection-errors", "-p", "no:cacheprovider", "-q"]
         if extra.get("xdist"):
-            cmd += ["-n", "0"]
+            cmd.append("--numprocesses=0")
         if extra.get("pytest_cov"):
             cmd.append("--no-cov")
         return cmd

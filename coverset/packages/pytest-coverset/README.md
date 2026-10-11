@@ -14,14 +14,17 @@ Installing the plugin changes nothing about a normal run except registering the 
 | `--coverset-scores FILE` | off | JSON `{nodeid: score}`; sort by `(-max(module), module, -max(class), class, -score, nodeid)` |
 | `--coverset-source PKG` | all in-repo code | package name or path to measure and trace (repeatable) |
 | `--coverset-trace-module MOD` | none | extra module (and submodules) to trace (repeatable) |
-| `--coverset-full-trace FILE` | none | repo-relative paths, one per line, traced without a sample cap |
+| `--coverset-full-trace FILE` | none | repo-relative paths, one per line, traced without the adaptive sample cap |
 | `--coverset-shapes on\|off` | `on` | record argument and return shapes |
 | `--coverset-repr-examples off\|scalars\|all` | `scalars` | redacted example values to keep |
 | `--coverset-stop-file PATH` | none | once `PATH` exists, skip the remaining tests, write the bundle, exit 2 |
 | `--coverset-shape-samples N` | 2048 | sampled calls per function before sampling stops |
 | `--coverset-shape-settle N` | 64 | consecutive calls with no new shape before sampling stops |
+| `--coverset-full-trace-cap N` | 100000 | safety cap on sampled calls per full-trace function (recorded as `truncated`, `cap: "full"`) |
 
-Coverage uses the ctrace core with one dynamic context per test whose name is exactly the nodeid (no static context is prefixed, so `|` in parametrize ids needs no special parsing); the `''` context holds imports and collection. A foreign `sys.settrace` function is a usage error. coverage.py's own warnings (for example a `--coverset-source` package the shard never imports) are silenced, so target repos that run with `-W error` or `filterwarnings = error` are unaffected, and an error while recording a result or emitting an event goes to `meta.json` `errors` instead of aborting the run.
+Every option takes `--opt value` or `--opt=value`. Scripts that pass paths outside the repository should use the `=` form: pytest looks for its ini file before plugins register their options, so a separate path word can move the rootdir and drop the repo's pytest configuration. `--coverset-out` with pytest-xdist workers (`-n 2`, `-n auto`) is a usage error, and so is Python below 3.12.
+
+Coverage uses the ctrace core with one dynamic context per test whose name is exactly the nodeid (no static context is prefixed, so `|` in parametrize ids needs no special parsing); the `''` context holds imports and collection. A foreign `sys.settrace` function at start is a usage error; a tracer lost later (a test calling `sys.settrace(None)`, or pytest-cov started without `--no-cov`) is recorded as `tracer_lost_at`/`tracer_losses` in `meta.json` and re-installed when possible. coverage.py's own warnings (for example a `--coverset-source` package the shard never imports) are captured into `meta.json` `coverage_warnings` instead of raised, so target repos that run with `-W error` or `filterwarnings = error` are unaffected, and an error while recording a result or emitting an event goes to `meta.json` `errors` instead of aborting the run. A conftest that fails to import still yields a bundle and a `done` event with exit code 4.
 
 ## Stopping
 
@@ -36,7 +39,7 @@ Shape keys follow plan Addendum B. Infinities do not count as the finite sign cl
 
 ## Bundle
 
-`DIR/bundle.tar.gz` holds `coverage.sqlite`, `coverage.json` (format 3), `shapes.jsonl.gz` (plan Addendum B), `results.jsonl` (one final row per test, authoritative), `collect.json` (`items` with file, line, markers, invariant ids, hypothesis flag; `errors` for collection errors), `durations.json`, `invariant_links.jsonl` and `meta.json` (versions, `tracer`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `cwd`, `shapes_disabled_reason`, `tracer_errors`, counts, timings). Shape and result paths are relative to the git root (the rootdir when there is no `.git`); `coverage.json` and `coverage.sqlite` paths are relative to the working directory, which is the repo root in a worker.
+`DIR/bundle.tar.gz` holds `coverage.sqlite`, `coverage.json` (format 3), `shapes.jsonl.gz` (plan Addendum B), `results.jsonl` (one final row per test, authoritative), `collect.json` (`items` with file, line, markers, invariant ids, hypothesis flag; `errors` for collection errors), `durations.json`, `invariant_links.jsonl` and `meta.json` (versions, `tracer`, `tracer_lost_at`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `configfile`, `cwd`, `shapes_disabled_reason`, `tracer_errors`, counts, timings). Shape and result paths are relative to the git root (the rootdir when there is no `.git`); `coverage.json` and `coverage.sqlite` paths are relative to the working directory, which is the repo root in a worker.
 
 ## Events
 

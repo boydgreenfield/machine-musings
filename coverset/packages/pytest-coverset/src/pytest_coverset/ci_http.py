@@ -39,8 +39,16 @@ class SseEvent:
     data: str
 
 
+HEARTBEAT = SseEvent(None, "", "")
+"""Yielded by :func:`iter_sse` for every comment line (the server's ``: ping``), so a caller can check
+its deadline even while no event is dispatched."""
+
+
 def iter_sse(lines: Iterable[bytes]) -> Iterator[SseEvent]:
-    """Parse ``text/event-stream`` lines into events (comments ignored, multi-line data joined)."""
+    """Parse ``text/event-stream`` lines into events (multi-line data joined).
+
+    Comment lines yield :data:`HEARTBEAT` (compare by identity) instead of being dropped silently.
+    """
     event_id: str | None = None
     event_type = ""
     data: list[str] = []
@@ -52,6 +60,7 @@ def iter_sse(lines: Iterable[bytes]) -> Iterator[SseEvent]:
             event_type, data = "", []
             continue
         if line.startswith(":"):
+            yield HEARTBEAT
             continue
         name, _, value = line.partition(":")
         value = value.removeprefix(" ")
@@ -161,6 +170,28 @@ class ApiClient:
             response.close()
             raise SseUnavailable(f"HTTP {response.status} {content_type or 'without a content type'}")
         return response
+
+
+def stream_lines(response: http.client.HTTPResponse, read_timeout: Callable[[], float]) -> Iterator[bytes]:
+    """Lines of an open stream, each read bounded by ``read_timeout()`` seconds (asked before every line).
+
+    The socket timeout is lowered as the caller's deadline approaches, so a server that sends nothing
+    (or only partial lines) cannot hold the reader past it; a timeout raises :class:`TimeoutError`.
+    """
+    while True:
+        set_read_timeout(response, read_timeout())
+        line = response.readline()
+        if not line:
+            return
+        yield line
+
+
+def set_read_timeout(response: http.client.HTTPResponse, seconds: float) -> None:
+    """Best effort: set the socket timeout of an open ``urlopen`` response (no-op if unreachable)."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    settimeout = getattr(sock, "settimeout", None)
+    if settimeout is not None:
+        settimeout(max(0.05, seconds))
 
 
 def _decode(raw: bytes) -> Any:

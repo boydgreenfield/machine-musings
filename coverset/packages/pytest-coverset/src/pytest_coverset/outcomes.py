@@ -51,10 +51,15 @@ def exception_name(exc_type: type[BaseException]) -> str:
 
 
 def truncate_utf8(text: str, limit: int = MAX_LONGREPR_BYTES) -> tuple[str, bool]:
-    """Cut ``text`` to at most ``limit`` UTF-8 bytes; return the text and whether it was cut."""
+    """Cut ``text`` to at most ``limit`` UTF-8 bytes; return the text and whether it was cut.
+
+    The result is always valid UTF-8: a lone surrogate (``"\\udcff"`` from a ``surrogateescape``d
+    file name or a hand-built message) becomes ``?``, so it can never fail a later encode in
+    ``results.jsonl``, the bundle's JSON files or the control plane's database.
+    """
     data = text.encode("utf-8", errors="replace")
     if len(data) <= limit:
-        return text, False
+        return data.decode("utf-8", errors="replace"), False
     return data[:limit].decode("utf-8", errors="ignore"), True
 
 
@@ -74,12 +79,15 @@ def _crash_location(report: pytest.TestReport, repo_root: str) -> tuple[str | No
 
 
 def _skip_reason(report: pytest.TestReport) -> str | None:
+    """The skip/xfail reason, sanitised and cut to :data:`MAX_LONGREPR_BYTES` like a longrepr."""
+    reason: str | None = None
     if hasattr(report, "wasxfail"):
-        return str(report.wasxfail) or None
-    longrepr = report.longrepr
-    if isinstance(longrepr, tuple) and len(longrepr) == 3:
-        return str(longrepr[2]).removeprefix("Skipped: ")
-    return None
+        reason = str(report.wasxfail) or None
+    else:
+        longrepr = report.longrepr
+        if isinstance(longrepr, tuple) and len(longrepr) == 3:
+            reason = str(longrepr[2]).removeprefix("Skipped: ")
+    return truncate_utf8(reason)[0] if reason is not None else None
 
 
 def fold_reports(

@@ -26,7 +26,8 @@ class Scenario:
     ``ok`` (stream everything after Last-Event-ID), ``unsupported`` (406), ``drop_first`` (the first
     connection closes after ``drop_after`` events), ``reset_each`` (every connection sends at most
     ``drop_after`` events and is then reset with a TCP RST, so the client sees a network error),
-    ``empty`` (every connection closes without events) or ``error`` (500). ``fail_all`` answers 500
+    ``empty`` (every connection closes without events), ``pings`` (the stream stays open for 30 s
+    sending only ``: ping`` comments) or ``error`` (500). ``fail_all`` answers 500
     to everything.
     """
 
@@ -118,6 +119,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if scenario.sse == "empty":
             self.wfile.write(b": ping\n\n")
+            return
+        if scenario.sse == "pings":  # a queued run: the stream stays open and only carries comments
+            try:
+                for _ in range(300):
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    time.sleep(0.1)
+            except OSError:
+                pass
             return
         last = int(self.headers.get("Last-Event-ID") or 0)
         pending = [e for e in scenario.events if e["seq"] > last]

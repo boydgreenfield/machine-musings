@@ -78,7 +78,9 @@ def test_hostile_values_keep_every_parameter_and_hide_secrets(pytester: pytest.P
     assert big_n == {"int|big|pos": "<int 16610 bits>", "int|pos": "1"}
     assert [(row["n"], row["ex"]) for row in shapes.rows("big", "label")] == [(2, "'x'")]
 
-    assert shapes.keys("Thing.act", "<receiver>") == {"obj:hazpkg.mod.Sneaky"}
+    # Called unbound with an unrelated object: not a Thing receiver, so recorded as `self` (and the
+    # Sneaky __class__ property was never evaluated: tracer_errors is 0 and the class name is right).
+    assert shapes.keys("Thing.act", "self") == {"obj:hazpkg.mod.Sneaky"}
     assert shapes.keys("Thing.act", "x") == {"int|pos"}
 
     assert [row["ex"] for row in shapes.rows("make_token", "return")] == ["<redacted:len=21>"]

@@ -211,12 +211,9 @@ def test_test_command() -> None:
         "-m",
         "pytest",
         "@/w/shard-0.args",
-        "--coverset-out",
-        "/w/out",
-        "--coverset-scores",
-        "/w/scores.json",
-        "--coverset-source",
-        "ledger",
+        "--coverset-out=/w/out",
+        "--coverset-scores=/w/scores.json",
+        "--coverset-source=ledger",
         "--continue-on-collection-errors",
         "-p",
         "no:cacheprovider",
@@ -228,33 +225,50 @@ def test_test_command() -> None:
         "trace_modules": ["vendor"],
         "full_trace_file": "/w/full.txt",
         "shapes": "off",
+        "repr_examples": "all",
         "stop_file": "/w/STOP",
         "xdist": True,
         "pytest_cov": True,
     }
     cmd = adapter.test_command("/w/a", None, "/w/o", extra)
-    assert cmd[:6] == ["/venv/bin/python", "-m", "pytest", "@/w/a", "--coverset-out", "/w/o"]
-    assert "--coverset-scores" not in cmd
-    assert cmd[6:] == [
-        "--coverset-source",
-        "a",
-        "--coverset-source",
-        "b",
-        "--coverset-trace-module",
-        "vendor",
-        "--coverset-full-trace",
-        "/w/full.txt",
-        "--coverset-shapes",
-        "off",
-        "--coverset-stop-file",
-        "/w/STOP",
+    assert cmd[:5] == ["/venv/bin/python", "-m", "pytest", "@/w/a", "--coverset-out=/w/o"]
+    assert not any(word.startswith("--coverset-scores") for word in cmd)
+    assert cmd[5:] == [
+        "--coverset-source=a",
+        "--coverset-source=b",
+        "--coverset-trace-module=vendor",
+        "--coverset-full-trace=/w/full.txt",
+        "--coverset-shapes=off",
+        "--coverset-repr-examples=all",
+        "--coverset-stop-file=/w/STOP",
         "--continue-on-collection-errors",
         "-p",
         "no:cacheprovider",
         "-q",
-        "-n",
-        "0",
+        "--numprocesses=0",
         "--no-cov",
+    ]
+
+
+def test_test_command_never_emits_a_separate_value_word() -> None:
+    """Every ``--coverset-*`` value rides in the same word, so pytest's early ini lookup sees no paths."""
+    extra = {
+        "sources": ["a"],
+        "trace_modules": ["m"],
+        "full_trace_file": "/w/f",
+        "shapes": "on",
+        "repr_examples": "scalars",
+        "stop_file": "/w/S",
+        "xdist": True,
+    }
+    cmd = PythonAdapter().test_command("/w/a", "/w/s.json", "/w/o", extra)
+    for word in cmd[4:]:
+        if word.startswith("--"):
+            assert word in ("--continue-on-collection-errors", "--no-cov") or "=" in word, word
+    assert [word for word in cmd if not word.startswith(("-", "@"))] == [
+        "python",
+        "pytest",
+        "no:cacheprovider",
     ]
 
 
@@ -315,6 +329,7 @@ def test_env_spec_never_emits_workspace_or_local_packages(tmp_path: Path) -> Non
     assert not [line for line in lines if line.split("=")[0] in ("alpha", "beta", "root")]
 
 
+@pytest.mark.security
 def test_symlinked_python_version_is_refused_without_echo(tmp_path: Path) -> None:
     secret = tmp_path / "secret.txt"
     secret.write_text("secret-token-abc rest\n")

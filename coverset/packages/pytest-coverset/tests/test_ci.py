@@ -10,8 +10,16 @@ from pathlib import Path
 import pytest
 from stub_api import NOT_FOUND, RUN_ID, SHA, Scenario, event_list, serve, verdict_found
 
-from pytest_coverset.ci import EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_NO_TESTS, EXIT_SERVER_ERROR, Waiter, main
-from pytest_coverset.ci_http import ApiClient, iter_sse
+from pytest_coverset.ci import (
+    EXIT_FAILURE,
+    EXIT_INTERRUPTED,
+    EXIT_NO_TESTS,
+    EXIT_SERVER_ERROR,
+    Waiter,
+    main,
+    printable,
+)
+from pytest_coverset.ci_http import HEARTBEAT, ApiClient, iter_sse
 
 COUNTS_PASS = {"passed": 2, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0, "not_run": 0}
 COUNTS_FAIL = {"passed": 1, "failed": 1, "error": 0, "skipped": 1, "xfailed": 0, "xpassed": 0, "not_run": 0}
@@ -265,7 +273,12 @@ def test_iter_sse_parsing() -> None:
         b"\r\n",
     ]
     events = list(iter_sse(raw))
-    assert [(e.id, e.event, e.data) for e in events] == [("4", "test", '{"a":\n1}'), ("4", "message", "x")]
+    assert events[0] is HEARTBEAT  # comments are surfaced so the caller can check its deadline
+    dispatched = [e for e in events if e is not HEARTBEAT]
+    assert [(e.id, e.event, e.data) for e in dispatched] == [
+        ("4", "test", '{"a":\n1}'),
+        ("4", "message", "x"),
+    ]
 
 
 def test_errored_run_exits_2_not_5() -> None:
@@ -299,3 +312,48 @@ def test_exit_code_for_honours_the_server_code(
     from pytest_coverset.ci import exit_code_for
 
     assert exit_code_for(conclusion, server_code, counts) == expected
+
+
+def test_timeout_is_enforced_while_the_stream_only_pings() -> None:
+    """A queued run's stream carries only `: ping` comments; --timeout must still end the wait."""
+    scenario = Scenario(verdicts=[verdict_found("queued")], sse="pings")
+    started = time.monotonic()
+    with serve(scenario) as server:
+        code, output = run_cli(server, "--timeout", "1.5")
+    elapsed = time.monotonic() - started
+    assert code == EXIT_INTERRUPTED
+    assert "timed out" in output
+    assert elapsed < 6, elapsed
+
+
+def test_server_text_is_printed_without_terminal_escapes() -> None:
+    hostile = "E   boom\x1b[31m red\x1b[0m\r\n\x1b]0;pwned\x07E   next\x9b2J\x00"
+    scenario = Scenario(
+        verdicts=[verdict_found()],
+        events=event_list(
+            (
+                "test",
+                {
+                    "nodeid": "tests/test_a.py::test_x\x1b[2K",
+                    "outcome": "failed",
+                    "failed_phase": "call",
+                    "longrepr": hostile,
+                },
+            ),
+            ("log", {"shard": 0, "text": "\x1b[1mbold\x1b[0m log"}),
+            ("done", {"conclusion": "failure", "exit_code": 1, "counts": {"failed": 1}}),
+        ),
+    )
+    with serve(scenario) as server:
+        code, output = run_cli(server)
+    assert code == EXIT_FAILURE
+    assert "\x1b" not in output and "\x9b" not in output and "\x00" not in output and "\r" not in output
+    lines = output.splitlines()
+    assert "FAILED tests/test_a.py::test_x" in lines
+    assert "    E   boom red" in lines
+    assert "    E   next2J" in lines
+    assert "[shard 0] bold log" in lines
+
+
+def test_printable_keeps_newlines_and_tabs() -> None:
+    assert printable("a\tb\nc\x1b[31md\x07\x85e") == "a\tb\ncde"
