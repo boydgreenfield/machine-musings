@@ -52,7 +52,7 @@ QUALITY = 82
 MIN_QUALITY = 50
 MAX_BYTES = 250 * 1024
 READY = 'body[data-ready="1"]'
-SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment")
+SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test")
 REPORT_SHOT_NAMES = ("report", "report-source")
 GROUPS = {"report": REPORT_SHOT_NAMES}
 """``--only`` names that stand for several shots."""
@@ -61,6 +61,8 @@ REPORT_LENS_TEST = "tests/test_windows.py::test_expires_at"
 REPORT_FILE_ROWS = 8
 """File-table rows kept under the treemap in report.jpg."""
 VALIDATE_EMAIL_PATH = "src/ledger/accounts/emailcheck.py"
+FAILING_TEST = "tests/test_refund.py::test_refund_partial"
+"""The test whose page test.jpg shows (PR #1's failing test)."""
 PARSE_PATH = "src/ledger/durations/parse.py"
 
 
@@ -373,6 +375,23 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
         goto(page, f"{base}/forge/outbox?method=upsert_pr_comment")
         shoot_page(page, path)
 
+    def test_page(page: Any, path: Path) -> None:
+        # The failing test of PR #1: identity, result, history and its data flow, down to the end
+        # of the "Functions it called" strips of the first function (the page is about 1330 px).
+        goto(page, f"{base}/repos/{rid}/tests/by-nodeid?nodeid={FAILING_TEST}&run={ids.pr1_run}")
+        page.wait_for_selector("#test-flow svg.flow-test", state="attached")
+        bottom = page.evaluate(
+            "() => { const s = document.querySelector('#test-flow');"
+            " const r = s ? s.getBoundingClientRect() : null;"
+            " return r ? r.bottom + window.scrollY : document.body.scrollHeight; }"
+        )
+        height = max(VIEWPORT["height"], int(bottom) + 16)
+        page.screenshot(
+            path=str(path),
+            full_page=True,
+            clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
+        )
+
     return {
         "pr": pr,
         "run-live": run_live,
@@ -381,6 +400,7 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
         "source": source,
         "map": treemap,
         "comment": comment,
+        "test": test_page,
     }
 
 
