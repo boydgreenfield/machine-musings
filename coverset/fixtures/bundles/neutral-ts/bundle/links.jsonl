@@ -1,0 +1,2 @@
+{"test": "tests/pricing.test.ts > applyDiscount > takes 10% off", "invariant": "discount_never_negative"}
+{"test": "tests/rates.test.ts > rateFor > charges extra weight above a kilogram", "invariant": "shipping_cost_monotone"}

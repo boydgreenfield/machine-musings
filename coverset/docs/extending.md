@@ -145,49 +145,47 @@ Designed, not built: `forge/gitlab.py` and a Bitbucket adapter.
 
 ## Adding a language
 
-A language adapter tells coverset how to build the test environment, run one shard, read its bundle, and index functions.
+A new language does not need coverset to run its tests. The repository's own test runner runs them with a reporter that writes a **neutral bundle**, and coverset ingests it like a Python shard: the facts store, patch coverage, tests per line, the treemap, input classes, the pages, the sticky comment and the static report all read the same model.
 
-### The protocol
+1. **Emit the neutral bundle** specified in [docs/neutral-bundle.md](neutral-bundle.md): `manifest.json` with your `language` and `producer`, `tests.jsonl`, `files.jsonl`, `coverage.jsonl`, and for a language coverset cannot parse, `functions.jsonl` (function regions with their hashes and type descriptors); `arcs.jsonl`, `shapes.jsonl` and `links.jsonl` when you have them. The JSON Schemas are in [docs/schema/](schema/).
+2. **Check it** with `coverset bundle validate PATH` (every problem with file, row, field and message; exit 1 when there is any) and `coverset bundle info PATH` (rows per file, and what the reader would drop or clip). `fixtures/bundles/neutral-ts/` is a complete, valid TypeScript example, written by `scripts/make_neutral_fixture.py`.
+3. **Register the language name** with the neutral adapter: `coverset.lang.neutral.register_language("go")` (`typescript` and `javascript` are registered already). `coverset.lang.adapter_for_language(name)` then returns a `NeutralAdapter`, and `coverset.lang.read_any_bundle` reads the bundle whatever its language, because the manifest says `coverset-neutral`.
 
-```python
-class LanguageAdapter(Protocol):
-    name: str
-    def detect(self, repo_root: Path) -> bool: ...
-    def env_spec(self, repo_root: Path, cfg: Mapping) -> EnvSpec: ...
-    def test_command(self, args_file: str, scores_file: str | None, out_dir: str, extra: Mapping) -> list[str]: ...
-    def read_bundle(self, bundle_dir: Path) -> NeutralBundle: ...
-    def changed_functions(self, path: str, old_src: str | None, new_src: str | None,
-                          added: set[int], removed: set[int]) -> list[FunctionChange]: ...
-    def index_functions(self, path: str, source: str) -> list[FunctionRegion]: ...
-    def shape_catalogue(self) -> Catalogue: ...
-```
+`NeutralAdapter` implements the `LanguageAdapter` protocol (`coverset/lang/base.py`) from the bundle alone: `read_bundle` is `coverset_model.io.read_bundle` under the untrusted-bundle limits, `index_functions` returns the shipped regions of a path, `changed_functions` compares the shipped regions of the base and head runs by qualname, ordinal and hashes (without base regions, every head region the diff touches is `modified`), and `shape_catalogue` reads the shipped type descriptors. `env_spec` and `test_command` raise `NotRunnableError`: coverset does not build the environment or start the runner for these languages, so the anticipatory scheduling of [docs/orchestrator.md](orchestrator.md) (first-test latency, likeliest failures first, sharding) stays Python-only; ingest, facts, pages and reports do not. Per path, the run's function regions are the adapter's own index of the head sources when it has one, else the regions the bundle shipped ([docs/data-model.md](data-model.md#the-neutralbundle-contract)).
 
-`read_bundle` returns a `NeutralBundle`, the language-neutral contract that `facts/ingest.py` consumes ([docs/data-model.md](data-model.md#the-neutralbundle-contract)). `index_functions` returns `FunctionRegion`s with the same meaning as for Python: `def_line` is the first line a call attributes to the function, `body_start` the first body statement, `func_key = blake2b(path \0 qualname \0 ordinal)`. The body-line rule ([docs/data-model.md](data-model.md#the-body-line-rule)) then works unchanged.
+### The TypeScript walk-through
 
-### Where Python is still assumed
+A Vitest or Jest reporter (`vitest-coverset`, say) writes the files like this:
 
-The protocol is the contract, but the committed orchestrator still calls Python-specific code in places. A second language needs these generalised:
-
-| Place | Assumption |
+| File | How |
 |---|---|
-| `orchestrator/planner.py` (`_collect`) | runs `python -m pytest --collect-only` on worker 0 |
-| `orchestrator/planner.py` (`_measured_sources`, `_changes`) | selects `.py` files |
-| `orchestrator/planner.py` (`_load_config`) | reads `[tool.coverset]` from `pyproject.toml` into a `CoversetConfig` |
-| `orchestrator/verdict.py` (`_ai_review`) | passes `language="python"` to the review bundle |
-| `db/models.py` | `repos.language` and `functions.language` exist and default to `python` |
+| `tests.jsonl` | from the runner's test results: `id` is `file > describe > name` (stable across runs), `outcome` maps `pass`/`fail`/`skip`/`todo` to `passed`/`failed`/`skipped`/`skipped`, a test that never ran (bail, shard cancelled) has `outcome: null`; `fail_sig` hashes the error class and the top in-repo stack frame (file and line), never the message; `message` is the error text, redacted, at most 8 KiB; `property: true` for fast-check properties |
+| `coverage.jsonl` | per-test lines. With `node:inspector`, open a session, call `Profiler.startPreciseCoverage({callCount: true, detailed: true})` once and `Profiler.takePreciseCoverage()` in the reporter's after-each hook: each take returns the block ranges executed since the previous one, so the delta is that test's coverage; map byte offsets to generated lines and through the source map to source lines, then keep the lines that start a statement. With Istanbul (`babel-plugin-istanbul`, or Vitest's `istanbul` provider), snapshot and reset the `__coverage__` counters around each test instead: the statement map's `start.line` of every statement whose counter moved. Everything before the first test (module loading, top-level `describe` bodies) goes under `<import>`. |
+| `files.jsonl` | Istanbul's statement map (first line of each statement) gives `statements`; its branch map gives `branches`, one `[branch line, target first line]` pair per target |
+| `arcs.jsonl` | the branch-map targets whose counters are non-zero over the whole run |
+| `functions.jsonl` | regions from the TypeScript compiler API (`ts.createSourceFile`, walk `FunctionDeclaration`, `MethodDeclaration`, `ArrowFunction` assigned to a name, `ClassDeclaration`) or tree-sitter-typescript: `qualname` follows the class and nesting path (`Cart.addItem`, `outer.<locals>.inner` style is not required, but one convention per producer), `ordinal` separates overloads, `def_line` is the first decorator or the `function`/method line, `body_start` the first statement of the body, `end_line` the closing brace; `body_hash`/`sig_hash` hash the printed body and signature without comments and whitespace; `types` from the checker (below). `key` may be left out (Node's `crypto` has no 8-byte BLAKE2b; the reader computes it). |
+| `shapes.jsonl` | a small instrumentation pass (an SWC or Babel plugin, or a Vite transform) wraps each function's entry and return, computes the shape key of every argument (table below) and of `this` (as `<receiver>`), and aggregates `(function, parameter, shape key, caller)` rows with sample counts, the tests seen, and one redacted `example` (at most 200 characters) each; sampling stops after a cap (say 64 calls without a new shape or 2,048 calls) and the `sampling` row says `truncated: true, cap: "sample"` |
+| `links.jsonl` | from a tag or annotation convention the suite already uses for invariants (`test("...", {meta: {invariant: "cents_conserved"}})`) |
+| `manifest.json` | `{"format": "coverset-neutral", "version": 1, "language": "typescript", "producer": {"name": "vitest-coverset", "version": "..."}, "created_at": ..., "shard": ..., "meta": {"runner": "vitest", ...}}` |
 
-### The TypeScript route (designed, not built)
+**Values to shape tokens.** The shape-key vocabulary is the value vocabulary of [docs/neutral-bundle.md](neutral-bundle.md#shape-keys); the reporter computes the same features in JavaScript:
 
-The plan's route for `lang/typescript.py`, a Jest or Vitest adapter:
+| JavaScript value | Type token | Features |
+|---|---|---|
+| `true`, `false` | `bool` | `true` / `false` |
+| a number with `Number.isInteger(n)` | `int` | `neg`/`zero`/`pos`, `big` beyond ±2³¹ |
+| any other number | `float` | `nan`; `inf` (+ `inf-neg`); else `neg`/`zero`/`pos` (and `integral` never, since integral numbers are `int`) |
+| `bigint` | `int` | as for numbers |
+| a string | `str` | `len:<bucket>` (UTF-16 length is fine), `empty`, `whitespace`, `ascii`/`unicode`, `ws-edge`, `digits`, `kind:...` by the same regular expressions as `pytest_coverset/features.py` |
+| `null`, `undefined` | `NoneType` | none |
+| an array | `list` | `len`, `elem:<type or mixed>`, the numeric summaries, `order`, `dups`, `pair` over the first 32 elements |
+| a plain object, a `Map` | `dict` | `len`, `elem` (values), `key` (keys) |
+| a `Set` | `set` | `len`, `elem`, numeric summaries |
+| `Uint8Array`, `Buffer`, `ArrayBuffer` | `bytes` | `len` |
+| a class instance | `obj:<module>.<ClassName>` | none (`dataclass`/`pydantic` are Python-only) |
+| a function | `obj:<module>.Function` | none |
 
-| Need | Approach |
-|---|---|
-| Per-test coverage | a reporter that opens a `node:inspector` session, calls `Profiler.startPreciseCoverage({callCount: true, detailed: true})` once, and `Profiler.takePreciseCoverage()` after each test. Each take returns block ranges with counts since the last take, so the delta is that test's coverage. Map byte offsets to lines with the source map. |
-| Function regions | tree-sitter-typescript, joined by declaration line to Istanbul's `fnMap` so names agree with what coverage tools report. `qualname` follows the class and nesting path; `ordinal` separates overloads. |
-| Argument shapes | an SWC or Babel instrumentation pass that wraps each function entry and return, computes the same shape keys (`str|ascii|kind:email/plain|len:11-100`, `list|elem:int|...`) in JavaScript, and writes `shapes.jsonl.gz` in the plugin's format. JavaScript values need their own type tokens (`number` has no int/float split; `undefined`), which means extending the shape grammar and the catalogue (below). |
-| Results and events | the reporter writes the same framed stdout events and a `results.jsonl` with the `TestRow` fields; `fail_sig` hashes the error class and the crash location. |
-| Bundle | a tarball that `read_bundle` converts into a `NeutralBundle` under the same untrusted-input limits as `facts/convert.py`. |
-| Environment | `env_spec` from the lockfile (`package-lock.json` or `pnpm-lock.yaml`), hashed with the reporter's version. |
+**Types to descriptors.** From the checker's declared type of each parameter: `number` → `float` (or `int` when the reporter knows the values are integral, e.g. a branded `Int` type), `bigint` → `int`, `string` → `str`, `boolean` → `bool`, `null`/`undefined`/`void` → `none`, `T | undefined` and optional parameters → a union with `none`, `T[]`/`Array<T>`/`ReadonlyArray<T>` → `list`, `[A, B]` → a fixed `tuple`, `Set<T>` → `set`, `Map<K, V>` and `Record<K, V>` → `dict`, string or number literal unions → `literal`, an `enum` → `enum` with its member names, classes and interfaces → `object`, `any`/`unknown` → `any`, an unannotated parameter → `null`. An enum value is recorded with an example that names the member (`Currency.EUR`) so its members become expected classes.
 
 ## Adding a review client
 
@@ -212,13 +210,13 @@ Register it in `ai/client.py` (`get_review_client`), add the mode to `AiMode` in
 An input class needs three things: a feature in the shape key (recorded in the worker), a rule that makes it expected, and a rule that marks it observed (both in the catalogue).
 
 1. **Record the feature** in `packages/pytest-coverset/src/pytest_coverset/features.py`. Add a token to the right `_*_features` function. Keep the safety rules: compute only for exact builtin types, never call user code, bound the work. Tokens are sorted into the key, so order does not matter. Add cases to `packages/pytest-coverset/tests/test_features.py`.
-2. **Accept it in the bundle reader.** `facts/convert.py` (`is_shape_key`) accepts any feature token without spaces or `|`, so a new feature passes; a new type token must be added to `_SHAPE_TYPE`.
-3. **Make it a class** in `src/coverset/analysis/shapes.py`:
+2. **Accept it in the bundle readers.** `facts/convert.py` (`is_shape_key`) accepts any feature token without spaces or `|`, so a new feature passes there; a new type token must be added to `_SHAPE_TYPE`. The neutral reader checks the version-1 vocabulary, so add the token to `FEATURES` (and a new type token to `SCALAR_TYPES` or `CONTAINER_TYPES`) in `packages/coverset-model/src/coverset_model/shape_keys.py`, and to the "Shape keys" list of [docs/neutral-bundle.md](neutral-bundle.md#shape-keys).
+3. **Make it a class** in `packages/coverset-model/src/coverset_model/catalogue.py`:
    - in `_shape_classes`, map the token to `(group, class)` for an observed value;
    - in `Catalogue._expected_rows`, add the class to the expected set, under a trigger that comes from data or the annotation (never unconditionally: a family should open only when the parameter's kind was seen);
    - in `_CLASS_TEXT`, give it a description and a Hypothesis strategy that produces such values.
-4. **Test it** in `tests/analysis/test_analysis_shapes.py`, and check `render_markdown` and `coverset shapes FUNC --markdown` show it.
+4. **Test it** in `tests/analysis/test_analysis_shapes.py` (or `packages/coverset-model/tests/`), and check `render_markdown` and `coverset shapes FUNC --markdown` show it.
 
 Changing an existing token changes shape keys, and with them the ids in every repository's `dictionary.json`. Old runs keep the old keys; `shapes_for_function` pools by `shape_id`, so a renamed token shows as a new shape rather than merging with history.
 
-A whole new string kind (say, phone numbers) goes into `string_kind` in `features.py`. The order of the checks there is the precedence, and `_STR_KINDS` or a new family in `analysis/shapes.py` turns it into classes.
+A whole new string kind (say, phone numbers) goes into `string_kind` in `features.py` (and `STRING_KINDS` in `shape_keys.py`). The order of the checks there is the precedence, and `_STR_KINDS` or a new family in `coverset_model/catalogue.py` turns it into classes.

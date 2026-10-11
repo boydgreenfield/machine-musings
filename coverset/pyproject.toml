@@ -27,6 +27,7 @@ dependencies = [
   "modal==1.6.1",
   "anthropic>=1.13,<2",
   "pytest-coverset",
+  "coverset-model",
 ]
 
 [project.scripts]
@@ -50,6 +51,7 @@ exclude = ["examples/*"]
 
 [tool.uv.sources]
 pytest-coverset = { workspace = true }
+coverset-model = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -73,7 +75,7 @@ timeout = 600
 [tool.ruff]
 line-length = 110
 target-version = "py313"
-src = ["src", "packages/pytest-coverset/src", "tests"]
+src = ["src", "packages/pytest-coverset/src", "packages/coverset-model/src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

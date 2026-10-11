@@ -4,7 +4,7 @@ Line and branch coverage say which lines ran. They do not say which kinds of val
 
 **Input-class coverage** is observed ÷ expected classes over a function's parameters. That is each-choice coverage: every class should be hit at least once; combinations are not counted.
 
-The catalogue lives in `src/coverset/analysis/shapes.py` (`Catalogue`). The same derivation serves the ingest (`facts.ingest.finalize_run` calls the catalogue once per function), the verdict, the CLI (`coverset shapes`) and the UI.
+The catalogue lives in the language-neutral model package, `packages/coverset-model/src/coverset_model/catalogue.py` (`Catalogue`, re-exported unchanged by `coverset.analysis.shapes`). It reads shape keys and **type descriptors** ([docs/neutral-bundle.md](neutral-bundle.md#type-descriptors)), never a language's own type syntax: Python annotation text is converted to a descriptor first (`coverset_model.python_types.descriptor`), and a TypeScript bundle ships descriptors in `functions.jsonl`. The same derivation serves the ingest (`facts.ingest.finalize_run` calls the catalogue once per function), the verdict, the CLI (`coverset shapes`), the UI and the static report.
 
 ## The catalogue
 
@@ -85,7 +85,7 @@ Containers are summarised over their first 32 elements, read by index (`list`, `
 
 ## How expected classes are derived
 
-For each parameter the catalogue takes the observed shapes and the annotation text (from `ast.unparse`, collected by `annotation_index` over the head commit's sources), then:
+For each parameter the catalogue takes the observed shapes and the declared type as a descriptor. For Python the descriptor comes from the annotation text (`ast.unparse`, collected by `annotation_index` over the head commit's sources, or by `function_catalogue` from the function's own file) through `python_types.descriptor`, with the `Enum` classes of the sources resolved; for any other language it is the one the bundle shipped. Then:
 
 1. **Observed kinds open families.** An observed `int` makes negative, zero and positive expected. An email-shaped string makes the five email sub-classes expected. A family whose kind never appeared stays closed: a parameter that only ever saw plain words is not charged for missing emails.
 2. **The annotation adds classes the data cannot show.**
@@ -103,7 +103,26 @@ For each parameter the catalogue takes the observed shapes and the annotation te
 | `Annotated[A, ...]` | whatever `A` adds |
 | a string annotation (`"list[int]"`) | parsed, then as above |
 
-Parameters named in the signature are listed even when never observed, because their annotation alone can make classes expected. The pseudo-parameters `return` and `<receiver>` are recorded but never counted as inputs.
+The same rules, stated on descriptors (`coverset_model.types.expected_families`, which reduces a descriptor to what the catalogue reads; a union is read arm by arm, nested unions flattened):
+
+| Type descriptor | Expected classes it adds |
+|---|---|
+| `{"kind": "union", "arms": [A, B, ...]}` | one `type` class per arm that is not a `literal`, named by the arm (`int`, `str`, `none`, `list`, the short name of an `enum` or `object`), when there are two or more arms; plus what each arm adds |
+| an arm `{"kind": "none"}` | `none` |
+| `{"kind": "bool"}` | `true`, `false` |
+| `{"kind": "float"}` | `nan`, `inf`, once the number family is open (a number was observed) |
+| `{"kind": "int"}`, `"str"`, `"bytes"` | nothing by itself: the number, string and bytes families open from observed values |
+| `{"kind": "list" \| "set" \| "frozenset", "elem": E}`, `{"kind": "tuple", "elem": E}` | once a container was observed: `zero-element`, `negative-element`, `all-zero`, `sum-zero` when every arm of `E` is `int` or `float`, and `nan-element` when one is `float`; `inverted-pair` when `E` is a fixed 2-tuple of numbers |
+| `{"kind": "list"}` or `{"kind": "tuple"}` (any elements) | once a container was observed: `unsorted`, `duplicates` when the declared or observed elements are comparable (`int`, `float`, `str`, `bytes`, `tuple`) |
+| `{"kind": "tuple", "elems": [...]}` (fixed size), `{"kind": "dict", ...}` | no element classes |
+| `{"kind": "literal", "values": [v, ...]}` | one class per value, named by its Python `repr` (`'a'`, `1`, `True`, `None`) |
+| `{"kind": "enum", "name": "Role", "members": [...]}` | `Role.<member>` per member, once some observed example names a member |
+| `{"kind": "object", ...}`, `{"kind": "any"}` | nothing by itself |
+| `null` (unannotated) | nothing; the parameter is never reported at 100% |
+
+Python annotations map onto descriptors as `int | None` → union of `int` and `none`; `Optional[X]` → `X`'s arms plus `none`; `Literal[...]` → literal; `list`/`List`/`Sequence`/`MutableSequence` → list; `tuple[X, ...]` → variable-length tuple, `tuple[X, Y]` → fixed; `set`/`Set`/`AbstractSet`/`MutableSet`/`Iterable`/`Collection`/`Iterator` → set; `frozenset`/`FrozenSet` → frozenset; `dict`/`Dict`/`Mapping`/`MutableMapping` → dict; `Annotated[X, ...]` → `X`; `Any` → any; an `Enum` class of the sources → enum; any other name → object. Every annotation therefore expects the classes it did when the catalogue read annotation text, with two exceptions: a `type` class of a union arm written with an abstract name is now named by its descriptor kind (`Sequence[int] | None` expects `list` and `none`, which an observed list can satisfy, where it used to expect an unobservable `Sequence`), and `Literal` values that are not JSON scalars (`b"x"`) are dropped (`packages/coverset-model/tests/test_model_types.py` pins the rest against the previous output).
+
+Parameters named in the signature are listed even when never observed, because their declared type alone can make classes expected. The pseudo-parameters `return` and `<receiver>` are recorded but never counted as inputs.
 
 3. **Unannotated parameters are never 100%.** When everything expected was observed but some observed parameter has no annotation, the percentage is withheld (`pct = None`) and the note says, for example, `text unannotated: observed {str}`. Without an annotation coverset cannot know which classes the author meant to accept (`test_unannotated_params_are_never_100_percent`). The per-function numbers stored at ingest (`func_input_cov.blocks_expected` and `blocks_observed`) have no room for this rule; `Catalogue.unannotated` names the parameters it applies to.
 
@@ -118,7 +137,7 @@ A missing class is labelled in one of two ways (`FunctionInputCov.missing_reason
 | `never exercised` | no test of the function hit the sample cap: the tracer saw every call, so no test passed a value of that class |
 | `not observed in N sampled calls (K tests hit the sample cap)` | sampling of the function was capped ([adaptive sampling](instrumentation.md#adaptive-sampling-and-the-full-trace-list)), so a later call might have carried the class |
 
-K has one definition everywhere (`analysis/shapes.cap_hits`: the ingest's `func_sampling` and `func_input_cov`, the verdict, the sticky comment and the UI): the tests that called the function (lines in its body) but were never sampled, because the cap had already stopped sampling, with a floor of 1 for the test during which the cap was hit. Either cap counts: the adaptive one (`cap: "sample"` in the plugin's `func_sampling` rows) and the full-trace safety cap (`cap: "full"`).
+K has one definition everywhere (`coverset_model.catalogue.cap_hits`, re-exported as `analysis/shapes.cap_hits`: the ingest's `func_sampling` and `func_input_cov`, the verdict, the sticky comment and the UI): the tests that called the function (lines in its body) but were never sampled, because the cap had already stopped sampling, with a floor of 1 for the test during which the cap was hit. Either cap counts: the adaptive one (`cap: "sample"` in the plugin's `func_sampling` rows) and the full-trace safety cap (`cap: "full"`).
 
 Functions in the PR's changed files and every invariant target are traced without the adaptive cap, so their missing classes are `never exercised` unless they reach the much higher full-trace safety cap (`test_missing_reason_says_never_exercised_only_without_a_sample_cap`).
 
@@ -126,7 +145,7 @@ The PR comment and check summary list only `never exercised` classes of function
 
 ## Hypothesis hints
 
-Every class carries a description and a Hypothesis strategy that produces values of it (`_CLASS_TEXT` in `analysis/shapes.py`). The CLI prints the strategy for each missing class; the PR comment puts one snippet per class in a `<details>` block.
+Every class carries a description and a Hypothesis strategy that produces values of it (`_CLASS_TEXT` in `coverset_model/catalogue.py`). The CLI prints the strategy for each missing class; the PR comment puts one snippet per class in a `<details>` block.
 
 | Class | Strategy |
 |---|---|

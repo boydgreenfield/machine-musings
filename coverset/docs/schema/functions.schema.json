@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coverset.dev/schema/neutral/v1/functions.schema.json",
+  "title": "functions.jsonl: one function region",
+  "type": "object",
+  "required": [
+    "path",
+    "qualname",
+    "ordinal",
+    "def_line",
+    "body_start",
+    "end_line",
+    "body_hash",
+    "sig_hash",
+    "params",
+    "kind"
+  ],
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "qualname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "ordinal": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "def_line": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "body_start": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "end_line": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "body_hash": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "sig_hash": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "params": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "maxItems": 1024
+    },
+    "kind": {
+      "enum": [
+        "function",
+        "method",
+        "class",
+        "module"
+      ]
+    },
+    "types": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/descriptor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "descriptor": {
+      "description": "A type descriptor (docs/neutral-bundle.md, 'Type descriptors').",
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "int",
+            "float",
+            "str",
+            "bool",
+            "bytes",
+            "none",
+            "list",
+            "set",
+            "frozenset",
+            "tuple",
+            "dict",
+            "union",
+            "literal",
+            "enum",
+            "object",
+            "any"
+          ]
+        },
+        "elem": {
+          "$ref": "#/$defs/descriptor"
+        },
+        "elems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/descriptor"
+          },
+          "maxItems": 256
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor"
+        },
+        "arms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/descriptor"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "maxItems": 256
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

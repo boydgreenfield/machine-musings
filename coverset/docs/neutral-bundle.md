@@ -9,13 +9,19 @@ downstream (the facts store, the input-class catalogue, the pages, the sticky co
 report) reads only this model, through `coverset_model` (`packages/coverset-model`, no
 dependencies, Python 3.12+).
 
-This page is the specification. `coverset bundle validate DIR` checks a bundle against it, and
-`docs/schema/` holds the JSON Schemas it enforces. Version 1.
+This page is the specification. `coverset bundle validate PATH` checks a bundle against it (and
+`coverset bundle info PATH` summarises one), and [`docs/schema/`](schema/) holds the JSON Schemas
+of every file, generated from `coverset_model.schema` (`uv run python -m coverset_model schemas
+docs/schema`; a test fails when they drift). Version 1.
 
 ## Layout
 
-A bundle is a directory (or a `tar.gz` of one, flat members) with these files. Every `.jsonl`
-file may instead be `.jsonl.gz`. Encoding is UTF-8; JSON strings never contain lone surrogates.
+A bundle is a directory (or a `tar.gz` of one, flat members: regular files only, no
+directories, links or devices) with these files. Every `.jsonl` file may instead be `.jsonl.gz`,
+but not both. Encoding is UTF-8; JSON strings never contain lone surrogates, and numbers are
+finite (no `NaN` or `Infinity`). Other files in the directory are ignored. Every row is one JSON
+object per line; fields not listed in the schemas are reported by `validate` and ignored by
+readers (producer-specific detail goes in `manifest.json`'s `meta`).
 
 | File | Required | Rows |
 |---|---|---|
@@ -24,15 +30,15 @@ file may instead be `.jsonl.gz`. Encoding is UTF-8; JSON strings never contain l
 | `files.jsonl` | yes | one per measured source file (static facts) |
 | `coverage.jsonl` | yes | one per (test, file) with executed lines |
 | `arcs.jsonl` | no | one per file: executed branch arcs over the whole run |
-| `functions.jsonl` | depends | one per function region; required unless the language adapter derives regions from sources (Python does) |
+| `functions.jsonl` | depends | one per function region; required unless the language adapter derives regions from sources (Python does): `validate` reports a missing one, and the run then has no regions for those files |
 | `shapes.jsonl` | no | observation and sampling rows of the shape tracer |
 | `links.jsonl` | no | `{"test", "invariant"}` pairs from `@pytest.mark.invariant`-style markers |
 
-Paths are POSIX, relative to the repository root, never absolute, never containing `..` or a
-drive letter, at most 512 characters. Test ids are the framework's own (pytest nodeids, Jest's
-`file > describe > name`), at most 512 characters, unique within the bundle. Line numbers are
-1-based. A bundle is untrusted input: readers apply the limits in `docs/security.md` section 7
-(file sizes, line lengths, row counts, gzip ratios) and refuse anything outside them.
+Paths are POSIX, relative to the repository root, never absolute, never containing `.`, `..` or
+empty segments, a backslash, a control character or a drive letter, at most 512 characters. Test
+ids are the framework's own (pytest nodeids, Jest's `file > describe > name`), at most 512
+characters, unique within the bundle. Line numbers are 1-based and at most 1,000,000. A bundle is
+untrusted input; see [Reading a bundle](#reading-a-bundle) for the limits readers apply.
 
 ### `manifest.json`
 
@@ -43,10 +49,14 @@ drive letter, at most 512 characters. Test ids are the framework's own (pytest n
  "meta": {"tracer": "CTracer", "tool_id": 4, "python": "3.13.0"}}
 ```
 
-`format` and `version` are checked first; an unknown major version is refused. `language` is a
-lowercase identifier (`python`, `typescript`, `javascript`, ...). `shard` is the shard index when
-the run was split, else `null`. `meta` is free-form producer detail that is stored verbatim in
-the run's ingest record (the Python plugin puts its tracer, tool id, warnings and caps there).
+`format` and `version` are checked first; `version` is an integer and any version other than 1
+is refused. `language` is a lowercase identifier (`python`, `typescript`, `javascript`, ...;
+`^[a-z][a-z0-9_+-]{0,31}$`), `producer` names the writer (`name` up to 128 characters, `version`
+up to 64). `created_at` is an ISO 8601 timestamp or `null`. `shard` is the shard index when the
+run was split, else `null`. `meta` is free-form producer detail that becomes the in-memory
+bundle's `meta` (the Python plugin puts its tracer, tool id, warnings and caps there); the keys
+`bundle` and `convert` are the reader's own (below) and are never written. `manifest.json` is at
+most 1 MiB, and any schema violation in it refuses the bundle.
 
 ### `tests.jsonl`
 
@@ -57,12 +67,15 @@ the run's ingest record (the Python plugin puts its tracer, tool id, warnings an
  "property": false, "start": 1760209445.1, "stop": 1760209445.11}
 ```
 
-`outcome` is one of `passed`, `failed`, `error`, `skipped`, `xfailed`, `xpassed`, or `null` for a
-test that was collected but never ran (cancelled shard, stop file). `failed_phase` is `setup`,
-`call`, `teardown` or `null`. `fail_sig` is a stable hash of the failure's exception type and the
-crash location (never of the message), so the same failure has the same signature across runs.
-`message` is the failure text, at most 8 KiB. `property` marks property-based tests (Hypothesis,
-fast-check). `markers` and `invariants` may be empty.
+`id`, `file` and `outcome` are required; every other field may be omitted (`null`, empty or
+`false`). `outcome` is one of `passed`, `failed`, `error`, `skipped`, `xfailed`, `xpassed`, or
+`null` for a test that was collected but never ran (cancelled shard, stop file). `<import>` is
+not a test id. `failed_phase` is `setup`, `call`, `teardown` or `null`. `fail_sig` is a stable
+hash of the failure's exception type and the crash location (never of the message), so the same
+failure has the same signature across runs; readers cut it at 64 characters. `message` is the
+failure text, cut at 8 KiB (8,192 characters). `property` marks property-based tests
+(Hypothesis, fast-check). `markers` and `invariants` may be empty. A test id listed twice keeps
+its first row.
 
 ### `files.jsonl`
 
@@ -74,7 +87,10 @@ fast-check). `markers` and `invariants` may be empty.
 `statements` are the lines that can execute (coverage.py's statements; Istanbul's statement map
 first lines), `excluded` the ones the producer excluded from measurement, `branches` the possible
 branch arcs as `[from, to]` line pairs (coverage.py's arcs; for Istanbul, each branch location to
-each target's first line). A file with no statements is still listed so its functions have a home.
+each target's first line; a negative target is an exit, as in coverage.py). `path` and
+`statements` are required; `n_lines` defaults to the largest line the row mentions, and statements
+beyond `n_lines` are dropped. A file with no statements is still listed so its functions have a
+home.
 
 ### `coverage.jsonl`
 
@@ -86,8 +102,10 @@ each target's first line). A file with no statements is still listed so its func
 
 One row per (test, file) with the sorted executed lines; `<import>` is the reserved test id for
 code that ran outside any test (module import, collection). Lines must be statements of that
-file (readers drop the rest). Optional `"arcs": [[from, to], ...]` per row holds the test's
-executed branch arcs.
+file (readers drop the rest, so a module's docstring line or an excluded `def` recorded at import
+time does not survive). A file missing from `files.jsonl` keeps its lines and is reported. Two
+rows for the same (test, file) are merged. Optional `"arcs": [[from, to], ...]` per row holds the
+test's executed branch arcs (validated, not read by coverset today).
 
 ### `arcs.jsonl`
 
@@ -101,21 +119,27 @@ are not all here is partial.
 ### `functions.jsonl`
 
 ```json
-{"key": "7c1d2a9e5b304f11", "path": "src/ledger/billing/allocate.py", "qualname": "allocate_cents",
+{"key": "89dd83c15378aa33", "path": "src/ledger/billing/allocate.py", "qualname": "allocate_cents",
  "ordinal": 0, "def_line": 8, "body_start": 10, "end_line": 24, "body_hash": "a1b2c3d4",
  "sig_hash": "e5f60718", "params": ["total_cents", "weights"], "kind": "function",
  "types": {"total_cents": {"kind": "int"}, "weights": {"kind": "list", "elem": {"kind": "float"}},
            "return": {"kind": "list", "elem": {"kind": "int"}}}}
 ```
 
-`key` is `blake2b(path + "\0" + qualname + "\0" + ordinal, digest_size=8)` in hex; `ordinal`
-numbers same-named regions in one file in source order (overloads, redefinitions). `def_line` is
-the first line of the declaration (decorators included), `body_start` the first body statement
-after a leading docstring, `end_line` the last line. `body_hash` and `sig_hash` are the
-producer's stable hashes of the body and the signature (formatting-insensitive where the language
-allows); readers compare them only with hashes from the same producer. `kind` is `function`,
-`method`, `class` or `module`. `types` maps parameter names (and `return`) to **type
-descriptors** (below) or `null` when unannotated; it may be omitted.
+`key` is `blake2b(path + "\0" + qualname + "\0" + ordinal, digest_size=8)` in hex. It is
+optional, because readers compute it themselves (a producer whose platform has no 8-byte BLAKE2b,
+such as Node's `crypto`, leaves it out); when present and different, `validate` reports it and the
+reader uses its own. `ordinal` numbers same-named regions in one file in source order (overloads,
+redefinitions); `(path, qualname, ordinal)` is unique. `def_line` is the first line of the
+declaration (decorators included), `body_start` the first body statement after a leading
+docstring, `end_line` the last line, with `def_line <= body_start <= end_line`. `body_hash` and
+`sig_hash` are the producer's stable hashes of the body and the signature (formatting-insensitive
+where the language allows, at most 128 characters); readers compare them only with hashes from
+the same producer. `kind` is `function`, `method`, `class` or `module`. `params` lists the
+parameter names in order (`*args`-style names may keep their prefix). `types` maps parameter
+names (and `return`) to **type descriptors** (below) or `null` when unannotated; it may be
+omitted, and names that are not parameters are ignored. The path should be listed in
+`files.jsonl`.
 
 ### `shapes.jsonl`
 
@@ -141,7 +165,20 @@ line]` for an in-repo caller or `{"test": id}` when the test called the function
 during which it was seen; `example` is a redacted, shortened value repr (at most 200 characters)
 and `example_test` the test it came from. A `sampling` row per traced function gives the total
 calls, the tests that were sampled, whether sampling stopped early (`truncated`) and which cap
-stopped it (`sample`, `full` or `null`).
+stopped it (`sample`, `full` or `null`). A non-null `cap` needs `truncated: true`; `truncated: true`
+with `cap: null` means the producer did not say which cap (a converted pytest-coverset bundle).
+`obs` rows need `kind`, `func`, `param`, `shape`, `caller`, `samples` and `tests`; `truncated`
+defaults to `false`, `example` and `example_test` to `null`. Examples are cut at 200 characters.
+
+### `links.jsonl`
+
+```json
+{"test": "tests/test_allocate.py::test_split", "invariant": "cents_conserved"}
+```
+
+One row per (test, invariant) pair; the reader adds the invariant to that test's `invariants`
+(the union with the ones listed in `tests.jsonl`). A row naming a test missing from `tests.jsonl`
+is dropped.
 
 ### Shape keys
 
@@ -155,7 +192,9 @@ canonical. Type tokens are the value vocabulary, not the language's type names: 
 bytes `len:<bucket>`; containers `len:<bucket>`, `elem:<type or mixed>`, `key:<type or mixed>`,
 `order:<sorted|reverse|unsorted|n/a>`, `dups`, `any_zero|any_neg|any_nan|any_inf|all_zero|sum_zero`,
 `pair:<lt|eq|gt|mixed>`; objects `dataclass`, `pydantic`. `coverset_model.shape_keys` parses and
-validates keys; `docs/input-classes.md` explains how input classes are derived from them.
+validates keys against this vocabulary (each type takes only its own features, each `prefix:`
+at most once, `elem:` and `key:` a type token or `mixed`), and a row whose key does not validate is
+dropped; `docs/input-classes.md` explains how input classes are derived from them.
 
 A TypeScript reporter maps JavaScript values onto this vocabulary: integral numbers → `int`,
 other numbers → `float` (`NaN` → `float|nan`), strings → `str`, booleans → `bool`, `null` and
@@ -170,17 +209,22 @@ descriptor is a small JSON tree, the same for every language:
 | Descriptor | Meaning |
 |---|---|
 | `{"kind": "int"}`, `"float"`, `"str"`, `"bool"`, `"bytes"`, `"none"` | a scalar type |
-| `{"kind": "list", "elem": D}`, `{"kind": "set", "elem": D}`, `{"kind": "tuple", "elems": [D, ...]}` | containers |
-| `{"kind": "dict", "key": D, "value": D}` | mappings |
+| `{"kind": "list", "elem": D}`, `{"kind": "set", "elem": D}`, `{"kind": "frozenset", "elem": D}` | collections; `elem` is omitted when the declaration names no element type (bare `list`) |
+| `{"kind": "tuple", "elems": [D, ...]}`, `{"kind": "tuple", "elem": D}` | a fixed-size tuple, or a variable-length one (`tuple[int, ...]`); neither field for a bare tuple |
+| `{"kind": "dict", "key": D, "value": D}` | mappings (either field may be omitted) |
 | `{"kind": "union", "arms": [D, ...]}` | any of the arms (`Optional[X]` is a union with `none`) |
-| `{"kind": "literal", "values": [v, ...]}` | one of the listed JSON values |
+| `{"kind": "literal", "values": [v, ...]}` | one of the listed JSON scalars |
 | `{"kind": "enum", "name": "Role", "members": ["admin", "member"]}` | a closed enumeration |
 | `{"kind": "object", "name": "ledger.util.money.Money"}` | a class or interface |
-| `{"kind": "any"}` | unknown or unannotated |
+| `{"kind": "any"}` | unknown (an unannotated parameter is `null`, not `any`) |
 
-`coverset_model.python_types.descriptor(annotation_text)` converts a Python annotation to a
-descriptor (`int | None` → union of `int` and `none`; `Literal["a", "b"]` → literal; an Enum
-subclass resolved from the sources → enum). A TypeScript reporter does the same from the
+Descriptors carry no other fields, nest at most 32 levels, and hold at most 256 arms, elements,
+values or members per node; names are 1 to 512 characters.
+
+`coverset_model.python_types.descriptor(annotation_text, enums=...)` converts a Python
+annotation to a descriptor (`int | None` → union of `int` and `none`; `Literal["a", "b"]` →
+literal; `Sequence[int]` → list; `Iterable[int]` → set; `Mapping[K, V]` → dict; an Enum subclass
+resolved from the sources → enum). A TypeScript reporter does the same from the
 TypeScript type (`number` → `float` unless the declared values are integral, `string` → `str`,
 `T | undefined` → union with `none`, string-literal unions → literal, `enum` → enum, interfaces
 and classes → object). `docs/input-classes.md` lists which classes each descriptor expects.
@@ -188,13 +232,46 @@ and classes → object). `docs/input-classes.md` lists which classes each descri
 ## Reading a bundle
 
 `coverset_model.io.read_bundle(path)` returns a `NeutralBundle` (the same in-memory contract the
-facts store already consumes), after validating the manifest and every row; `validate(path)`
-returns the problems without building anything. The Python adapter's own on-disk bundle
-(`coverage.sqlite`, `coverage.json`, `shapes.jsonl.gz`, `results.jsonl`, ...) is converted to the
-same `NeutralBundle` by `coverset.facts.convert.read_python_bundle`; `pytest-coverset` can also
-write the neutral files directly (`--coverset-neutral`). A bundle whose `manifest.json` says
-`coverset-neutral` is read by the neutral adapter whatever its language; the orchestrator picks
-the reader by the manifest.
+facts store already consumes) for a directory or a `tar.gz`; `validate(path)` returns every
+problem (file, row, field, message) without building anything and never raises;
+`write_bundle(bundle, dir, manifest=...)` writes one and `pack(dir, archive)` archives it
+reproducibly. The Python adapter's own on-disk bundle (`coverage.sqlite`, `coverage.json`,
+`shapes.jsonl.gz`, `results.jsonl`, ...) is converted to the same `NeutralBundle` by
+`coverset.facts.convert.read_python_bundle`; `coverset bundle convert PATH --to DIR` writes it as
+neutral files, and a later `pytest-coverset` writes them directly (`--coverset-neutral`).
+`coverset.lang.read_any_bundle(path)` reads either: a bundle whose `manifest.json` says
+`coverset-neutral` is read by the neutral reader whatever its language, anything else by the
+Python converter; the orchestrator's ingest uses it.
+
+A bundle is untrusted. The reader **refuses** it (`BundleRejected`, a `BundleError` inside
+coverset) when:
+
+| Limit | Default (`coverset_model.io.Limits`, same names as `BundleLimits`) |
+|---|---|
+| total size of the known files, or of the archive | 200 MiB |
+| any gzip stream (the archive, each `.jsonl.gz`) | 10 × its compressed size, at least 16 MiB, at most 500 MiB |
+| archive members | 256, flat names, regular files only |
+| `manifest.json` | 1 MiB; `format`, `version` and the schema must hold |
+| distinct test ids, paths, shape keys | 50,000, 50,000, 20,000 |
+| function regions | 500,000 |
+| (test, file, line) coverage cells | 25,000,000 |
+| a required file is missing, a file is a symlink or device, both `.jsonl` and `.jsonl.gz` exist | refused |
+
+Everything else is per row: a row that breaks its schema, names an unsafe path, reuses a test id
+or the reserved `<import>` id, has a line longer than 1 MiB, invalid UTF-8, a lone surrogate or a
+non-finite number, a shape key outside the grammar, a function whose lines do not nest or whose
+`(path, qualname, ordinal)` repeats, is **dropped**; executed lines that are not statements are
+dropped from their row; messages, `fail_sig` and examples are **cut**. Each is counted in
+`meta["convert"]["dropped"]` as `<file>.<code>` (`tests.path`, `coverage.not_statement`, ...).
+With a head tree (`allowed_paths`), rows naming any other path are dropped too
+(`<file>.paths_not_in_head`).
+
+The reader fills two `meta` keys itself: `meta["bundle"]` (the manifest's `format`, `version`,
+`language`, `producer`, `created_at`, `shard`) and `meta["convert"]` (`bundle_sha256` over the
+files read, the file names, rows per file, the drop counts, `bundle_bytes`). `write_bundle` writes
+`conform(bundle)`, what the format keeps of an in-memory bundle (tests sorted by id, every test
+with a result also collected, non-statement lines dropped, long texts cut), so
+`read_bundle(write_bundle(b)) == conform(b)` apart from those two keys.
 
 ## What a producer must get right
 

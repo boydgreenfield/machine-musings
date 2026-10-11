@@ -247,23 +247,54 @@ The same pass (`orchestrator/history.py`, `collect_garbage`) runs in-process: `s
 
 ## The NeutralBundle contract
 
-`facts/ingest.py` consumes only `coverset.lang.base.NeutralBundle`, never a pytest-specific file. A language adapter's `read_bundle(bundle_dir)` returns one per shard:
+`facts/ingest.py` consumes only `NeutralBundle`, never a pytest-specific file. The dataclasses live
+in the dependency-free `coverset_model` package (`packages/coverset-model`,
+`coverset_model.neutral`) and `coverset.lang.base` re-exports them. One per shard:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `meta` | `dict` | free-form; `meta["convert"]["bundle_sha256"]` is the bundle's identity when present |
+| `meta` | `dict` | free-form; `meta["convert"]["bundle_sha256"]` is the bundle's identity when present; a neutral bundle's reader adds `meta["bundle"]` (format, version, language, producer, created_at, shard) |
 | `collected` | `tuple[CollectedItem, ...]` | `nodeid`, `file`, `line`, `markers`, `invariant_ids`, `hypothesis` |
 | `tests` | `tuple[TestRow, ...]` | `nodeid`, `file`, `outcome`, `duration_s`, `failed_phase`, `fail_sig`, `longrepr`, `start`, `stop` |
 | `coverage` | `dict[str, dict[str, tuple[int, ...]]]` | test id → path → executed statement first lines; the key `<import>` holds lines run outside tests |
 | `static` | `dict[str, StaticFile]` | `path`, `n_lines`, `statements`, `excluded`, `arcs_possible` |
 | `run_arcs` | `dict[str, tuple[tuple[int, int], ...]]` | path → executed branch arcs, union over tests |
 | `shapes` | `tuple[ShapeObs, ...]` | `func` triple, `param`, `shape_key`, `caller` (a triple or a test id), `samples`, `tests`, `truncated`, `example`, `example_test` |
-| `sampling` | `tuple[FuncSampling, ...]` | `func` triple, `calls`, `tests`, `truncated` |
+| `sampling` | `tuple[FuncSampling, ...]` | `func` triple, `calls`, `tests`, `truncated`, `cap` (`"sample"`, `"full"` or None) |
 | `durations` | `dict[str, float]` | seconds by test id |
+| `functions` | `tuple[FunctionRegion, ...]` | function regions the bundle ships (`functions.jsonl`); empty for a converted pytest-coverset bundle |
+| `types` | `Mapping[FuncTriple, Mapping[str, TypeDescriptor \| None]]` | declared type of each parameter and `return` per function triple (a read-only `FrozenMap`) |
 
-Paths are git-root-relative POSIX. Test ids may be any string up to 512 characters. Shape keys must follow the grammar in [docs/instrumentation.md](instrumentation.md#shape-keys); a new language either maps its values onto those type tokens or extends the catalogue ([docs/extending.md](extending.md#adding-a-language)).
+Paths are git-root-relative POSIX. Test ids may be any string up to 512 characters. Shape keys
+must follow the grammar in [docs/neutral-bundle.md](neutral-bundle.md#shape-keys).
 
-The plan also describes an on-disk neutral format (`tests.jsonl`, `coverage.jsonl`, `shapes.jsonl`, `invariant_links.jsonl`) that a Jest or Vitest reporter could write. That file format is **designed, not built**: today the contract is the in-memory dataclass, and a new adapter converts its own files into it.
+**The on-disk format is built.** [docs/neutral-bundle.md](neutral-bundle.md) specifies it
+(`manifest.json`, `tests.jsonl`, `files.jsonl`, `coverage.jsonl`, `arcs.jsonl`, `functions.jsonl`,
+`shapes.jsonl`, `links.jsonl`, each `.jsonl` optionally gzipped, as a directory or a flat
+`tar.gz`), [docs/schema/](schema/) holds its JSON Schemas, and `coverset_model.io` reads, validates
+and writes it. A worker's bundle is read by `coverset.lang.read_any_bundle`: a `manifest.json` that
+says `coverset-neutral` selects the neutral reader for any language, anything else is a
+pytest-coverset bundle for `facts/convert.read_python_bundle`. Both readers take the same
+`BundleLimits` (the neutral reader copies every field with a matching name into
+`coverset_model.io.Limits`) and the head tree as the path allow-list. The neutral reader refuses a
+bundle over the size, gzip-ratio, member, distinct-id, path, shape-key, function or cell limits,
+an unknown version or a missing required file (a `BundleError`, so the shard is recorded as failed
+and the run's coverage is partial, as for Python); it drops and counts every row that breaks the
+schema or the rules the schema cannot say (unsafe paths, repeated ids, lines that are not
+statements, function keys and line ranges, shape keys outside the grammar) under
+`meta["convert"]["dropped"]`, which the ingest log keeps. `coverset bundle validate`, `info` and
+`convert` expose the same checks on the command line.
+
+**Function regions.** The run's `functions` table (the body-line rule, `func_key`, the treemap,
+input-class coverage per function) needs regions for every measured file. The language adapter
+indexes the head commit's sources where it can (`PythonAdapter.index_functions`, the planner's
+`_index_head`); for every path it did not index (another language, or a file the adapter cannot
+parse) the ingest takes the regions the bundle shipped in `functions.jsonl`
+(`orchestrator/bundles.ingest_one` through `lang/neutral.merge_regions`: per path, the adapter's
+regions win). `NeutralAdapter`, built from a bundle, serves those shipped regions to anything that
+asks it (`index_functions`, `changed_functions` by comparing the base and head bundles' regions and
+hashes), and its `shape_catalogue` reads the shipped type descriptors, so the static facts
+(`files.jsonl`), the regions and the declared types of a TypeScript run all come from its bundle.
 
 ## Measured ceiling
 

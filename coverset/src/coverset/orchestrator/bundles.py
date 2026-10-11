@@ -3,10 +3,13 @@
 A bundle is untrusted (the PR's own code ran next to the plugin that wrote it). Each one is pulled
 with ``Worker.get_file`` before the worker is released, size-checked, written under
 ``<data_dir>/runs/<run_id>/``, then handed to :func:`ingest_one`: safe extraction
-(:func:`~coverset.facts.untrusted.extract_bundle`), conversion by the language adapter's
-``read_bundle`` with the head tree as the path allow-list (for Python,
-:meth:`~coverset.lang.python.PythonAdapter.read_bundle`) and a one-shard ingest
-(:func:`~coverset.facts.ingest.ingest_shard`). A bundle that breaks a limit is logged with
+(:func:`~coverset.facts.untrusted.extract_bundle`), conversion with the head tree as the path
+allow-list by :func:`~coverset.lang.read_any_bundle` (the manifest picks the reader: a neutral
+bundle of any language through ``coverset_model.io``, else the pytest-coverset converter), or by a
+job's own adapter when it names one, and a one-shard ingest
+(:func:`~coverset.facts.ingest.ingest_shard`). The function regions written for the run are the
+planner's index of the head sources, and for every path the adapter could not index, the regions
+the bundle shipped in ``functions.jsonl`` (:func:`~coverset.lang.neutral.merge_regions`). A bundle that breaks a limit is logged with
 :func:`~coverset.facts.ingest.record_shard_failure` and the run's coverage is then partial.
 
 Conversion is CPU-bound (seconds for a large shard), so :class:`IngestPool` runs different shards
@@ -38,16 +41,19 @@ from coverset.config import Settings
 from coverset.facts.ingest import RunContext, ingest_shard, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleError, BundleLimits, extract_bundle
+from coverset.lang import adapter_for_language, read_any_bundle
 from coverset.lang.base import (
     CollectedItem,
     FuncSampling,
     FunctionRegion,
     FuncTriple,
     LanguageAdapter,
+    NeutralBundle,
     ShapeObs,
     StaticFile,
     TestRow,
 )
+from coverset.lang.neutral import adapter_language, merge_regions
 
 __all__ = [
     "IngestJob",
@@ -88,19 +94,27 @@ class IngestJob:
     language: str = "python"
     adapter: LanguageAdapter | None = None
     """The language adapter whose ``read_bundle`` converts the bundle (picklable for the process
-    pool); None means :class:`~coverset.lang.python.PythonAdapter`. It must accept the keyword
-    arguments ``limits``, ``source_root`` and ``head_paths``."""
+    pool); None means :func:`~coverset.lang.read_any_bundle`, which picks the reader by the
+    bundle's manifest. It must accept the keyword arguments ``limits``, ``source_root`` and
+    ``head_paths``."""
 
 
 def adapter_for(job: IngestJob) -> LanguageAdapter:
-    """The adapter that converts ``job``'s bundle."""
+    """The adapter serving ``job``'s language (its own adapter when it names one)."""
     if job.adapter is not None:
         return job.adapter
-    if job.language != "python":
-        raise BundleError(f"no language adapter for {job.language!r}")
-    from coverset.lang.python import PythonAdapter
+    return adapter_for_language(job.language)
 
-    return PythonAdapter()
+
+def read_job_bundle(job: IngestJob, bundle_dir: Path) -> NeutralBundle:
+    """Convert ``job``'s extracted bundle: the job's adapter when set, else by the manifest."""
+    if job.adapter is not None:
+        return job.adapter.read_bundle(  # type: ignore[call-arg]
+            bundle_dir, limits=job.limits, source_root=Path(job.source_root), head_paths=job.head_paths
+        )
+    return read_any_bundle(
+        bundle_dir, limits=job.limits, source_root=Path(job.source_root), head_paths=job.head_paths
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,13 +140,10 @@ def ingest_one(job: IngestJob) -> IngestOutcome:
     workdir = Path(tempfile.mkdtemp(prefix=f"coverset-ingest-{job.shard_id}-"))
     try:
         extract_bundle(Path(job.tarball), workdir / "bundle", job.limits)
-        bundle = adapter_for(job).read_bundle(  # type: ignore[call-arg]
-            workdir / "bundle",
-            limits=job.limits,
-            source_root=Path(job.source_root),
-            head_paths=job.head_paths,
-        )
-        result = ingest_shard(store, job.ctx, bundle, job.shard_id, job.functions, language=job.language)
+        bundle = read_job_bundle(job, workdir / "bundle")
+        functions = merge_regions(job.functions, bundle.functions)
+        language = adapter_language(bundle) or job.language
+        result = ingest_shard(store, job.ctx, bundle, job.shard_id, functions, language=language)
     except Exception as exc:  # a bundle (or its ingest) failed: the run's coverage becomes partial
         reason = str(exc)[:500] if isinstance(exc, BundleError) else f"{type(exc).__name__}: {exc}"[:500]
         with contextlib.suppress(Exception):  # the failure record itself is best effort
@@ -251,7 +262,8 @@ def _record_failure(job: IngestJob, reason: str) -> None:
 
 
 def merge_sampling(rows: Sequence[FuncSampling]) -> dict[FuncTriple, FuncSampling]:
-    """Combine per-shard sampling rows of each function (calls summed, tests unioned, any truncation)."""
+    """Combine per-shard sampling rows of each function (calls summed, tests unioned, any truncation,
+    the first cap named)."""
     merged: dict[FuncTriple, FuncSampling] = {}
     for row in rows:
         prev = merged.get(row.func)
@@ -263,5 +275,6 @@ def merge_sampling(rows: Sequence[FuncSampling]) -> dict[FuncTriple, FuncSamplin
             calls=prev.calls + row.calls,
             tests=tuple(sorted(set(prev.tests) | set(row.tests))),
             truncated=prev.truncated or row.truncated,
+            cap=prev.cap or row.cap,
         )
     return merged

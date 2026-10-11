@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "coverset",
+    "coverset-model",
     "pytest-coverset",
 ]
 
@@ -499,6 +500,7 @@ dependencies = [
     { name = "alembic" },
     { name = "anthropic" },
     { name = "click" },
+    { name = "coverset-model" },
     { name = "duckdb" },
     { name = "githubkit", extra = ["auth-app"] },
     { name = "hypercorn" },
@@ -537,6 +539,7 @@ requires-dist = [
     { name = "alembic", specifier = "==1.20.0" },
     { name = "anthropic", specifier = ">=1.13,<2" },
     { name = "click", specifier = ">=8" },
+    { name = "coverset-model", editable = "packages/coverset-model" },
     { name = "duckdb", specifier = ">=1.5.6,<2" },
     { name = "githubkit", extras = ["auth-app"], specifier = "==0.16.1" },
     { name = "hypercorn", specifier = "==0.18.0" },
@@ -568,6 +571,11 @@ dev = [
     { name = "pytest-timeout", specifier = "==2.4.0" },
     { name = "ruff", specifier = ">=0.14" },
 ]
+
+[[package]]
+name = "coverset-model"
+version = "0.1.0"
+source = { editable = "packages/coverset-model" }
 
 [[package]]
 name = "cryptography"

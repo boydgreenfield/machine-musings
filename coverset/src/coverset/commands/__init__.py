@@ -44,6 +44,9 @@ def register_commands(
     invariants.add_command(invariants_scan_command, "scan")
     repo.add_command(repo_purge_command, "purge")
     modal.add_command(modal_reap_command, "reap")
+    from coverset.commands.bundle import bundle_group
+
+    cli.add_command(bundle_group, "bundle")
     from coverset.commands.report import report_command
 
     cli.add_command(report_command, "report")
