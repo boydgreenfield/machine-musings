@@ -1,0 +1,1 @@
+{"tests/test_calc.py::test_add": 0.01, "tests/test_calc.py::test_classify[neg]": 0.02, "tests/test_calc.py::test_classify[pos]": 0.03, "tests/test_calc.py::test_box_total": 0.04, "tests/test_calc.py::test_zero_fails": 0.05}

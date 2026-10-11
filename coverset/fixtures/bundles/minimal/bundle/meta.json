@@ -1,0 +1,8 @@
+{
+ "generator": "tests/facts/facts_helpers.py",
+ "coverage_version": "7.16.2",
+ "python": "3.13.0",
+ "plugin_version": "fixture",
+ "tracer": "CTracer",
+ "tool_id": 4
+}
