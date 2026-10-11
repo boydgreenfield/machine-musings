@@ -62,7 +62,7 @@ MAX_PYTHON_VERSION_BYTES: Final = 64 * 1024
 MAX_LOCK_BYTES: Final = 64 * 1024 * 1024
 UV_EXPORT_TIMEOUT_S: Final = 120
 _MODULE_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
-_PYTHON_RE: Final = re.compile(r"^(\d+)\.(\d+)(\.\d+)?$")
+_PYTHON_RE: Final = re.compile(r"^(\d{1,4})\.(\d{1,4})(\.\d{1,4})?$", re.ASCII)
 _NOT_SOURCE_PACKAGES: Final = frozenset({"tests", "test", "docs", "examples", "scripts", "benchmarks"})
 _SAFE_CHARS_RE: Final = re.compile(r"[^A-Za-z0-9._+-]")
 
@@ -123,13 +123,9 @@ def read_tool_config(pyproject_text: str, *, repo_root: Path | None = None) -> C
     elif repo_root is not None:
         values["source"] = _infer_packages(repo_root, source_root)
     if "testpaths" in raw:
-        values["testpaths"] = tuple(
-            _rel_path(p, "testpaths") for p in _str_list(raw["testpaths"], "testpaths")
-        )
+        values["testpaths"] = tuple(_argv_path(p) for p in _str_list(raw["testpaths"], "testpaths"))
     elif isinstance(pytest_ini, dict) and "testpaths" in pytest_ini:
-        values["testpaths"] = tuple(
-            _rel_path(p, "testpaths") for p in _str_list(pytest_ini["testpaths"], "testpaths")
-        )
+        values["testpaths"] = tuple(_argv_path(p) for p in _str_list(pytest_ini["testpaths"], "testpaths"))
     if "python" in raw:
         values["python"] = _python_version(raw["python"])
     elif repo_root is not None and (pinned := _pinned_python(repo_root)) is not None:
@@ -431,6 +427,8 @@ def _str_list(value: object, key: str) -> list[str]:
 def _modules(value: object, key: str) -> tuple[str, ...]:
     modules = _str_list(value, key)
     for module in modules:
+        # The pattern also keeps out words starting with "-" or "@": these are spliced into argv
+        # (--coverset-source=..., --coverset-trace-module=...).
         if not _MODULE_RE.fullmatch(module):
             raise ConfigError(f"{key}: {_shown(module)} is not a dotted module name")
     return tuple(modules)
@@ -446,6 +444,18 @@ def _rel_path(value: object, key: str) -> str:
     return str(path)
 
 
+def _argv_path(value: object, key: str = "testpaths") -> str:
+    """A repo-relative path that is spliced into pytest's argv as a word of its own.
+
+    It must not start with ``-`` (pytest would take it for an option, e.g. ``-p evil``) or ``@``
+    (argparse would read further arguments from that file).
+    """
+    path = _rel_path(value, key)
+    if path.startswith(("-", "@")):
+        raise ConfigError(f"{key} entries must not start with '-' or '@': {_shown(value)}")
+    return path
+
+
 def _positive_int(value: object, key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ConfigError(f"{key} must be a positive integer")
@@ -456,9 +466,10 @@ def _python_version(value: object) -> str:
     match = _PYTHON_RE.fullmatch(value) if isinstance(value, str) else None
     if match is None:
         raise ConfigError(f"python must look like '3.13', got {_shown(value)}")
-    if (int(match.group(1)), int(match.group(2))) < MIN_PYTHON:
+    major, minor = int(match.group(1)), int(match.group(2))
+    if (major, minor) < MIN_PYTHON:
         raise ConfigError(f"instrumented repos need Python 3.12+, got {_shown(value)}")
-    return f"{match.group(1)}.{match.group(2)}"
+    return f"{major}.{minor}"  # "03.13" and "3.013" both mean 3.13
 
 
 def _shown(value: object) -> str:

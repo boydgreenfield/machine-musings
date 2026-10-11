@@ -9,7 +9,10 @@ written and read back through the filesystem API, and a SIGTERM delivered to a r
 ``finally`` block whatever happens; the command exits non-zero with the error if any step fails.
 
 The smoke sandbox's cost is recorded in ``executor_spend`` (kind ``smoke``) when it is terminated,
-so it counts against the daily budget like everything else.
+and its ``debian_slim`` image build is priced and recorded like an env image build (kind ``build``),
+so both count against the daily budget like everything else. The command runs through
+:func:`~coverset.commands.common.run_async`, so SIGTERM cancels it and the ``finally`` block still
+terminates the sandbox.
 
 ``images`` reads ``<data_dir>/modal/images.json``: it lists the env images built through *this* data
 directory only (other data dirs, e.g. the benchmark's, keep their own file).
@@ -27,7 +30,7 @@ from typing import Any
 
 import click
 
-from coverset.commands.common import load
+from coverset.commands.common import load, run_async
 from coverset.config import Settings
 
 __all__ = ["modal_images_command", "modal_smoke_command", "register_modal_commands"]
@@ -45,7 +48,7 @@ def modal_smoke_command(python_version: str, verbose: bool) -> None:
     """Create one Modal sandbox, run python -V, write/read a file, signal an exec, terminate it."""
     settings = load()
     try:
-        rows = asyncio.run(_smoke(settings, python_version, verbose=verbose))
+        rows = run_async(lambda: _smoke(settings, python_version, verbose=verbose))
     except click.ClickException:
         raise
     except Exception as exc:
@@ -97,7 +100,18 @@ async def _smoke(settings: Settings, python_version: str, *, verbose: bool) -> l
             lambda a: f"{getattr(a, 'app_id', '?')} ({settings.modal_environment}/coverset-runner)",
         )
         image = modal.Image.debian_slim(python_version=python_version)
-        await step("image build", lambda: build_and_record(app, image, verbose=verbose, modal=modal), str)
+
+        async def build() -> str:
+            # Priced and recorded like an env image build (executor_spend kind "build"): Modal may
+            # bill a build, cached or not, and a failed one may have run part of the way.
+            started = time.monotonic()
+            try:
+                return await build_and_record(app, image, verbose=verbose, modal=modal)
+            finally:
+                seconds = time.monotonic() - started
+                executor._record_spend("build", executor.cost_usd(executor._default_resources(), seconds))
+
+        await step("image build", build, str)
 
         async def create() -> Any:
             nonlocal terminate

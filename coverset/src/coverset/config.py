@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     ai_review_untrusted: bool = False
     ai_max_bundle_chars: int = Field(default=120_000, gt=0)
     ai_exclude_globs: CommaList = Field(default_factory=list)
+    scan_after_baseline: bool = True
+    """Run ``coverset invariants scan`` in the background after a trusted, completed baseline of the
+    default branch's tip (``COVERSET_SCAN_AFTER_BASELINE``)."""
 
     forge: ForgeKind = "auto"
     executor: ExecutorKind = "local"

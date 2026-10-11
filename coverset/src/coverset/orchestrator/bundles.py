@@ -157,7 +157,9 @@ def ingest_one(job: IngestJob) -> IngestOutcome:
         shapes=tuple(o for o in bundle.shapes if o.func in job.keep_funcs),
         sampling=tuple(s for s in bundle.sampling if s.func in job.keep_funcs),
         meta={
-            k: meta[k] for k in ("exit_code", "counts", "stop_requested", "tracer", "convert") if k in meta
+            k: meta[k]
+            for k in ("exit_code", "counts", "stop_requested", "tracer", "tracer_lost_at", "convert")
+            if k in meta
         },
     )
 

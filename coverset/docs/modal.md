@@ -166,7 +166,9 @@ keeps running. `COVERSET_POOL_SIZE=0` turns the pool off. `coverset run` and `co
 restarts (`orchestrator/budget.py`, `spent_today`): today's (UTC) `runs.cost_estimate` (finished
 runs' costs and in-flight runs' reservations) plus today's `executor_spend` rows (pool idle time,
 snapshot builds, smoke tests, benchmarks, image builds: spend that belongs to no run, written when
-the sandbox is claimed or terminated or the build ends). The executor's own check adds what only
+the sandbox is claimed or terminated or the build ends; `coverset modal smoke` records its
+`debian_slim` image build as kind `build`, priced like an env image build, and runs under the same
+SIGTERM handling as `coverset run`, so its sandbox is terminated when the command is stopped). The executor's own check adds what only
 it knows: the accrued time of the non-shard sandboxes it holds right now and rows not yet written.
 `PoolMaintainer` and `budget.reserve` read the database sum. A new day starts from zero.
 

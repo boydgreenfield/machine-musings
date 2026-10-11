@@ -23,7 +23,8 @@ Migrations are Alembic revisions under `src/coverset/db/migrations/versions/`, r
 | `0002` | `runs.network`, `approval_check_id`, `approved_by`, `check_run_id` |
 | `0003` | `runs.extra_env`, `retry_increment_keys`, `summary_json` |
 | `0004` | `webhook_deliveries.body_sha256` (unique), `runs.approval_requested_by`, `pull_requests.author` |
-| `0005` | `runs.claimed_by` (`<role>@<host>:<pid>:<nonce>` of the process executing the run), `runs.heartbeat_at` (refreshed every 10 s while it executes), `runs.rank_executed` (how many tests had reported when the first failure was confirmed) |
+| `0005` | `runs.claimed_by` (`<role>@<host>:<pid>:<nonce>` of the process executing the run), `runs.heartbeat_at` (refreshed every 10 s while it executes), `runs.rank_executed` (the position at which the first confirmed failure's first attempt reported: how many first-attempt results, across all shards, had arrived when it did) |
+| `0006` | the `executor_spend` table: `day`, `executor` (`local`, `modal`), `kind` (`pool`, `snapshot`, `smoke`, `build`, `bench`), `usd`, `sandbox_id`, `created_at`; index `(day, executor, kind)` |
 
 ### Conventions
 
@@ -54,11 +55,12 @@ Migrations are Alembic revisions under `src/coverset/db/migrations/versions/`, r
 | `invariants` | one version of a declared invariant | `inv_key`, `spec_hash`, `spec_json`, `first_seen_sha`, `last_seen_sha` | unique `(repo_id, inv_key, spec_hash)` |
 | `invariant_results` | the status of one invariant version in one run; `coverset invariants scan` rewrites the scanned baseline run's row of each review-kind invariant in place (`trigger = scan`, the run's own status kept in `evidence.scan.run_status`) | `status`, `trigger` (`run`, `scan`), `target_func_key`, `target_body_hash`, `covering_test_ids`, `evidence` | primary key `(run_id, invariant_id)`; index `(invariant_id, run_id)` |
 | `review_findings` | an advisory AI-review finding for one function body, from a run's review of its changed functions or from `coverset invariants scan` (stored under the scanned baseline run) | `run_id`, `func_key`, `body_hash`, `bundle_hash`, `source` (`fixture`, `heuristic`, `anthropic`), `verdict`, `confidence`, `payload` | index `(func_key, bundle_hash)`; index `run_id` |
+| `executor_spend` | spend that belongs to no run (pool idle time, trusted snapshot builds, `coverset modal smoke` sandboxes and their image builds, env image builds, benchmarks), counted with `runs.cost_estimate` against the daily budget (`orchestrator/budget.py`) | `day` (UTC), `executor`, `kind` (`pool`, `snapshot`, `smoke`, `build`, `bench`), `usd`, `sandbox_id` | index `(day, executor, kind)` |
 | `settings` | control-plane key/value state | `key`, `value` (2,048 characters, sized for secrets) | primary key `key` |
 
 The `runs.timeline` keys are listed in [ARCHITECTURE.md](../ARCHITECTURE.md#how-a-run-works) and [docs/orchestrator.md](orchestrator.md#timeline).
 
-`test_stats` is recomputed at the end of every run by `orchestrator/history.py` (`update_test_stats`). An untrusted run updates nothing. Otherwise only completed, trusted runs count, plus the run being recorded; `not_run` results never count. A test with no history of its own borrows the statistics of its `family` (the node id before the first `[`, shared by every parametrisation) for scoring (`load_test_history`; test `test_load_test_history_family_fallback`).
+`test_stats` is recomputed at the end of every run by `orchestrator/history.py` (`update_test_stats`). An untrusted run updates nothing. Otherwise only completed, trusted runs count, plus the run being recorded; `not_run` results never count. A test with no `test_stats` row of its own borrows only the median p50 of its `family` (the node id before the first `[`, shared by every parametrisation) for scoring; its fail rate, flakiness and run count stay empty (`load_test_history`; test `test_load_test_history_family_fallback`). A test without statistics that ran in the previous run (e.g. an untrusted run, which updates no `test_stats`) keeps that outcome and is not scored as a new test.
 
 `run_events` and `test_results` are written in batches by `EventSink` (`orchestrator/runner.py`): every 100 ms or 200 pending rows, under the run's lock, with every payload string passed through `coverset.logging.redact`.
 
@@ -120,9 +122,9 @@ Shard tables (one file per shard per attempt):
 | `test_lines` | `test_id`, `file_id`, `line` | long format, sorted by `(file_id, line, test_id)`; `test_id = 0` is `<import>` |
 | `run_arcs` | `file_id`, `from_line`, `to_line` | executed branch arcs, union over the shard's tests |
 | `call_shapes` | `func_key`, `param`, `shape_id`, `caller_kind` (`func` or `test`), `caller_key`, `caller_path`, `caller_qualname`, `caller_line`, `samples`, `test_ids[]`, `truncated`, `example_test_id`, `example_repr` | one row per `(function, parameter, shape, caller)`; `caller_key` is the caller's `func_key` or the calling test's node id |
-| `func_sampling` | `func_key`, `path`, `qualname`, `firstlineno`, `calls`, `tests_called`, `tests_truncated`, `truncated`, `test_ids[]` | how often the tracer sampled each function |
+| `func_sampling` | `func_key`, `path`, `qualname`, `firstlineno`, `calls`, `tests_called`, `tests_truncated`, `truncated`, `test_ids[]` | how often the tracer sampled each function; `truncated` is set by either cap (the adaptive sample cap or the full-trace safety cap); `tests_truncated` is this shard's `cap_hits` |
 | `shapes` | `shape_id`, `shape_key` | the shape keys this shard used |
-| `ingest_log` | `shard_id`, `attempt`, `bundle_sha256`, `status` (`ok`, `failed`), `ingested_at`, `n_tests`, `n_test_lines`, `convert_json` | one file per shard holding every attempt; the commit record. `convert_json` carries the converter's counts and, when `meta.json` names a tracer other than coverage.py's C tracer (`CTracer`), `tracer_mismatch: true` and the tracer's name; the runner then adds a `log` run event "coverage was collected with <name>; per-test contexts may be incomplete" |
+| `ingest_log` | `shard_id`, `attempt`, `bundle_sha256`, `status` (`ok`, `failed`), `ingested_at`, `n_tests`, `n_test_lines`, `convert_json` | one file per shard holding every attempt; the commit record. `convert_json` carries the converter's counts and, when `meta.json` names a tracer other than coverage.py's C tracer (`CTracer`), `tracer_mismatch: true` and the tracer's name; the runner then adds a `log` run event "coverage was collected with <name>; per-test contexts may be incomplete". A C tracer the plugin saw replaced mid-run (`meta.tracer_lost_at`) is recorded the same way, with the name "CTracer lost at <context>", and the event reads "coverage lost its tracer at <nodeid>; per-test contexts after it may be incomplete" |
 
 Run tables (one file per run):
 
@@ -131,7 +133,7 @@ Run tables (one file per run):
 | `functions` | `commit_sha`, `func_key`, `file_id`, `path`, `qualname`, `ordinal`, `def_line`, `body_start`, `end_line`, `body_hash`, `sig_hash`, `params_json`, `kind` (`function`, `method`, `class`, `module`), `language` | the head commit's regions, indexed once per run |
 | `runs_dim` | `head_sha`, `base_sha`, `branch`, `pr_number`, `created_at`, `scoring_basis_run_id`, `expected_shards`, `ingested_shards`, `coverage_complete`, `finalized_at` | mirrored from the control database so facts SQL never attaches SQLite |
 | `file_cov` | `file_id`, `path`, `statements`, `covered`, `branches`, `branches_covered`, `partial_branches`, `percent` | `percent = 100 × (covered + branches_covered) / (statements + branches)` |
-| `func_input_cov` | `func_key`, `tests_called`, `tests_sampled`, `tests_truncated`, `blocks_expected`, `blocks_observed`, `missing_json` | input-class coverage per function; the class columns stay null without a catalogue |
+| `func_input_cov` | `func_key`, `tests_called`, `tests_sampled`, `tests_truncated`, `blocks_expected`, `blocks_observed`, `missing_json` | input-class coverage per function; the class columns stay null without a catalogue. `tests_truncated` is counted over the whole run with `analysis/shapes.cap_hits`, the definition the verdict and the UI use: 0 when no shard capped the function, else the tests that called it (lines in its body) but were never sampled, at least 1 |
 
 Line numbers are `int32`. coverage.py arcs use negative numbers for code-object entry and exit, so arc columns allow them.
 

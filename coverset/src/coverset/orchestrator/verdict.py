@@ -12,9 +12,10 @@ the optional AI review. CPU-heavy pieces (shape catalogues, test bodies) run in 
 
 :func:`build_summary` adds the run-level numbers: the first confirmed failure's ``rank_coverset``
 (its planned position in the global priority order; ``runs.rank_executed`` keeps the position at
-which it actually reported), ``rank_file_order`` (its position in plain collection order) and ``t_first_failure_file_order_est = (sandbox_ready - t0) + Σ p50 of the tests before it in
-file order`` (an estimate, labelled as such), where ``t0`` is when the webhook arrived or else when
-the run was queued. :func:`persist_verdict` writes ``runs.verdict/reason/summary_json`` and
+which its first attempt actually reported), ``rank_file_order`` (its position in plain collection
+order) and ``t_first_failure_file_order_est = (first_test - t0) + Σ p50 of the tests before it in
+file order`` (an estimate, labelled "estimated from the first test"), where ``t0`` is when the
+webhook arrived or else when the run was queued. :func:`persist_verdict` writes ``runs.verdict/reason/summary_json`` and
 :func:`post_summary` sends it through the forge when the run belongs to a PR.
 """
 
@@ -25,7 +26,7 @@ import dataclasses
 import logging
 import statistics
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -49,7 +50,8 @@ from coverset.analysis.invariants import (
     spec_hash,
 )
 from coverset.analysis.patch import PatchReport, patch_report
-from coverset.analysis.shapes import NEVER_EXERCISED, Catalogue, FunctionInputCov
+from coverset.analysis.shapes import NEVER_EXERCISED, Catalogue, FunctionInputCov, function_catalogue
+from coverset.analysis.sharding import UNKNOWN_DURATION_S
 from coverset.config import Settings
 from coverset.db.models import Invariant as InvariantModel
 from coverset.db.models import InvariantResult as InvariantResultModel
@@ -74,9 +76,11 @@ __all__ = [
     "RunReport",
     "TestState",
     "build_report",
+    "ESTIMATE_LABEL",
     "build_summary",
     "file_order_estimate",
     "functions_of_interest",
+    "outcome_tally",
     "source_changes",
     "persist_verdict",
     "post_summary",
@@ -169,18 +173,26 @@ def functions_of_interest(plan: RunPlan) -> dict[str, FunctionRegion]:
     return found
 
 
-def file_order_estimate(plan: RunPlan, nodeid: str, sandbox_ready_s: float) -> float | None:
-    """``sandbox_ready_s + Σ p50`` of the tests before ``nodeid`` in collection order (estimated).
+ESTIMATE_LABEL = "estimated from the first test"
+"""How every reader labels ``t_first_failure_file_order_est``."""
 
-    Unknown p50s count as the median of the known ones.
+
+def file_order_estimate(plan: RunPlan, nodeid: str, first_test_s: float) -> float | None:
+    """``first_test_s + Σ p50`` of the tests before ``nodeid`` in collection order (estimated).
+
+    ``first_test_s`` is ``timeline.first_test - t0``: everything before the first test (the
+    environment, collection, planning) happens whichever order the tests run in, so the estimate
+    starts where the orders begin to differ. Unknown p50s count as the median of the known ones,
+    or as :data:`~coverset.analysis.sharding.UNKNOWN_DURATION_S` (what the planner assumes) when no
+    test has been timed.
     """
     ranks = plan.file_ranks
     if nodeid not in ranks:
         return None
     known = [d for d in plan.durations.values() if d > 0]
-    median = statistics.median(known) if known else 0.0
+    median = statistics.median(known) if known else UNKNOWN_DURATION_S
     before = plan.collected[: ranks[nodeid] - 1]
-    return round(sandbox_ready_s + sum(plan.durations.get(i.nodeid, median) for i in before), 3)
+    return round(first_test_s + sum(plan.durations.get(i.nodeid, median) for i in before), 3)
 
 
 # -- the report ---------------------------------------------------------------------------------
@@ -215,10 +227,16 @@ async def build_report(
             patch_report, plan.changed_lines, statics, dict(union), source_changes(plan), covering
         )
     interest = functions_of_interest(plan)
-    report.input_cov, report.observations = await asyncio.to_thread(_input_coverage, interest, ok, catalogue)
+
+    def called(region: FunctionRegion) -> list[str]:
+        return tests_covering(store, run.repo_id, run.id, region.path, region.body_start, region.end_line)
+
+    report.input_cov, report.observations = await asyncio.to_thread(
+        _input_coverage, interest, ok, plan.measured_sources, called if ok else None
+    )
     report.ai_source, evidence = await _ai_review(session, settings, run, plan, report)
     invariant_rows, by_target = await _invariants(
-        session, run, plan, states, report.input_cov, evidence, store=store
+        session, run, plan, states, report.input_cov, evidence, store=store, statics=statics
     )
     report.invariants = tuple(invariant_rows)
     report.invariants_changed = tuple(await _invariant_changes(plan, run))
@@ -228,9 +246,19 @@ async def build_report(
 
 
 def _input_coverage(
-    interest: Mapping[str, FunctionRegion], outcomes: Sequence[IngestOutcome], catalogue: Catalogue
+    interest: Mapping[str, FunctionRegion],
+    outcomes: Sequence[IngestOutcome],
+    sources: Mapping[str, str],
+    called: Callable[[FunctionRegion], list[str]] | None = None,
 ) -> tuple[dict[str, FunctionInputCov], dict[str, list[ShapeObs]]]:
-    """Input-class coverage and the shape observations of each function of interest, by ``func_key``."""
+    """Input-class coverage and the shape observations of each function of interest, by ``func_key``.
+
+    Each function's catalogue comes from :func:`~coverset.analysis.shapes.function_catalogue` over
+    its head source (``sources``), the helper the PR page's cards use, so the comment's "N input
+    classes never exercised" and the cards count the same classes. ``called(region)`` lists the
+    tests whose lines touch the body; it is asked only for a function whose sampling was capped,
+    so "K tests hit the sample cap" counts what the UI counts.
+    """
     by_triple: dict[tuple[str, str, int], list[ShapeObs]] = defaultdict(list)
     for outcome in outcomes:
         for obs in outcome.shapes:
@@ -240,7 +268,16 @@ def _input_coverage(
     observations: dict[str, list[ShapeObs]] = {}
     for key, region in interest.items():
         observations[key] = by_triple.get(region.triple, [])
-        covs[key] = catalogue.function_input_cov(region, observations[key], sampling.get(region.triple))
+        row = sampling.get(region.triple)
+        capped = (row is not None and row.truncated) or any(o.truncated for o in observations[key])
+        tests_called = None
+        if capped and called is not None:
+            try:
+                tests_called = called(region)
+            except Exception as exc:  # facts unreadable: the count falls back to its floor
+                log.warning("cannot read the callers of %s: %s", region.qualname, exc)
+        found = function_catalogue(region, sources.get(region.path))
+        covs[key] = found.input_cov(region, observations[key], row, tests_called=tests_called)
     return covs, observations
 
 
@@ -332,6 +369,7 @@ async def _invariants(
     review: Mapping[str, ReviewEvidence],
     *,
     store: FactsStore | None = None,
+    statics: Mapping[str, StaticFile] | None = None,
 ) -> tuple[list[InvariantRow], dict[str, list[InvariantRow]]]:
     """Evaluate head invariants plus the base definitions the PR weakened or removed, persist them,
     return summary rows (a base definition's row reads ``<id> (base)``)."""
@@ -370,7 +408,7 @@ async def _invariants(
             if inv.id in ids or any(v.marker in ids for v in inv.verify if v.marker)
         ]
         cov = input_cov.get(region.func_key) if region is not None else None
-        covers = await _covers_changed_lines(store, run, plan, region, linked)
+        covers = await _covers_changed_lines(store, run, plan, region, linked, statics=statics)
         lens = invariant_lens(inv, cov, linked, covers_changed_lines=covers)
         evidence = {**result.evidence, "lens": lens.summary}
         if base_kind is not None:
@@ -403,11 +441,17 @@ async def _covers_changed_lines(
     plan: RunPlan,
     region: FunctionRegion | None,
     linked: Sequence[str],
+    *,
+    statics: Mapping[str, StaticFile] | None = None,
 ) -> bool | None:
     """Whether a linked test executed one of the target's changed lines (None: target unchanged).
 
-    Read from the run's facts (``test_lines``); a changed target without added lines (only
-    deletions) counts its whole span.
+    Read from the run's facts (``test_lines``), with the body-line rule of
+    :mod:`coverset.analysis.patch`: only changed *body* statements (``[body_start, end_line]``, and
+    statements when the file's static facts are known) are asked about, because test contexts never
+    hold a ``def``, decorator or docstring line (import time runs those). A change that touches no
+    body statement (a signature-, decorator- or docstring-only change, or only deletions) asks about
+    the whole body span: did a linked test call the function at all.
     """
     if region is None or not any(
         c.region is not None and c.region.func_key == region.func_key for c in plan.changes
@@ -417,10 +461,11 @@ async def _covers_changed_lines(
         return False
     if store is None:
         return None
-    lines = sorted(
-        n for n in plan.changed_lines.get(region.path, ()) if region.def_line <= n <= region.end_line
-    )
-    spans = _spans(lines) if lines else [(region.def_line, region.end_line)]
+    lines = {n for n in plan.changed_lines.get(region.path, ()) if region.body_start <= n <= region.end_line}
+    static = statics.get(region.path) if statics else None
+    if static is not None:
+        lines &= set(static.statements) - set(static.excluded)
+    spans = _spans(sorted(lines)) if lines else [(region.body_start, region.end_line)]
     wanted = set(linked)
 
     def query() -> bool:
@@ -473,6 +518,9 @@ async def _invariant_row(session: AsyncSession, run: Run, inv: Invariant) -> Inv
 
 
 async def _previous_result(session: AsyncSession, run: Run, inv: Invariant) -> PreviousResult | None:
+    """The latest earlier result of ``inv`` that is real evidence (``stale`` rows are derived and
+    skipped, so staleness persists until fresh evidence arrives); within one run, the row of the
+    same spec wins over a PR's ``(base)`` row."""
     row = (
         await session.execute(
             select(InvariantResultModel, InvariantModel.spec_hash)
@@ -482,9 +530,10 @@ async def _previous_result(session: AsyncSession, run: Run, inv: Invariant) -> P
                 InvariantModel.repo_id == run.repo_id,
                 InvariantModel.inv_key == inv_key(inv),
                 InvariantResultModel.run_id != run.id,
+                InvariantResultModel.status != "stale",
                 Run.created_at <= run.created_at,
             )
-            .order_by(Run.created_at.desc())
+            .order_by(Run.created_at.desc(), (InvariantModel.spec_hash == spec_hash(inv)).desc())
             .limit(1)
         )
     ).first()
@@ -647,6 +696,7 @@ def build_summary(
     """The :class:`VerdictSummary` of a run (``report`` is None for the early first-failure verdict)."""
     failures = [s for s in states.values() if s.confirmed and not s.preexisting]
     items = plan.items_by_nodeid if plan is not None else {}
+    collect_errors = getattr(plan, "collect_errors", None) or []
     failure_rows = tuple(
         FailureRow(
             nodeid=s.nodeid,
@@ -655,13 +705,13 @@ def build_summary(
             line=items[s.nodeid].line if s.nodeid in items else None,
         )
         for s in failures
-    )
+    ) + tuple(_collection_error_row(error) for error in collect_errors)
     first_failure_s = None
     first = (run.timeline or {}).get("first_failure")
     if first:
         first_failure_s = round((datetime.fromisoformat(first) - t0_of(run)).total_seconds(), 3)
     patch = report.patch if report is not None else None
-    title = _title(conclusion, reason, failures, plan, patch)
+    title = _title(conclusion, reason, failure_rows, len(collect_errors), states, patch)
     return VerdictSummary(
         conclusion=conclusion,  # type: ignore[arg-type]
         title=title,
@@ -688,25 +738,62 @@ def build_summary(
 def _title(
     conclusion: str,
     reason: str,
-    failures: Sequence[TestState],
-    plan: RunPlan | None,
+    failures: Sequence[FailureRow],
+    collect_errors: int,
+    states: Mapping[str, TestState],
     patch: PatchReport | None,
 ) -> str:
     if conclusion == "failure" and failures:
         more = f" (+{len(failures) - 1} more)" if len(failures) > 1 else ""
-        return f"{failures[0].nodeid} failed{more}"[:255]
+        verb = "failed to collect" if len(failures) == collect_errors else "failed"
+        return f"{failures[0].nodeid} {verb}{more}"[:255]
     if conclusion == "success":
-        total = len(plan.collected) if plan is not None else 0
-        text = f"{total} tests passed"
+        text = outcome_tally(states)
+        if all(t.outcome in ("passed", "not_run") for t in states.values()):
+            text = f"{sum(1 for t in states.values() if t.outcome == 'passed')} tests passed"
         if patch is not None and patch.patch_pct is not None:
             text += f" · patch coverage {patch.patch_pct:g}%"
-        return text
+        return text[:255]
     return (reason or conclusion)[:255]
 
 
-def _message(longrepr: str | None) -> str:
-    if not longrepr:
-        return "test failed"
+def outcome_tally(states: Mapping[str, TestState]) -> str:
+    """``N passed, 1 pre-existing failure, K skipped``: the outcomes of a run that did not fail.
+
+    Only passed tests count as passed; pre-existing failures, quarantined failures, skips, xfails
+    and xpasses are named when present.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for test in states.values():
+        counts[test.outcome] += 1
+    preexisting = sum(1 for t in states.values() if t.preexisting)
+    other_failed = counts["failed"] + counts["error"] - preexisting
+    parts = [f"{counts['passed']} passed"]
+    if preexisting:
+        parts.append(f"{preexisting} pre-existing failure{'' if preexisting == 1 else 's'}")
+    if other_failed > 0:
+        parts.append(f"{other_failed} quarantined failure{'' if other_failed == 1 else 's'}")
+    for outcome in ("skipped", "xfailed", "xpassed"):
+        if counts[outcome]:
+            parts.append(f"{counts[outcome]} {outcome}")
+    return ", ".join(parts)
+
+
+def _collection_error_row(error: Mapping[str, Any]) -> FailureRow:
+    """A test module that failed to import, as a failure row (its node id is the module path)."""
+    nodeid = str(error.get("nodeid") or "<collection>")
+    longrepr = error.get("longrepr")
+    return FailureRow(
+        nodeid=nodeid,
+        message=_message(longrepr if isinstance(longrepr, str) else None, default="collection error"),
+        path=nodeid.split("::", 1)[0] if nodeid.endswith(".py") or "::" in nodeid else None,
+        line=None,
+    )
+
+
+def _message(longrepr: str | None, *, default: str = "test failed") -> str:
+    if not longrepr or not longrepr.strip():
+        return default
     lines = [line.strip() for line in longrepr.strip().splitlines() if line.strip()]
     errors = [line for line in lines if line.startswith("E ")]
     text = errors[0][1:].strip() if errors else lines[-1]
@@ -749,6 +836,8 @@ async def persist_verdict(session: AsyncSession, run: Run, summary: VerdictSumma
     run.reason = summary.reason
     data = summary_to_json(summary)
     data["rank_executed"] = run.rank_executed
+    if run.t_first_failure_file_order_est is not None:
+        data["t_first_failure_file_order_est_label"] = ESTIMATE_LABEL
     run.summary_json = data
     await session.flush()
 

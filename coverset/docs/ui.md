@@ -36,7 +36,8 @@ fails to load shows "Could not load this section (HTTP n)" where it would have g
 ### The PR page
 
 1. **Verdict band** (sticky, full width, opaque): FAIL / PASS / PASS with gaps, the reason, then
-   "first failure 1.0 s · test 1 of 100 (file order: 66th, ~1.7 s est.)", patch coverage, changed
+   "first failure 1.0 s · test 1 of 100 (file order: 66th, ~1.7 s estimated from the first test)",
+   patch coverage, changed
    functions with no test, "N input classes never exercised in changed functions" (distinct
    `param:class` per changed function, the same classes the cards count) with a muted "· M more in
    invariant targets" linking to the invariants page when functions the PR did not change, checked
@@ -63,10 +64,16 @@ fails to load shows "Could not load this section (HTTP n)" where it would have g
 * **Timeline**: webhook received (when there was one), queued, sandbox ready, first test, wave 1
   done, first failure, verdict, finished, in seconds from the webhook (else from queuing). A failed
   test reported before its retry confirmed it shows as a dashed "failure reported" tick until the
-  confirmed first failure replaces it. When `docs/numbers.json` has `t_cold_path` a grey ghost bar
-  shows the measured cold path on the same axis; when it is more than four times the run's axis the
-  bar is drawn broken and labelled "not to scale" instead of squashing every milestone into the
-  first pixels. Without the key no bar is drawn.
+  confirmed first failure replaces it. On runs of the demo repository (`coverset-demo/ledger`),
+  when `docs/numbers.json` has `t_cold_path_demo`, a grey ghost bar shows the demo app's measured
+  cold path on the same axis, labelled "measured cold path, demo app: fresh sandbox, install, plain
+  pytest", with a failure tick at `t_cold_path_demo_first_failure` when the run itself has a first
+  failure; when it is more than four times the run's axis the bar is drawn broken and labelled "not
+  to scale" instead of squashing every milestone into the first pixels. Other repositories get no
+  bar: no cold path was measured for their suites (the bench suite's `t_cold_path` describes 1,200
+  synthetic tests, not them). After a confirmed failure the head line also says where file order
+  would have run it and when ("~3.3 s estimated from the first test", see
+  [orchestrator.md](orchestrator.md#timeline)).
 * **Shards**: one lane per sandbox, one block per test in the order it reported. A block spans
   from the previous report on its shard to its own (the first test of a shard gets the lane's
   median block width, since its report also carries pytest's start-up). Blue = passed, vermilion
@@ -211,8 +218,8 @@ or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 | `run-live.jpg` | `/runs/<PR 1 run>?replay=1&speed=0.25&freeze=<F>` with **F = timeline.verdict + 0.1** | F is the run's `timeline.verdict` in seconds from `timeline.webhook_received` (else `timeline.queued`), plus 0.1, rounded to 2 decimals (the demo's PR 1 lands near 1.1). Wait for `[data-replay="frozen"]` (attached; about 5 s at ¼ speed): FAIL posted, the first-failure rule across the lanes, the failing test pinned in "Why this order", lanes partly filled, queued tests hollow. |
 | `why-order.jpg` | `/runs/<PR 1 run>` | Clip to `#why-order` (the panel with its heading); the failing test is pinned "ran 1st; file order would have run it 66th · tied at 8.0 with 2 others; …" and one muted row sums up the tests with no risk signal. |
 | `shapes.jpg` | `/repos/1/functions/<validate_email func_key>?run=<PR 2 run>` | Shape grid (two hollow email classes) and flow ribbon. The func_key is in the card links on `/repos/1/prs/2` (`/prs/2/functions/<key>`). |
-| `source.jpg` | `/repos/1/files/src/ledger/durations/parse.py?run=<PR 2 run>` | Chips under `def parse_duration`; then click `#L18 button.gt` and wait for `#line-tests-body .test-list` to show the tests popover. Shot at 1440×1000 and clipped below the popover: at 900 px the popover opens above line 18 and covers the chips. |
-| `map.jpg` | `/repos/1/map` | Gap mode is the default. Full-page shot clipped just above the "Largest gaps" table, so the whole treemap is in it. |
+| `source.jpg` | `/repos/1/files/src/ledger/durations/parse.py?run=<PR 2 run>` | Chips under `def parse_duration`; then click `#L18 button.gt` and wait for `#line-tests-body .test-list` to show the tests popover. Shot at 1440×1000 and clipped just under the last test row that is fully visible in the popover (the popover scrolls inside a capped height, so its own bottom edge would cut a row in half): at 900 px the popover opens above line 18 and covers the chips. |
+| `map.jpg` | `/repos/1/map` | Gap mode is the default. Full-page shot clipped just above the "Largest gaps" table, so the whole treemap is in it. The pointer is parked at (1, 1) after every navigation: Playwright keeps it where the source shot's click left it, and a treemap tile under it would show its hover outline. |
 | `comment.jpg` | `/forge/outbox?method=upsert_pr_comment` | The rendered sticky comments. |
 
 Times on pages are relative to `settings.now()`, so `COVERSET_FAKE_NOW=2026-10-11T14:00:00Z` pins

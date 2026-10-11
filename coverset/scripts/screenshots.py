@@ -219,8 +219,19 @@ def wait_ready(page: Any, timeout_ms: float = 30_000) -> None:
     page.wait_for_selector(READY, state="attached", timeout=timeout_ms)
 
 
+def rest_pointer(page: Any) -> None:
+    """Park the mouse in the page's top-left corner, over nothing hoverable.
+
+    Playwright keeps the pointer where the last click left it, across navigations: after the
+    source shot clicks line 18's test count, the pointer sat over a treemap tile on the next page
+    and its hover outline (the blue ring) ended up in map.jpg.
+    """
+    page.mouse.move(1, 1)
+
+
 def goto(page: Any, url: str) -> None:
     page.goto(url, wait_until="load")
+    rest_pointer(page)
     wait_ready(page)
     page.wait_for_timeout(200)
 
@@ -284,6 +295,7 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
 
     def run_live(page: Any, path: Path) -> None:
         page.goto(f"{base}/runs/{ids.pr1_run}?replay=1&speed=0.25&freeze={ids.freeze_s}", wait_until="load")
+        rest_pointer(page)
         page.wait_for_selector('[data-replay="frozen"]', state="attached", timeout=60_000)
         wait_ready(page)
         page.wait_for_timeout(300)
@@ -310,11 +322,21 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
             page.wait_for_selector("#line-tests-body .test-list", state="attached")
             wait_ready(page)
             page.wait_for_timeout(250)
+            # The popover scrolls inside a capped height, so its own bottom edge cuts a row in
+            # half. End the shot just under the last row that is fully visible in it.
             bottom = page.evaluate(
-                "() => Math.max(document.getElementById('line-tests').getBoundingClientRect().bottom,"
-                " document.querySelector('footer') ? document.querySelector('footer').getBoundingClientRect().bottom : 0)"
+                """() => {
+                    const box = document.getElementById('line-tests');
+                    const edge = Math.min(box.getBoundingClientRect().bottom, window.innerHeight);
+                    let last = box.getBoundingClientRect().top;
+                    for (const row of box.querySelectorAll('.test-list li')) {
+                        const r = row.getBoundingClientRect();
+                        if (r.bottom <= edge - 1) last = Math.max(last, r.bottom);
+                    }
+                    return last;
+                }"""
             )
-            height = min(SOURCE_HEIGHT, int(bottom) + 24)
+            height = min(SOURCE_HEIGHT, int(bottom) + 6)
             page.screenshot(
                 path=str(path), clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height}
             )

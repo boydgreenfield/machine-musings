@@ -58,10 +58,23 @@ queued ──▶ claim + policy ──▶ plan ───────────
    is acquired. Executors with snapshots use the newest ready trusted snapshot;
    a PR never waits for one. Workers are acquired (as many as the repo's timed tests need), each gets
    the archive (`put_tree`), and `sandbox_ready` is recorded. Worker 0 collects
-   (`pytest --collect-only` with the plugin; `collect.json` is read back, the `-q` listing is the
-   fallback). Then the diff `base...head` is classified into changed functions, the prior run is
-   chosen (the PR's previous head, else the merge-base, else the latest default-branch baseline),
-   every test is scored, wave 1 (the change-covering set) is computed and the tests are dealt into
+   (`pytest --collect-only --continue-on-collection-errors` with the plugin, every plugin option one
+   word such as `--coverset-out=<dir>`, so pytest's early ini lookup keeps the repo's own config;
+   `collect.json` is read back, the `-q` listing is the fallback). Exit codes 0, 1, 2 and 5 are
+   accepted whenever `collect.json` parses: a test module that fails to import is listed in its
+   `errors`, kept in `plan.collect_errors`, and becomes a confirmed failure of the run (a failure
+   row named by the module path with the import error, reason "N collection error(s)", verdict
+   `failure`, exit code 1) while every other test still runs; with nothing collected but errors the
+   run fails the same way instead of "no tests collected". Collected node ids that `@shard.args`
+   could not hold on one line (any line break `str.splitlines()` knows, or NUL; possible only with
+   pytest's id escaping disabled) are dropped with a warning. Sources are decoded as CPython does
+   (PEP 263 coding cookie or BOM; undecodable bytes become U+FFFD). Then the diff `base...head` is
+   classified into changed functions, the prior run is chosen (the PR's previous head, else the
+   merge-base, else the latest default-branch baseline; a candidate needs usable facts:
+   `coverage_complete`, or at least one committed shard ingest), every test is scored (a changed
+   path matching `[tool.coverset] tracked_globs`, default `uv.lock` and `conftest.py`, matched
+   from the right like `PurePath.match`, gives every test the `impacted_by_diff` signal with the
+   explanation "tracked file changed: <path>"; wave 1 and sharding do not change), wave 1 (the change-covering set) is computed and the tests are dealt into
    shards (`analysis/sharding.py`, `plan_shards`): `K = ceil(Σ p50 / target_shard_seconds)`, capped by
    `max_shards`, by the number of assignment units (a fixture group in one priority decile is one
    unit) and by `max(1, n_tests // 3)` unless the *measured* p50s alone exceed `target_shard_seconds`
@@ -111,15 +124,28 @@ queued ──▶ claim + policy ──▶ plan ───────────
    logged and leaves the previous snapshot in use. The task lives in
    `OrchestratorContext.background`; a CLI context waits for it before closing its executors, so
    `coverset run --executor modal` of the default branch's tip builds the snapshot before it exits.
+   The same baselines, on every executor, also get **`coverset invariants scan`** in the background
+   (`runner.scan_after_baseline`, `COVERSET_SCAN_AFTER_BASELINE`, default true): if the head is still
+   the branch tip, the scan (see Commands) runs pinned to that run, review-kind invariants get a
+   fresh advisory review through the configured client (with `COVERSET_AI=off` there is none and the
+   statuses are still recorded: `needs_review` for one verified only by review), and their rows are
+   rewritten with `trigger = 'scan'`. Errors are logged, never raised into the run.
 
 Every failure path (planning, environment, capacity, an internal error, cancellation) ends the run
 `error` or `cancelled` with a reason, a `verdict` event and a `done` event, so SSE clients and
 `coverset-ci wait` always finish. If even that write fails, or the run's task dies, a last-resort
-finalizer (in the runner, the dispatcher and the CLI) marks the run `error` with both events.
+finalizer (in the runner, the dispatcher and the CLI) marks the run `error` with both events and
+replaces the budget reservation in `cost_estimate` with the real worker cost (what the dead
+execution in that process had held, else 0: nothing was acquired), so a crashed Modal run does not
+keep its reservation against the day's budget. Worker-produced text (`longrepr`, collection errors,
+shard errors quoted in a reason) is redacted with `coverset.logging.redact` as it enters the run,
+before it reaches `runs.reason`, `runs.summary_json`, events or the forge.
 
 `done.exit_code` (what `coverset-ci wait` and `coverset run` exit with): `0` success, `1` a confirmed
-failure (also when shards errored too), `5` no tests collected, `2` for everything else (error,
-cancelled, abandoned, neutral such as "budget exhausted" or a skipped run).
+failure or a collection error (also when shards errored too), `5` no tests collected, `2` for
+everything else (error, cancelled, abandoned, neutral such as "budget exhausted" or a skipped run).
+`coverset-ci wait` stops at the first `failure` verdict (exit 1); after any other verdict it reads
+on to `done` and exits with its code.
 
 **Cost.** `runs.cost_estimate = Σ executor.cost_usd(resources, seconds the worker was held)` over
 every worker the run acquired, from `acquire` to `release` (extras released right after sharding
@@ -129,7 +155,9 @@ belongs to no run is in `executor_spend` (see Policy above).
 ## Events
 
 `run_events` rows are written in batches (every 100 ms or 200 rows) with consecutive `seq` numbers;
-payload strings are redacted. Kinds from the HTTP contract (Addendum A): `progress`, `test`, `log`,
+payload strings are redacted. A transaction that adds its own event (the `verdict` and `done` rows)
+also writes every event queued while it ran, in the same commit: those were numbered below its own
+row, so a client reading `seq > since` after the commit can never skip one that commits later. Kinds from the HTTP contract (Addendum A): `progress`, `test`, `log`,
 `verdict`, `done`. Internal kinds: `queued` (intake), `status` (`running`, `planned` with test,
 shard and wave-1 counts and the prior run), `shard` (per-shard status and exit code) and `failure`
 (a confirmed failure: retried or not, pre-existing or not, its rank). The first-failure verdict is a
@@ -156,22 +184,28 @@ priority order (wave 1 first, then by score); `rank_executed` is the position at
 reported: how many tests (across all shards, first attempts) had reported a result when it did. The
 two differ when shards run in parallel or when the plugin keeps a module's or class's tests together
 behind their best-ranked member. `rank_file_order` is its position in plain collection order, and
-`t_first_failure_file_order_est = (sandbox_ready - t0) + Σ p50` of the tests before it in file
-order: an **estimate** of when plain file-order CI would have reached it (unknown p50s count as the
-median), always labelled as estimated.
+`t_first_failure_file_order_est = (first_test - t0) + Σ p50` of the tests before it in file order:
+an **estimate** of when plain file-order CI would have reached it. It starts at the first test
+because the environment, collection and planning happen in either order (`sandbox_ready` when no
+result streamed in); unknown p50s count as the median of the known ones, or as 0.05 s (the
+planner's default) when no test has been timed. It is labelled "estimated from the first test" on
+the run page, the PR page, the sticky comment and in `runs.summary_json`
+(`t_first_failure_file_order_est_label`).
 
 ## Retries, flaky tests and fail-fast
 
 Fail-fast lives in the orchestrator, never in the plugin. When a non-quarantined test reports
 `failed` or `error` for the first time, the runner starts one retry exec on the same worker, alongside
-the shard: `--coverset-out run/retry-<n> --coverset-shapes off`, the nodeid alone in
+the shard: `--coverset-out=run/retry-<n> --coverset-shapes=off`, the nodeid alone in
 `run/retry-<n>.args`. Retries are never ingested and are capped per run by
 `COVERSET_RETRY_BUDGET_PER_RUN` (a failure past the budget is confirmed without a retry).
 
 * The retry passes: the test is **flaky** (`test_results.flaky = true`, outcome `passed`, two
   `test_attempts` rows); it does not fail the run.
 * It fails again: the failure is **confirmed**. If the same `fail_sig` (exception type + crash
-  location) failed in the base-branch run, it is **pre-existing** and does not count. Otherwise the
+  location) failed in the base-branch run, it is **pre-existing** and does not count (a run whose
+  only failures are pre-existing succeeds with a reason such as "12 passed, 1 pre-existing failure,
+  2 skipped": only passed tests are counted as passed). Otherwise the
   first confirmed failure records `rank_coverset` and `rank_executed`, sets `timeline.first_failure` and posts a
   `failure` verdict immediately; later ones are added to the final verdict.
 
@@ -214,7 +248,8 @@ options and the run's `extra_env`; never `COVERSET_GITHUB_*`, `ANTHROPIC_API_KEY
 whatever is left in its process group is killed, so a test suite's background processes do not
 outlive it), extracts source with the tarfile `data` filter, keeps each worker in its own
 `coverset-run-*` temp directory (removed on release, after which every worker call raises; leftovers
-older than an hour are swept at start-up) and caches one virtualenv per environment hash under
+older than an hour are swept at start-up, except a directory whose `.worker.lock` a live worker
+holds with `flock`, or whose `run/` or `repo/` changed within the hour) and caches one virtualenv per environment hash under
 `~/.cache/coverset/venvs/` (built under a file lock and renamed into place atomically). `uv` builds
 the venv with `--no-config` and an allow-listed environment (`PATH`, `HOME`, cache dirs, `UV_*`,
 proxy and TLS variables: no tokens reach an sdist's build hooks), installs the requirements, then
@@ -292,7 +327,8 @@ created is left running; anything a crash leaves behind is ended by Modal's `idl
   verified only by review becomes `satisfied` or `needs_review`; one that also has test, property or
   runtime entries keeps the status its tests decided in the run (a review never overrides tests and
   never yields `violated`) and gains the review entry in its evidence. Prints a table of invariant,
-  target, verify kinds, review finding, the run's status and the scan's status. Code:
-  `commands/invariants.py`.
+  target, verify kinds, review finding, the run's status and the scan's status. The runner runs the
+  same scan after every trusted, completed baseline of the default branch's tip (step 8 above).
+  Code: `commands/invariants.py`.
 * `coverset seed-demo`, `coverset warm`, `coverset facts query SQL`, `coverset shapes FUNC [--markdown] [--suggest]`,
   `coverset invariants check`, `coverset gc [--dry-run]`, `coverset repo purge NAME`, `coverset modal reap [--all]`.

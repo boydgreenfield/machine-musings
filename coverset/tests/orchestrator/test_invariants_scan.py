@@ -81,6 +81,12 @@ CLASSIFY_FIXTURE = {
 
 
 @pytest.fixture
+def settings_overrides() -> dict[str, Any]:
+    """These tests run the scan by hand: no automatic scan after their baselines."""
+    return {"scan_after_baseline": False}
+
+
+@pytest.fixture
 def fixtures_dir(tmp_path: Path) -> Path:
     root = tmp_path / "ai-fixtures"
     (root / "default").mkdir(parents=True)

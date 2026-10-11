@@ -211,7 +211,7 @@ def test_grid_uses_sampling_wording_when_tests_hit_the_cap() -> None:
     obs = [_obs("email", "str|ascii|kind:email/plain|len:11-100", 2048, truncated=True)]
     sampling = FuncSampling(("m.py", "check", 1), 2048, ("tests/t.py::test_a",), True)
     model = _view(obs, sampling).grid()
-    assert model.missing_reason == "not observed in 2048 sampled calls (1 tests hit the sample cap)"
+    assert model.missing_reason == "not observed in 2048 sampled calls (1 test hit the sample cap)"
     html = str(render_grid(model, cell_url=lambda c: "/c", target="t"))
     assert "not observed in 2048 sampled calls" in html and "never exercised" not in html
 

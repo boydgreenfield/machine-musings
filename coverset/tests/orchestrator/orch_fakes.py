@@ -202,6 +202,8 @@ class Script:
     bundle_outcomes: dict[str, Outcome] = field(default_factory=dict)
     meta: dict[str, Any] = field(default_factory=dict)
     shard_exit_code: int | None = None
+    collect_errors: list[dict[str, Any]] = field(default_factory=list)
+    """``errors`` of ``collect.json`` (modules that failed to import); collection then exits 1."""
     envs: list[dict[str, str]] = field(default_factory=list)
     commands: list[list[str]] = field(default_factory=list)
 
@@ -278,9 +280,11 @@ class FakeWorker:
                 for k, n in enumerate(nodeids)
                 if n not in known
             ]
-            (out / "collect.json").write_text(json.dumps({"items": chosen, "errors": []}))
+            errors = self.script.collect_errors
+            (out / "collect.json").write_text(json.dumps({"items": chosen, "errors": errors}))
             emit(prefix + json.dumps({"kind": "collected", "count": len(chosen)}), "stdout")
-            return RunResult(0 if chosen else 5, started, time.time(), 10, False)
+            code = 1 if errors else 0 if chosen else 5
+            return RunResult(code, started, time.time(), 10, False)
         args_file = Path(next(c for c in cmd if c.startswith("@"))[1:])
         nodeids = [line for line in args_file.read_text().splitlines() if line]
         stop_file = _option(cmd, "--coverset-stop-file")

@@ -34,7 +34,7 @@
     {% if stream_url %}<div sse-swap="done" hx-swap="innerHTML" class="replay-slot">{% if replay %}<span class="replay-status" data-replay="playing">replaying at {{ '%g'|format(speed) }}× speed{% if freeze is not none %}, stopping at {{ freeze|secs }}{% endif %}</span>{% else %}<span class="replay-status" data-replay="live">live</span>{% endif %}</div>{% endif %}
   </section>
   <section class="panel">
-    <div class="panel-head"><h2>Timeline</h2><span class="aside">seconds since the {{ 'webhook arrived' if (run.timeline or {}).get('webhook_received') else 'run was queued' }}{% if ghost_s %} · grey: measured cold path{% endif %}</span></div>
+    <div class="panel-head"><h2>Timeline</h2><span class="aside">seconds since the {{ 'webhook arrived' if (run.timeline or {}).get('webhook_received') else 'run was queued' }}{% if ghost_s %} · grey: measured cold path of the demo app (fresh sandbox, install, plain pytest){% endif %}</span></div>
     <div id="run-timeline" {% if stream_url %}sse-swap="timeline" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_timeline.html" %}</div>
   </section>
   <section class="panel">

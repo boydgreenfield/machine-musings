@@ -60,6 +60,7 @@ def test_secrets():
 """
 
 
+@pytest.mark.security
 def test_hostile_values_keep_every_parameter_and_hide_secrets(pytester: pytest.Pytester) -> None:
     pytester.mkpydir("hazpkg")
     (pytester.path / "hazpkg" / "mod.py").write_text(HAZARD_MODULE)

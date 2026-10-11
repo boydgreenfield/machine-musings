@@ -30,13 +30,17 @@ reach the network. What the executor does guarantee:
 * **Released means gone.** After ``release`` every worker method raises
   :class:`~coverset.executors.base.ExecutorError`; nothing recreates the deleted directory.
 * **Cleanup.** Each worker owns a ``tempfile.mkdtemp(prefix="coverset-run-")`` directory outside the
-  project, removed on release; executor start-up removes leftovers older than an hour.
+  project, removed on release; executor start-up removes leftovers older than an hour. A worker
+  holds an exclusive ``flock`` on ``<root>/.worker.lock`` from acquire to release, and the sweep
+  skips a directory whose lock is held or whose ``run/`` or ``repo/`` changed within the hour, so
+  another process's start-up never deletes a live worker of a long run.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import io
 import json
 import logging
@@ -83,6 +87,8 @@ __all__ = [
 ]
 
 RUN_DIR_PREFIX = "coverset-run-"
+WORKER_LOCK = ".worker.lock"
+"""File in a worker root that its executor holds an exclusive ``flock`` on while the worker lives."""
 READY_MARKER = ".coverset-ready.json"
 KILL_GRACE_S = 5.0
 ACQUIRE_WAIT_S = 600.0
@@ -307,6 +313,7 @@ class LocalWorker:
         self._groups: set[int] = set()
         self._cancelled: set[int] = set()
         self._released = False
+        self._lock_fd: int | None = _hold_lock(root / WORKER_LOCK)
         (root / "home").mkdir(exist_ok=True)
         (root / "tmp").mkdir(exist_ok=True)
 
@@ -454,6 +461,10 @@ class LocalWorker:
                 _signal_group(group, signal.SIGKILL)
             self._groups.clear()
             await asyncio.to_thread(shutil.rmtree, self._root, True)
+            if self._lock_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self._lock_fd)  # closing the descriptor drops the flock
+                self._lock_fd = None
             if self._on_release is not None:
                 self._on_release(self.id)
 
@@ -554,8 +565,57 @@ def _write_atomic(target: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _hold_lock(path: Path) -> int | None:
+    """Open ``path`` and take an exclusive ``flock`` on it; the descriptor holds it until closed."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        log.warning("cannot create the worker lock %s: %s", path, exc)
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        log.warning("cannot lock the worker directory %s: %s", path.parent, exc)
+        return None
+    return fd
+
+
+def _try_lock(path: Path) -> int | None:
+    """A descriptor holding ``path``'s lock, or None when another holder has it (a live worker).
+
+    A missing lock file (a directory from before locks, or one a test deleted) is not "held": the
+    caller falls back to the modification times.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return -1
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _recently_used(entry: Path, cutoff: float) -> bool:
+    """Whether ``entry`` or its ``run/`` or ``repo/`` directory changed after ``cutoff``."""
+    for path in (entry, entry / "run", entry / "repo"):
+        with contextlib.suppress(OSError):
+            if path.lstat().st_mtime > cutoff:
+                return True
+    return False
+
+
 def sweep_stale_run_dirs(temp_dir: Path, *, max_age_s: float = STALE_RUN_DIR_S) -> list[Path]:
-    """Remove ``coverset-run-*`` directories in ``temp_dir`` (owned by us) older than ``max_age_s``."""
+    """Remove ``coverset-run-*`` directories in ``temp_dir`` (owned by us) older than ``max_age_s``.
+
+    A directory is left alone while its worker lock is held (a live worker of any process) or when
+    it, its ``run/`` or its ``repo/`` changed within ``max_age_s``.
+    """
     removed: list[Path] = []
     cutoff = time.time() - max_age_s
     try:
@@ -569,9 +629,16 @@ def sweep_stale_run_dirs(temp_dir: Path, *, max_age_s: float = STALE_RUN_DIR_S) 
             info = entry.lstat()
         except OSError:
             continue
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mtime > cutoff:
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or _recently_used(entry, cutoff):
             continue
-        shutil.rmtree(entry, ignore_errors=True)
+        fd = _try_lock(entry / WORKER_LOCK)
+        if fd is None:
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+        finally:
+            if fd >= 0:
+                os.close(fd)
         removed.append(entry)
     return removed
 

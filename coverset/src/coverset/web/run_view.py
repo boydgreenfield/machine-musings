@@ -47,7 +47,11 @@ REGIONS = ("head", "timeline", "gantt", "failures", "order")
 TERMINAL = frozenset({"completed", "cancelled", "abandoned", "skipped", "error"})
 WHY_ORDER_ROWS = 20
 MAX_PINNED = 3
-GHOST_KEY = "t_cold_path"
+DEMO_REPO = "coverset-demo/ledger"
+"""The demo repository: the only one with a measured cold path (``docs/numbers.json``)."""
+GHOST_KEY = "t_cold_path_demo"
+GHOST_FAILURE_KEY = "t_cold_path_demo_first_failure"
+GHOST_LABEL = "measured cold path, demo app: fresh sandbox, install, plain pytest"
 
 
 @dataclass(slots=True)
@@ -117,6 +121,24 @@ def build_state(run_id: str, events: Sequence[RunEvent]) -> RunState:
     return state
 
 
+def cold_path(repo: Repo) -> tuple[float | None, float | None]:
+    """``(seconds, first failure seconds)`` of the measured cold path for ``repo``'s run pages.
+
+    Only the demo repository has one (``t_cold_path_demo`` in ``docs/numbers.json``: a fresh
+    sandbox, the install and plain pytest on the demo app); every other repository gets none,
+    because the bench suite's cold path says nothing about its suite.
+    """
+    if repo.full_name != DEMO_REPO:
+        return None, None
+    numbers = load_numbers()
+
+    def seconds(key: str) -> float | None:
+        value = numbers.get(key)
+        return float(value) if isinstance(value, int | float) and value > 0 else None
+
+    return seconds(GHOST_KEY), seconds(GHOST_FAILURE_KEY)
+
+
 def _origin(run: Run) -> datetime:
     marks, origin = milestones(run.timeline or {})
     return origin or run.created_at
@@ -136,9 +158,7 @@ def regions_context(
     origin = _origin(run)
     clock = state.clock if replay else None
     marks, _ = milestones(run.timeline or {}, until=clock)
-    numbers = load_numbers()
-    ghost = numbers.get(GHOST_KEY)
-    ghost_s = float(ghost) if isinstance(ghost, int | float) and ghost > 0 else None
+    ghost_s, ghost_failure_s = cold_path(bundle.repo)
     end_moment = final_clock or state.clock or origin
     if not replay and run.status not in TERMINAL:
         predicted = max((s.predicted_s or 0.0 for s in bundle.shards), default=0.0)
@@ -184,7 +204,13 @@ def regions_context(
         "first_render": first_render,
         "basis": bundle.basis,
         "basis_label": bundle.basis_label,
-        "timeline_svg": render_timeline(marks, span=max(span, timeline_end), ghost=ghost_s),
+        "timeline_svg": render_timeline(
+            marks,
+            span=max(span, timeline_end),
+            ghost=ghost_s,
+            ghost_label=GHOST_LABEL,
+            ghost_mark=ghost_failure_s if (run.timeline or {}).get("first_failure") else None,
+        ),
         "ghost_s": ghost_s,
         "gantt_svg": render_gantt(
             blocks,

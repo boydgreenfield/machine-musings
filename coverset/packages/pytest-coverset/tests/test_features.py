@@ -246,6 +246,16 @@ def test_secret_dict_keys_are_redacted_in_container_examples() -> None:
     assert example_repr("**kw", {"token": 5}, "all") == "{'token': <redacted>}"
 
 
+@pytest.mark.security
+def test_credential_names_are_redacted() -> None:
+    assert example_repr("credentials", "sekrit", "scalars") == "<redacted:len=6>"
+    assert example_repr("credential", "sekrit", "scalars") == "<redacted:len=6>"
+    assert example_repr("db_creds", "sekrit", "scalars") == "<redacted:len=6>"
+    assert example_repr("**kw", {"credentials": "sekrit", "name": "bob"}, "all") == (
+        "{'credentials': <redacted:len=6>, 'name': 'bob'}"
+    )
+
+
 def test_sum_of_a_huge_int_and_a_float_does_not_drop_the_value() -> None:
     assert shape_key([10**400, 1.0]) == "list|elem:mixed|len:2-10|order:reverse"
     assert shape_key([10**400, -(10**400), 0.5]) == "list|any_neg|elem:mixed|len:2-10|order:unsorted"

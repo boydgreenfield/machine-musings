@@ -37,15 +37,16 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
-from coverset.analysis.functions import FunctionRegion, index_functions_detailed
+from coverset.analysis.functions import FunctionRegion, IndexedFunction, index_functions_detailed
 from coverset.lang.base import FuncSampling, FuncTriple, InputCov, ShapeObs
 
 __all__ = [
     "Catalogue",
+    "FunctionCatalogue",
     "FunctionInputCov",
     "InputClass",
     "ParamInfo",
@@ -54,10 +55,12 @@ __all__ = [
     "annotation_index",
     "enum_index",
     "example_sort_key",
+    "function_catalogue",
     "function_input_cov",
     "parse_shape_key",
     "render_markdown",
     "suggest_annotation",
+    "cap_hits",
 ]
 
 NON_INPUT_PARAMS: Final = frozenset({"return", "<receiver>"})
@@ -383,12 +386,15 @@ class Catalogue:
         sampling: FuncSampling | None,
         *,
         annotations: ParamAnnotations | None = None,
+        tests_called: Collection[str] | None = None,
     ) -> FunctionInputCov:
         """Input-class coverage of ``region`` from the observations of that function.
 
         ``annotations`` maps parameter names to annotation text (see
         :func:`coverset.analysis.functions.index_functions_detailed`); when omitted, the
-        catalogue's ``annotations`` table is consulted for ``region.triple``.
+        catalogue's ``annotations`` table is consulted for ``region.triple``. ``tests_called`` are
+        the tests whose lines touch the body in the run; with them, ``tests_truncated`` counts the
+        tests that called the function after its sample cap (:func:`cap_hits`).
         """
         if annotations is None:
             annotations = self._annotations.get(region.triple)
@@ -405,7 +411,7 @@ class Catalogue:
                 kinds = sorted({shape.type_name for shape, _ in state.shapes})
                 unannotated.append(f"{state.param} unannotated: observed {{{', '.join(kinds)}}}")
         missing = [c for c in expected if c.name not in observed]
-        truncated = _tests_truncated(observations, sampling)
+        truncated = _tests_truncated(observations, sampling, tests_called)
         pct = round(100.0 * (len(expected) - len(missing)) / len(expected), 1) if expected else None
         if pct == 100.0 and unannotated:
             pct = None
@@ -554,11 +560,68 @@ def function_input_cov(
     *,
     annotations: Mapping[str, str | None] | None = None,
     catalogue: Catalogue | None = None,
+    tests_called: Collection[str] | None = None,
 ) -> FunctionInputCov:
     """Input-class coverage of ``region`` with the default (or given) catalogue."""
     return (catalogue or Catalogue()).function_input_cov(
-        region, observations, sampling, annotations=annotations
+        region, observations, sampling, annotations=annotations, tests_called=tests_called
     )
+
+
+@dataclass(frozen=True, slots=True)
+class FunctionCatalogue:
+    """What :func:`function_catalogue` gives a reader of one function's input classes."""
+
+    catalogue: Catalogue
+    annotations: dict[str, str | None]
+    """Parameter annotations by bare name (``*args`` → ``args``)."""
+    returns: str | None
+    """The return annotation."""
+
+    def input_cov(
+        self,
+        region: FunctionRegion,
+        observations: Sequence[ShapeObs],
+        sampling: FuncSampling | None,
+        *,
+        tests_called: Collection[str] | None = None,
+    ) -> FunctionInputCov:
+        """:meth:`Catalogue.function_input_cov` with this function's annotations."""
+        return self.catalogue.function_input_cov(
+            region, observations, sampling, annotations=self.annotations, tests_called=tests_called
+        )
+
+
+def function_catalogue(
+    region: FunctionRegion, source: str | None, *, indexed: Sequence[IndexedFunction] | None = None
+) -> FunctionCatalogue:
+    """The catalogue for one function, built the same way wherever its classes are shown.
+
+    The verdict (the changed-function rows and the sticky comment's "N input classes never
+    exercised"), the PR page's cards and the function page all call this, so they count the same
+    classes: the parameter annotations come from the function's own head ``source`` (matched by
+    ``func_key``, else by qualname and ``def_line``), and ``Enum`` annotations resolve through the
+    enum classes defined in that same file (:func:`enum_index`). ``indexed`` is
+    ``index_functions_detailed(region.path, source)`` when the caller has it cached.
+    """
+    if source is None:
+        return FunctionCatalogue(Catalogue(), {}, None)
+    if indexed is None:
+        try:
+            indexed = index_functions_detailed(region.path, source)
+        except (SyntaxError, ValueError, RecursionError):
+            indexed = []
+    annotations: dict[str, str | None] = {}
+    returns: str | None = None
+    for item in indexed:
+        if item.region.func_key == region.func_key or (
+            item.region.qualname == region.qualname and item.region.def_line == region.def_line
+        ):
+            annotations = {_bare(p): a for p, a in zip(item.region.params, item.annotations, strict=True)}
+            returns = item.returns
+            break
+    enums = enum_index({region.path: source})
+    return FunctionCatalogue(Catalogue(enums.get if enums else None), annotations, returns)
 
 
 def annotation_index(sources: Mapping[str, str]) -> dict[FuncTriple, dict[str, str | None]]:
@@ -799,19 +862,40 @@ def _element_strategy(state: _ParamState) -> str:
     return "st.integers(0, 100)"
 
 
-def _tests_truncated(observations: Sequence[ShapeObs], sampling: FuncSampling | None) -> int:
-    """Distinct tests in truncated observation rows (all sampled tests if only the function says so)."""
-    tests = {t for o in observations if o.truncated for t in o.tests}
-    if not tests and sampling is not None and sampling.truncated:
-        tests = set(sampling.tests)
-    return len(tests)
+def cap_hits[T](sampled: Collection[T], called: Collection[T] = (), *, truncated: bool) -> int:
+    """How many tests "hit the sample cap" of a function: the one definition every reader uses.
+
+    0 when sampling was never capped. Otherwise the tests that called the function (their lines
+    touch its body) but were never sampled, because the cap had already stopped sampling, with a
+    floor of 1: the test during which the cap was hit was sampled, yet calls after the cap went
+    unrecorded. Both caps count (the adaptive one, ``cap: "sample"``, and the full-trace safety
+    cap, ``cap: "full"``): either way a missing class was "not observed in N sampled calls", never
+    "never exercised". ``facts.ingest`` (per shard and in ``func_input_cov``), the verdict and the
+    UI all count with this.
+    """
+    if not truncated:
+        return 0
+    return max(len(set(called) - set(sampled)), 1)
+
+
+def _tests_truncated(
+    observations: Sequence[ShapeObs], sampling: FuncSampling | None, called: Collection[str] | None
+) -> int:
+    """:func:`cap_hits` from a function's sampling row (else its observations)."""
+    capped = (sampling is not None and sampling.truncated) or any(o.truncated for o in observations)
+    if sampling is not None:
+        sampled: set[str] = set(sampling.tests)
+    else:
+        sampled = {t for o in observations for t in o.tests}
+    return cap_hits(sampled, called or (), truncated=capped)
 
 
 def _sampling_note(sampling: FuncSampling | None, truncated: int) -> str:
     if not truncated:
         return ""
     calls = sampling.calls if sampling is not None else 0
-    return f"not observed in {calls} sampled calls ({truncated} tests hit the sample cap)"
+    tests = "test" if truncated == 1 else "tests"
+    return f"not observed in {calls} sampled calls ({truncated} {tests} hit the sample cap)"
 
 
 def _elem_name(token: str) -> str:

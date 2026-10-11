@@ -33,8 +33,8 @@
    incremented; retries are never ingested and capped by ``retry_budget_per_run``). A pass makes the
    test *flaky*; a second failure *confirms* it unless its ``fail_sig`` also failed on the base
    branch (*pre-existing*). The first confirmed failure posts a verdict immediately and records
-   ``rank_coverset`` (planned position) and ``rank_executed`` (how many tests had reported when it
-   did); with ``fail_fast = "cancel_remaining"`` the shards then get STOP files, up to
+   ``rank_coverset`` (planned position) and ``rank_executed`` (the position at which its first
+   attempt reported, counting every shard's first attempts); with ``fail_fast = "cancel_remaining"`` the shards then get STOP files, up to
    20 s to write their bundles, and are cancelled; with ``finish_in_background`` (the default) they
    run on so the facts land. A newer queued run for the same PR cancels this one
    (``cancel_superseded``).
@@ -56,6 +56,12 @@
    PR runs, untrusted runs, errored or cancelled runs, other branches and superseded heads (the demo's
    history replay) never snapshot. The task is kept in :attr:`OrchestratorContext.background`;
    :meth:`OrchestratorContext.close` waits for it.
+8. **Invariants scan.** After the same kind of baseline (trusted, default branch, completed with
+   ``success`` or ``failure``) on any executor, with ``COVERSET_SCAN_AFTER_BASELINE`` (default true),
+   a background task runs ``coverset invariants scan`` pinned to that run
+   (:func:`scan_after_baseline`) if its head is still the branch tip: review-kind invariants get a
+   fresh advisory review and their statuses are rewritten with ``trigger = 'scan'``. Errors are
+   logged, never raised.
 
 Every failure path ends the run as ``error`` or ``cancelled`` with a reason and a ``done`` event, so
 SSE clients and ``coverset-ci wait`` always finish; if even that write fails,
@@ -102,6 +108,7 @@ from coverset.db.models import (
 )
 from coverset.db.session import Database
 from coverset.executors.base import EnvRef, Executor, ExecutorError, Resources, RunResult, SnapshotRef
+from coverset.facts.convert import C_TRACERS
 from coverset.facts.ingest import RunContext, finalize_run, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.lang.base import LanguageAdapter
@@ -137,6 +144,7 @@ from coverset.orchestrator.verdict import (
     build_summary,
     file_order_estimate,
     functions_of_interest,
+    outcome_tally,
     persist_verdict,
     post_summary,
     t0_of,
@@ -433,20 +441,41 @@ def retry_env(extra_env: Mapping[str, str], increment_keys: list[str]) -> dict[s
     return env
 
 
+_LIVE_COSTS: dict[str, Callable[[], float]] = {}
+"""Run id → the worker cost so far of an execution in this process; left behind when the
+execution's task dies, so :func:`finalize_crashed` records the real cost, not the reservation."""
+
+
 async def finalize_crashed(
-    db: Database, settings: Settings, run_id: str, reason: str, *, after_seq: int = 0
+    db: Database,
+    settings: Settings,
+    run_id: str,
+    reason: str,
+    *,
+    after_seq: int = 0,
+    cost: float | None = None,
 ) -> bool:
     """Last resort for a run whose execution died: ``error`` with ``verdict`` and ``done`` events.
 
     Does nothing (returns False) when the run already reached a terminal status. ``after_seq`` is
-    the highest event sequence number the dead execution may have handed out.
+    the highest event sequence number the dead execution may have handed out. ``cost_estimate``
+    becomes the real worker cost (``cost``, else what the dead execution in this process had
+    spent, else 0: nothing was acquired here), so a crashed budgeted run does not keep its
+    reservation against the daily budget.
     """
+    meter = _LIVE_COSTS.pop(run_id, None)
+    if cost is None:
+        try:
+            cost = round(float(meter()), 6) if meter is not None else 0.0
+        except Exception:  # a broken rate card: the reservation is still worse than 0
+            cost = 0.0
 
     async def work(session: AsyncSession) -> bool:
         run = await session.get(Run, run_id)
         if run is None or run.status not in ("queued", "running"):
             return False
         now = settings.now()
+        run.cost_estimate = cost
         run.status = "error"
         run.verdict = "neutral"
         run.reason = reason[:1000]
@@ -650,17 +679,28 @@ class EventSink:
         raise AssertionError("unreachable")
 
     async def _transact_once(self, work: Callable[[AsyncSession], Awaitable[Any]] | None) -> Any:
+        """One attempt: the pending batch, then ``work``, then whatever was queued meanwhile.
+
+        ``work`` awaits (``session.get``, flushes), and other tasks queue events while it does. Those
+        events take sequence numbers *below* any event ``work`` adds afterwards (a ``verdict`` or
+        ``done`` row), so they are written in this same transaction: a client that reads
+        ``seq > since`` after the commit can never skip one that commits later.
+        """
         async with self._lock, self._db.session() as session:
-            batch = self._take()
+            batches: list[_Batch] = []
             try:
-                if batch is not None:
+                if (batch := self._take()) is not None:
+                    batches.append(batch)
                     await self._write(session, batch)
                 result = await work(session) if work is not None else None
+                if work is not None and (late := self._take()) is not None:
+                    batches.append(late)
+                    await self._write(session, late)
                 await session.commit()
             except BaseException:
                 with contextlib.suppress(Exception):
                     await session.rollback()
-                if batch is not None:
+                for batch in reversed(batches):  # each requeue goes in front: keep the original order
                     self._requeue(batch)
                 raise
         return result
@@ -814,6 +854,8 @@ class _Execution:
         self.watcher: asyncio.Task[None] | None = None
         self.heartbeat: asyncio.Task[None] | None = None
         self.first_failure: str | None = None
+        self.first_test_at: datetime | None = None
+        """When the first test result streamed in (``timeline.first_test``)."""
         self.early_verdict: asyncio.Task[None] | None = None
         self.stop_requested = False
         self.cancel_reason: str | None = None
@@ -833,6 +875,7 @@ class _Execution:
         if run is None:
             return await self._outcome()
         self.run = run
+        _LIVE_COSTS[self.run_id] = self._cost
         sink = self.sink = EventSink(
             self.ctx.db,
             self.run_id,
@@ -889,12 +932,37 @@ class _Execution:
             await asyncio.to_thread(shutil.rmtree, self.settings.runs_dir / self.run_id, True)
         if crash is not None:
             with contextlib.suppress(Exception):
-                await finalize_crashed(self.ctx.db, self.settings, self.run_id, crash, after_seq=sink.seq)
+                await finalize_crashed(
+                    self.ctx.db, self.settings, self.run_id, crash, after_seq=sink.seq, cost=self._cost()
+                )
+        _LIVE_COSTS.pop(self.run_id, None)
         if run.pr_id is not None and self.settings.env != "test":
             await self._expire_pr_runs(run.pr_id)
         outcome = await self._outcome()
         self._schedule_resnapshot(run, outcome)
+        self._schedule_scan(run, outcome)
         return outcome
+
+    def _schedule_scan(self, run: Run, outcome: RunOutcome) -> None:
+        """``coverset invariants scan`` of this baseline (see the module docstring, step 8)."""
+        plan = self.plan
+        if plan is None or not self.settings.scan_after_baseline:
+            return
+        if not (
+            run.trigger in history.BASELINE_TRIGGERS
+            and run.trusted
+            and run.pr_id is None
+            and run.branch == plan.default_branch
+            and outcome.status == "completed"
+            and outcome.conclusion in ("success", "failure")
+        ):
+            return
+        self.ctx.spawn(
+            scan_after_baseline(
+                self.ctx, plan.repo_id, run.id, plan.head_sha, mirror=plan.mirror, branch=plan.default_branch
+            ),
+            name=f"invariants scan after run {run.id}",
+        )
 
     def _schedule_resnapshot(self, run: Run, outcome: RunOutcome) -> None:
         """Re-snapshot the default branch after a trusted baseline (see the module docstring, step 7)."""
@@ -1163,7 +1231,10 @@ class _Execution:
             },
         )
         if not plan.collected:
-            await self._finish("completed", "neutral", "no tests collected", exit_code=NO_TESTS_EXIT_CODE)
+            if plan.collect_errors:  # every test module failed to import: that is a failure
+                await self._finish("completed", "failure", _collection_errors_text(plan.collect_errors))
+            else:
+                await self._finish("completed", "neutral", "no tests collected", exit_code=NO_TESTS_EXIT_CODE)
             return
         self.states = {i.nodeid: TestState(i.nodeid) for i in plan.collected}
         self.wave1_pending = set(plan.wave1.tests)
@@ -1403,6 +1474,7 @@ class _Execution:
         sink.event("test", self._test_payload(test, flaky=False))
         now = self.settings.now()
         if self.counts.total() == 1:
+            self.first_test_at = now
             sink.timeline("first_test", now)
             if not plan.wave1.tests:  # an empty wave 1 is finished as soon as testing starts
                 sink.timeline("wave1_finished", now)
@@ -1554,8 +1626,9 @@ class _Execution:
         now = self.settings.now()
         assert self.run is not None
         t0 = t0_of(self.run)
-        sandbox_ready_s = (plan.sandbox_ready_at - t0).total_seconds()
-        estimate = file_order_estimate(plan, test.nodeid, sandbox_ready_s)
+        # Measured from the first test: environment, collection and planning happen in both orders.
+        started = self.first_test_at or plan.sandbox_ready_at
+        estimate = file_order_estimate(plan, test.nodeid, (started - t0).total_seconds())
         self.run.rank_coverset = plan.ranks.get(test.nodeid)
         self.run.rank_executed = test.exec_index
         self.run.rank_file_order = plan.file_ranks.get(test.nodeid)
@@ -1774,7 +1847,7 @@ class _Execution:
                 self.counts[row.outcome] += 1
                 test.outcome, test.duration_s = row.outcome, row.duration_s
                 test.failed_phase, test.fail_sig = row.failed_phase, row.fail_sig
-                test.longrepr = (row.longrepr or "")[:MAX_LONGREPR_CHARS] or None
+                test.longrepr = redact((row.longrepr or "")[:MAX_LONGREPR_CHARS]) or None
                 test.shard_id, test.attempts = outcome.shard_id, 1
                 sink.result(
                     test_id,
@@ -1843,6 +1916,7 @@ class _Execution:
         )
         await sink.flush()
         conclusion, status, reason = self._conclusion(plan)
+        reason = redact(reason)  # shard errors quote worker-produced text
         cost = self._cost()
         not_run = sum(1 for t in self.states.values() if t.outcome == "not_run")
         report = await self._report(plan, outcomes, catalogue)
@@ -1888,29 +1962,39 @@ class _Execution:
             notes.append((kind, clean))
         return notes
 
-    def _conclusion(self, plan: RunPlan) -> tuple[str, str, str]:
-        """``(conclusion, status, reason)`` from confirmed failures, shard errors and outcomes."""
+    def _conclusion(self, plan: RunPlan | None) -> tuple[str, str, str]:
+        """``(conclusion, status, reason)`` from confirmed failures, collection errors, shard errors
+        and outcomes. A success counts the tests that passed: ``all N tests passed`` when every test
+        that ran passed, else ``N passed, 1 pre-existing failure, K skipped``."""
         confirmed = [t for t in self.states.values() if t.confirmed and not t.preexisting]
         preexisting = [t for t in self.states.values() if t.preexisting]
         flaky = [t for t in self.states.values() if t.flaky]
         errors = [f"shard {k}: {s.error}" for k, s in sorted(self.shard_states.items()) if s.error]
+        collect_errors = getattr(plan, "collect_errors", None) or []
         executed = sum(1 for t in self.states.values() if t.outcome != "not_run")
+        passed = sum(1 for t in self.states.values() if t.outcome == "passed")
         notes = []
         if flaky:
             notes.append(f"{len(flaky)} flaky")
-        if preexisting:
-            notes.append(f"{len(preexisting)} pre-existing failure{'s' if len(preexisting) != 1 else ''}")
-        notes += errors
-        notes += self._exit_code_mismatches()
-        suffix = f" ({'; '.join(notes)})" if notes else ""
-        if confirmed:
-            noun = "failure" if len(confirmed) == 1 else "failures"
-            return "failure", "error" if errors else "completed", f"{len(confirmed)} confirmed {noun}{suffix}"
+        tail = errors + self._exit_code_mismatches()
+        if confirmed or collect_errors:
+            parts = []
+            if confirmed:
+                parts.append(f"{len(confirmed)} confirmed {'failure' if len(confirmed) == 1 else 'failures'}")
+            if collect_errors:
+                parts.append(_collection_errors_text(collect_errors))
+            if preexisting:
+                notes.append(_plural(len(preexisting), "pre-existing failure"))
+            return "failure", "error" if errors else "completed", f"{', '.join(parts)}{_suffix(notes + tail)}"
         if errors:
-            return "neutral", "error", f"incomplete run{suffix}"
+            if preexisting:
+                notes.append(_plural(len(preexisting), "pre-existing failure"))
+            return "neutral", "error", f"incomplete run{_suffix(notes + tail)}"
         if executed == 0:
-            return "neutral", "completed", f"no tests ran{suffix}"
-        return "success", "completed", f"all {executed} tests passed{suffix}"
+            return "neutral", "completed", f"no tests ran{_suffix(notes + tail)}"
+        if passed == executed:
+            return "success", "completed", f"all {executed} tests passed{_suffix(notes + tail)}"
+        return "success", "completed", f"{outcome_tally(self.states)}{_suffix(notes + tail)}"
 
     def _exit_code_mismatches(self) -> list[str]:
         """Shards whose pytest exit code disagrees with the outcomes they reported."""
@@ -1941,6 +2025,7 @@ class _Execution:
         ``done`` events in one (retried) transaction, then the forge post."""
         sink = self.sink
         assert sink is not None
+        reason = redact(reason)  # may quote worker output (a collection error's tail)
         code = exit_code_for(status, conclusion, exit_code)
         cost = self._cost()
         counts = self._counts()
@@ -2023,6 +2108,30 @@ async def resnapshot(
     return snapshot
 
 
+async def scan_after_baseline(
+    ctx: OrchestratorContext, repo_id: int, run_id: str, sha: str, *, mirror: Path, branch: str
+) -> Any:
+    """Review the review-kind invariants at a baseline that is still the tip of ``branch``.
+
+    The same scan as ``coverset invariants scan`` (:func:`coverset.commands.invariants.scan_invariants`),
+    pinned to ``run_id``, through the configured review client: with ``COVERSET_AI=off`` there is
+    no client and the scan still records each invariant's status (``needs_review`` for one verified
+    only by review). Errors are logged by :meth:`OrchestratorContext.spawn`, never raised into a run.
+    """
+    from coverset.commands.invariants import scan_invariants
+    from coverset.orchestrator.repos import default_branch_sha
+
+    tip = await asyncio.to_thread(default_branch_sha, mirror, branch)
+    if tip != sha:
+        log.info(
+            "invariants scan of repo %s skipped: %s is no longer the tip of %s", repo_id, sha[:12], branch
+        )
+        return None
+    report = await scan_invariants(ctx.db, ctx.settings, ctx.store, str(repo_id), run_id=run_id)
+    log.info("invariants scan after run %s: %d review invariant(s)", run_id, len(report.rows))
+    return report
+
+
 def _app_forge(app: Any) -> Any:
     """The app's own forge adapter (shared with the webhook routes), or None to resolve lazily."""
     try:
@@ -2037,12 +2146,35 @@ def _app_forge(app: Any) -> Any:
 
 
 def tracer_warning(meta: Mapping[str, Any]) -> str | None:
-    """The ``log`` text for a shard whose coverage did not come from coverage.py's C tracer."""
+    """The ``log`` text for a shard whose coverage did not come from coverage.py's C tracer, or
+    whose C tracer was replaced mid-run (the plugin's ``tracer_lost_at``)."""
     convert = meta.get("convert")
     if not isinstance(convert, Mapping) or not convert.get("tracer_mismatch"):
         return None
+    lost = meta.get("tracer_lost_at")
+    tracer = meta.get("tracer")
+    if (
+        isinstance(lost, str)
+        and lost
+        and (tracer is None or (isinstance(tracer, str) and tracer in C_TRACERS))
+    ):
+        where = "".join(ch for ch in lost[:512] if ch.isprintable())
+        return f"coverage lost its tracer at {where}; per-test contexts after it may be incomplete"
     name = str(convert.get("tracer") or meta.get("tracer") or "an unknown tracer")[:64]
     return f"coverage was collected with {name}; per-test contexts may be incomplete"
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def _suffix(notes: list[str]) -> str:
+    return f" ({'; '.join(notes)})" if notes else ""
+
+
+def _collection_errors_text(errors: list[dict[str, Any]]) -> str:
+    """``N collection error(s)``: test modules that failed to import (each one is a failure)."""
+    return f"{len(errors)} collection error{'' if len(errors) == 1 else 's'}"
 
 
 def _catalogue(adapter: LanguageAdapter, sources: Mapping[str, str]) -> Any:
@@ -2053,7 +2185,11 @@ def _catalogue(adapter: LanguageAdapter, sources: Mapping[str, str]) -> Any:
 
 
 def _parse_test(payload: Mapping[str, Any]) -> tuple[str, float, str | None, str | None, str | None] | None:
-    """Validate a ``test`` event: ``(outcome, duration_s, failed_phase, fail_sig, longrepr)``."""
+    """Validate a ``test`` event: ``(outcome, duration_s, failed_phase, fail_sig, longrepr)``.
+
+    The worker wrote it, so ``longrepr`` is redacted here, before it reaches the run's state, the
+    verdict summary (``runs.summary_json``) or the forge.
+    """
     outcome = payload.get("outcome")
     if outcome not in OUTCOMES:
         return None
@@ -2069,7 +2205,7 @@ def _parse_test(payload: Mapping[str, Any]) -> tuple[str, float, str | None, str
         seconds,
         phase if phase in PHASES else None,
         sig if isinstance(sig, str) and _sig_bytes(sig) is not None else None,
-        longrepr[:MAX_LONGREPR_CHARS] if isinstance(longrepr, str) else None,
+        redact(longrepr[:MAX_LONGREPR_CHARS]) if isinstance(longrepr, str) else None,
     )
 
 

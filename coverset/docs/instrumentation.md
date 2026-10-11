@@ -88,7 +88,7 @@ A test that calls `sys.settrace(None)`, or installs its own trace function and d
 
 The tracer is then re-installed through coverage.py's public `Coverage.stop()` and `Coverage.start()`, so only the culprit test loses lines; the following tests are measured again (`test_lost_tracer_is_recorded_and_reinstalled`). This is done only while the plugin's Coverage object is the active one. When another Coverage object was started on top of it, which is what pytest-cov does without `--no-cov`, `stop()` would fail coverage.py's collector-stack assertion, so the loss is recorded with `reinstalled: false` and nothing is touched (`test_a_coverage_object_stacked_on_top_is_recorded`). coverage.py's own "Trace function changed" warning comes only from its Python tracer, never from ctrace, which is why the plugin checks itself.
 
-The control plane does not read `tracer_lost_at` yet: `facts/convert.py` flags `tracer_mismatch` only from `meta.tracer`. Treating `tracer_lost_at` the same way is a change in `facts/convert.py` and `orchestrator/runner.py`, outside the plugin.
+The control plane reads `tracer_lost_at`: `facts/convert.py` (`tracer_mismatch`) flags the shard as a `tracer_mismatch` with the text "CTracer lost at <context>" (printable, at most 64 characters), ingest records it in the shard's `ingest_log`, and `orchestrator/runner.py` (`tracer_warning`) writes a `log` event "coverage lost its tracer at <nodeid>; per-test contexts after it may be incomplete" (`tests/facts/test_facts_fixes.py::test_a_lost_tracer_is_a_tracer_mismatch`, `tests/orchestrator/test_review_fixes.py::test_a_lost_tracer_reaches_the_run_events`).
 
 ### When data reaches disk
 

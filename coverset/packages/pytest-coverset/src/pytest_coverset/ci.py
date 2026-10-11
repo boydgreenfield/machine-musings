@@ -5,6 +5,11 @@ The command never creates runs. It resolves the run for ``(repo_id, sha)`` throu
 ``text/event-stream`` (reconnecting with ``Last-Event-ID``) and falls back to JSON polling
 (``?since=<seq>``) when SSE is unavailable. Exit codes (plan Addendum A): 0 success, 1 failure,
 2 interrupted/error/timed out/cancelled, 3 network or server error after retries, 5 no tests.
+
+A ``failure`` verdict (the early first-failure one included) ends the wait at once with 1. Any
+other verdict is followed by the run's ``done`` event, whose ``exit_code`` decides (the runner sends
+``verdict`` ``neutral`` "no tests collected" and then ``done`` with exit code 5), so the wait reads
+on until ``done`` (or ``--timeout``).
 """
 
 from __future__ import annotations
@@ -130,6 +135,8 @@ class Waiter:
         self.counts: dict[str, int] = {}
         self.last_seq = 0
         self.summary_url: str | None = None
+        self.verdict: tuple[str, str | None] | None = None
+        """The last non-failure ``verdict`` event (conclusion, reason), while waiting for ``done``."""
         self._last_progress = float("-inf")
 
     def run(self) -> int:
@@ -261,7 +268,7 @@ class Waiter:
         counts = body.get("counts") if isinstance(body.get("counts"), dict) else None
         if counts:
             self.counts = {k: int(v) for k, v in counts.items() if isinstance(v, int)}
-        conclusion = body.get("conclusion")
+        conclusion = body.get("conclusion") or (self.verdict[0] if self.verdict is not None else None)
         self.summary_url = body.get("summary_url") or self.summary_url
         self._summary(str(conclusion), body.get("summary"))
         return exit_code_for(conclusion, None, counts)
@@ -279,17 +286,22 @@ class Waiter:
             self._print(f"[shard {payload.get('shard', '?')}] {payload.get('text', '')}")
         elif kind == "verdict":
             conclusion = payload.get("conclusion")
-            self._print(f"coverset verdict: {conclusion} ({payload.get('reason', '')})")
-            if conclusion != "success":
-                self._summary(str(conclusion), payload.get("reason"))
+            reason = payload.get("reason")
+            self._print(f"coverset verdict: {conclusion} ({reason or ''})")
+            if conclusion == "failure":  # always exit 1: no need to wait for the rest of the run
+                self._summary(str(conclusion), reason)
                 return exit_code_for(conclusion)
+            # Any other conclusion: the ``done`` event that follows carries the exit code (5 when
+            # no tests were collected, 2 for errors and neutral runs), so keep reading until it.
+            self.verdict = (str(conclusion), reason if isinstance(reason, str) else None)
         elif kind == "done":
             counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else None
             if counts:
                 self.counts = {k: int(v) for k, v in counts.items() if isinstance(v, int)}
             conclusion = payload.get("conclusion")
             exit_code = payload.get("exit_code")
-            self._summary(str(conclusion))
+            reason = self.verdict[1] if self.verdict is not None else None
+            self._summary(str(conclusion), reason if conclusion != "success" else None)
             return exit_code_for(conclusion, exit_code if isinstance(exit_code, int) else None, counts)
         return None
 

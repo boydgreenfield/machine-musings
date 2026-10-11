@@ -116,6 +116,23 @@ def summary_missing_counts(summary: dict[str, Any]) -> tuple[int, int] | None:
     return missing_counts(parsed.function_rows, parsed.missing_input_classes)
 
 
+def target_gaps(summary: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """``(function, never-exercised classes)`` of the invariant targets the run's changed-function
+    rows do not cover: the "M more in invariant targets" the PR page and the comment count."""
+    try:
+        parsed = summary_from_json(summary) if summary else None
+    except (TypeError, ValueError, KeyError):
+        return []
+    if parsed is None:
+        return []
+    changed = {row.qualname for row in parsed.function_rows}
+    gaps: dict[str, list[str]] = defaultdict(list)
+    for item in parsed.missing_input_classes:
+        if item.function not in changed and item.class_name not in gaps[item.function]:
+            gaps[item.function].append(item.class_name)
+    return sorted(gaps.items())
+
+
 @bp.get("/repos/<int:rid>/prs/<int:n>")
 async def pr_page(rid: int, n: int) -> Response:
     """The PR page: verdict band, needs-attention cards and collapsed detail sections."""
@@ -408,6 +425,7 @@ async def invariants_page(rid: int) -> Response:
     changed = (selected.summary_json or {}).get("invariants_changed", []) if selected else []
     return await render_page(
         "invariants.html",
+        target_gaps=target_gaps(selected.summary_json or {}) if selected else [],
         repo=repo_row,
         latest_spec=latest_spec,
         history=history,

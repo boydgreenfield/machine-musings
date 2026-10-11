@@ -293,9 +293,9 @@ async def test_concurrent_modal_runs_see_each_others_reservation(
     first = await _baseline_run(ctx, repo_id, repo.main_sha, executor="modal")
     second = await _baseline_run(ctx, repo_id, repo.main_sha, executor="modal")
     task = asyncio.create_task(execute_run(ctx, first))
-    for _ in range(100):
-        if (await load_run(ctx, first)).cost_estimate > 0:
-            break
+    deadline = asyncio.get_running_loop().time() + 30  # generous: a loaded machine plans slowly
+    while (await load_run(ctx, first)).cost_estimate <= 0:
+        assert asyncio.get_running_loop().time() < deadline, "the first run never reserved its budget"
         await asyncio.sleep(0.02)
     refused = await execute_run(ctx, second)
     assert (refused.status, refused.conclusion, refused.reason) == (
@@ -473,7 +473,9 @@ async def test_scoring_runs_off_the_event_loop(
 
 
 async def test_covers_changed_lines_comes_from_facts(monkeypatch: pytest.MonkeyPatch) -> None:
-    region = SimpleNamespace(func_key="k", path="src/p.py", def_line=10, end_line=20, qualname="f")
+    region = SimpleNamespace(
+        func_key="k", path="src/p.py", def_line=10, body_start=11, end_line=20, qualname="f"
+    )
     plan = SimpleNamespace(
         changes=[SimpleNamespace(region=SimpleNamespace(func_key="k"))],
         changed_lines={"src/p.py": {12, 13, 30}},

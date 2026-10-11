@@ -16,7 +16,7 @@ Rules live in `invariants.yaml` at the repository root (`[tool.coverset] invaria
 
 `test` and `property` entries decide first: violated beats satisfied beats untested. `review` entries are advisory. They can move an invariant out of `needs_review` to `satisfied`, but they never override a test or property outcome and never produce `violated`.
 
-**Carry forward.** When a run leaves an invariant `untested` (or `needs_review` with no review finding), coverset looks at the previous stored result of the same invariant. If that was `satisfied` and both the target's `body_hash` and the invariant's `spec_hash` are unchanged, the status stays `satisfied` with `carried_from_run` in the evidence. If either changed, the status is `stale` with `stale_since_run` and a reason such as "target body changed" (`test_stale_and_carried_forward`).
+**Carry forward.** When a run leaves an invariant `untested` (or `needs_review` with no review finding), coverset looks at the latest earlier result of the same invariant that is real evidence: `stale` rows are skipped, because they are derived, and within one PR run the row of the same spec wins over its `(base)` row (`orchestrator/verdict.py`, `_previous_result`). If that was `satisfied` and both the target's `body_hash` and the invariant's `spec_hash` are unchanged, the status stays `satisfied` with `carried_from_run` in the evidence. If either changed, the status is `stale` with `stale_since_run` naming that satisfied run and a reason such as "target body changed" (`test_stale_and_carried_forward`). So `stale` persists from run to run until fresh evidence arrives, instead of decaying to `untested` on the run after (`tests/orchestrator/test_review_fixes.py::test_previous_result_skips_stale_rows`, `test_stale_is_carried_forward`); a body changed back to the satisfied one is `satisfied` again.
 
 ## The `invariants.yaml` schema
 
@@ -41,7 +41,7 @@ The file is validated against a JSON Schema (draft 2020-12, `INVARIANTS_SCHEMA`)
 | `rationale` | string | no | why the rule exists |
 | `owner` | string, up to 255 characters | no | who to ask |
 
-`resolve_target` turns `scope.target` into a function region: it strips `[tool.coverset] source_root` from each region's path, turns the path into a module name, and matches `module.qualname`. Only `function`, `class` and `module` scopes resolve; `package` and `endpoint` invariants are evaluated without a target, so they get no coverage lens and no body hash.
+`resolve_target` turns `scope.target` into a function region: it strips `[tool.coverset] source_root` from each region's path, turns the path into a module name, and matches `module.qualname`. When several regions share the qualname, the first one with a real body wins: `@overload` stubs (a body of only `...`, `pass` or a docstring, `analysis/functions.is_stub`) are skipped while the implementation exists, so the target's body hash, covering tests and lens are the implementation's (`test_an_overloaded_target_is_its_implementation`). Only `function`, `class` and `module` scopes resolve; `package` and `endpoint` invariants are evaluated without a target, so they get no coverage lens and no body hash.
 
 ### An annotated example
 
@@ -133,7 +133,7 @@ cents_conserved: 6 tests, never reached total_cents:negative, weights:empty, wei
 merge_idempotent: 1 test, never reached intervals:empty, intervals:unsorted, intervals:duplicates, intervals:inverted-pair
 ```
 
-The first line is `main-6`: the six tests that check conservation never pass a negative total, which is exactly the class PR #1's refund code adds. On PR #1 the lens has 7 tests and `total_cents:negative` is no longer in the list, because the new refund test reaches it and fails. A lens lists classes the *linked* tests missed, even when some other test reached them. When the target changed in the PR and no linked test exists, it ends with "changed lines not covered by linked tests".
+The first line is `main-6`: the six tests that check conservation never pass a negative total, which is exactly the class PR #1's refund code adds. On PR #1 the lens has 7 tests and `total_cents:negative` is no longer in the list, because the new refund test reaches it and fails. A lens lists classes the *linked* tests missed, even when some other test reached them. When the target changed in the PR and no linked test exists, it ends with "changed lines not covered by linked tests". "Changed lines" follow the body-line rule of [docs/data-model.md](data-model.md#the-body-line-rule): only changed body statements are asked about, because a test never records a `def`, decorator or docstring line; a signature-, decorator- or docstring-only change asks whether a linked test ran any line of the body (`test_signature_and_decorator_changes_ask_about_the_body`).
 
 The input classes come from the catalogue described in [docs/input-classes.md](input-classes.md). Invariant target files are always on the full-trace list, so their classes are never sampled away.
 
@@ -149,7 +149,7 @@ For a PR run coverset loads `invariants.yaml` from both the merge-base and the h
 | `added` | the id is only in the head |
 | `unchanged` | equal spec hashes |
 
-Every change other than `unchanged` appears in the verdict under "Invariants changed by this PR", with its reasons (`test_diff_invariants`). Base definitions that the head **removed** are still evaluated in that run, with `removed_in_head` in their evidence, so deleting a rule does not silence it on the PR that deletes it. A weakened rule is evaluated in its head form only.
+Every change other than `unchanged` appears in the verdict under "Invariants changed by this PR", with its reasons (`test_diff_invariants`). Base definitions that the head **removed** are still evaluated in that run, with `removed_in_head` in their evidence, so deleting a rule does not silence it on the PR that deletes it. A **weakened** rule is evaluated twice: in its head form, and in its base form, stored as a row of its own labelled `<id> (base)` with `base_definition` and `weakened_in_head` in its evidence, so the stricter rule the PR relaxed still reports whether it held (`test_weakened_invariant_base_definition_is_evaluated`).
 
 An `invariants.yaml` that fails to load is logged and treated as empty for that side.
 
@@ -160,7 +160,7 @@ A `review` entry asks the advisory AI reviewer ([docs/ai-review.md](ai-review.md
 | Command | Status |
 |---|---|
 | `coverset invariants check [--repo PATH]` | built: loads and validates a checkout's `invariants.yaml` with the repo's `[tool.coverset]` and prints a table (`commands/maintenance.py`; test `test_invariants_check`) |
-| `coverset invariants scan [--repo PATH\|NAME] [--executor local\|modal]` | built: reviews every invariant with a `review` entry at the head of the latest completed, trusted baseline run of the default branch, through the configured review client (the offline fake unless `COVERSET_AI=anthropic` and the repo opted in). Findings land in `review_findings` under that run and the invariant's row is rewritten with `trigger = 'scan'`: review-only invariants take the review's status (`satisfied` or `needs_review`), mixed invariants keep the status their tests decided and gain the review as evidence; a review never yields `violated`. It is a command, not an automatic step after baselines (`commands/invariants.py`; tests in `tests/orchestrator/test_invariants_scan.py`). |
+| `coverset invariants scan [--repo PATH\|NAME] [--executor local\|modal]` | built: reviews every invariant with a `review` entry at the head of the latest completed, trusted baseline run of the default branch, through the configured review client (the offline fake unless `COVERSET_AI=anthropic` and the repo opted in). Findings land in `review_findings` under that run and the invariant's row is rewritten with `trigger = 'scan'`: review-only invariants take the review's status (`satisfied` or `needs_review`), mixed invariants keep the status their tests decided and gain the review as evidence; a review never yields `violated`. It also runs automatically, in the background, after every trusted, completed (`success` or `failure`) baseline of the default branch whose head is still the branch tip, pinned to that run (`COVERSET_SCAN_AFTER_BASELINE`, default true; with `COVERSET_AI=off` it still records the statuses). Errors are logged and never affect the run (`commands/invariants.py`, `orchestrator/runner.py` `scan_after_baseline`; tests in `tests/orchestrator/test_invariants_scan.py` and `tests/orchestrator/test_review_fixes.py`). |
 
 ## Runtime checks (designed, not built)
 

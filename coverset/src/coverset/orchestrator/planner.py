@@ -16,8 +16,10 @@ its shard's files, in this order:
 3. acquire workers (as many as the last run of the repo needed, at least one; ``coverset run
    --shards N`` asks for N, capped by ``COVERSET_MAX_SHARDS``) and ``put_tree`` the head archive into
    each: ``sandbox_ready``;
-4. collect on worker 0 (``pytest --collect-only`` with pytest-coverset, read back ``collect.json``;
-   the ``-q`` node id listing is the fallback);
+4. collect on worker 0 (``pytest --collect-only --continue-on-collection-errors`` with
+   pytest-coverset, read back ``collect.json``; the ``-q`` node id listing is the fallback). A test
+   module that fails to import is kept in :attr:`RunPlan.collect_errors` and becomes a confirmed
+   failure of the run while every other test still runs;
 5. diff ``base...head`` on the mirror and classify changed functions; pick the prior run (the PR's
    previous head, else the merge-base, else the latest default-branch baseline);
 6. score every test, compute wave 1 (the change-covering set), deal shards (priority-snake LPT) and
@@ -44,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import math
@@ -52,10 +55,11 @@ import shutil
 import statistics
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import tokenize
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import func, insert, select
@@ -93,6 +97,7 @@ from coverset.facts.queries import ParquetPriorRun
 from coverset.facts.store import FactsStore
 from coverset.lang.base import CollectedItem, EnvSpec, LanguageAdapter, PriorRun
 from coverset.lang.python import CoversetConfig, PythonAdapter, read_tool_config
+from coverset.logging import redact
 from coverset.orchestrator import history
 from coverset.orchestrator.repos import (
     archive,
@@ -124,6 +129,12 @@ log = logging.getLogger(__name__)
 REPO_DIR = "repo"
 RUN_DIR = "run"
 COLLECT_TIMEOUT_S = 300.0
+COLLECT_EXIT_CODES = frozenset({0, 1, 2, 5})
+"""``pytest --collect-only`` exit codes that still leave a usable ``collect.json``: 1 or 2 when a
+test module failed to import (the good items and the errors are both in the file), 5 when nothing
+was collected. Codes 1 and 2 count only when ``collect.json`` parses."""
+MAX_COLLECT_ERRORS = 100
+MAX_COLLECT_ERROR_CHARS = 8 * 1024
 MAX_NODEID_CHARS = 512
 DEFAULT_MEDIAN_S = UNKNOWN_DURATION_S
 """Duration assumed for a test nobody has timed yet, when no other test has been timed either."""
@@ -679,10 +690,9 @@ async def _collect(
         "-p",
         "no:cacheprovider",
         f"--rootdir={worker.path(REPO_DIR)}",
-        "--coverset-out",
-        worker.path(LAYOUT.collect_dir),
-        "--coverset-shapes",
-        "off",
+        f"--coverset-out={worker.path(LAYOUT.collect_dir)}",
+        "--coverset-shapes=off",
+        "--continue-on-collection-errors",
         *config.testpaths,
     ]
     env = worker_env(worker, config, nonce, run.extra_env or {})
@@ -694,16 +704,22 @@ async def _collect(
         on_line=lambda text, stream: lines.append(text) if stream == "stdout" else None,
         stdout_cap=settings.max_stdout_bytes,
     )
-    if result.exit_code not in (0, 5):
-        tail = "\n".join(lines[-20:])[-2000:]
-        raise PlanError("collection", f"pytest --collect-only exited {result.exit_code}: {tail}")
+    if result.exit_code not in COLLECT_EXIT_CODES or result.timed_out or result.truncated:
+        raise PlanError("collection", _collect_failure(result.exit_code, lines))
     try:
         raw = await worker.get_file(f"{LAYOUT.collect_dir}/collect.json")
         items, errors = await asyncio.to_thread(parse_collect_json, raw)
     except (ExecutorError, ValueError, RecursionError) as exc:
+        if result.exit_code not in (0, 5):  # no collect.json to say which modules failed
+            raise PlanError("collection", _collect_failure(result.exit_code, lines)) from exc
         log.warning("collect.json unavailable (%s); falling back to the -q listing", exc)
         items, errors = parse_collect_listing(lines), []
     return items, errors
+
+
+def _collect_failure(exit_code: int, lines: Sequence[str]) -> str:
+    tail = "\n".join(lines[-20:])[-2000:]
+    return f"pytest --collect-only exited {exit_code}: {tail}"
 
 
 def parse_collect_json(raw: bytes) -> tuple[list[CollectedItem], list[dict[str, Any]]]:
@@ -713,13 +729,15 @@ def parse_collect_json(raw: bytes) -> tuple[list[CollectedItem], list[dict[str, 
         raise ValueError("collect.json has no items list")
     items: list[CollectedItem] = []
     seen: set[str] = set()
+    dropped: list[str] = []
     for entry in data["items"]:
         if not isinstance(entry, dict):
             continue
         nodeid, file = entry.get("nodeid"), entry.get("file")
         if not isinstance(nodeid, str) or not nodeid or len(nodeid) > MAX_NODEID_CHARS or nodeid in seen:
             continue
-        if "\n" in nodeid or "\0" in nodeid:
+        if not _one_args_line(nodeid):
+            dropped.append(nodeid)
             continue
         line = entry.get("line")
         seen.add(nodeid)
@@ -733,8 +751,36 @@ def parse_collect_json(raw: bytes) -> tuple[list[CollectedItem], list[dict[str, 
                 hypothesis=entry.get("hypothesis") is True,
             )
         )
-    errors = [e for e in data.get("errors", []) if isinstance(e, dict)][:100]
+    if dropped:
+        log.warning(
+            "dropped %d collected node id(s) that would not fit on one line of an args file "
+            "(line breaks or NUL in the id; pytest escapes these unless its id escaping is "
+            "disabled), e.g. %r",
+            len(dropped),
+            dropped[0][:80],
+        )
+    errors: list[dict[str, Any]] = []
+    raw_errors = data.get("errors", [])
+    for entry in raw_errors if isinstance(raw_errors, list) else []:
+        if not isinstance(entry, dict) or len(errors) >= MAX_COLLECT_ERRORS:
+            continue
+        where, text = entry.get("nodeid"), entry.get("longrepr")
+        if not isinstance(where, str) or not where.strip() or len(where) > MAX_NODEID_CHARS:
+            where = "<collection>"
+        errors.append(
+            {
+                "nodeid": redact("".join(c if c.isprintable() else " " for c in where)),
+                "longrepr": redact(text[:MAX_COLLECT_ERROR_CHARS]) if isinstance(text, str) else None,
+            }
+        )
     return items, errors
+
+
+def _one_args_line(nodeid: str) -> bool:
+    """Whether ``nodeid`` survives a round trip through ``@shard.args``: argparse reads the file
+    with ``str.splitlines()``, which also breaks at ``\r``, ``\v``, ``\f``, ``\x1c``-``\x1e``,
+    ``\x85``, U+2028 and U+2029, and a NUL cannot be an argument at all."""
+    return "\0" not in nodeid and nodeid.splitlines() == [nodeid]
 
 
 def parse_collect_listing(lines: Sequence[str]) -> list[CollectedItem]:
@@ -841,6 +887,7 @@ async def _analyse(
         test_history=test_history,
         now=now,
         rng_seed=exploration_seed(run.id),
+        tracked_changes=tracked_changes(diffs.values(), config.tracked_globs),
     )
     scored_list, wave1, order, durations, median_s = await asyncio.to_thread(
         _score, collected, changes, prior, scoring_ctx, changed_files
@@ -869,6 +916,20 @@ async def _analyse(
         median_s=median_s,
         target_shard_seconds=config.target_shard_seconds,
     )
+
+
+def tracked_changes(diffs: Iterable[FileDiff], globs: Sequence[str]) -> tuple[str, ...]:
+    """Changed paths (either side of the diff, deletions included) that match a tracked glob.
+
+    A glob matches like :meth:`pathlib.PurePath.match`: from the right, so ``conftest.py`` matches
+    ``tests/conftest.py`` and ``uv.lock`` the lock file in any directory.
+    """
+    found: set[str] = set()
+    for diff in diffs:
+        for path in {diff.path, diff.base_path}:
+            if any(PurePosixPath(path).match(glob) for glob in globs if glob):
+                found.add(path)
+    return tuple(sorted(found))
 
 
 def _index_head(
@@ -973,11 +1034,21 @@ def _changes(
     return changed_functions(adapter, base_tree, head_tree, py_diffs)  # type: ignore[arg-type]
 
 
-def _text(data: bytes) -> str | None:
+def _text(data: bytes) -> str:
+    """Python source bytes as text, decoded the way CPython does (PEP 263 coding cookie or BOM).
+
+    A file whose declared encoding is unknown or does not decode falls back to UTF-8 with
+    ``errors="replace"``: line numbers stay right, and unlike ``surrogateescape`` the text can still
+    be hashed, parsed and written to Parquet.
+    """
     try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    except SyntaxError:  # an invalid cookie or BOM mismatch: CPython would refuse the file
+        encoding = "utf-8"
+    try:
+        return data.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        return data.decode("utf-8", errors="replace")
 
 
 def _measured_sources(checkout: Path, config: CoversetConfig, head_paths: frozenset[str]) -> dict[str, str]:
@@ -998,9 +1069,7 @@ def _measured_sources(checkout: Path, config: CoversetConfig, head_paths: frozen
             continue
         file = checkout / path
         if file.is_file() and not file.is_symlink():
-            text = _text(file.read_bytes())
-            if text is not None:
-                sources[path] = text
+            sources[path] = _text(file.read_bytes())
     return sources
 
 

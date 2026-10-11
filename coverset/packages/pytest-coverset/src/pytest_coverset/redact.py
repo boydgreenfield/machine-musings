@@ -26,7 +26,7 @@ MAX_EXAMPLE_CHARS = 200
 MAX_INT_BITS = 128
 RETURN_PARAM = "return"
 
-SECRET_NAME_RE = re.compile(r"(?i)pass|secret|token|key|auth|cookie|session")
+SECRET_NAME_RE = re.compile(r"(?i)pass|secret|token|key|auth|cookie|session|cred")
 """Parameter, function and dict-key names whose values are never shown."""
 
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (

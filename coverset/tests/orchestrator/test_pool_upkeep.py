@@ -173,7 +173,7 @@ async def test_executors_without_snapshots_schedule_nothing(
 ) -> None:
     script.zero_passes = True
     await run_baseline(ctx, repo_id, repo.main_sha)
-    assert not ctx.background
+    assert not [t for t in ctx.background if "re-snapshot" in t.get_name()]  # the invariants scan may run
 
 
 async def test_a_failed_snapshot_build_is_logged_not_raised(

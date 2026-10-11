@@ -154,11 +154,13 @@ async def scan_invariants(
     *,
     executor: ExecutorKind | None = None,
     client_factory: Callable[[Settings, bool], Any] | None = None,
+    run_id: str | None = None,
 ) -> ScanReport:
     """Run the scan described in the module docstring and return its report.
 
     ``client_factory(settings, repo_enabled)`` builds the review client (default:
     :func:`coverset.ai.client.get_review_client`); tests pass a fake with their own fixtures.
+    ``run_id`` pins the baseline run to scan (the runner's automatic scan after a baseline).
     """
     from coverset.db.models import Run
     from coverset.orchestrator.history import BASELINE_TRIGGERS
@@ -175,6 +177,8 @@ async def scan_invariants(
         )
         if executor is not None:
             query = query.where(Run.executor == executor)
+        if run_id is not None:
+            query = query.where(Run.id == run_id)
         candidates = list(
             await session.scalars(query.order_by(Run.created_at.desc(), Run.id.desc()).limit(20))
         )
@@ -255,7 +259,7 @@ async def _scan_checkout(
     callables = {
         r.func_key: r for r in targets.values() if r is not None and r.kind in ("function", "method")
     }
-    sources = _read_sources(checkout, sorted({r.path for r in regions}))
+    sources = await asyncio.to_thread(_read_sources, checkout, sorted({r.path for r in regions}))
     async with db.session() as session:
         stored = {inv.id: await _stored_result(session, run, inv) for inv in reviewed}
         ranks, nodeids = await _run_tests(session, run.id)
@@ -278,7 +282,8 @@ async def _scan_checkout(
                 select(ReviewFinding).where(ReviewFinding.func_key.in_(list(callables)))
             )
             existing = {(f.func_key, f.bundle_hash): ReviewFindingRow.from_db(f) for f in found}
-        bundle = build_review_bundle(
+        bundle = await asyncio.to_thread(
+            build_review_bundle,
             repo_name=repo.full_name,
             head_sha=run.head_sha,
             pr_number=None,
@@ -470,17 +475,19 @@ def _input_coverage(
     Shapes are those of the newest default-branch run with facts (normally the scanned baseline);
     sampling comes from the scanned run.
     """
+    from coverset.analysis.shapes import function_catalogue
     from coverset.commands.facts import _observation, _sampling
     from coverset.facts.queries import shapes_for_function
 
-    catalogue = adapter.shape_catalogue(dict(sources))
+    del adapter  # the catalogue is the per-function one the verdict and the UI use
     covs: dict[str, Any] = {}
     observations: dict[str, list[Any]] = {}
     for key, region in regions.items():
         rows = shapes_for_function(store, repo.id, key, 1, branch=repo.default_branch)
         observations[key] = [_observation(region, row) for row in rows]
         sampling = _sampling(store, repo.id, run_id, region)
-        covs[key] = catalogue.function_input_cov(region, observations[key], sampling)
+        found = function_catalogue(region, sources.get(region.path))
+        covs[key] = found.input_cov(region, observations[key], sampling)
     return covs, observations
 
 

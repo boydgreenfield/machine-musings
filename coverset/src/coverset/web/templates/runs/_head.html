@@ -10,5 +10,5 @@
   {% if total %}
   <span class="bar" role="img" aria-label="{{ state.reported }} of {{ total }} tests reported"><svg viewBox="0 0 220 8" width="220" height="8"><rect class="done" width="{{ (220 * state.reported / total)|round(1) }}" height="8"/>{% if failed_count %}<rect class="bad" width="{{ [3, (220 * failed_count / total)]|max|round(1) }}" height="8"/>{% endif %}</svg></span>
   {% endif %}
-  {% if verdict %}<span class="muted">{{ verdict.get('reason') }}{% if verdict.get('early') %} (posted at the first confirmed failure){% endif %}</span>{% elif basis %}<span class="muted">scored against <code>{{ basis.head_sha|sha }}</code> ({{ basis_label }})</span>{% endif %}
+  {% if verdict %}<span class="muted">{{ verdict.get('reason') }}{% if verdict.get('early') %} (posted at the first confirmed failure){% endif %}{% if verdict.get('conclusion') == 'failure' and run.rank_file_order and run.t_first_failure_file_order_est is not none %} · file order would have run it {{ run.rank_file_order|ordinal }}, ~{{ run.t_first_failure_file_order_est|secs }} estimated from the first test{% endif %}</span>{% elif basis %}<span class="muted">scored against <code>{{ basis.head_sha|sha }}</code> ({{ basis_label }})</span>{% endif %}
 </div>

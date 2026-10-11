@@ -37,6 +37,20 @@
 </section>
 {% endif %}
 
+{% if target_gaps %}
+<section class="panel" id="target-gaps">
+  <div class="panel-head"><h2>Never exercised in invariant targets</h2><span class="aside">functions this run did not change, checked because invariants target them: input classes no test passed in</span></div>
+  <table>
+    <thead><tr><th>Function</th><th>Input classes never exercised</th></tr></thead>
+    <tbody>
+    {% for function, classes in target_gaps %}
+      <tr><td><code>{{ function }}</code></td><td>{% for c in classes %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 <section class="panel">
 {% for key, spec in latest_spec.items() %}
   {% set current = (selected_rows|selectattr('key', 'equalto', key)|list or [none])[0] %}

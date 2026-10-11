@@ -6,8 +6,9 @@ is read once. Everything here is synchronous (call it through ``asyncio.to_threa
 store only through :class:`~coverset.facts.store.FactsStore` (``read_table``), never by globbing.
 
 Input classes come from :class:`~coverset.analysis.shapes.Catalogue` over the run's own
-``call_shapes`` (the same observations the verdict used), with parameter annotations indexed from
-the head commit's source of the function's file.
+``call_shapes`` (the same observations the verdict used), built by
+:func:`~coverset.analysis.shapes.function_catalogue` from the head commit's source of the
+function's file, exactly as the verdict builds it.
 """
 
 from __future__ import annotations
@@ -24,7 +25,13 @@ from typing import Any
 import numpy as np
 
 from coverset.analysis.functions import index_functions_detailed
-from coverset.analysis.shapes import Catalogue, FunctionInputCov, InputClass, ParamInfo
+from coverset.analysis.shapes import (
+    Catalogue,
+    FunctionInputCov,
+    InputClass,
+    ParamInfo,
+    function_catalogue,
+)
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.queries import TreeNode, treemap
 from coverset.facts.schema import CALLABLE_KINDS
@@ -89,6 +96,8 @@ class FunctionView:
     return_cells: tuple[GridCell, ...]
     line_pct: float | None
     branch_pct: float | None
+    catalogue: Catalogue = dataclasses.field(default_factory=Catalogue)
+    """The catalogue ``cov`` was computed with (enum-aware for the function's file)."""
 
     @property
     def hollow(self) -> int:
@@ -159,7 +168,7 @@ class FunctionView:
 
     def flows(self, file_of: Callable[[str], str]) -> list[Flow]:
         """Ribbon flows: test file → caller → parameter, weighted by samples."""
-        catalogue = Catalogue()
+        catalogue = self.catalogue
         expected = {c.name for c in self.cov.expected}
         flows: list[Flow] = []
         for obs in self.observations:
@@ -467,23 +476,25 @@ class RunFacts:
         return treemap(self.store, self.repo_id, self.run_id)
 
     def function_view(self, region: FunctionRegion, source: str | None) -> FunctionView:
-        """Input-class coverage, per-class samples and the return row of ``region``."""
-        annotations: dict[str, str | None] = {}
-        returns: str | None = None
-        if source is not None:
-            for item in _indexed(region.path, source):
-                if item.region.func_key == region.func_key or (
-                    item.region.qualname == region.qualname and item.region.def_line == region.def_line
-                ):
-                    annotations = {
-                        p.lstrip("*"): a for p, a in zip(item.region.params, item.annotations, strict=True)
-                    }
-                    returns = item.returns
-                    break
-        catalogue = Catalogue()
+        """Input-class coverage, per-class samples and the return row of ``region``.
+
+        The catalogue comes from :func:`~coverset.analysis.shapes.function_catalogue`, the helper
+        the verdict uses too, so a card counts the classes the sticky comment counts.
+        """
+        found = function_catalogue(
+            region, source, indexed=_indexed(region.path, source) if source is not None else None
+        )
+        catalogue, annotations, returns = found.catalogue, found.annotations, found.returns
         observations = self.observations(region.func_key)
-        cov = catalogue.function_input_cov(
-            region, observations, self.sampling(region), annotations=annotations
+        sampling = self.sampling(region)
+        capped = (sampling is not None and sampling.truncated) or any(o.truncated for o in observations)
+        cov = found.input_cov(
+            region,
+            observations,
+            sampling,
+            tests_called=self.tests_in_range(region.path, region.body_start, region.end_line)
+            if capped
+            else None,
         )
         expected = {c.name for c in cov.expected}
         samples: dict[str, int] = defaultdict(int)
@@ -521,6 +532,7 @@ class RunFacts:
             return_cells=return_cells,
             line_pct=line_pct,
             branch_pct=branch_pct,
+            catalogue=catalogue,
         )
 
 

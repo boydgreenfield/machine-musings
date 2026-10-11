@@ -149,8 +149,11 @@ async def prior_candidates(
 ) -> list[PriorCandidate]:
     """Completed runs of the repo (newest first) that can serve as the prior run.
 
-    With ``store``, runs without a facts directory are left out (their facts were collected
-    elsewhere or expired).
+    A run qualifies only when its facts are usable: ``coverage_complete``, or (checked with
+    ``store``) at least one committed shard ingest. A completed run without any (no tests
+    collected, budget exhausted, every bundle rejected) would give scoring and wave 1 no coverage
+    at all. With ``store``, runs without a facts directory are left out too (their facts were
+    collected elsewhere or expired).
     """
     rows = await session.scalars(
         select(Run)
@@ -160,7 +163,12 @@ async def prior_candidates(
     )
     candidates = []
     for run in rows:
-        if store is not None and not store.run_dir(repo_id, run.id).is_dir():
+        if store is not None:
+            if not store.run_dir(repo_id, run.id).is_dir():
+                continue
+            if not run.coverage_complete and not _has_committed_shard(store, repo_id, run.id):
+                continue
+        elif not run.coverage_complete:
             continue
         candidates.append(
             PriorCandidate(
@@ -172,6 +180,14 @@ async def prior_candidates(
             )
         )
     return candidates
+
+
+def _has_committed_shard(store: FactsStore, repo_id: int, run_id: str) -> bool:
+    try:
+        return bool(store.committed(repo_id, run_id))
+    except Exception as exc:  # an unreadable ingest_log is no basis for scoring
+        log.warning("cannot read the ingest log of run %s: %s", run_id, exc)
+        return False
 
 
 async def previous_pr_run(session: AsyncSession, run: Run) -> Run | None:

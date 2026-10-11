@@ -117,9 +117,16 @@ def render_timeline(
     span: float | None = None,
     ghost: float | None = None,
     ghost_label: str = "measured cold path",
+    ghost_mark: float | None = None,
+    ghost_mark_label: str = "first failure",
     width: float = 1100.0,
 ) -> Markup:
-    """The strip SVG plus an ordered list of the same milestones."""
+    """The strip SVG plus an ordered list of the same milestones.
+
+    ``ghost`` draws a grey bar of that many seconds under the strip (``ghost_label`` names it) and
+    ``ghost_mark`` a tick on it (``ghost_mark_label``, e.g. when the cold path saw its first
+    failure).
+    """
     if not marks:
         return Markup('<p class="empty">No timeline recorded yet.</p>')
     end = max(m.at for m in marks)
@@ -186,9 +193,17 @@ def render_timeline(
                 f' M{num(bx + 3)},{num(gy + 11)} L{num(bx + 7)},{num(gy - 3)}"/>'
             )
             note = f" (bar not to scale: {ghost / run_axis:.0f}× this axis)"
+        mark_text = ""
+        if ghost_mark is not None and 0 < ghost_mark <= ghost:
+            mx = left + ghost_w * ghost_mark / ghost
+            parts.append(
+                f'<line class="tl-tick is-failure" x1="{num(mx)}" x2="{num(mx)}"'
+                f' y1="{num(gy - 3)}" y2="{num(gy + 11)}"/>'
+            )
+            mark_text = f" · {ghost_mark_label} {_fmt_s(ghost_mark)}"
         parts.append(
             f'<text class="tl-label tl-ghost-label" x="{num(left)}" y="{num(gy + 22)}">'
-            f'{esc(ghost_label)} <tspan class="tl-num">{esc(_fmt_s(ghost))}</tspan>{esc(note)}</text>'
+            f'{esc(ghost_label)} <tspan class="tl-num">{esc(_fmt_s(ghost))}</tspan>{esc(mark_text)}{esc(note)}</text>'
         )
         height = 132.0
     items = "".join(

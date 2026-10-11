@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 import numpy as np
 import pyarrow as pa
 
+from coverset.analysis.shapes import cap_hits
 from coverset.facts.convert import tracer_mismatch
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import CALLABLE_KINDS, SCHEMAS
@@ -321,9 +322,9 @@ def _func_sampling(
         called = set(sampled)
         if region is not None and (file_id := ids.find_file_id(region.path)) is not None:
             called |= index.tests_in(file_id, region.body_start, region.end_line)
-        # When the adaptive cap stopped sampling, every test that called the function without
-        # being sampled is "truncated"; at least the test during which the cap was hit is.
-        truncated = max(len(called - sampled), 1) if sampling.truncated else 0
+        # When a cap stopped sampling, every test that called the function without being sampled
+        # is "truncated"; at least the test during which the cap was hit is (cap_hits).
+        truncated = cap_hits(sampled, called, truncated=sampling.truncated)
         rows["func_key"].append(resolver.key(sampling.func))
         rows["path"].append(sampling.func[0])
         rows["qualname"].append(sampling.func[1])
@@ -624,21 +625,25 @@ WITH fn AS (
     SELECT DISTINCT func_key, file_id, body_start, end_line FROM functions
     WHERE kind IN {CALLABLE_KINDS!r}
 ), called AS (
-    SELECT fn.func_key, count(DISTINCT tl.test_id) AS tests_called
+    SELECT fn.func_key, count(DISTINCT tl.test_id) AS tests_called,
+           list(DISTINCT tl.test_id) AS called_ids
     FROM fn JOIN test_lines tl
       ON tl.file_id = fn.file_id AND tl.line BETWEEN fn.body_start AND fn.end_line
     WHERE tl.test_id <> 0
     GROUP BY fn.func_key
 ), samp AS (
-    SELECT func_key, sum(tests_truncated) AS tests_truncated,
-           len(list_distinct(flatten(list(test_ids)))) AS tests_sampled
+    SELECT func_key, bool_or(truncated) AS capped,
+           list_distinct(flatten(list(test_ids))) AS sampled_ids
     FROM func_sampling GROUP BY func_key
 ), keys AS (
     SELECT func_key FROM fn UNION SELECT func_key FROM samp
 )
 SELECT keys.func_key, coalesce(called.tests_called, 0) AS tests_called,
-       coalesce(samp.tests_sampled, 0) AS tests_sampled,
-       coalesce(samp.tests_truncated, 0) AS tests_truncated
+       coalesce(len(samp.sampled_ids), 0) AS tests_sampled,
+       -- analysis.shapes.cap_hits over the whole run: callers never sampled, at least 1
+       CASE WHEN coalesce(samp.capped, false) THEN greatest(len(list_filter(
+           coalesce(called.called_ids, []), lambda x: NOT list_contains(samp.sampled_ids, x)
+       )), 1) ELSE 0 END AS tests_truncated
 FROM keys LEFT JOIN called USING (func_key) LEFT JOIN samp USING (func_key)
 ORDER BY keys.func_key
 """

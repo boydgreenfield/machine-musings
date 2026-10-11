@@ -218,20 +218,38 @@ def test_polling_done_without_done_event_reads_the_run() -> None:
     assert "1 failed, 1 passed, 1 skipped" in output
 
 
-def test_no_tests_exit_code() -> None:
+@pytest.mark.parametrize("sse", ["ok", "unsupported"])
+def test_no_tests_exit_code(sse: str) -> None:
+    """What the runner sends when nothing was collected: a neutral verdict, then done with code 5."""
     zero = dict.fromkeys(COUNTS_PASS, 0)
-    events = event_list(("done", {"conclusion": "success", "exit_code": 5, "counts": zero}))
-    with serve(Scenario(verdicts=[verdict_found()], events=events)) as server:
-        code, _ = run_cli(server)
+    events = event_list(
+        ("verdict", {"conclusion": "neutral", "reason": "no tests collected"}),
+        ("done", {"conclusion": "neutral", "exit_code": 5, "counts": zero}),
+    )
+    with serve(Scenario(verdicts=[verdict_found()], events=events, sse=sse)) as server:
+        code, output = run_cli(server)
     assert code == EXIT_NO_TESTS
+    assert "reason: no tests collected" in output
 
 
 @pytest.mark.parametrize(("conclusion", "expected"), [("cancelled", 2), ("timed_out", 2), ("neutral", 2)])
 def test_other_conclusions(conclusion: str, expected: int) -> None:
-    events = event_list(("verdict", {"conclusion": conclusion, "reason": "stopped"}))
+    events = event_list(
+        ("verdict", {"conclusion": conclusion, "reason": "stopped"}),
+        ("done", {"conclusion": conclusion, "exit_code": 2, "counts": {}}),
+    )
     with serve(Scenario(verdicts=[verdict_found()], events=events)) as server:
         code, _ = run_cli(server)
     assert code == expected
+
+
+def test_a_neutral_verdict_without_done_ends_at_the_polled_end() -> None:
+    """A server that never sends ``done`` (an old one) still ends the wait, with 2."""
+    events = event_list(("verdict", {"conclusion": "neutral", "reason": "stopped"}))
+    with serve(Scenario(verdicts=[verdict_found()], events=events)) as server:
+        code, output = run_cli(server)
+    assert code == EXIT_INTERRUPTED
+    assert "(neutral)" in output
 
 
 def test_token_is_sent_and_auth_failure_exits_3(monkeypatch: pytest.MonkeyPatch) -> None:

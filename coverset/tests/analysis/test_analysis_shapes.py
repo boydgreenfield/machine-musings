@@ -211,11 +211,20 @@ def test_never_exercised_and_sample_cap_notes() -> None:
     assert _cov("validate_email", []).note == "never exercised"
     assert _cov("validate_email", []).pct is None
     sampling = FuncSampling(FUNCS["parse_duration"].region.triple, 2048, ("t1", "t2"), True)
-    cov = _cov(
-        "parse_duration", [obs("text", "str|ascii|len:2-10", truncated=True, tests=("t1", "t2"))], sampling
+    observations = [obs("text", "str|ascii|len:2-10", truncated=True, tests=("t1", "t2"))]
+    cov = _cov("parse_duration", observations, sampling)
+    assert cov.tests_truncated == 1  # no callers known: the test during which the cap was hit
+    assert "not observed in 2048 sampled calls (1 test hit the sample cap)" in cov.note
+    entry = FUNCS["parse_duration"]
+    called = function_input_cov(
+        entry.region,
+        observations,
+        sampling,
+        annotations=dict(zip(entry.region.params, entry.annotations, strict=True)),
+        tests_called=("t1", "t2", "t3", "t4"),
     )
-    assert cov.tests_truncated == 2
-    assert "not observed in 2048 sampled calls (2 tests hit the sample cap)" in cov.note
+    assert called.tests_truncated == 2  # t3 and t4 called it after the cap
+    assert "not observed in 2048 sampled calls (2 tests hit the sample cap)" in called.note
 
 
 def test_render_markdown_table() -> None:
@@ -317,7 +326,7 @@ def test_missing_reason_says_never_exercised_only_without_a_sample_cap() -> None
         [obs("email", "str|ascii|kind:email/plain|len:11-100", truncated=True, tests=("t::a", "t::b"))],
         FuncSampling(("src/ledger/demo.py", "validate_email", 1), 2048, ("t::a", "t::b"), True),
     )
-    assert capped.missing_reason == "not observed in 2048 sampled calls (2 tests hit the sample cap)"
+    assert capped.missing_reason == "not observed in 2048 sampled calls (1 test hit the sample cap)"
 
 
 def test_enum_members_are_observed_through_examples() -> None:

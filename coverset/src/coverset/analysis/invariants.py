@@ -38,7 +38,7 @@ from typing import Any, Final, Literal
 import jsonschema
 import yaml
 
-from coverset.analysis.functions import MODULE_QUALNAME, FunctionRegion
+from coverset.analysis.functions import MODULE_QUALNAME, FunctionRegion, is_stub
 from coverset.analysis.shapes import FunctionInputCov, InputClass
 
 __all__ = [
@@ -174,7 +174,10 @@ class Invariant:
 
 @dataclass(frozen=True, slots=True)
 class PreviousResult:
-    """The most recent stored result of the same invariant, for carry-forward and staleness."""
+    """The most recent stored result of the same invariant that is not ``stale`` (the last real
+    evidence), for carry-forward and staleness. ``stale`` rows are skipped because they are derived:
+    a run after a stale one compares against the last ``satisfied`` result again, so ``stale``
+    persists until fresh evidence arrives instead of decaying to ``untested``."""
 
     run_id: str
     status: InvariantStatus
@@ -354,9 +357,16 @@ def spec_hash(inv: Invariant) -> str:
 def resolve_target(
     inv: Invariant, regions: Sequence[FunctionRegion], source_root: str = ""
 ) -> FunctionRegion | None:
-    """The region a function/class/module invariant targets, by dotted ``module.qualname``."""
+    """The region a function/class/module invariant targets, by dotted ``module.qualname``.
+
+    When several regions share the qualname (``@overload`` stubs, a property's getter and setter,
+    redefinitions), the first one with a real body wins: an ``@overload`` stub's ``...`` body
+    (:func:`~coverset.analysis.functions.is_stub`) is never the target while the implementation
+    exists, so the body hash, covering tests and coverage lens are the implementation's.
+    """
     if inv.scope.kind not in ("function", "class", "module"):
         return None
+    matches: list[FunctionRegion] = []
     for region in regions:
         module = _module_name(region.path, source_root)
         if module is None:
@@ -367,8 +377,8 @@ def resolve_target(
         elif region.kind != "module" and f"{module}.{region.qualname}" == inv.scope.target:
             wanted_class = inv.scope.kind == "class"
             if (region.kind == "class") == wanted_class:
-                return region
-    return None
+                matches.append(region)
+    return next((r for r in matches if not is_stub(r)), matches[0] if matches else None)
 
 
 def _module_name(path: str, source_root: str) -> str | None:
@@ -479,6 +489,8 @@ def _carry_forward(
     inv: Invariant, ctx: InvariantContext, status: InvariantStatus, evidence: dict[str, Any]
 ) -> tuple[InvariantStatus, dict[str, Any]]:
     prev = ctx.previous_result
+    if prev is not None and prev.status == "stale":  # still no fresh evidence: it stays stale
+        return "stale", {**evidence, "stale_since_run": prev.run_id, "reason": "no fresh evidence since"}
     if prev is None or prev.status != "satisfied":
         return status, evidence
     same_body = prev.target_body_hash == ctx.body_hash

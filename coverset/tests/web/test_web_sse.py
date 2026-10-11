@@ -80,7 +80,22 @@ async def test_replay_reemits_events_in_order(client: Client, demo: Demo) -> Non
 
 
 async def test_replay_freezes_mid_run(client: Client, demo: Demo) -> None:
-    response = await client.get(f"/runs/{demo.pr1_run}/events?replay=1&speed=100&freeze=0.9")
+    import json
+    import sqlite3
+
+    con = sqlite3.connect(demo.data_dir.parent / "coverset.db")
+    try:
+        timeline = json.loads(
+            con.execute("SELECT timeline FROM runs WHERE id = ?", (demo.pr1_run,)).fetchone()[0]
+        )
+    finally:
+        con.close()
+    t0 = datetime.fromisoformat(timeline["queued"])
+    first, last = (
+        (datetime.fromisoformat(timeline[key]) - t0).total_seconds() for key in ("first_test", "finished")
+    )
+    freeze = round(first + (last - first) / 2, 2)  # mid-run on this machine, whatever its speed
+    response = await client.get(f"/runs/{demo.pr1_run}/events?replay=1&speed=100&freeze={freeze}")
     events = frames(await response.get_data(as_text=True))
     assert events[-1][1] == "done" and 'data-replay="frozen"' in events[-1][2]
     heads = [d for _, e, d in events if e == "head"]

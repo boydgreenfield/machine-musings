@@ -94,6 +94,9 @@ class ScoringContext:
     now: datetime
     rng_seed: int
     """Seed of the exploration sample; use :func:`exploration_seed` of the run id."""
+    tracked_changes: Sequence[str] = ()
+    """Changed paths matching ``[tool.coverset] tracked_globs`` (``uv.lock``, ``conftest.py``):
+    files every test depends on, so each test gets the ``impacted_by_diff`` signal."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +156,9 @@ def _components(
     failed = history is not None and _failed_last_run(history)
     if failed:
         notes.append("failed in previous run")
-    is_new = history is None or history.runs_n == 0
+    # New means never seen: no statistics and no result in the previous run (a test that ran there,
+    # e.g. in an untrusted run that updates no ``test_stats``, is not new).
+    is_new = history is None or (history.runs_n == 0 and history.last_outcome is None)
     file_changed = item.file in ctx.changed_files
     if is_new:
         notes.append("new test")
@@ -167,6 +172,10 @@ def _components(
         notes.append(f"covers {', '.join(names)} (changed)" + (f" +{more} more" if more else ""))
     elif impacted:
         notes.append("touches module-level code of a changed file")
+    elif ctx.tracked_changes:
+        impacted = True
+        more = len(ctx.tracked_changes) - 1
+        notes.append(f"tracked file changed: {ctx.tracked_changes[0]}" + (f" +{more} more" if more else ""))
     overlap = len(touched) / len(impact.regions) if impact.regions else 0.0
     decay = 0.0
     if history is not None and history.last_fail_at is not None:

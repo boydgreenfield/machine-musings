@@ -80,7 +80,7 @@ async def test_layout_wiring(client: Client) -> None:
 async def test_pr_pages_tell_the_demo_story(client: Client, demo: Demo) -> None:
     pr1 = await (await client.get(f"/repos/{demo.repo_id}/prs/1")).get_data(as_text=True)
     assert "s-fail" in pr1 and ">FAIL<" in pr1
-    assert "first failure" in pr1 and "file order: 66th" in pr1 and "est.)" in pr1
+    assert "first failure" in pr1 and "file order: 66th" in pr1 and "estimated from the first test)" in pr1
     assert ">refund<" in pr1 and ">NEW<" in pr1 and "1 covering test failed" in pr1
     assert "cents_conserved" in pr1 and 'class="inv i-violated"' in pr1
     assert "AI (fixture)" in pr1 and "advisory" in pr1

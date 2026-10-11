@@ -40,6 +40,7 @@ __all__ = [
     "IndexedFunction",
     "index_functions",
     "index_functions_detailed",
+    "is_stub",
     "own_lines",
 ]
 
@@ -284,3 +285,18 @@ def _region(
 
 def _digest(text: str) -> str:
     return hashlib.blake2b(text.encode(), digest_size=_HASH_BYTES).hexdigest()
+
+
+_STUB_BODY_HASHES: Final = frozenset(
+    _digest(_dump_body(ast.parse(body).body, skeleton=False)) for body in ("", "...", "pass")
+)
+"""``body_hash`` of a function whose body (docstring aside) is empty, ``...`` or ``pass``."""
+
+
+def is_stub(region: FunctionRegion) -> bool:
+    """True for a function or method whose body is only a docstring, ``...`` or ``pass``.
+
+    ``@overload`` signatures and protocol stubs look like that; an invariant naming the function
+    means its implementation (the same-qualname region with a real body).
+    """
+    return region.kind in ("function", "method") and region.body_hash in _STUB_BODY_HASHES
