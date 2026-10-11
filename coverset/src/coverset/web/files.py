@@ -20,7 +20,8 @@ from quart import Blueprint, Response, request, url_for
 from sqlalchemy import select
 from werkzeug.exceptions import NotFound
 
-from coverset.db.models import PullRequest, Run
+from coverset.db.models import PullRequest, Run, TestCase
+from coverset.facts.queries import test_touched
 from coverset.orchestrator.repos import mirror_path
 from coverset.web.context import app_db, app_settings
 from coverset.web.detail import function_detail
@@ -97,6 +98,7 @@ async def source(rid: int, path: str) -> Response:
         changed = analysis.changed_lines.get(path, set())
         removed = analysis.removed.get(path, {})
     line_facts = await asyncio.to_thread(facts.line_facts, path)
+    focus, focus_test = await _focus_for(rid, run, path, facts)
     regions = []
     hollow_total = 0
     for region in facts.callables(path):
@@ -131,6 +133,7 @@ async def source(rid: int, path: str) -> Response:
         changed=changed,
         removed=removed,
         tests_url=tests_url,
+        focus=focus,
     )
     measured = sorted(facts.statics)
     index = measured.index(path) if path in measured else -1
@@ -167,7 +170,33 @@ async def source(rid: int, path: str) -> Response:
         stats=stats,
         known=line_facts.known,
         changed=len(changed),
+        focus=focus_test,
+        focus_lines=len(focus or ()),
+        clear_url=url_for("files.source", rid=rid, path=path, run=run.id, **extra),
     )
+
+
+async def _focus_for(
+    rid: int, run: Run, path: str, facts: RunFacts
+) -> tuple[frozenset[int] | None, dict[str, Any] | None]:
+    """``?test=<id>``: the lines that test ran in ``path`` (a frozenset, empty when it never
+    touched the file) and the banner data, or ``(None, None)`` without the parameter. A test of
+    another repository is a 404; the id is the database's, as the test page uses it."""
+    test_id = parse_int(request.args.get("test"), minimum=1)
+    if test_id is None:
+        return None, None
+    async with app_db().session() as session:
+        case = await session.get(TestCase, test_id)
+    if case is None or case.repo_id != rid:
+        raise NotFound(f"There is no test with id {test_id} in this repository.")
+    touched = await asyncio.to_thread(test_touched, facts.store, rid, run.id, case.nodeid)
+    lines = frozenset(line for file in touched if file.path == path for line in file.lines)
+    banner = {
+        "nodeid": case.nodeid,
+        "url": url_for("testpage.test_page", rid=rid, test_id=case.id, run=run.id),
+        "statements": sum(1 for n in lines if n in facts.line_facts(path).statements),
+    }
+    return lines, banner
 
 
 @bp.get("/repos/<int:rid>/files/<path:path>/lines/<int:n>/tests")

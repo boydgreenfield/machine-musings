@@ -13,7 +13,7 @@ escaped by hand (:func:`~coverset.web.render.html.attr`).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -116,6 +116,7 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         line_range: tuple[int, int] | None = None,
         tests_url: Callable[[int], str] | None = None,
         anchor_prefix: str = "L",
+        focus: Collection[int] | None = None,
     ) -> None:
         super().__init__(nowrap=False, cssclass="src-code")
         self.facts = facts
@@ -126,6 +127,8 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         self.line_range = line_range
         self.tests_url = tests_url
         self.anchor_prefix = anchor_prefix
+        self.focus = None if focus is None else frozenset(focus)
+        """When set, every line outside it is dimmed (the data-flow lens of one test)."""
 
     # Pygments calls wrap(source) with (is_line, html) pairs; we yield our own structure.
     def wrap(self, source: Iterable[tuple[int, str]]) -> Iterator[tuple[int, str]]:  # type: ignore[override]
@@ -186,6 +189,8 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
             classes.append(state)
         if number in self.changed:
             classes.append("chg")
+        if self.focus is not None and number not in self.focus:
+            classes.append("dim")
         if head is not None:
             classes.append(f"fn-head d{min(depth, MAX_DEPTH)}")
         anchor = f"{self.anchor_prefix}{number}"
@@ -231,6 +236,7 @@ def render_source(
     line_range: tuple[int, int] | None = None,
     tests_url: Callable[[int], str] | None = None,
     anchor_prefix: str = "L",
+    focus: Collection[int] | None = None,
 ) -> Markup:
     """Highlight ``text`` (Python when ``path`` ends in ``.py``) into the line-block structure."""
     lexer = (
@@ -247,5 +253,6 @@ def render_source(
         line_range=line_range,
         tests_url=tests_url,
         anchor_prefix=anchor_prefix,
+        focus=focus,
     )
     return Markup(highlight(text, lexer, formatter))

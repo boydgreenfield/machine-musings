@@ -15,6 +15,7 @@
       <span>{{ stats.statements }} statements · {{ stats.missed }} never ran · {{ stats.partial }} partial{% if stats.hollow %} · {{ stats.hollow }} input class{{ '' if stats.hollow == 1 else 'es' }} never exercised{% endif %}</span>
       {% else %}<span>not measured in this run</span>{% endif %}
       {% if changed %}<span>{{ changed }} changed line{{ '' if changed == 1 else 's' }} marked +</span>{% endif %}
+      {% if focus %}<span class="focus-note" id="focus-note">lines run by <a href="{{ focus.url }}"><code class="nodeid">{{ focus.nodeid|nodeid }}</code></a>: {{ focus.statements }} of {{ stats.statements }} statements, the rest dimmed · <a href="{{ clear_url }}">show every test</a></span>{% endif %}
       <span class="muted">{% if prev_url %}<a href="{{ prev_url }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_url %}<a href="{{ next_url }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
     </div>
     <ul class="legend src-legend">
@@ -24,7 +25,7 @@
       <li><span class="chip">class <b>n</b></span> input class some test passed in (sampled calls)</li>
       <li><span class="chip chip-hollow">class <b>0</b></span> never exercised</li>
     </ul>
-    {{ html }}
+    {% if focus %}<div class="src-focus">{{ html }}</div>{% else %}{{ html }}{% endif %}
   </div>
 </div>
 {% endblock %}

@@ -587,3 +587,8 @@ svg.flow-test { display: block; width: 100%; max-width: 100%; height: auto; font
 .reach-param { min-width: 8ch; }
 .reach-strip { display: inline-flex; align-items: center; padding: 1px 4px; border-radius: 3px; background: var(--surface-2); }
 .reach-strip.any { background: transparent; border: 1px solid var(--rule); }
+
+/* the data-flow lens of one test on the source view: every line it did not run is dimmed */
+.src-focus .ln.dim > .src, .src-focus .ln.dim > .gn, .src-focus .ln.dim > .gt, .src-focus .ln.dim > .brn, .src-focus .ln.dim > .sr { opacity: 0.38; }
+.src-focus .ln.dim.fn-head > .src { opacity: 0.7; }
+.focus-note { color: var(--ink); }
