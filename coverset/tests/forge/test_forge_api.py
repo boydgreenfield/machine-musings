@@ -38,6 +38,7 @@ AUDIENCE = "http://127.0.0.1:8000"
 # -- verify_actions_oidc ----------------------------------------------------------------------------
 
 
+@pytest.mark.security
 def test_valid_token(rsa_key: rsa.RSAPrivateKey, jwk_client: StubJwkClient) -> None:
     claims = verify_actions_oidc(
         sign_token(rsa_key, oidc_claims(AUDIENCE)), audience=AUDIENCE, jwk_client=jwk_client
@@ -46,6 +47,7 @@ def test_valid_token(rsa_key: rsa.RSAPrivateKey, jwk_client: StubJwkClient) -> N
     assert claims.repository == "coverset-demo/ledger" and claims.sha == SHA_A
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -77,6 +79,7 @@ def test_rejected_claims(
         verify_actions_oidc(token, audience=AUDIENCE, jwk_client=jwk_client)
 
 
+@pytest.mark.security
 def test_leeway_accepts_a_just_expired_token(rsa_key: rsa.RSAPrivateKey, jwk_client: StubJwkClient) -> None:
     token = sign_token(rsa_key, oidc_claims(AUDIENCE, exp=datetime.now(UTC) - timedelta(seconds=30)))
     verify_actions_oidc(token, audience=AUDIENCE, jwk_client=jwk_client)
@@ -96,6 +99,7 @@ def test_alg_none_rejected_before_key_lookup(jwk_client: StubJwkClient) -> None:
     assert jwk_client.calls == 0
 
 
+@pytest.mark.security
 def test_hs256_key_confusion_rejected(rsa_key: rsa.RSAPrivateKey, jwk_client: StubJwkClient) -> None:
     public_pem = rsa_key.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
@@ -116,6 +120,7 @@ def test_hs256_key_confusion_rejected(rsa_key: rsa.RSAPrivateKey, jwk_client: St
         verify_actions_oidc(token, audience=AUDIENCE, jwk_client=jwk_client)
 
 
+@pytest.mark.security
 def test_wrong_key_and_garbage_rejected(jwk_client: StubJwkClient) -> None:
     other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     with pytest.raises(OidcError):
@@ -180,6 +185,7 @@ EVENTS = [
 ]
 
 
+@pytest.mark.security
 async def test_verdict_with_a_valid_oidc_token(
     oidc_app: Quart, client: Client, db: Database, settings: Settings, rsa_key: rsa.RSAPrivateKey
 ) -> None:
@@ -208,6 +214,7 @@ async def test_verdict_with_a_valid_oidc_token(
         assert stored is not None and stored.ci_first_contact_at == first_contact
 
 
+@pytest.mark.security
 async def test_oidc_token_for_another_repo_is_404(
     oidc_app: Quart, client: Client, db: Database, settings: Settings, rsa_key: rsa.RSAPrivateKey
 ) -> None:
@@ -219,6 +226,7 @@ async def test_oidc_token_for_another_repo_is_404(
         assert response.status_code == 404 and await response.get_json() == {"error": "not_found"}
 
 
+@pytest.mark.security
 async def test_invalid_oidc_token_is_401(
     oidc_app: Quart, client: Client, db: Database, rsa_key: rsa.RSAPrivateKey
 ) -> None:
@@ -230,6 +238,7 @@ async def test_invalid_oidc_token_is_401(
     assert response.headers["WWW-Authenticate"].startswith("Bearer")
 
 
+@pytest.mark.security
 async def test_public_repo_without_token_gets_a_reduced_answer(
     oidc_app: Quart, client: Client, db: Database
 ) -> None:
@@ -242,6 +251,7 @@ async def test_public_repo_without_token_gets_a_reduced_answer(
     assert (body["state"], body["conclusion"], body["run_id"]) == ("queued", None, run.id)
 
 
+@pytest.mark.security
 async def test_private_unknown_and_local_repos_are_404_without_token(
     oidc_app: Quart, client: Client, db: Database
 ) -> None:
@@ -254,6 +264,7 @@ async def test_private_unknown_and_local_repos_are_404_without_token(
         assert response.status_code == 404, path
 
 
+@pytest.mark.security
 async def test_public_callers_are_rate_limited(oidc_app: Quart, client: Client, db: Database) -> None:
     repo = await seed_repo(db, private=False)
     await seed_run(db, repo)
@@ -403,6 +414,7 @@ async def test_events_sse_stream_honours_last_event_id(
     assert [f["event"] for f in parse_sse(await resumed.get_data(as_text=True))] == ["done"]
 
 
+@pytest.mark.security
 async def test_events_authorization_follows_the_runs_repo(
     oidc_app: Quart, client: Client, db: Database, settings: Settings, rsa_key: rsa.RSAPrivateKey
 ) -> None:

@@ -66,6 +66,7 @@ async def test_without_a_run_queue_runs_wait_in_the_database(
         assert run is not None and run.status == "queued" and run.trigger == "baseline"
 
 
+@pytest.mark.security
 async def test_bad_signature_is_403_without_echo(client: Client, db: Database, fake_forge: FakeForge) -> None:
     response = await post_fixture(client, "pr_opened", **{"X-Hub-Signature-256": "sha256=" + "0" * 64})
     assert response.status_code == 403
@@ -83,12 +84,14 @@ async def test_missing_signature_is_403(client: Client, db: Database, fake_forge
     assert await count(db, WebhookDelivery) == 0
 
 
+@pytest.mark.security
 async def test_tampered_body_is_403(client: Client, db: Database, fake_forge: FakeForge) -> None:
     headers, body = load_fixture("pr_opened")
     response = await client.post("/webhooks/github", data=body.replace(b"MEMBER", b"OWNER"), headers=headers)
     assert response.status_code == 403
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("overrides", [{"github_webhook_secret": None}, {"github_webhook_secret": ""}])
 async def test_empty_secret_fails_closed(tmp_path: Any, overrides: dict[str, Any]) -> None:
     settings = Settings.for_tests(data_dir=tmp_path / "data", **overrides)
@@ -99,6 +102,7 @@ async def test_empty_secret_fails_closed(tmp_path: Any, overrides: dict[str, Any
     assert await response.get_json() == {"error": "webhook_secret_unset"}
 
 
+@pytest.mark.security
 async def test_test_secret_rejected_outside_test_env(tmp_path: Any) -> None:
     settings = Settings.for_tests(
         env="dev", data_dir=tmp_path / "data", github_webhook_secret=TEST_WEBHOOK_SECRET
@@ -110,6 +114,7 @@ async def test_test_secret_rejected_outside_test_env(tmp_path: Any) -> None:
     assert await response.get_json() == {"error": "webhook_secret_rejected"}
 
 
+@pytest.mark.security
 async def test_duplicate_delivery_is_processed_once(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge
 ) -> None:
@@ -123,6 +128,7 @@ async def test_duplicate_delivery_is_processed_once(
     assert len(queue.run_ids) == 1
 
 
+@pytest.mark.security
 async def test_oversized_body_is_413(client: Client, fake_forge: FakeForge) -> None:
     headers, _body = load_fixture("pr_opened")
     size = MAX_CONTENT_LENGTH + 1
@@ -132,6 +138,7 @@ async def test_oversized_body_is_413(client: Client, fake_forge: FakeForge) -> N
     assert response.status_code == 413
 
 
+@pytest.mark.security
 async def test_unknown_event_is_recorded_and_ignored(
     client: Client, db: Database, fake_forge: FakeForge
 ) -> None:
@@ -154,6 +161,7 @@ async def test_unknown_event_is_recorded_and_ignored(
         )
 
 
+@pytest.mark.security
 async def test_ping_is_ignored(client: Client, db: Database, fake_forge: FakeForge) -> None:
     response = await post_fixture(client, "ping")
     assert response.status_code == 202 and (await response.get_json())["reason"] == "ping"
@@ -174,11 +182,13 @@ async def test_malformed_payload_is_400(client: Client, db: Database, fake_forge
     assert await count(db, Run) == 0
 
 
+@pytest.mark.security
 async def test_bad_delivery_id_is_400(client: Client, fake_forge: FakeForge) -> None:
     response = await post_fixture(client, "pr_opened", **{"X-GitHub-Delivery": "../../etc/passwd"})
     assert response.status_code == 400
 
 
+@pytest.mark.security
 async def test_unknown_forge_route_is_404(client: Client, fake_forge: FakeForge) -> None:
     headers, body = load_fixture("pr_opened")
     assert (await client.post("/webhooks/gitlab", data=body, headers=headers)).status_code == 404
@@ -210,6 +220,7 @@ async def test_fork_pr_gets_the_approval_check(
     ]
 
 
+@pytest.mark.security
 async def test_approve_run_from_a_non_writer_is_not_queued(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge
 ) -> None:
@@ -225,6 +236,7 @@ async def test_approve_run_from_a_non_writer_is_not_queued(
         assert run is not None and run.status == "awaiting_approval" and run.approved_by is None
 
 
+@pytest.mark.security
 async def test_approval_fixture_binds_the_check_external_id(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge
 ) -> None:
@@ -262,6 +274,7 @@ async def test_approval_fixture_binds_the_check_external_id(
         assert untouched is not None and untouched.status == "awaiting_approval"
 
 
+@pytest.mark.security
 async def test_concurrent_deliveries_are_all_recorded(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge
 ) -> None:
@@ -295,6 +308,7 @@ async def test_concurrent_deliveries_are_all_recorded(
     assert await count(db, WebhookDelivery) == 6
 
 
+@pytest.mark.security
 async def test_integrity_error_is_retried_once_then_503(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,6 +335,7 @@ async def test_integrity_error_is_retried_once_then_503(
     assert await count(db, WebhookDelivery) == 1, "nothing half-stored; GitHub can redeliver"
 
 
+@pytest.mark.security
 async def test_replay_with_a_fresh_guid_is_a_duplicate(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge
 ) -> None:
@@ -337,6 +352,7 @@ async def test_replay_with_a_fresh_guid_is_a_duplicate(
         assert delivery is not None and delivery.body_sha256 is not None and len(delivery.body_sha256) == 64
 
 
+@pytest.mark.security
 async def test_deeply_nested_payload_is_400(client: Client, db: Database, fake_forge: FakeForge) -> None:
     raw = b"[" * 100_000 + b"]" * 100_000
     headers = {
@@ -371,6 +387,7 @@ async def test_repository_privatized_is_accepted(client: Client, db: Database, f
         assert repo is not None and repo.private is True
 
 
+@pytest.mark.security
 async def test_other_owner_answered_202_without_rows(
     client: Client, db: Database, fake_forge: FakeForge
 ) -> None:

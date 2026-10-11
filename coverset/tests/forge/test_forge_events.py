@@ -26,6 +26,7 @@ def test_github_published_hmac_vector() -> None:
     assert verify_signature(GITHUB_VECTOR_SECRET, headers, GITHUB_VECTOR_PAYLOAD)
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     "signature",
     [
@@ -42,12 +43,14 @@ def test_bad_signatures_rejected(signature: str | None) -> None:
     assert not verify_signature(GITHUB_VECTOR_SECRET, headers, GITHUB_VECTOR_PAYLOAD)
 
 
+@pytest.mark.security
 def test_signature_covers_the_raw_bytes() -> None:
     assert not verify_signature(
         GITHUB_VECTOR_SECRET, {"X-Hub-Signature-256": GITHUB_VECTOR_SIGNATURE}, b"Hello, World! "
     )
 
 
+@pytest.mark.security
 def test_no_secret_never_verifies() -> None:
     signature = sign_body("", b"{}")
     assert not verify_signature("", {"X-Hub-Signature-256": signature}, b"{}")
@@ -196,6 +199,7 @@ def test_pull_request_closed_and_draft() -> None:
     assert draft.kind == "pr_opened" and draft.draft
 
 
+@pytest.mark.security
 def test_deleted_head_repo_counts_as_fork() -> None:
     event = parse_github_event(*_mutated("pr_opened", lambda p: p["pull_request"]["head"].update(repo=None)))
     assert event.from_fork

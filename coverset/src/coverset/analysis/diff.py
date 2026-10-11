@@ -16,12 +16,13 @@ both sides of every changed file and classifies each touched region:
     the same file (renamed) or in another file (moved), including every unchanged function of a
     renamed file. Same body with a new signature is ``modified`` with ``prev`` set.
 
-``trivial``, ``renamed`` and ``moved`` changes are behaviour-preserving: they inherit the prior
-run's facts. Head-side line numbers (``added``) are only ever intersected with head regions and
+``trivial``, ``renamed`` and ``moved`` changes are behaviour-preserving: reports label them
+``inherited`` and do not count them as untested (copying the prior run's facts is designed, not
+built). Head-side line numbers (``added``) are only ever intersected with head regions and
 base-side numbers (``removed``) with base regions.
 
 Pairing vanished with appeared definitions is deliberately conservative, because a wrong pairing
-lets changed code inherit facts it did not earn: an exact body match under a different short name
+lets changed code carry an inherited label it did not earn: an exact body match under a different short name
 needs a substantial body (at least :data:`MIN_MATCH_TOKENS` code tokens) and, for classes, the same
 set of direct members. The fuzzy pass compares bodies as sequences of normalised code lines
 (tokens joined, so comments and layout do not matter), only for same-arity pairs with substantial
@@ -106,7 +107,7 @@ class FileDiff:
 
 
 def is_behaviour_preserving(change: FunctionChange) -> bool:
-    """Whether ``change`` can inherit the prior run's facts (trivial, renamed or moved)."""
+    """Whether ``change`` is behaviour-preserving (trivial, renamed or moved) and so labelled inherited."""
     return change.kind in _BEHAVIOUR_PRESERVING
 
 
@@ -391,7 +392,7 @@ def _exact_match(old: _Side, new: _Side) -> bool:
 
     Classes must also have the same direct members (a class hash skips its methods). A different
     short name additionally needs a substantial body, so unrelated ``pass``/``...`` stubs or
-    one-liners never inherit each other's facts.
+    one-liners are never paired with each other.
     """
     if not _compatible(old.region, new.region):
         return False

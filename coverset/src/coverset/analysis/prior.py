@@ -1,4 +1,4 @@
-"""Choosing the prior run whose facts drive scoring, wave 1 and inherited coverage.
+"""Choosing the prior run whose facts drive scoring, wave 1 and the inherited label.
 
 The prior run is the most recent completed run whose head is (a) the PR's previous head, else
 (b) the merge-base of base and head, else (c) the latest baseline run on the default branch.

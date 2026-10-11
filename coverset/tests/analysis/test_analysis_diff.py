@@ -173,6 +173,7 @@ def test_bad_refs_are_rejected(ref: str) -> None:
         validate_ref(ref)
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("ref", ["main", "feature/x", "a" * 40, "HEAD"])
 def test_good_refs_pass(ref: str) -> None:
     assert validate_ref(ref) == ref

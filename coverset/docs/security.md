@@ -2,7 +2,7 @@
 
 coverset runs other people's code and reports on it. This page is the threat model and the checklist the hardening phase runs. Every control names the module that implements it and the test that covers it. "No test" marks a control that is in the code but not pinned by a test; "in progress" marks parts another agent is building now ([docs/modal.md](modal.md), [docs/ui.md](ui.md)); "designed" marks parts that do not exist yet.
 
-Running the security-marked suite today, `uv run pytest -m security`, selects 3 tests (all in `tests/analysis/test_analysis_invariants.py`). The other tests named below run in the normal suite (`uv run pytest`). Marking them is a hardening-phase task.
+The tests named below carry `@pytest.mark.security`, so `uv run pytest -m security` runs the security suite on its own (252 tests at the time of writing; the exact count follows the test files). Controls marked "no test" are still open.
 
 ## Threat model
 

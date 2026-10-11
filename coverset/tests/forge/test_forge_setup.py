@@ -161,6 +161,7 @@ async def test_bad_or_missing_state_is_400(client: Client, exchange: list[httpx.
     assert exchange == []
 
 
+@pytest.mark.security
 async def test_existing_credentials_cannot_be_replaced_in_open_mode(
     client: Client, app: Quart, exchange: list[httpx.Request]
 ) -> None:
@@ -183,6 +184,7 @@ async def test_existing_credentials_cannot_be_replaced_in_open_mode(
     assert exchange == [] and key.read_text() == "old key"
 
 
+@pytest.mark.security
 async def test_callback_only_from_loopback_without_an_admin_session(
     client: Client, exchange: list[httpx.Request]
 ) -> None:
@@ -196,6 +198,7 @@ async def test_callback_only_from_loopback_without_an_admin_session(
     assert exchange == []
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     "headers",
     [
@@ -225,6 +228,7 @@ def test_tunnel_public_url_without_admin_token_refuses_to_start(tmp_path: Path) 
         Settings.for_tests(data_dir=tmp_path, public_url="https://coverset-demo.ngrok.app")
 
 
+@pytest.mark.security
 async def test_admin_session_replaces_credentials_with_a_csrf_post(tmp_path: Path, admin_token: str) -> None:
     """With a token, the callback works through a tunnel for a signed-in admin, and replacing
     stored credentials is a POST carrying the CSRF token."""
@@ -282,6 +286,7 @@ async def test_failed_exchange_is_reported(client: Client, exchange: list[httpx.
     assert bad.status_code == 400
 
 
+@pytest.mark.security
 def test_manifest_code_is_redacted_from_access_logs() -> None:
     line = '127.0.0.1:5000 - - "GET /setup/github/callback?code=0123abcd_ef-9&state=s HTTP/1.1" 303'
     assert (

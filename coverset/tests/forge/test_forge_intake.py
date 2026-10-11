@@ -111,6 +111,7 @@ async def test_cancelled_run_does_not_block_a_new_one(db: Database, settings: Se
     assert again.status == "created" and again.run_id != first.run_id
 
 
+@pytest.mark.security
 async def test_duplicate_delivery_is_a_no_op(db: Database, settings: Settings) -> None:
     event = event_from("pr_opened")
     assert (await run_intake(db, settings, event)).status == "created"
@@ -136,6 +137,7 @@ async def test_drafts(db: Database, settings: Settings, run_drafts: bool) -> Non
         assert ready.status == "created"
 
 
+@pytest.mark.security
 async def test_fork_pr_awaits_approval_with_a_neutral_check(
     db: Database, settings: Settings, fake_forge: FakeForge
 ) -> None:
@@ -189,6 +191,7 @@ async def event_kinds(db: Database, run_id: str) -> list[str]:
         )
 
 
+@pytest.mark.security
 async def test_approve_run_queues_with_network_blocked(
     db: Database, settings: Settings, fake_forge: FakeForge
 ) -> None:
@@ -220,6 +223,7 @@ async def test_approve_run_queues_with_network_blocked(
     assert again.status == "ignored_event"
 
 
+@pytest.mark.security
 @pytest.mark.parametrize("role", ["read", "triage", "none"])
 async def test_approve_run_by_a_non_writer_is_refused(
     db: Database, settings: Settings, fake_forge: FakeForge, role: str
@@ -238,6 +242,7 @@ async def test_approve_run_by_a_non_writer_is_refused(
     assert await event_kinds(db, run.id) == ["queued", "approval_rejected"]
 
 
+@pytest.mark.security
 async def test_untrusted_author_cannot_approve_their_own_pr(
     db: Database, settings: Settings, fake_forge: FakeForge
 ) -> None:
@@ -259,6 +264,7 @@ async def test_untrusted_author_cannot_approve_their_own_pr(
     assert payload is not None and "cannot approve" in payload["reason"]
 
 
+@pytest.mark.security
 async def test_permission_lookup_failure_keeps_the_run_waiting(
     db: Database, settings: Settings, fake_forge: FakeForge
 ) -> None:
@@ -272,6 +278,7 @@ async def test_permission_lookup_failure_keeps_the_run_waiting(
     assert (await get_run(db, awaiting.run_id)).status == "queued" and queued == [awaiting.run_id]
 
 
+@pytest.mark.security
 async def test_approve_run_by_external_id(db: Database, settings: Settings, fake_forge: FakeForge) -> None:
     awaiting = await run_intake(db, settings, event_from("pr_opened_fork"))
     button = event_from(
@@ -282,6 +289,7 @@ async def test_approve_run_by_external_id(db: Database, settings: Settings, fake
     assert (await get_run(db, awaiting.run_id)).status == "queued"
 
 
+@pytest.mark.security
 async def test_concurrent_approvals_queue_once(
     db: Database, settings: Settings, fake_forge: FakeForge
 ) -> None:
@@ -320,6 +328,7 @@ async def test_admin_approval_helper(db: Database, settings: Settings) -> None:
     )
 
 
+@pytest.mark.security
 async def test_token_mode_defaults_untrusted_prs_to_run_blocked_network(
     db: Database, settings: Settings
 ) -> None:
@@ -341,6 +350,7 @@ async def test_token_mode_defaults_untrusted_prs_to_run_blocked_network(
     assert effective_untrusted_pr_policy(settings) == "approve", "the fake forge keeps the default"
 
 
+@pytest.mark.security
 async def test_token_mode_approval_status_and_admin_approval(db: Database, settings: Settings) -> None:
     class TokenModeForge(FakeForge):
         def capabilities(self) -> ForgeCapabilities:
@@ -441,6 +451,7 @@ async def test_body_digest_dedupes_a_replay_under_a_new_guid(db: Database, setti
     assert again.status == "duplicate" and await count(db, WebhookDelivery) == 1
 
 
+@pytest.mark.security
 async def test_untrusted_policies(db: Database, settings: Settings) -> None:
     skip = settings.model_copy(update={"untrusted_pr_policy": "skip"})
     result = await run_intake(db, skip, event_from("pr_opened_fork"))
@@ -462,6 +473,7 @@ async def test_non_member_authors_are_untrusted_even_without_a_fork(
     assert (await run_intake(db, settings, event)).status == "awaiting_approval"
 
 
+@pytest.mark.security
 async def test_new_head_supersedes_an_awaiting_run(db: Database, settings: Settings) -> None:
     first = await run_intake(db, settings, event_from("pr_opened_fork"))
     second = await run_intake(
@@ -514,6 +526,7 @@ async def test_other_owners_create_nothing(db: Database, settings: Settings) -> 
         assert delivery is not None and delivery.status == "ignored_owner" and delivery.payload is None
 
 
+@pytest.mark.security
 async def test_allowed_repos_narrow_allowed_owners(db: Database, settings: Settings) -> None:
     narrowed = settings.model_copy(update={"allowed_repos": ["coverset-demo/other"]})
     assert (await run_intake(db, narrowed, event_from("pr_opened"))).status == "ignored_owner"
@@ -574,6 +587,7 @@ async def test_rerun_failed_button(db: Database, settings: Settings) -> None:
     assert payload is not None and payload["rerun_scope"] == "failed"
 
 
+@pytest.mark.security
 async def test_rerun_of_unapproved_untrusted_run_needs_approval(db: Database, settings: Settings) -> None:
     first = await run_intake(db, settings, event_from("pr_opened_fork"))
     async with db.session() as session:

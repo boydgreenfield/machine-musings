@@ -118,6 +118,7 @@ def annotations(n: int) -> tuple[Annotation, ...]:
     return tuple(Annotation(f"tests/test_{i}.py", i + 1, i + 1, "failure", f"boom {i}") for i in range(n))
 
 
+@pytest.mark.security
 async def test_app_mode_pins_the_api_version_on_every_request(github: MockGitHub, rsa_pem: str) -> None:
     forge = app_forge(github, rsa_pem)
     check_id = await forge.create_check(
@@ -175,6 +176,7 @@ async def test_create_check_sends_annotations_past_50_as_patches(github: MockGit
     assert len(body_of(patch)["output"]["annotations"]) == 25
 
 
+@pytest.mark.security
 async def test_writes_are_spaced_by_the_token_bucket(github: MockGitHub, rsa_pem: str) -> None:
     clock = FakeClock()
     bucket = TokenBucket(per_minute=100, burst=1, clock=clock.clock, sleep=clock.sleep)
@@ -352,6 +354,7 @@ def _failed(method: str, status: int, headers: dict[str, str] | None = None) -> 
     return RequestFailed(GitHubResponse(raw, Any))
 
 
+@pytest.mark.security
 def test_retry_decision_never_retries_non_idempotent_server_errors() -> None:
     """A 502 on a POST that GitHub committed must not create a second comment or check run."""
     for method in ("POST", "PUT", "DELETE"):
@@ -375,6 +378,7 @@ def test_retry_decision_caps_rate_limit_waits() -> None:
     assert retry_decision(limited(3600), 0).do_retry is False, "no hour-long sleep inside verdict posting"
 
 
+@pytest.mark.security
 async def test_post_server_error_is_sent_once(github: MockGitHub, rsa_pem: str) -> None:
     github.route("POST", "/repos/coverset-demo/ledger/issues/1/comments", 502, {"message": "Bad Gateway"})
     github.route("GET", "/repos/coverset-demo/ledger/issues/1/comments", 200, [])

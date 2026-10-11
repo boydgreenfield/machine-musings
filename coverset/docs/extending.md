@@ -170,7 +170,6 @@ The protocol is the contract, but the committed orchestrator still calls Python-
 
 | Place | Assumption |
 |---|---|
-| `orchestrator/bundles.py` (`ingest_one`) | calls `facts.convert.read_python_bundle` directly instead of `adapter.read_bundle` |
 | `orchestrator/planner.py` (`_collect`) | runs `python -m pytest --collect-only` on worker 0 |
 | `orchestrator/planner.py` (`_measured_sources`, `_changes`) | selects `.py` files |
 | `orchestrator/planner.py` (`_load_config`) | reads `[tool.coverset]` from `pyproject.toml` into a `CoversetConfig` |

@@ -131,6 +131,7 @@ async def test_public_polling_pages_never_stall_on_hidden_events(
     assert [e["seq"] for e in body["events"]] == [10]
 
 
+@pytest.mark.security
 async def test_public_run_detail_has_no_free_text_reason(
     oidc_app: Quart, client: Client, db: Database, admin_token: str
 ) -> None:
@@ -161,6 +162,7 @@ def test_stream_slots() -> None:
     assert slots.count() == 0 and slots.acquire("a"), "leaked slots expire"
 
 
+@pytest.mark.security
 async def test_anonymous_sse_streams_are_capped_per_client(
     oidc_app: Quart, client: Client, db: Database, admin_token: str
 ) -> None:
@@ -180,6 +182,7 @@ async def test_anonymous_sse_streams_are_capped_per_client(
     assert slots.count("<local>") == api.ANON_SSE_PER_KEY - 1, "a finished stream gives its slot back"
 
 
+@pytest.mark.security
 async def test_anonymous_streams_end_after_their_short_lifetime(
     oidc_app: Quart, client: Client, db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -193,6 +196,7 @@ async def test_anonymous_streams_end_after_their_short_lifetime(
     assert slots_of(oidc_app).count() == 0
 
 
+@pytest.mark.security
 async def test_json_polls_use_their_own_budget(oidc_app: Quart, client: Client, db: Database) -> None:
     repo = await seed_repo(db, private=False)
     run = await seed_run(db, repo, status="running")
@@ -205,6 +209,7 @@ async def test_json_polls_use_their_own_budget(oidc_app: Quart, client: Client, 
     assert (await client.get(f"/v1/runs/{run.id}/events")).status_code == 429
 
 
+@pytest.mark.security
 async def test_bearer_path_is_rate_limited_before_verification(
     oidc_app: Quart,
     client: Client,
@@ -228,6 +233,7 @@ async def test_bearer_path_is_rate_limited_before_verification(
 # -- strict numeric parameters ----------------------------------------------------------------------
 
 
+@pytest.mark.security
 @pytest.mark.parametrize(
     "query",
     [
@@ -244,11 +250,13 @@ async def test_bad_repo_ids_are_400(oidc_app: Quart, client: Client, admin_token
         assert response.status_code == 400, (query, headers)
 
 
+@pytest.mark.security
 async def test_largest_repo_id_is_a_plain_404(oidc_app: Quart, client: Client, admin_token: str) -> None:
     response = await client.get(f"/v1/verdict?repo_id={2**63 - 1}&sha={SHA_A}", headers=bearer(admin_token))
     assert response.status_code == 404
 
 
+@pytest.mark.security
 async def test_bad_sequence_numbers_are_400(
     oidc_app: Quart, client: Client, db: Database, admin_token: str
 ) -> None:
@@ -385,6 +393,7 @@ def test_guarded_client_caches_unknown_kids_and_outages(
     assert state.hits == hits_after_outage + 1, "after the cooldown the endpoint is asked again"
 
 
+@pytest.mark.security
 def test_guarded_client_rejects_tokens_without_a_kid(rsa_key: rsa.RSAPrivateKey) -> None:
     guarded = GuardedJwkClient(StubJwkClient(rsa_key))
     no_kid = jwt.encode(oidc_claims("aud"), rsa_key, algorithm="RS256")
