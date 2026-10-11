@@ -24,6 +24,8 @@ Medians of 5 runs on 2026-10-11 (the cold image build and the snapshot build are
 | **Shape grid and flow ribbon.** `validate_email` at 100% lines and branches, with `multi-label-domain` and `idn` never passed in, and which tests and callers feed its parameter. | **Source view.** Chips under `def parse_duration` count the calls per input class; the dashed ones are classes no test tried. The popover lists the tests that ran line 18, in run order. |
 | ![The coverage map in Gap mode](docs/map.jpg) | ![The sticky PR comment in the fake forge's outbox](docs/comment.jpg) |
 | **Coverage map, Gap mode.** Tile area is statements; the stronger a tile's colour, the more of its lines ran under tests that never tried whole kinds of input. Hatched tiles were never called. | **PR comment.** The one sticky comment coverset posts, as the fake forge recorded it: verdict, patch coverage, changed functions, invariants. |
+| ![The page of the refunds PR's failing test: identity, result, history and its data flow](docs/test.jpg) | ![The static report's overview: totals, the Gap treemap and the file table](docs/report.jpg) |
+| **Test page.** The refunds PR's failing test: its result and retry, the invariant it violates, its last runs, and its data flow from the test through `refund` into `allocate_cents` and each parameter. Every nodeid on the pages links here, and from here each file opens with the lines this test did not run dimmed. | **Local report.** The same facts as static pages from one `pytest` run, with no server: totals, the Gap treemap, the file table, a page per file, function and test. Built by `coverset report`; see below. |
 
 Screenshots: demo data from <!-- n:demo_runs -->8<!-- /n --> local runs (`coverset demo --executor local`: six `main` commits and two PRs), taken on <!-- n:screenshot_date -->2026-10-11<!-- /n --> with `scripts/screenshots.py`. Dark versions are next to them as `docs/*-dark.jpg`. The AI review in them comes from fixtures.
 
@@ -92,6 +94,23 @@ Each of these functions is at 100% line and branch coverage on `main`. Each tabl
 6 of 13 input classes observed (46.2%).
 <!-- shapes:allocate_cents:end -->
 
+## Local report
+
+`coverset report` writes one test run as a folder of static pages, the rich equivalent of `coverage html`: lines and branches, the tests behind every line, a data-flow lens that dims what one test did not run, a page per test with the input classes it passed in, and every function's shape grid with Hypothesis strategies for the classes no test passed in. No server and no database: open `index.html` from disk.
+
+```sh
+pytest --coverset-out .coverset --coverset-source mypkg
+coverset report .coverset --open      # also: a CI bundle.tar.gz, a neutral bundle, or --run <run id> from the facts store
+```
+
+![parse.py in the static report with the data-flow lens on one test and line 18's tests open](docs/report-source.jpg)
+
+One run only: no history and no PR diff (the live pages have those). Keys, the lens and the trust model are in [docs/report.md](docs/report.md).
+
+## One model for every language
+
+Everything downstream of a test run (the facts store, the input-class catalogue, the pages, the comment, the report) reads one language-neutral model, `coverset-model`, a package with no dependencies. Its on-disk form is the **neutral bundle** ([docs/neutral-bundle.md](docs/neutral-bundle.md)): `manifest.json`, then `tests`, `files`, `coverage`, `arcs`, `functions`, `shapes` and `links` as JSON lines, with shape keys from one value vocabulary (`int|neg`, `str|kind:email/multi-label-domain`, `list|elem:int|order:unsorted`) and declared types as small **type descriptors** (`{"kind": "union", "arms": [...]}`, `{"kind": "enum", "members": [...]}`) that any language can produce. `pytest-coverset --coverset-neutral` writes it for Python, `coverset bundle validate` checks a bundle against the specification and its JSON Schemas, `coverset bundle convert` turns a plugin bundle into one, and a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`, the shape a Vitest or Jest reporter would emit) validates, ingests into the facts store and renders in the pages and the report with no Python-specific code path. The reporter itself is the part not written; [docs/extending.md](docs/extending.md) walks through it file by file.
+
 ## Run it
 
 ```sh
@@ -104,6 +123,8 @@ uv run pytest                             # unit, web and end-to-end tests (loca
 uv run python scripts/screenshots.py      # the README screenshots (needs `uv run playwright install chromium-headless-shell`)
 uv run python scripts/bench_modal.py      # the Modal benchmarks behind docs/numbers.json (prints its cost estimate first)
 uv run python scripts/check_readme.py     # the numbers above against docs/numbers.json (--fix rewrites them)
+uv run coverset report --run <run id>     # the static report of a run in the facts store (or of a .coverset directory)
+uv run coverset bundle validate fixtures/bundles/neutral-ts/bundle   # the TypeScript fixture against the neutral bundle spec
 ```
 
 `coverset demo` seeds a deterministic git repository (`data/demo.git`: six commits on `main` and two PR branches), runs the six baselines and both PRs, replays `fixtures/webhooks/pr_opened.json` through the webhook route, and serves the UI. PR #1 ("Support partial refunds") fails on `tests/test_refund.py::test_refund_partial`; PR #2 ("Allow signups from company subdomains") passes with gaps. `--no-serve` stops after the runs. `COVERSET_DATA_DIR` moves everything the demo writes.
@@ -163,12 +184,13 @@ Keys are ignored while typing in a form field and with Ctrl, Alt or Cmd held. Th
 
 - **Control plane**: Python 3.13, Quart 0.23.1 on Hypercorn 0.18.0, SQLAlchemy 2.1.4 with aiosqlite 0.22.1 and Alembic 1.20.0 (SQLite), click for the CLI, pydantic-settings for every `COVERSET_*` setting.
 - **Facts**: PyArrow 26.0.0 Parquet files per run and shard, queried by in-memory DuckDB 1.5.6, so readers never lock writers.
-- **Worker plugin** (`packages/pytest-coverset`, Python 3.12+): coverage.py 7.16.2 with the ctrace core and one dynamic context per test, a `sys.monitoring` shape tracer on its own tool id, framed stdout events, and `coverset-ci`, which needs only the standard library.
+- **Model** (`packages/coverset-model`, no dependencies, Python 3.12+): the neutral bundle (reader, writer, validator, JSON Schemas), the shape-key grammar and the input-class catalogue over language-neutral type descriptors; the control plane and the plugin's conformance tests build on it.
+- **Worker plugin** (`packages/pytest-coverset`, Python 3.12+): coverage.py 7.16.2 with the ctrace core and one dynamic context per test, a `sys.monitoring` shape tracer on its own tool id, framed stdout events, `--coverset-neutral` for the neutral bundle, and `coverset-ci`, which needs only the standard library.
 - **Executors**: Modal 1.6.1 Sandboxes (env images, trusted filesystem snapshots, a warm pool, a reaper, cost guards) and a local subprocess executor.
 - **Forge**: githubkit 0.16.1 and PyJWT 2.15.1 for the GitHub App, token mode, webhooks and Actions OIDC; a fake forge records every call for the demo and the tests.
-- **Analysis**: unidiff 1.0.1 and the `ast` module for changed functions, greedy set cover for wave 1, priority-snake sharding, the input-class catalogue.
+- **Analysis**: unidiff 1.0.1 and the `ast` module for changed functions, greedy set cover for wave 1, priority-snake sharding, and the Python side of the catalogue (annotations and Enums to type descriptors).
 - **AI review**: a `ReviewClient` interface with a fixture-backed fake and an Anthropic client (`anthropic>=1.13,<2`, structured outputs, prompt caching).
-- **UI**: server-rendered Jinja pages with htmx 2.0.11, its SSE extension and idiomorph (vendored, SRI-checked), Pygments 2.21.0 for the source view, SVG built in Python for the shape grid, flow ribbon, Gantt chart and treemap. No build step and no inline scripts.
+- **UI**: server-rendered Jinja pages with htmx 2.0.11, its SSE extension and idiomorph (vendored, SRI-checked), Pygments 2.21.0 for the source view, SVG built in Python for the shape grid, flow ribbon, test flow, Gantt chart and treemap. No build step and no inline scripts. `coverset report` builds its static pages from the same renderers.
 - **Tests**: pytest 9.1.1, pytest-asyncio, Hypothesis 6.168.5, Playwright 1.63.0 for the screenshots.
 
 ```
@@ -182,18 +204,20 @@ coverset/
     lang/           the language-adapter contract and the Python adapter
     ai/             review bundles, fake and Anthropic clients
     web/            pages, SSE, the /v1 API, templates, static files, SVG renderers
+    report/         the static report (coverset report)
     db/             SQLAlchemy models and the Alembic migration
     demo/           the seeded demo repository and the demo flow
     commands/       the coverset CLI
+  packages/coverset-model/    the neutral bundle, shape keys and the input-class catalogue (no dependencies)
   packages/pytest-coverset/   the worker plugin and coverset-ci
   examples/demo-app/          the ledger package the demo runs
   examples/bench-suite/       the synthetic 1,200-test benchmark suite
-  fixtures/                   signed webhook payloads, review fixtures, bundles
+  fixtures/                   signed webhook payloads, review fixtures, bundles (a synthetic TypeScript one included)
   scripts/                    screenshots, README check, benchmarks, fixtures, demo seeding
   docs/                       the pages below, numbers.json and the screenshots
 ```
 
-[ARCHITECTURE.md](ARCHITECTURE.md) is the map: components, trust boundaries, extension seams, and what is designed but not built. Then [instrumentation](docs/instrumentation.md), [data model](docs/data-model.md), [input classes](docs/input-classes.md), [invariants](docs/invariants.md), [orchestrator](docs/orchestrator.md), [Modal](docs/modal.md), [GitHub](docs/github.md), [AI review](docs/ai-review.md), [web UI](docs/ui.md), [security](docs/security.md), [extending](docs/extending.md) and [benchmarks](docs/benchmarks.md).
+[ARCHITECTURE.md](ARCHITECTURE.md) is the map: components, trust boundaries, extension seams, and what is designed but not built. Then [instrumentation](docs/instrumentation.md), [data model](docs/data-model.md), [input classes](docs/input-classes.md), [invariants](docs/invariants.md), [orchestrator](docs/orchestrator.md), [Modal](docs/modal.md), [GitHub](docs/github.md), [AI review](docs/ai-review.md), [web UI](docs/ui.md), [security](docs/security.md), [extending](docs/extending.md), [benchmarks](docs/benchmarks.md), [the neutral bundle](docs/neutral-bundle.md) and [the static report](docs/report.md).
 
 ## Caveats
 
@@ -211,3 +235,4 @@ coverset/
 - The bench suite is synthetic. Its `busy()` bodies calibrate under the tracer, so each test spends its drawn time whether or not coverage is on, and the fan-out numbers measure parallelism, not instrumentation overhead.
 - Inherited means labelled, not copied. Trivial, renamed and moved functions are labelled inherited in the report, but their facts are not reused from the prior run and every collected test still runs.
 - `verify.kind: runtime` invariants are accepted and validated but not executed; they are always reported `untested`.
+- No TypeScript reporter is written. The neutral bundle it would produce is specified, validated and exercised end to end with a synthetic TypeScript bundle; the mapping from TypeScript types and JavaScript values to the model is documented, not implemented.
