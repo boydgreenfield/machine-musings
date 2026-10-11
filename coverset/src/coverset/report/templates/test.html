@@ -1,0 +1,61 @@
+{% extends "layout.html" %}
+{% from "_macros.html" import outcome %}
+{% block title %}{{ test.info.nodeid }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ link('index.html') }}">overview</a> / <a href="{{ link('index.html') }}#tests">tests</a> / test</div>
+<div class="page-head">
+  <h1 class="nodeid">{{ test.info.nodeid|nodeid }}</h1>
+  <p class="meta">
+    <span data-outcome="{{ test.info.outcome or 'not run' }}">{{ outcome(test.info.outcome) }}</span>
+    <span>{{ test.info.duration_s|duration }}</span>
+    {% if test.info.failed_phase %}<span>failed in {{ test.info.failed_phase }}</span>{% endif %}
+    <span>{{ files|length|plural('file') }} · {{ functions|length|plural('function') }} touched</span>
+  </p>
+</div>
+{% if message %}
+<section class="panel">
+  <h2>Message</h2>
+  <pre class="longrepr">{{ message }}</pre>
+</section>
+{% endif %}
+<section class="panel" id="files-touched">
+  <div class="panel-head"><h2>Files it ran</h2><span class="aside">open a file with this test's lens: lines it did not run are dimmed</span></div>
+  {% if files %}
+  <table>
+    <thead><tr><th>File</th><th class="num">Statements it ran</th></tr></thead>
+    <tbody>
+    {% for f, ran, total in files %}
+      <tr><td><a href="{{ link(f.page) }}#lens={{ test.hash }}"><code>{{ f.path }}</code></a></td><td class="num">{{ ran }} of {{ total }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">This test ran no measured line.</p>{% endif %}
+</section>
+<section class="panel" id="functions-touched">
+  <div class="panel-head"><h2>Functions it ran, and the input classes it passed in</h2><span class="aside">this test: filled = a class it passed in, hollow = a class no test passed in; all tests: the function's whole picture</span></div>
+  {% if functions %}
+  <table class="reach-table">
+    <thead><tr><th>Function</th><th class="num">Body lines it ran</th><th>Input classes</th></tr></thead>
+    <tbody>
+    {% for fn, lines, reach in functions %}
+      <tr data-func="{{ fn.region.qualname }}">
+        <td><a href="{{ link(fn.page) }}"><code>{{ fn.region.qualname }}</code></a><div class="muted small">{{ fn.region.path }}:{{ fn.region.def_line }}</div></td>
+        <td class="num">{{ lines }}</td>
+        <td>
+          {% for r in reach %}
+          <div class="reach-row" data-param="{{ r.param }}">
+            <code class="reach-param">{{ r.param }}</code>
+            <span class="reach-strip"><span class="muted small">this test</span> {{ strip(r.this_test, label='Input classes of ' ~ r.param ~ ' this test passed in', missing=fn.view.cov.missing_reason) }}</span>
+            <span class="reach-strip"><span class="muted small">all tests</span> {{ strip(r.any_test, missing=fn.view.cov.missing_reason) }}</span>
+            <span class="reach-names">{% for name in r.reached %}<span class="chip">{{ name }}</span> {% endfor %}{% if not r.reached %}<span class="muted">no class of this parameter</span>{% endif %}</span>
+          </div>
+          {% endfor %}
+          {% if not reach %}<span class="muted">{% if fn.view.cov.expected %}no input class recorded for this test{% else %}expects no input classes{% endif %}</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">This test ran no measured function body.</p>{% endif %}
+</section>
+{% endblock %}

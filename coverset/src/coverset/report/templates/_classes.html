@@ -1,0 +1,31 @@
+{# The input classes of one function, in the order the shape grid draws them: observed classes with
+   their example and tests, missing ones with the Hypothesis strategy and a Copy button. #}
+<div class="class-table{{ ' compact' if compact }}">
+<table>
+  <thead><tr><th>Input class</th><th>Seen</th><th>{{ 'Example or suggested strategy' if compact else 'Example (redacted) or suggested Hypothesis strategy' }}</th>{% if not compact %}<th>Tests that passed it in</th>{% endif %}</tr></thead>
+  <tbody>
+  {% for cell in cells %}
+    {% set observed = cell.observed %}
+    <tr data-cell-index="{{ loop.index0 }}" class="{{ 'is-hollow' if not observed }}">
+      <td><code>{{ cell.name }}</code>{% if cell.description %}<div class="muted small">{{ cell.description }}</div>{% endif %}</td>
+      <td>{% if cell.is_return %}returned {{ cell.samples }}×{% elif observed %}{{ cell.samples }} sampled call{{ '' if cell.samples == 1 else 's' }}{% else %}<span class="chip chip-hollow">{{ fn.view.cov.missing_reason }}</span>{% endif %}</td>
+      <td>
+        {% if observed %}
+          {% set example = fn.view.cov.examples.get(cell.name) %}
+          {% if example is not none %}<code class="example">{{ example }}</code>{% elif not cell.is_return %}<span class="muted">no example recorded</span>{% endif %}
+        {% elif cell.hint %}
+          <div class="code-block"><pre id="hint-{{ uid }}-{{ loop.index0 }}"><code>{{ cell.hint }}</code></pre><button type="button" class="copy" data-copy-target="#hint-{{ uid }}-{{ loop.index0 }}">Copy</button></div>
+        {% endif %}
+      </td>
+      {% if not compact %}
+      <td>
+        {% set tests = fn.view.cov.tests.get(cell.name, ()) %}
+        {% if tests %}<ul class="test-list">{% for t in tests[:5] %}{% set href = test_link(t) %}<li>{% if href %}<a class="nodeid" href="{{ link(href) }}">{{ t|nodeid }}</a>{% else %}<span class="nodeid">{{ t|nodeid }}</span>{% endif %}</li>{% endfor %}</ul>{% if tests|length > 5 %}<span class="muted">and {{ tests|length - 5 }} more</span>{% endif %}{% endif %}
+      </td>
+      {% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if not cells %}<p class="empty">This function expects no input classes.</p>{% endif %}
+</div>

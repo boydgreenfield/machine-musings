@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; base-uri 'none'; form-action 'none'">
+<title>{% block title %}{{ title }}{% endblock %} · coverset report</title>
+<link rel="stylesheet" href="{{ link('report.css') }}">
+<script src="{{ link('report.js') }}"></script>
+<script src="{{ link('search-index.js') }}" defer></script>
+</head>
+<body data-ready="0" data-root="{{ root }}" data-kind="{{ kind }}">
+<header class="top">
+  <a class="brand" href="{{ link('index.html') }}" aria-label="Report overview">
+    <svg viewBox="0 0 30 16" aria-hidden="true"><rect class="mark-filled" x="1" y="2" width="12" height="12" rx="2"/><rect class="mark-hollow" x="17" y="2.8" width="10.4" height="10.4" rx="1.5"/></svg>
+    coverset
+  </a>
+  <nav aria-label="Report">
+    <a href="{{ link('index.html') }}"{% if kind == 'index' %} aria-current="page"{% endif %}>Overview</a>
+    <a href="{{ link('index.html') }}#files">Files</a>
+    <a href="{{ link('index.html') }}#tests">Tests</a>
+    <a href="{{ link('about.html') }}"{% if kind == 'about' %} aria-current="page"{% endif %}>About</a>
+  </nav>
+  <div class="search" role="search">
+    <label class="sr" for="search">Search files, functions and tests</label>
+    <input id="search" type="search" placeholder="Search files, functions, tests  /" autocomplete="off" spellcheck="false" aria-controls="search-results" aria-expanded="false">
+    <ul id="search-results" class="search-results" role="listbox" hidden></ul>
+  </div>
+  <button type="button" id="theme-toggle" class="theme-toggle">Theme</button>
+</header>
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+<footer>{{ title }} · static report from {{ origin }} · no history, no PR diff (see the live pages for those) · press <kbd>?</kbd> for keys</footer>
+<div id="line-tests" class="popover" popover><div id="line-tests-body">No test selected.</div></div>
+<dialog id="keys-help" aria-labelledby="keys-title">
+  <h2 id="keys-title">Keys</h2>
+  <table>
+    <tbody>
+      <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Next / previous line that never ran or took only one branch</td></tr>
+      <tr><td><kbd>n</kbd> <kbd>N</kbd></td><td>Next / previous function with an input class no test passed in</td></tr>
+      <tr><td><kbd>t</kbd></td><td>Tests that ran the current line</td></tr>
+      <tr><td><kbd>i</kbd></td><td>Show or hide the current function's shape grid</td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next file</td></tr>
+      <tr><td><kbd>/</kbd></td><td>Search files, functions and tests</td></tr>
+      <tr><td><kbd>?</kbd></td><td>This help</td></tr>
+    </tbody>
+  </table>
+  <form method="dialog"><button class="btn secondary" type="submit">Close</button></form>
+</dialog>
+{% if data %}<script type="application/json" id="report-data">{{ data }}</script>
+{% endif %}
+</body>
+</html>

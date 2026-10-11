@@ -1,0 +1,52 @@
+{% extends "layout.html" %}
+{% block title %}{{ entry.path }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ link('index.html') }}">overview</a> / <a href="{{ link('index.html') }}#files">files</a> / source</div>
+<div class="source-shell">
+  <nav class="file-list" aria-label="Measured files">
+    {% set listed, before, after = files %}
+    {% if before %}<a href="{{ link('index.html') }}#files" class="muted">… {{ before }} more files</a>{% endif %}
+    {% for f, label in listed %}<a href="{{ link(f.page) }}"{% if f.path == entry.path %} aria-current="page"{% endif %} title="{{ f.path }}">{{ label }}</a>{% endfor %}
+    {% if after %}<a href="{{ link('index.html') }}#files" class="muted">… {{ after }} more files</a>{% endif %}
+  </nav>
+  <div class="src-frame">
+    <div class="src-bar">
+      <span class="path">{{ entry.path }}</span>
+      <span data-file-stats>{{ entry.statements }} statements · {{ entry.missed }} never ran · {{ entry.partial }} partial{% if entry.hollow %} · {{ entry.hollow }} input class{{ '' if entry.hollow == 1 else 'es' }} never exercised{% endif %} · {{ entry.tests|length|plural('test') }}</span>
+      <span class="muted">{% if prev_page %}<a href="{{ link(prev_page) }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_page %}<a href="{{ link(next_page) }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
+    </div>
+    {% if lens_tests %}
+    <div class="lens-bar">
+      <label for="lens">Data-flow lens: what did this test touch?</label>
+      <select id="lens">
+        <option value="">All tests ({{ lens_tests|length }})</option>
+        {% for i, nodeid, oc, n in lens_tests %}<option value="{{ i }}">{{ nodeid }} · {{ oc or 'not run' }} · {{ n|plural('line') }}</option>{% endfor %}
+      </select>
+      <span id="lens-note" class="muted" aria-live="polite"></span>
+    </div>
+    {% endif %}
+    <ul class="legend src-legend">
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="4" height="14" class="lg-ran"/></svg>ran</li>
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="6" height="14" class="lg-miss"/><rect x="6" y="0" width="8" height="14" class="lg-miss-tint"/></svg>never ran</li>
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="14" height="14" class="lg-part"/></svg>took one branch only</li>
+      <li><span class="chip">class <b>n</b></span> input class some test passed in (sampled calls)</li>
+      <li><span class="chip chip-hollow">class <b>0</b></span> never exercised</li>
+    </ul>
+    {% if html is not none %}
+    {{ html }}
+    {% else %}
+    <div class="no-source">
+      <p><strong>Source not available.</strong> <code>{{ entry.path }}</code> is listed in the bundle but could not be read under the repository root, so only its coverage summary is shown.</p>
+      <dl class="kv">
+        <dt>Statements</dt><dd>{{ entry.statements }} ({{ entry.run }} ran, {{ entry.run_pct|pct }})</dd>
+        <dt>Never ran</dt><dd>{{ missed_lines or 'none' }}</dd>
+        <dt>Partial branches</dt><dd>{% if partial_lines %}{% for line, targets in partial_lines %}line {{ line }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none{% endif %}</dd>
+        <dt>Tests</dt><dd>{{ entry.tests|length }}</dd>
+      </dl>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% for key, grid in grids %}<template class="grid-tpl" data-fn="{{ key }}">{{ grid }}</template>
+{% endfor %}
+{% endblock %}

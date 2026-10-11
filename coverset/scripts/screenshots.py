@@ -1,5 +1,5 @@
-"""Take the README screenshots: seven pages of the local demo, light (``docs/<name>.jpg``) and dark
-(``docs/<name>-dark.jpg``).
+"""Take the README screenshots: seven pages of the local demo and two pages of its static report,
+light (``docs/<name>.jpg``) and dark (``docs/<name>-dark.jpg``).
 
 Seeds a scratch demo with the LocalExecutor (``coverset demo --executor local --no-serve``), serves
 it with ``coverset serve`` on a free loopback port with ``COVERSET_FAKE_NOW`` pinned on the serving
@@ -8,9 +8,14 @@ Chromium through Playwright at 1440×900, device scale 1. Full-size PNGs land in
 (gitignored); the JPEGs are resized to 1200 px wide at quality 82, lowered stepwise until each is at
 most 250 KB. The recipe per page is in docs/ui.md ("Screenshots").
 
+The ``report`` group (``report.jpg``, ``report-source.jpg``) needs no server: it builds the static
+report of PR #2's run with ``coverset report --run`` into ``<data-dir>/report-shots`` and opens its
+pages from ``file://`` (docs/report.md).
+
     uv run python scripts/screenshots.py                       # seed a temp demo, shoot everything
     uv run python scripts/screenshots.py --data-dir <dir>      # reuse <dir> when it holds a demo
     uv run python scripts/screenshots.py --only pr,map --scheme light
+    uv run python scripts/screenshots.py --only report --data-dir <dir>   # the static report only
 
 Needs a Playwright Chromium (``uv run playwright install chromium-headless-shell`` once).
 """
@@ -48,6 +53,13 @@ MIN_QUALITY = 50
 MAX_BYTES = 250 * 1024
 READY = 'body[data-ready="1"]'
 SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment")
+REPORT_SHOT_NAMES = ("report", "report-source")
+GROUPS = {"report": REPORT_SHOT_NAMES}
+"""``--only`` names that stand for several shots."""
+REPORT_LENS_TEST = "tests/test_windows.py::test_expires_at"
+"""The test the report-source shot selects in the data-flow lens (it reaches parse.py through a caller)."""
+REPORT_FILE_ROWS = 8
+"""File-table rows kept under the treemap in report.jpg."""
 VALIDATE_EMAIL_PATH = "src/ledger/accounts/emailcheck.py"
 PARSE_PATH = "src/ledger/durations/parse.py"
 
@@ -372,6 +384,121 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
     }
 
 
+# -- the static report ------------------------------------------------------------------------------
+
+
+def build_report_dir(data_dir: Path, ids: DemoIds) -> Path:
+    """``coverset report --run <PR #2 run>`` into ``<data_dir>/report-shots`` (rewritten each time)."""
+    out = data_dir / "report-shots"
+    log(f"building the static report of PR #2's run into {out}")
+    result = subprocess.run(
+        [coverset_bin(), "report", "--run", ids.pr2_run, "--out", str(out)],
+        cwd=ROOT,
+        env=child_env(data_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"coverset report failed (exit {result.returncode}): {result.stderr[-2000:]}")
+    return out
+
+
+def take_report_shots(report: Path, schemes: list[str], only: set[str]) -> list[Path]:
+    """The report's index (totals, treemap, the top of the file table) and parse.py with the lens on
+    and line 18's tests open, from ``file://``."""
+    from playwright.sync_api import sync_playwright
+
+    SHOTS.mkdir(exist_ok=True)
+    pngs: list[Path] = []
+    with sync_playwright() as playwright:
+        browser = launch(playwright)
+        try:
+            for scheme in schemes:
+                context = browser.new_context(
+                    viewport=VIEWPORT, device_scale_factor=1, color_scheme=scheme, reduced_motion="reduce"
+                )
+                page = context.new_page()
+                page.set_default_timeout(30_000)
+                suffix = "" if scheme == "light" else "-dark"
+                if "report" in only:
+                    log(f"{scheme}: report")
+                    target = SHOTS / f"report{suffix}.png"
+                    report_index(page, report, target)
+                    pngs.append(target)
+                if "report-source" in only:
+                    log(f"{scheme}: report-source")
+                    target = SHOTS / f"report-source{suffix}.png"
+                    report_source(page, report, target)
+                    pngs.append(target)
+                context.close()
+        finally:
+            browser.close()
+    return pngs
+
+
+def report_index(page: Any, report: Path, path: Path) -> None:
+    """Totals, the Gap treemap and the first rows of the file table sorted by gap, largest first
+    (a full-page clip)."""
+    goto(page, (report / "index.html").as_uri())
+    gap = page.locator("#files th button", has_text="Gap")
+    gap.click()  # ascending
+    gap.click()  # descending
+    rest_pointer(page)
+    bottom = page.evaluate(
+        """(rows) => {
+            const table = document.querySelector('#files table');
+            if (!table) return document.body.scrollHeight;
+            const body = table.tBodies[0].rows;
+            const row = body[Math.min(rows, body.length) - 1];
+            return row.getBoundingClientRect().bottom + window.scrollY;
+        }""",
+        REPORT_FILE_ROWS,
+    )
+    height = max(VIEWPORT["height"], int(bottom) + 1)
+    page.screenshot(
+        path=str(path), full_page=True, clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height}
+    )
+
+
+def report_source(page: Any, report: Path, path: Path) -> None:
+    """parse.py with the data-flow lens on one test and line 18's tests popover open (below the line,
+    so the chips under ``def parse_duration`` stay visible: a 1000 px tall viewport, as in source.jpg)."""
+    page.set_viewport_size({"width": VIEWPORT["width"], "height": SOURCE_HEIGHT})
+    try:
+        goto(page, (report / "files" / f"{PARSE_PATH}.html").as_uri())
+        index = page.evaluate(
+            """(nodeid) => {
+                const option = Array.from(document.querySelectorAll('#lens option'))
+                    .find((o) => o.textContent.startsWith(nodeid + ' '));
+                return option ? option.value : null;
+            }""",
+            REPORT_LENS_TEST,
+        )
+        if index is None:
+            raise SystemExit(f"{REPORT_LENS_TEST} is not in parse.py's lens list")
+        page.select_option("#lens", value=index)
+        page.locator("#L18 button.gt").click()
+        page.wait_for_selector("#line-tests-body .test-list", state="attached")
+        page.wait_for_timeout(250)
+        bottom = page.evaluate(
+            """() => {
+                const box = document.getElementById('line-tests');
+                const edge = Math.min(box.getBoundingClientRect().bottom, window.innerHeight);
+                let last = box.getBoundingClientRect().top;
+                for (const row of box.querySelectorAll('.test-list li')) {
+                    const r = row.getBoundingClientRect();
+                    if (r.bottom <= edge - 1) last = Math.max(last, r.bottom);
+                }
+                return last;
+            }"""
+        )
+        height = min(SOURCE_HEIGHT, int(bottom) + 6)
+        page.screenshot(path=str(path), clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height})
+    finally:
+        page.set_viewport_size(VIEWPORT)
+
+
 # -- JPEGs ---------------------------------------------------------------------------------------------
 
 
@@ -402,12 +529,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--data-dir", type=Path, help="demo data dir (seeded when it has no coverset.db; default: a temp dir)"
     )
-    parser.add_argument("--only", default=",".join(SHOT_NAMES), help="comma-separated shot names")
+    parser.add_argument(
+        "--only",
+        default=",".join([*SHOT_NAMES, "report"]),
+        help="comma-separated shot names (`report` stands for report and report-source)",
+    )
     parser.add_argument("--scheme", choices=["light", "dark", "both"], default="both")
     parser.add_argument("--keep", action="store_true", help="keep the temporary data dir")
     args = parser.parse_args(argv)
-    args.only = {x for x in args.only.split(",") if x}
-    unknown = args.only - set(SHOT_NAMES)
+    args.only = {name for x in args.only.split(",") if x for name in GROUPS.get(x, (x,))}
+    unknown = args.only - set(SHOT_NAMES) - set(REPORT_SHOT_NAMES)
     if unknown:
         parser.error(f"unknown shots: {sorted(unknown)}")
     return args
@@ -423,8 +554,14 @@ def main(argv: list[str] | None = None) -> int:
         ids = demo_ids(data_dir)
         log(f"PR #1 run {ids.pr1_run} (freeze {ids.freeze_s} s), PR #2 run {ids.pr2_run}")
         schemes = ["light", "dark"] if args.scheme == "both" else [args.scheme]
-        with serve(data_dir, ids.fake_now) as base:
-            pngs = take_shots(base, ids, schemes, args.only)
+        pngs: list[Path] = []
+        server_shots = args.only & set(SHOT_NAMES)
+        if server_shots:
+            with serve(data_dir, ids.fake_now) as base:
+                pngs += take_shots(base, ids, schemes, server_shots)
+        report_shots = args.only & set(REPORT_SHOT_NAMES)
+        if report_shots:
+            pngs += take_report_shots(build_report_dir(data_dir, ids), schemes, report_shots)
         for png in pngs:
             jpg, size, quality = to_jpeg(png)
             flag = "" if size <= MAX_BYTES else "  (over 250 KB at the lowest quality)"

@@ -8,9 +8,12 @@ become ``#``). Numbers in SVG geometry go through :func:`num` so a NaN or inf ne
 
 from __future__ import annotations
 
+import json
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from markupsafe import Markup, escape
 
@@ -25,8 +28,11 @@ __all__ = [
     "fmt_ms",
     "fmt_secs",
     "join",
+    "json_data",
     "num",
+    "relative_hrefs",
     "safe_href",
+    "safe_relative_href",
     "truncate",
 ]
 
@@ -62,12 +68,59 @@ def attrs(**values: object) -> Markup:
 
 
 def safe_href(url: str | None) -> str:
-    """``url`` when it is a same-site path or an absolute http(s) URL, else ``#``."""
+    """``url`` when it is a same-site path or an absolute http(s) URL, else ``#``.
+
+    Inside :func:`relative_hrefs` (the static report) a relative link to a generated ``.html`` page
+    (or a bare ``#fragment``) is admitted too, see :func:`safe_relative_href`.
+    """
     if not url:
         return "#"
     if _SAFE_PATH.match(url) or _SAFE_URL.match(url):
         return url
+    if _RELATIVE.get() and _SAFE_RELATIVE.match(url):
+        return url
     return "#"
+
+
+# -- static report helpers (additive: the live pages never enter relative_hrefs) -------------------
+
+_RELATIVE: ContextVar[bool] = ContextVar("coverset_relative_hrefs", default=False)
+_SEGMENT = r"[A-Za-z0-9_~-][A-Za-z0-9._~-]*"
+_FRAGMENT = r"(?:#[A-Za-z0-9._~:=-]*)?"
+_SAFE_RELATIVE = re.compile(
+    rf"^(?:(?:\.\./)*(?:{_SEGMENT}/)*{_SEGMENT}\.html{_FRAGMENT}|#[A-Za-z0-9._~:=-]*)$"
+)
+_JSON_ESCAPES = {ord("<"): "\\u003c", ord(">"): "\\u003e", ord("&"): "\\u0026"}
+
+
+def safe_relative_href(url: str | None) -> str:
+    """``url`` when it is a relative link to a generated ``.html`` page or a ``#fragment``, else ``#``.
+
+    Segments are plain names (no leading dot, so no ``..`` except as leading ``../`` steps, no
+    scheme, no ``//``, no backslash or quote): ``../files/src/a.py.html#L12`` passes,
+    ``javascript:alert(1)`` and ``//evil.example/x.html`` do not.
+    """
+    if url and _SAFE_RELATIVE.match(url):
+        return url
+    return "#"
+
+
+@contextmanager
+def relative_hrefs() -> Iterator[None]:
+    """While active, :func:`safe_href` also admits :func:`safe_relative_href` links (the static
+    report's pages link to each other relatively so they work from ``file://``)."""
+    token = _RELATIVE.set(True)
+    try:
+        yield
+    finally:
+        _RELATIVE.reset(token)
+
+
+def json_data(value: object) -> Markup:
+    """``value`` as JSON safe inside ``<script type="application/json">``: ``<``, ``>`` and ``&``
+    are written as ``\\u003c`` escapes, so no string can close the element or open a comment."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=False, allow_nan=False)
+    return Markup(text.translate(_JSON_ESCAPES))
 
 
 def num(value: float, digits: int = 2) -> str:
