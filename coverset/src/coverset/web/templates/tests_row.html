@@ -1,0 +1,17 @@
+<tr id="test-{{ row.id }}"{% if row.quarantined %} class="is-quarantined"{% endif %}>
+  <td class="nodeid">{{ row.nodeid }}</td>
+  <td class="num">{{ row.runs }}</td>
+  <td class="num">{% if row.fail_rate is not none %}{{ (100 * row.fail_rate)|pct }}{% else %}–{% endif %}</td>
+  <td class="num">{% if row.flaky_n %}{{ row.flaky_n }}× <span class="muted">({{ '%.2f'|format(row.flaky_score) }})</span>{% else %}–{% endif %}</td>
+  <td class="num">{{ row.p50|ms }}</td>
+  <td class="num">{{ row.p95|ms }}</td>
+  <td class="num">{{ row.last_fail_at|ago if row.last_fail_at else '–' }}</td>
+  <td>
+    {% if can_quarantine %}
+    <button type="button" class="toggle-q" aria-pressed="{{ 'true' if row.quarantined else 'false' }}"
+      hx-post="{{ url_for('repos.toggle_quarantine', rid=repo.id, test_id=row.id) }}"
+      hx-vals='{"quarantined": "{{ '0' if row.quarantined else '1' }}"}'
+      hx-target="#test-{{ row.id }}" hx-swap="outerHTML">{{ 'Quarantined' if row.quarantined else 'Quarantine' }}</button>
+    {% else %}{{ 'quarantined' if row.quarantined else '' }}{% endif %}
+  </td>
+</tr>

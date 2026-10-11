@@ -1,9 +1,9 @@
 {% extends "setup/_layout.html" %}
 {% block title %}Connect GitHub{% endblock %}
-{% block main %}
-<h1>Connect coverset to GitHub</h1>
+{% block content %}
+<div class="page-head"><h1>Connect coverset to GitHub</h1></div>
 
-<section aria-labelledby="status">
+<section class="panel" aria-labelledby="status">
 <h2 id="status">Current configuration</h2>
 <dl>
   <dt>Forge mode</dt><dd><code>{{ mode }}</code></dd>
@@ -15,7 +15,17 @@
 </dl>
 </section>
 
-<section aria-labelledby="app">
+<section class="panel" aria-labelledby="sandboxes">
+<h2 id="sandboxes">Sandboxes</h2>
+<dl>
+  <dt>Default executor</dt><dd><code>{{ ui_settings.executor }}</code>{% if ui_settings.executor == 'local' %} (a convenience, not a sandbox: tests run as your user){% endif %}</dd>
+  <dt>Modal environment</dt><dd><code>{{ ui_settings.modal_environment }}</code> · daily budget ${{ '%.2f'|format(ui_settings.modal_daily_budget_usd) }} · network <code>{{ ui_settings.sandbox_network }}</code></dd>
+  <dt>Runs</dt><dd>{% if ui_settings.paused %}paused (webhooks are stored, no runs start){% else %}accepting runs, at most {{ ui_settings.max_concurrent_runs }} at once{% endif %}</dd>
+  <dt>Admin token</dt><dd>{{ 'set: every page needs it' if ui_settings.admin_token_set else 'not set (loopback only)' }}</dd>
+</dl>
+</section>
+
+<section class="panel" aria-labelledby="app">
 <h2 id="app">Option 1: create a GitHub App (check runs, buttons, sticky comment)</h2>
 {% if not reachable %}
 <p role="alert"><strong>{{ public_url }} is a loopback address.</strong> GitHub cannot deliver webhooks to it.
@@ -36,7 +46,7 @@ and the private key to <code>{{ key_path }}</code> (both readable only by you). 
 </ul>
 <form method="post" action="{{ action }}">
   <input type="hidden" name="manifest" value="{{ manifest_json }}">
-  <button type="submit">Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
+  <button class="btn" type="submit">Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
 </form>
 <p>For an organization, open <code>/setup?org=&lt;organization&gt;</code> instead.</p>
 <details>
@@ -45,7 +55,7 @@ and the private key to <code>{{ key_path }}</code> (both readable only by you). 
 </details>
 </section>
 
-<section aria-labelledby="token">
+<section class="panel" aria-labelledby="token">
 <h2 id="token">Option 2: token mode (commit statuses and comments only)</h2>
 <p>Without an App, coverset can post a commit status named <code>coverset</code> and the sticky PR comment using a token:</p>
 <ol>

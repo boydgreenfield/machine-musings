@@ -1,0 +1,12 @@
+{% if failures %}
+{% for f in failures %}
+  {% set c = confirmed.get(f.nodeid) %}
+  <details class="section"{% if loop.first %} open{% endif %}>
+    <summary><span class="oc oc-failed">{{ f.outcome }}</span> <span class="nodeid">{{ f.nodeid }}</span>
+      <span class="muted">{% if f.failed_phase %} in {{ f.failed_phase }}{% endif %} · shard {{ f.shard }}{% if c %} · {{ 'confirmed by a retry' if c.get('retried') else 'confirmed' }}{% if c.get('rank') %}, ran {{ c.rank|ordinal }}{% endif %}{% if c.get('preexisting') %} · also fails on the base branch{% endif %}{% elif f.flaky %} · passed on retry{% endif %}</span></summary>
+    <div class="body">{% if f.longrepr %}<pre class="longrepr">{{ f.longrepr }}</pre>{% else %}<p class="empty">No traceback recorded.</p>{% endif %}</div>
+  </details>
+{% endfor %}
+{% else %}
+<p class="empty">{% if state.done or not live %}No test failed.{% else %}No failures so far.{% endif %}</p>
+{% endif %}

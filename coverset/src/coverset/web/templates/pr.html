@@ -1,0 +1,173 @@
+{% extends layout %}
+{% from "_macros.html" import run_status, outcome, inv_chip %}
+{% block title %}PR #{{ pr.number }} {{ pr.title }}{% endblock %}
+{% block main %}
+{% set s = summary %}
+<div class="verdict-band" aria-label="Verdict">
+  {% if run %}{{ run_status(run, big=True) }}{% else %}<span class="status s-neutral big">no run</span>{% endif %}
+  <div class="reason">{% if run %}{{ s.get('reason') or run.reason or s.get('title') or run.status }}{% else %}No run for this pull request yet{% endif %}</div>
+  <div class="facts">
+    {% if s.get('first_failure_s') is not none %}
+    <span class="ff"><strong>first failure {{ s.first_failure_s|secs }}</strong>{% if s.get('rank_coverset') %} · test {{ s.rank_coverset }}{% if s.get('tests_total') %} of {{ s.tests_total }}{% endif %}{% if s.get('rank_file_order') %} (file order: {{ s.rank_file_order|ordinal }}{% if s.get('t_first_failure_file_order_est') is not none %}, ~{{ s.t_first_failure_file_order_est|secs }} est.{% endif %}){% endif %}{% endif %}</span>
+    {% endif %}
+    {% if s.get('patch_total') %}<span>patch <strong>{{ s.patch_pct|pct }}</strong> ({{ s.patch_covered }}/{{ s.patch_total }})</span>{% endif %}
+    {% if s %}<span><strong>{{ s.get('zero_test_functions', 0) }}</strong> changed function{{ '' if s.get('zero_test_functions', 0) == 1 else 's' }} with no test</span>{% endif %}
+    {% if s %}<span><strong>{{ (s.get('missing_input_classes') or [])|length }}</strong> input class{{ '' if (s.get('missing_input_classes') or [])|length == 1 else 'es' }} never exercised</span>{% endif %}
+    {% set untested = (s.get('invariants') or [])|selectattr('status', 'equalto', 'untested')|list %}
+    {% set violated = (s.get('invariants') or [])|selectattr('status', 'equalto', 'violated')|list %}
+    {% if violated %}<span><strong>{{ violated|length }}</strong> invariant{{ '' if violated|length == 1 else 's' }} violated</span>{% endif %}
+    {% if s %}<span><strong>{{ untested|length }}</strong> invariant{{ '' if untested|length == 1 else 's' }} untested</span>{% endif %}
+    {% if s.get('ai_source') %}<span>AI review: {{ s.ai_source.replace('fixture', 'fixtures').replace('heuristic', 'heuristics') }} (advisory)</span>{% endif %}
+  </div>
+</div>
+
+<div class="pr-title">
+  <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / pull requests</div>
+  <h1>#{{ pr.number }} {{ pr.title }}</h1>
+  <p class="meta">
+    <span><code>{{ pr.head_ref or 'head' }}</code> → <code>{{ pr.base_ref or repo.default_branch }}</code></span>
+    {% if pr.author %}<span>by {{ pr.author }}</span>{% endif %}
+    <span>head <code>{{ pr.head_sha|sha }}</code></span>
+    {% if run %}<span><a href="{{ url_for('runs.run_page', run_id=run.id) }}">run page</a> · <a href="{{ url_for('runs.run_page', run_id=run.id, replay=1, speed=0.25) }}">replay</a></span>{% endif %}
+    {% if run %}<span>{{ run.created_at|ago }}</span>{% endif %}
+  </p>
+</div>
+
+{% if run and not facts_exists %}
+<section class="panel"><p class="empty">This run has no coverage facts yet{% if run.status in ('queued', 'running') %}: they land when its shards finish{% endif %}.</p></section>
+{% endif %}
+
+{% if cards %}
+<section aria-labelledby="attention">
+  <div class="panel-head"><h2 id="attention">Needs attention</h2><span class="aside">changed functions, most severe first · filled square = input class a test passed in, hollow = never</span></div>
+  <div class="cards">
+  {% for card in cards %}
+    {% set fk = card.region.func_key %}
+    <article class="card sev-{{ card.severity }}">
+      <details{% if loop.first and first_detail %} open{% else %} hx-get="{{ url_for('repos.pr_card', rid=repo.id, n=pr.number, func_key=fk, run=run.id) }}" hx-trigger="toggle once" hx-target="find .detail" hx-swap="innerHTML"{% endif %}>
+        <summary>
+          <div>
+            <div class="row"><span class="toggle" aria-hidden="true"></span><span class="fn-name">{{ card.region.qualname }}</span><span class="badge {{ 'b-new' if card.badge == 'NEW' else 'b-changed' }}">{{ card.badge }}</span>{% if card.inherited %}<span class="badge">inherited</span>{% endif %}<span class="fn-path">{{ card.region.path }}:{{ card.region.def_line }}</span></div>
+            <div class="why">{{ card.reasons|join(' · ') if card.reasons else 'covered: every line ran and every expected input class was passed in' }}</div>
+            <div class="row strip-row">
+              {{ card.strip }}
+              <span class="muted">{{ card.view.cov.observed_expected }} of {{ card.view.cov.expected|length }} input classes</span>
+              {% for inv in card.invariants %}{{ inv_chip(inv.status, inv.key) }}{% endfor %}
+              {% if card.ai_label %}<span class="ai-chip" title="Advisory: AI findings never change pass or fail">{{ card.ai_label }} <em>advisory</em></span>{% endif %}
+            </div>
+          </div>
+          <div class="nums">
+            <span><b>{{ card.tests|length }}</b> test{{ '' if card.tests|length == 1 else 's' }}</span>
+            <span>lines <b>{{ card.line_pct|pct }}</b></span>
+            <span>branches <b>{{ card.view.branch_pct|pct }}</b></span>
+          </div>
+        </summary>
+        <div class="detail">{% if loop.first and first_detail %}{% with detail = first_detail %}{% include "_function_detail.html" %}{% endwith %}{% else %}<p class="empty">Loading…</p>{% endif %}</div>
+      </details>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% elif run and facts_exists %}
+<section class="panel"><p class="empty">No changed Python functions in measured source files.</p></section>
+{% endif %}
+
+{% if run %}
+<h2 class="section-title">Details</h2>
+{% set failed = results|selectattr('outcome', 'in', ['failed', 'error'])|list %}
+<details class="section">
+  <summary>Tests <span class="muted">{{ results|length }} · {{ failed|length }} failed · failures first</span></summary>
+  <div class="body">
+  <table>
+    <thead><tr><th>Outcome</th><th>Test</th><th class="num">Rank</th><th class="num">File order</th><th class="num">Duration</th><th class="num">Shard</th></tr></thead>
+    <tbody>
+    {% for r in results[:200] %}
+      <tr>
+        <td>{{ outcome(r.outcome) }}{% if r.flaky %} <span class="badge">flaky</span>{% endif %}{% if r.quarantined %} <span class="badge">quarantined</span>{% endif %}</td>
+        <td class="nodeid">{{ r.nodeid }}</td>
+        <td class="num">{{ r.rank or '–' }}</td>
+        <td class="num">{{ r.file_rank or '–' }}</td>
+        <td class="num">{{ r.duration_ms|ms }}</td>
+        <td class="num">{{ r.shard if r.shard is not none else '–' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if results|length > 200 %}<p class="muted">First 200 of {{ results|length }}; the run page lists every test.</p>{% endif %}
+  </div>
+</details>
+
+<details class="section">
+  <summary>Invariants <span class="muted">{{ invariants|length }}</span></summary>
+  <div class="body">
+  {% for inv in invariants %}
+    <div class="inv-card">
+      <div><span class="key">{{ inv.key }}</span> {% if inv.removed_in_head %}<span class="badge">removed by this PR</span>{% endif %}
+        <p class="statement">{{ inv.statement }}</p>
+        {% if inv.lens %}<p class="lens">{{ inv.lens }}</p>{% endif %}
+      </div>
+      <div>{{ inv_chip(inv.status) }}</div>
+    </div>
+  {% else %}
+    <p class="empty">This run evaluated no invariants.</p>
+  {% endfor %}
+  <p><a href="{{ url_for('repos.invariants_page', rid=repo.id, run=run.id) }}">Compare with the base run</a></p>
+  </div>
+</details>
+
+<details class="section">
+  <summary>Indirect changes <span class="muted">{{ analysis.patch.indirect|length if analysis and analysis.patch else 0 }}</span></summary>
+  <div class="body">
+  {% if analysis and analysis.patch and analysis.patch.indirect %}
+  <table>
+    <thead><tr><th>Region</th><th>Kind</th><th>Why it is not a function row</th></tr></thead>
+    <tbody>
+    {% for item in analysis.patch.indirect %}
+      {% set side = item.change.region or item.change.prev %}
+      <tr><td><code>{{ side.qualname }}</code> <span class="muted">{{ side.path }}:{{ side.def_line }}</span></td><td>{{ item.change.kind }}</td><td>{{ item.reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No deleted functions and no class- or module-level edits.</p>
+  {% endif %}
+  {% if analysis and analysis.patch %}
+  <h3 class="sub">Patch coverage by file</h3>
+  <table>
+    <thead><tr><th>File</th><th class="num">Covered</th><th class="num">Changed statements</th><th>Lines never run</th></tr></thead>
+    <tbody>
+    {% for path, fp in analysis.patch.per_file.items() %}
+      <tr><td><a href="{{ url_for('files.source', rid=repo.id, path=path, run=run.id, pr=pr.number) }}"><code>{{ path }}</code></a></td><td class="num">{{ fp.covered }}</td><td class="num">{{ fp.total }}</td><td>{{ fp.missing|join(', ') or '–' }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  </div>
+</details>
+
+<details class="section">
+  <summary>Invariants changed by this PR <span class="muted">{{ changed_invariants|length }}</span></summary>
+  <div class="body">
+  {% if changed_invariants %}
+  <table>
+    <thead><tr><th>Invariant</th><th>Change</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for row in changed_invariants %}
+      <tr><td><code>{{ row.id }}</code></td><td>{{ row.status }}</td><td>{{ row.note or '' }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">This PR leaves <code>invariants.yaml</code> unchanged.</p>
+  {% endif %}
+  </div>
+</details>
+
+{% if other_runs|length > 1 %}
+<details class="section">
+  <summary>Earlier runs of this PR <span class="muted">{{ other_runs|length }}</span></summary>
+  <div class="body"><ul>{% for r in other_runs %}<li>{{ run_status(r) }} <a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number, run=r.id) }}"><code>{{ r.head_sha|sha }}</code></a> {{ r.created_at|ago }}</li>{% endfor %}</ul></div>
+</details>
+{% endif %}
+{% endif %}
+{% endblock %}

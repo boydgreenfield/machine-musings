@@ -1,0 +1,62 @@
+{% extends layout %}
+{% from "_macros.html" import run_status, counts as count_line %}
+{% block title %}{{ repo.full_name }}{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>{{ repo.full_name }}</h1>
+  <p class="meta"><span>{{ repo.forge }}</span><span>default branch <code>{{ repo.default_branch }}</code></span><span>{{ tests }} tests</span></p>
+</div>
+<p class="meta">
+  <a class="btn secondary" href="{{ url_for('repos.map_page', rid=repo.id) }}">Coverage map</a>
+  <a class="btn secondary" href="{{ url_for('repos.tests_page', rid=repo.id) }}">Tests</a>
+  <a class="btn secondary" href="{{ url_for('repos.invariants_page', rid=repo.id) }}">Invariants</a>
+  {% if current %}<a class="btn secondary" href="{{ url_for('runs.run_page', run_id=current.id) }}">Latest baseline run</a>{% endif %}
+</p>
+
+<section class="panel">
+  <div class="panel-head"><h2>Pull requests</h2></div>
+  {% if prs %}
+  <table class="run-list">
+    <thead><tr><th>Verdict</th><th>Pull request</th><th>Head</th><th>Tests</th><th>Author</th><th class="num">Updated</th></tr></thead>
+    <tbody>
+    {% for pr in prs %}
+      {% set run = latest.get(pr.id) %}
+      <tr>
+        <td>{% if run %}{{ run_status(run) }}{% else %}<span class="status s-neutral">no run</span>{% endif %}</td>
+        <td><a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number) }}"><strong>#{{ pr.number }}</strong> {{ pr.title }}</a>{% if pr.from_fork %} <span class="badge">fork</span>{% endif %}{% if pr.draft %} <span class="badge">draft</span>{% endif %}</td>
+        <td><code>{{ pr.head_sha|sha }}</code></td>
+        <td>{% if run %}{{ count_line(counts.get(run.id)) }}{% endif %}</td>
+        <td>{{ pr.author or '–' }}</td>
+        <td class="num muted">{{ pr.updated_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No pull requests yet. Runs start when GitHub sends a pull_request webhook.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Default-branch runs</h2><span class="aside">baselines refresh coverage, durations and failure history</span></div>
+  {% if baselines %}
+  <table class="run-list">
+    <thead><tr><th>Verdict</th><th>Run</th><th>Head</th><th>Tests</th><th class="num">Shards</th><th class="num">Started</th></tr></thead>
+    <tbody>
+    {% for run in baselines %}
+      <tr>
+        <td>{{ run_status(run) }}</td>
+        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}">{{ run.trigger }} · {{ run.reason or run.status }}</a></td>
+        <td><code>{{ run.head_sha|sha }}</code></td>
+        <td>{{ count_line(counts.get(run.id)) }}</td>
+        <td class="num">{{ run.shard_count }}</td>
+        <td class="num muted">{{ run.created_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No default-branch runs yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends layout %}
+{% block title %}Map · {{ repo.full_name }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / map{% for p, name in crumbs or [] %} / <a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, path=p, run=run.id) }}">{{ name }}</a>{% endfor %}</div>
+<div class="page-head">
+  <h1>Coverage map</h1>
+  {% if run %}<p class="meta"><span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}"><code>{{ run.head_sha|sha }}</code></a> on {{ run.branch or 'detached head' }}</span><span>area = statements; click a function to open its source</span></p>{% endif %}
+</div>
+{% if not run %}
+<section class="panel"><p class="empty">No completed run with facts yet.</p></section>
+{% else %}
+<div class="map-tools">
+  <span class="seg" role="group" aria-label="Colour by">
+    {% for m in modes %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=m, path=root, run=run.id) }}" aria-current="{{ 'true' if m == mode else 'false' }}">{{ {'gap': 'Gap', 'lines': 'Lines', 'inputs': 'Input classes'}[m] }}</a>{% endfor %}
+  </span>
+  {{ legend }}
+  {% if root %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, run=run.id) }}">whole repository</a>{% endif %}
+</div>
+<p class="muted">{% if mode == 'gap' %}Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called.{% elif mode == 'inputs' %}Share of each function's expected input classes some test passed in. Hatched tiles were never called.{% else %}Share of each function's statements that some test ran.{% endif %}</p>
+{{ svg }}
+<section class="panel map-table">
+  <div class="panel-head"><h2>Largest gaps</h2><span class="aside">the same data as a table</span></div>
+  <table>
+    <thead><tr><th>Function</th><th class="num">Lines</th><th class="num">Input classes</th><th class="num">Gap</th></tr></thead>
+    <tbody>
+    {% for g in gaps %}
+      <tr>
+        <td><a href="{{ url_for('files.source', rid=repo.id, path=g.file, run=run.id) }}#L{{ g.node.def_line or 1 }}"><code>{{ g.name }}</code></a> <span class="muted">{{ g.file }}</span></td>
+        <td class="num">{{ g.line|pct }}</td>
+        <td class="num">{{ g.inputs|pct }}</td>
+        <td class="num">{% if g.gap is not none %}{{ '%.0f'|format(g.gap) }} pts{% else %}<span class="muted">never called</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

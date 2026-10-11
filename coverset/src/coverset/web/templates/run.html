@@ -1,0 +1,76 @@
+{% extends layout %}
+{% from "_macros.html" import outcome %}
+{% block title %}Run {{ run.id[-8:] }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a>{% if pr %} / <a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number) }}">PR #{{ pr.number }}</a>{% endif %} / run</div>
+<div class="page-head">
+  <h1>{% if pr %}#{{ pr.number }} {{ pr.title }}{% else %}{{ run.trigger }} run on {{ run.branch or 'detached head' }}{% endif %}</h1>
+  <p class="meta">
+    <span>head <code>{{ run.head_sha|sha }}</code>{% if run.base_sha %} vs <code>{{ run.base_sha|sha }}</code>{% endif %}</span>
+    <span>executor {{ run.executor }}</span>
+    <span>{{ run.shard_count }} shard{{ '' if run.shard_count == 1 else 's' }}</span>
+    <span>cost ${{ '%.4f'|format(run.cost_estimate or 0) }} (estimate)</span>
+    <span>{{ run.created_at|stamp }}</span>
+    {% if replay %}<a href="{{ url_for('runs.run_page', run_id=run.id) }}">stop replay</a>{% elif has_events and not live %}<a href="{{ url_for('runs.run_page', run_id=run.id, replay=1, speed=0.25) }}">replay at ¼ speed</a>{% endif %}
+  </p>
+</div>
+
+{% if run.status == 'awaiting_approval' %}
+<div class="approve" role="status">
+  <span class="status s-wait">awaiting approval</span>
+  <span>This pull request comes from an untrusted author. Its tests run only after someone with write access approves them, with the network blocked.{% if run.approval_requested_by %} Approval requested by {{ run.approval_requested_by }}.{% endif %}</span>
+  {% if can_approve %}
+  <form method="post" action="{{ url_for('api.approve_run', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn" type="submit">Approve run</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<div {% if stream_url %}sse-connect="{{ stream_url }}" sse-close="done"{% endif %} class="live-root">
+  <section class="panel" aria-live="polite">
+    <div id="run-head" {% if stream_url %}sse-swap="head" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_head.html" %}</div>
+    {% if stream_url %}<div sse-swap="done" hx-swap="innerHTML" class="replay-slot">{% if replay %}<span class="replay-status" data-replay="playing">replaying at {{ '%g'|format(speed) }}× speed{% if freeze is not none %}, stopping at {{ freeze|secs }}{% endif %}</span>{% else %}<span class="replay-status" data-replay="live">live</span>{% endif %}</div>{% endif %}
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Timeline</h2><span class="aside">seconds since the {{ 'webhook arrived' if (run.timeline or {}).get('webhook_received') else 'run was queued' }}{% if ghost_s %} · grey: measured cold path{% endif %}</span></div>
+    <div id="run-timeline" {% if stream_url %}sse-swap="timeline" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_timeline.html" %}</div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Shards</h2><span class="aside">one lane per sandbox; each block is one test, in the order it ran</span></div>
+    <div id="run-gantt" {% if stream_url %}sse-swap="gantt" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_gantt.html" %}</div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Failures</h2></div>
+    <div id="run-failures" {% if stream_url %}sse-swap="failures" hx-swap="morph:innerHTML"{% endif %}>{% include "runs/_failures.html" %}</div>
+  </section>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><h2>Why this order</h2><span class="aside">the first {{ order|length }} tests by priority score; failing tests pinned on top</span></div>
+  {{ why_order_svg }}
+</section>
+
+<details class="section">
+  <summary>All tests <span class="muted">{{ results|length }} · failures first</span></summary>
+  <div class="body">
+  <table>
+    <thead><tr><th>Outcome</th><th>Test</th><th class="num">Rank</th><th class="num">File order</th><th class="num">Duration</th><th class="num">Shard</th><th>Why it ran there</th></tr></thead>
+    <tbody>
+    {% for r in results %}
+      <tr>
+        <td>{{ outcome(r.outcome) }}{% if r.flaky %} <span class="badge">flaky</span>{% endif %}</td>
+        <td class="nodeid">{{ r.nodeid }}</td>
+        <td class="num">{{ r.rank or '–' }}</td>
+        <td class="num">{{ r.file_rank or '–' }}</td>
+        <td class="num">{{ r.duration_ms|ms }}</td>
+        <td class="num">{{ r.shard if r.shard is not none else '–' }}</td>
+        <td class="muted">{{ r.why }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</details>
+{% endblock %}

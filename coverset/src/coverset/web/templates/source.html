@@ -1,0 +1,30 @@
+{% extends layout %}
+{% block title %}{{ path }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a>{% if pr %} / <a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number) }}">PR #{{ pr.number }}</a>{% endif %} / <a href="{{ url_for('repos.map_page', rid=repo.id, run=run.id) }}">map</a> / source</div>
+<div class="source-shell">
+  <nav class="file-list" aria-label="Measured files">
+    {% if common_prefix %}<p class="file-list-root">{{ common_prefix }}/</p>{% endif %}
+    {% for p, label in measured %}<a href="{{ url_for('files.source', rid=repo.id, path=p, run=run.id, **({'pr': pr.number} if pr else {})) }}"{% if p == path %} aria-current="page"{% endif %} title="{{ p }}">{{ label }}</a>{% endfor %}
+  </nav>
+  <div class="src-frame">
+    <div class="src-bar">
+      <span class="path">{{ path }}</span>
+      <span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}"><code>{{ run.head_sha|sha }}</code></a></span>
+      {% if known %}
+      <span>{{ stats.statements }} statements · {{ stats.missed }} never ran · {{ stats.partial }} partial{% if stats.hollow %} · {{ stats.hollow }} input classes never passed in{% endif %}</span>
+      {% else %}<span>not measured in this run</span>{% endif %}
+      {% if changed %}<span>{{ changed }} changed line{{ '' if changed == 1 else 's' }} marked +</span>{% endif %}
+      <span class="muted">{% if prev_url %}<a href="{{ prev_url }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_url %}<a href="{{ next_url }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
+    </div>
+    <ul class="legend src-legend">
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="4" height="14" class="lg-ran"/></svg>ran</li>
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="6" height="14" class="lg-miss"/><rect x="6" y="0" width="8" height="14" class="lg-miss-tint"/></svg>never ran</li>
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="14" height="14" class="lg-part"/></svg>took one branch only</li>
+      <li><span class="chip">plain <b>14</b></span> input class passed in (samples)</li>
+      <li><span class="chip chip-hollow">idn <b>0</b></span> never passed in</li>
+    </ul>
+    {{ html }}
+  </div>
+</div>
+{% endblock %}

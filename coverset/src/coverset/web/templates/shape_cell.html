@@ -1,0 +1,19 @@
+{% extends layout %}
+{% block title %}{{ cell.name }}{% endblock %}
+{% block main %}
+{% if cell.observed %}
+<p><strong><code>{{ cell.name }}</code></strong> observed in {{ cell.samples }} sampled call{{ '' if cell.samples == 1 else 's' }}{% if cell.description %}: {{ cell.description }}{% endif %}.</p>
+{% if example %}<p>Example (redacted): <code>{{ example }}</code></p>{% endif %}
+{% if tests %}
+<p>Tests that passed this class in{% if tests|length > 12 %} (first 12 of {{ tests|length }}){% endif %}:</p>
+<ul class="test-list">{% for t in tests[:12] %}<li><span class="nodeid">{{ t }}</span></li>{% endfor %}</ul>
+{% endif %}
+{% else %}
+<p><strong><code>{{ cell.name }}</code></strong>: {{ missing_reason }}{% if cell.description %}. {{ cell.description }}{% endif %}.</p>
+{% if cell.hint %}
+<p>Suggested Hypothesis strategy:</p>
+<div class="code-block"><pre id="hint-{{ region.func_key }}"><code>{{ cell.hint }}</code></pre><button type="button" class="copy" data-copy-target="#hint-{{ region.func_key }}">Copy</button></div>
+{% endif %}
+<p class="muted">A hollow square means no test ever passed in a value of this class, not that the code is wrong for it.</p>
+{% endif %}
+{% endblock %}

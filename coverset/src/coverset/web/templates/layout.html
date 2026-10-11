@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="htmx-config" content="{{ htmx_config }}">
+<title>{% block title %}coverset{% endblock %} · coverset</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+{% if not no_scripts %}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/htmx.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='vendor/idiomorph-ext.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='vendor/sse.min.js') }}" defer></script>
+{% endif %}
+</head>
+<body hx-ext="morph,sse" hx-headers='{"X-CSRF-Token": "{{ csrf_token() }}"}' data-ready="{{ '1' if no_scripts else '0' }}">
+{% set endpoint = request.endpoint or '' %}
+<header class="top">
+  <a class="brand" href="{{ url_for('dashboard.index') }}" aria-label="coverset dashboard">
+    <svg viewBox="0 0 30 16" aria-hidden="true"><rect class="mark-filled" x="1" y="2" width="12" height="12" rx="2"/><rect class="mark-hollow" x="17" y="2.8" width="10.4" height="10.4" rx="1.5"/></svg>
+    coverset
+  </a>
+  <nav aria-label="Main">
+    <a href="{{ url_for('dashboard.index') }}"{% if endpoint == 'dashboard.index' %} aria-current="page"{% endif %}>Dashboard</a>
+    {% for r in nav_repos %}
+    <a href="{{ url_for('repos.repo', rid=r.id) }}"{% if endpoint in ('repos.repo', 'repos.pr_page', 'repos.map_page', 'files.source', 'files.function') and nav_repo and nav_repo.id == r.id %} aria-current="page"{% endif %}>{{ r.full_name }}</a>
+    {% endfor %}
+    {% if nav_repo %}
+    <a href="{{ url_for('repos.tests_page', rid=nav_repo.id) }}"{% if endpoint == 'repos.tests_page' %} aria-current="page"{% endif %}>Tests</a>
+    <a href="{{ url_for('repos.invariants_page', rid=nav_repo.id) }}"{% if endpoint == 'repos.invariants_page' %} aria-current="page"{% endif %}>Invariants</a>
+    {% endif %}
+    <a href="{{ url_for('outbox.outbox') }}"{% if endpoint == 'outbox.outbox' %} aria-current="page"{% endif %}>Outbox</a>
+    <a href="{{ url_for('setup.index') }}"{% if endpoint.startswith('setup.') %} aria-current="page"{% endif %}>Setup</a>
+  </nav>
+  {% if not no_scripts %}<button type="button" id="theme-toggle" class="theme-toggle">Theme</button>{% endif %}
+</header>
+{% if settings_paused %}<div class="banner" role="status">coverset is paused: webhooks are stored, no runs start.</div>{% endif %}
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+<footer>coverset · times shown in UTC · press <kbd>?</kbd> for keys</footer>
+<div id="line-tests" class="popover" popover><div id="line-tests-body">Loading…</div></div>
+<dialog id="keys-help" aria-labelledby="keys-title">
+  <h2 id="keys-title">Keys</h2>
+  <table>
+    <tbody>
+      <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>Next / previous line that never ran or took only one branch</td></tr>
+      <tr><td><kbd>n</kbd> <kbd>N</kbd></td><td>Next / previous function with an input class no test passed in</td></tr>
+      <tr><td><kbd>t</kbd></td><td>Tests that ran the current line</td></tr>
+      <tr><td><kbd>i</kbd></td><td>Show or hide the current function's shape grid</td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next file</td></tr>
+      <tr><td><kbd>?</kbd></td><td>This help</td></tr>
+    </tbody>
+  </table>
+  <form method="dialog"><button class="btn secondary" type="submit">Close</button></form>
+</dialog>
+</body>
+</html>

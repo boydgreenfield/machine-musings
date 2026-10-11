@@ -1,0 +1,29 @@
+{# Shared bits: status chips for runs, outcomes, invariant chips. Text always accompanies colour. #}
+{% macro run_status(run, big=False) -%}
+{%- set label = (run.summary_json or {}).get('label') -%}
+{%- if run.status == 'awaiting_approval' -%}<span class="status s-wait{{ ' big' if big }}">awaiting approval</span>
+{%- elif run.status in ('queued', 'paused') -%}<span class="status s-wait{{ ' big' if big }}">{{ run.status }}</span>
+{%- elif run.status == 'running' and not run.verdict -%}<span class="status s-run{{ ' big' if big }}">running</span>
+{%- elif run.verdict == 'failure' -%}<span class="status s-fail{{ ' big' if big }}">FAIL</span>
+{%- elif run.verdict == 'success' and label == 'PASS with gaps' -%}<span class="status s-gaps{{ ' big' if big }}">PASS with gaps</span>
+{%- elif run.verdict == 'success' -%}<span class="status s-pass{{ ' big' if big }}">PASS</span>
+{%- elif run.verdict -%}<span class="status s-neutral{{ ' big' if big }}">{{ (label or run.verdict)|upper }}</span>
+{%- else -%}<span class="status s-neutral{{ ' big' if big }}">{{ run.status }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro outcome(value) -%}
+<span class="oc oc-{{ value or 'not_run' }}">{{ (value or 'not run').replace('_', ' ') }}</span>
+{%- endmacro %}
+
+{% macro inv_chip(status, key=None) -%}
+<span class="inv i-{{ status }}" title="{{ status.replace('_', ' ') }}">{% if key %}{{ key }} {% endif %}{{ status.replace('_', ' ') }}</span>
+{%- endmacro %}
+
+{% macro counts(c) -%}
+{%- if c -%}<span class="counts">{{ c.get('passed', 0) }} passed{% if c.get('failed', 0) + c.get('error', 0) %} · <span class="f">{{ c.get('failed', 0) + c.get('error', 0) }} failed</span>{% endif %}{% if c.get('not_run', 0) %} · {{ c.get('not_run') }} not run{% endif %}</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro run_name(run, prs) -%}
+{%- if run.pr_id and prs.get(run.pr_id) -%}PR #{{ prs[run.pr_id].number }} {{ prs[run.pr_id].title }}{%- else -%}{{ run.trigger }} on {{ run.branch or 'detached' }}{%- endif -%}
+{%- endmacro %}

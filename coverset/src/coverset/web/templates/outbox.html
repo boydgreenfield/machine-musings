@@ -1,0 +1,35 @@
+{% extends layout %}
+{% block title %}Outbox{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>Outbox</h1>
+  <p class="meta"><span>{{ total }} forge call{{ '' if total == 1 else 's' }}{% if method %} named <code>{{ method }}</code>{% endif %}</span><span>newest first</span></p>
+</div>
+<p class="meta">Filter:
+  <a href="{{ url_for('outbox.outbox') }}"{% if not method %} aria-current="page"{% endif %}>all</a>
+  {% for m in methods %}<a href="{{ url_for('outbox.outbox', method=m) }}"{% if m == method %} aria-current="page"{% endif %}><code>{{ m }}</code></a>{% endfor %}
+</p>
+{% for item in calls %}
+  {% set call = item.call %}
+  <article class="outbox-call">
+    <header>
+      <span class="method">{{ call.method }}</span>
+      {% if item.title %}<strong>{{ item.title }}</strong>{% endif %}
+      {% if item.conclusion %}<span class="status {{ 's-fail' if item.conclusion == 'failure' else 's-pass' if item.conclusion == 'success' else 's-neutral' }}">{{ item.conclusion }}</span>{% endif %}
+      <span class="muted">{{ call.target or '' }}</span>
+      {% if call.run_id %}<a href="{{ url_for('runs.run_page', run_id=call.run_id) }}">run</a>{% endif %}
+      <span class="muted">{{ call.created_at|stamp }} · {{ call.forge }}</span>
+    </header>
+    {% if item.body %}
+    <p class="gh-label">Would be posted to GitHub (fake forge)</p>
+    <div class="markdown">{{ item.body }}</div>
+    {% endif %}
+    <details class="raw"><summary>Request</summary><pre>{{ item.request_json }}</pre>{% if item.response_json %}<pre>{{ item.response_json }}</pre>{% endif %}</details>
+  </article>
+{% else %}
+<section class="panel"><p class="empty">No forge calls recorded. Runs on pull requests post a check run and a sticky comment here.</p></section>
+{% endfor %}
+{% if pages > 1 %}
+<p class="pager">{% if page > 1 %}<a href="{{ url_for('outbox.outbox', page=page - 1, method=method) }}">newer</a>{% endif %} page {{ page }} of {{ pages }} {% if page < pages %}<a href="{{ url_for('outbox.outbox', page=page + 1, method=method) }}">older</a>{% endif %}</p>
+{% endif %}
+{% endblock %}
