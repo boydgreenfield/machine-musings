@@ -739,7 +739,15 @@ class _ShapesHeader:
         tests = self._tests(row.get("tests"))
         if func is None or calls is None or tests is None:
             return None
-        return FuncSampling(func=func, calls=calls, tests=tests, truncated=row.get("truncated") is True)
+        truncated = row.get("truncated") is True
+        cap = row.get("cap")
+        return FuncSampling(
+            func=func,
+            calls=calls,
+            tests=tests,
+            truncated=truncated,
+            cap=cap if truncated and cap in ("sample", "full") else None,
+        )
 
 
 def _lookup[T](table: tuple[T | None, ...], index: object) -> T | None:

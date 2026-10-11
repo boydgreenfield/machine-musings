@@ -11,6 +11,7 @@ Installing the plugin changes nothing about a normal run except registering the 
 | Option | Default | Meaning |
 |---|---|---|
 | `--coverset-out DIR` | off | write the facts bundle to `DIR` (turns instrumentation on) |
+| `--coverset-neutral` | off | also write the language-neutral bundle, `DIR/neutral/` and `DIR/neutral.tar.gz` (`COVERSET_NEUTRAL=1` does the same) |
 | `--coverset-scores FILE` | off | JSON `{nodeid: score}`; sort by `(-max(module), module, -max(class), class, -score, nodeid)` |
 | `--coverset-source PKG` | all in-repo code | package name or path to measure and trace (repeatable) |
 | `--coverset-trace-module MOD` | none | extra module (and submodules) to trace (repeatable) |
@@ -41,9 +42,18 @@ Shape keys follow plan Addendum B. Infinities do not count as the finite sign cl
 
 `DIR/bundle.tar.gz` holds `coverage.sqlite`, `coverage.json` (format 3), `shapes.jsonl.gz` (plan Addendum B), `results.jsonl` (one final row per test, authoritative), `collect.json` (`items` with file, line, markers, invariant ids, hypothesis flag; `errors` for collection errors), `durations.json`, `invariant_links.jsonl` and `meta.json` (versions, `tracer`, `tracer_lost_at`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `configfile`, `cwd`, `shapes_disabled_reason`, `tracer_errors`, counts, timings). Shape and result paths are relative to the git root (the rootdir when there is no `.git`); `coverage.json` and `coverage.sqlite` paths are relative to the working directory, which is the repo root in a worker.
 
+## Neutral bundle
+
+With `--coverset-neutral` (or `COVERSET_NEUTRAL=1`) the plugin also writes the language-neutral bundle of coverset's `docs/neutral-bundle.md` into `DIR/neutral/` and packs it, flat, as `DIR/neutral.tar.gz` next to `bundle.tar.gz`: `manifest.json` (`meta` is the same mapping as `meta.json`; `shard` comes from `COVERSET_SHARD`), `tests.jsonl.gz` (every collected test, `outcome` null for one that never ran), `files.jsonl.gz`, `coverage.jsonl.gz` (per test and file, statement first lines, `<import>` for code outside tests, with the test's arcs), `arcs.jsonl.gz`, `functions.jsonl.gz` (function regions by the control plane's rules, `regions.py`; no `types`, which the control plane derives from the sources for Python), `shapes.jsonl.gz` (self-contained `obs` and `sampling` rows) and `links.jsonl`. It is built from the files already written, after measurement stopped, so coverage, shapes and results are identical with and without the flag; it is written on every path that writes `bundle.tar.gz`, and the `neutral_written` event (`path`, `sha256`, `bytes`, `seconds`, `rows`, `dropped`) precedes `done`. On the fixture project it adds about 0.03 s.
+
+```sh
+pytest --coverset-out .coverset --coverset-neutral
+coverset report .coverset
+```
+
 ## Events
 
-Each event is one stdout line: `"\x1ecoverset <COVERSET_EVENT_NONCE> " + JSON`, kinds `collected`, `test`, `heartbeat`, `bundle_written`, `done`. The JSON is ASCII-only, so any stdout encoding works. Split stdout on `\n` only: Python's `str.splitlines()` treats `\x1e` as a line break. The plugin removes `COVERSET_EVENT_NONCE` from the environment before conftest files load, so tests and their subprocesses do not inherit it; the nonce separates events from log text and is not a security boundary, so reconcile streamed rows against `results.jsonl`.
+Each event is one stdout line: `"\x1ecoverset <COVERSET_EVENT_NONCE> " + JSON`, kinds `collected`, `test`, `heartbeat`, `bundle_written`, `neutral_written` (only with `--coverset-neutral`), `done`. The JSON is ASCII-only, so any stdout encoding works. Split stdout on `\n` only: Python's `str.splitlines()` treats `\x1e` as a line break. The plugin removes `COVERSET_EVENT_NONCE` from the environment before conftest files load, so tests and their subprocesses do not inherit it; the nonce separates events from log text and is not a security boundary, so reconcile streamed rows against `results.jsonl`.
 
 ## Args files
 

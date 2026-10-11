@@ -11,6 +11,9 @@ hung test is interrupted, pytest exits with code 2 and ``pytest_sessionfinish`` 
 bundle; the interrupted test counts as ``not_run``. Further SIGTERMs while the bundle is written are
 ignored, so the runner should wait a few seconds before escalating to SIGKILL. Instrumentation never
 aborts the test run: errors while recording a result or emitting an event go to ``meta.errors``.
+
+With ``--coverset-neutral`` (or ``COVERSET_NEUTRAL=1``) the language-neutral bundle is written as
+well, on every path that writes the Python bundle (:mod:`pytest_coverset.neutral`).
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ from pytest_coverset.bundle import (
 )
 from pytest_coverset.coverage_ctx import CoverageContext, ForeignTracerError
 from pytest_coverset.events import EventWriter
+from pytest_coverset.neutral import NeutralWriter, env_enabled, shard_from_env
 from pytest_coverset.ordering import PriorityOrdering, load_scores
 from pytest_coverset.outcomes import exception_name, fold_reports, truncate_utf8
 from pytest_coverset.paths import find_git_root, norm_path
@@ -80,6 +84,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("coverset", "coverset instrumentation (inert unless --coverset-out is given)")
     group.addoption(
         "--coverset-out", metavar="DIR", default=None, help="write the coverset facts bundle to DIR"
+    )
+    group.addoption(
+        "--coverset-neutral",
+        action="store_true",
+        default=False,
+        help="also write the language-neutral bundle (DIR/neutral, DIR/neutral.tar.gz); "
+        "COVERSET_NEUTRAL=1 does the same",
     )
     group.addoption(
         "--coverset-scores",
@@ -154,6 +165,7 @@ class Options:
     shape_samples: int
     shape_settle: int
     full_trace_cap: int
+    neutral: bool = False
 
     @classmethod
     def from_namespace(cls, ns: Any) -> Options:
@@ -169,6 +181,7 @@ class Options:
             shape_samples=ns.coverset_shape_samples,
             shape_settle=ns.coverset_shape_settle,
             full_trace_cap=ns.coverset_full_trace_cap,
+            neutral=bool(getattr(ns, "coverset_neutral", False)) or env_enabled(),
         )
 
 
@@ -183,6 +196,11 @@ class CoversetSession:
         self.git_root = find_git_root(config.rootpath) or find_git_root(Path.cwd())
         self.repo_root = str(self.git_root or config.rootpath)
         options.out_dir.mkdir(parents=True, exist_ok=True)
+        self.start_cwd = os.getcwd()
+        self.shard = shard_from_env()
+        self.neutral = (
+            NeutralWriter(options.out_dir, self.repo_root, self.start_cwd) if options.neutral else None
+        )
         self.coverage = CoverageContext(options.out_dir, options.sources)
         self.tracer: ShapeTracer | None = None
         self.full_trace: tuple[str, ...] = ()
@@ -390,15 +408,51 @@ class CoversetSession:
         counts = self.results.counts(len(self.collected))
         for name, exc in write_static_files(out, self.collected, self.collect_errors, self.results.results):
             self._record_error(name, exc)
+        neutral = self.neutral
+        if neutral is not None:
+            self._attempt(
+                "neutral",
+                lambda: neutral.write_data(
+                    self.collected,
+                    self.results.results,
+                    self.coverage.json_file,
+                    self.coverage.data_file,
+                    out / SHAPES_FILE,
+                ),
+            )
         self._note_tracer_loss()
-        self._attempt("meta", lambda: write_json(out / META_FILE, self._meta(exit_code, counts)))
+        meta = self._meta(exit_code, counts)
+        if neutral is not None:
+            self._attempt(
+                "neutral manifest",
+                lambda: neutral.write_manifest(meta, version=__version__, shard=self.shard),
+            )
+        self._attempt("meta", lambda: write_json(out / META_FILE, meta))
         try:
             path, digest, size = make_tarball(out)
         except Exception as exc:
             self._record_error("tarball", exc)
         else:
             self._emit("bundle_written", path=str(path), sha256=digest, bytes=size)
+        if neutral is not None:
+            self._write_neutral_tarball(neutral)
         self._emit("done", exit_code=exit_code, counts=counts)
+
+    def _write_neutral_tarball(self, neutral: NeutralWriter) -> None:
+        try:
+            path, digest, size = neutral.pack()
+        except Exception as exc:
+            self._record_error("neutral tarball", exc)
+            return
+        self._emit(
+            "neutral_written",
+            path=str(path),
+            sha256=digest,
+            bytes=size,
+            seconds=round(neutral.seconds, 6),
+            rows=dict(neutral.rows),
+            dropped=dict(sorted(neutral.stats.items())),
+        )
 
     def abort(self, exit_code: int, label: str, exc: BaseException) -> None:
         """Finalise after pytest gave up before the session ran (a conftest failed to import, ...).
@@ -461,6 +515,7 @@ class CoversetSession:
             "shape_samples": self.options.shape_samples,
             "shape_settle": self.options.shape_settle,
             "full_trace_cap": self.options.full_trace_cap,
+            "neutral": self.options.neutral,
             "functions_traced": tracer.functions_traced if tracer is not None else 0,
             "functions_truncated": tracer.functions_truncated if tracer is not None else 0,
             "tracer_errors": tracer.tracer_errors if tracer is not None else 0,

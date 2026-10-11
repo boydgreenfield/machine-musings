@@ -5,7 +5,7 @@
 - per-test line and branch coverage, one coverage.py context per test;
 - the shapes of the arguments and return values of in-repo functions, through `sys.monitoring`;
 - each test's final outcome, streamed as JSON lines on stdout;
-- a facts bundle, `bundle.tar.gz`, that the control plane pulls once the shard ends.
+- a facts bundle, `bundle.tar.gz`, that the control plane pulls once the shard ends, and on request the same facts as a language-neutral bundle, `neutral.tar.gz` ([The neutral bundle](#the-neutral-bundle)).
 
 It also orders tests by a scores file and registers the `invariant(id)` marker. The plugin's own README (`packages/pytest-coverset/README.md`) is the reference card for its options; this page explains how each part works and why.
 
@@ -28,6 +28,7 @@ Installing the plugin changes nothing about a normal run except registering the 
 | Option | Default | Effect |
 |---|---|---|
 | `--coverset-out DIR` | off | write the bundle to `DIR`; turns instrumentation on |
+| `--coverset-neutral` | off | also write the language-neutral bundle, `DIR/neutral/` and `DIR/neutral.tar.gz`; `COVERSET_NEUTRAL=1` in the environment does the same ([The neutral bundle](#the-neutral-bundle)) |
 | `--coverset-scores FILE` | off | JSON `{nodeid: score}`; run the riskiest tests first |
 | `--coverset-source PKG` | all in-repo code | package name or path to measure and trace (repeatable) |
 | `--coverset-trace-module MOD` | none | extra module, and its submodules, to trace (repeatable) |
@@ -119,7 +120,7 @@ The plugin does not invent exit codes; these are pytest's, and the plugin reache
 
 The runner treats 0, 1 and 5 as normal shard ends, and 2 as normal only after it asked for a stop (`runner._shard_error`).
 
-When pytest gives up before the test session starts, the plugin still finalises. A conftest that fails to import makes pytest exit 4 without ever calling `pytest_sessionfinish` or `pytest_unconfigure`; a `pytest_load_initial_conftests` wrapper catches that, writes the bundle with the error in `meta.errors`, and emits `bundle_written` and `done` with `exit_code` 4 (`test_conftest_import_error_still_writes_the_bundle`). A usage error raised after the session started (an unreadable scores file) is finalised the same way from `pytest_unconfigure` (`test_unreadable_scores_file_still_writes_the_bundle`).
+When pytest gives up before the test session starts, the plugin still finalises. A conftest that fails to import makes pytest exit 4 without ever calling `pytest_sessionfinish` or `pytest_unconfigure`; a `pytest_load_initial_conftests` wrapper catches that, writes the bundle with the error in `meta.errors`, and emits `bundle_written` and `done` with `exit_code` 4 (`test_conftest_import_error_still_writes_the_bundle`). A usage error raised after the session started (an unreadable scores file) is finalised the same way from `pytest_unconfigure` (`test_unreadable_scores_file_still_writes_the_bundle`). Every one of these paths (normal end, STOP file, SIGTERM, a failed conftest, a late usage error) goes through the same `finalize`, so with `--coverset-neutral` each also writes the neutral bundle and emits `neutral_written` before `done` (`test_early_exits_still_write_the_neutral_bundle`, `test_stopped_run_lists_not_run_tests_with_a_null_outcome`).
 
 ## The shape tracer
 
@@ -269,6 +270,7 @@ Readers must split stdout on `\n` only. Python's `str.splitlines()` treats `\x1e
 | `test` | `nodeid`, `file`, `outcome`, `duration_s`, `failed_phase`, `fail_sig`, `longrepr`, `truncated`, `reason`, `start`, `stop` |
 | `heartbeat` | `done`, `total`, `elapsed_s`; emitted before a test when no event was written for 10 s |
 | `bundle_written` | `path`, `sha256`, `bytes` |
+| `neutral_written` | `path`, `sha256`, `bytes` of `neutral.tar.gz`, plus `seconds` (time spent exporting), `rows` per file and `dropped` (counts of rows left out, below); only with `--coverset-neutral`, after `bundle_written` |
 | `done` | `exit_code`, `counts` (every outcome plus `not_run`) |
 
 `outcome` is one of `passed`, `failed` (the body failed, including a strict XPASS), `error` (setup or teardown failed), `skipped`, `xfailed`, `xpassed`. `fail_sig` is the blake2b-8 hex digest of the exception type plus the crash location, so the same failure on two commits gets the same signature even when its message differs (`test_fail_sig_is_stable_across_messages`). `longrepr` is cut to 8 KiB of UTF-8 with `truncated` set. The skip or xfail `reason` is cut to the same 8 KiB, silently (a 2 MB `pytest.skip()` message once produced a 2,000,292-byte event line, over the executor's 1 MiB line cap; it is now 8,484 bytes).
@@ -290,7 +292,9 @@ Paths in `shapes.jsonl.gz`, `results.jsonl` and `collect.json` are git-root-rela
 | `collect.json` | `{"items": [{nodeid, file, line, markers, invariant_ids, hypothesis}], "errors": [{nodeid, longrepr, truncated}]}`. `line` is 1-based (the first decorator line). `hypothesis` is true for `@given` tests. |
 | `durations.json` | `{nodeid: duration_s}` |
 | `invariant_links.jsonl` | `{"test_id": <nodeid>, "invariant_id": <id>}` per marker link |
-| `meta.json` | `schema`, `plugin_version`, `python`, `coverage_version`, `pytest_version`, `core`, `tracer`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `context_format`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `configfile`, `cwd`, `sources`, `trace_modules`, `full_trace`, `shapes`, `shapes_disabled_reason`, `repr_examples`, `shape_samples`, `shape_settle`, `full_trace_cap`, `functions_traced`, `functions_truncated`, `tracer_errors`, `hypothesis` (`version`, `deadline_ms`), `exit_code`, `counts`, `stop_requested`, `errors`, `started_at`, `finished_at`, `timings` (`session_wall_s`, `tracer_callback_s`, `tracer_events`) |
+| `meta.json` | `schema`, `plugin_version`, `python`, `coverage_version`, `pytest_version`, `core`, `tracer`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `context_format`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `configfile`, `cwd`, `sources`, `trace_modules`, `full_trace`, `shapes`, `shapes_disabled_reason`, `repr_examples`, `shape_samples`, `shape_settle`, `full_trace_cap`, `neutral` (whether `--coverset-neutral` was on), `functions_traced`, `functions_truncated`, `tracer_errors`, `hypothesis` (`version`, `deadline_ms`), `exit_code`, `counts`, `stop_requested`, `errors`, `started_at`, `finished_at`, `timings` (`session_wall_s`, `tracer_callback_s`, `tracer_events`) |
+
+With `--coverset-neutral` the directory also holds `neutral/` and `neutral.tar.gz` ([below](#the-neutral-bundle)); neither is a member of `bundle.tar.gz`, whose eight members are unchanged.
 
 ### `shapes.jsonl.gz`
 
@@ -319,6 +323,37 @@ Rows refer to the header's lists by index, so long strings appear once.
 | `func_sampling` | one row per traced function: sampled `calls`, sampled `tests`, `truncated`, and `cap` (`"sample"`, `"full"` or `null`: which cap stopped sampling) |
 
 The block above is an excerpt of the bundle from the hand run described in [Running it by hand](#running-it-by-hand), with the lists shortened (`...`). A caller of kind `func` has the form `{"kind": "func", "path": ..., "qualname": ..., "line": ...}`.
+
+## The neutral bundle
+
+`--coverset-neutral` (or `COVERSET_NEUTRAL=1`, so the orchestrator can switch it on without changing the shard argv) makes the plugin also write the language-neutral bundle that [docs/neutral-bundle.md](neutral-bundle.md) specifies, the same format a TypeScript reporter writes. It is off by default. `src/pytest_coverset/neutral.py` writes it.
+
+| File in `DIR/neutral/` | Made from |
+|---|---|
+| `manifest.json` | `format` `coverset-neutral`, `version` 1, `language` `python`, `producer` `{"name": "pytest-coverset", "version": <plugin version>}`, `created_at` (UTC), `shard` from `COVERSET_SHARD` (an integer, else `null`), `meta` = exactly the mapping written to `meta.json` |
+| `tests.jsonl.gz` | every collected test in collection order, merged with its final result; `outcome` `null` for a test that never ran (STOP file, SIGTERM); `message` is the result's `longrepr` (already cut to 8 KiB); `markers`, `invariants` and `property` (Hypothesis) from the collected item; `start`, `stop`, `duration_s` from the result |
+| `files.jsonl.gz` | `coverage.json` per file: `statements` = executed ∪ missing lines, `excluded`, `branches` = executed ∪ missing branch arcs; `n_lines` counted from the source file |
+| `coverage.jsonl.gz` | `coverage.sqlite` through coverage.py's public `CoverageData` API: `contexts_by_lineno` finds the (context, file) pairs, then `set_query_context` plus `arcs` (or `lines` without branch data) per pair. Raw tracer lines are mapped to their statement's first line exactly as the control plane's `read_python_bundle` maps them, and only statement lines are kept (a module docstring's line 1, recorded at import, is not a statement). The `''` context is `<import>`. Each row carries the pair's `arcs`. |
+| `arcs.jsonl.gz` | `coverage.json`'s executed branch arcs per file (the run-wide union) |
+| `functions.jsonl.gz` | the function regions of every measured `.py` file, without `types` (below) |
+| `shapes.jsonl.gz` | the plugin's header-indexed `shapes.jsonl.gz` rewritten as self-contained `obs` rows (`func`, `param`, `shape`, `caller`, `samples`, `tests`, `truncated`, `example`, `example_test`) and `sampling` rows (`func`, `calls`, `tests`, `truncated`, `cap`). Observations whose caller is `<import>` (a decorator applied at import time) are left out, as the control plane's Python reader leaves them out. |
+| `links.jsonl` | `invariant_links.jsonl` as `{"test", "invariant"}` |
+
+Paths go through the same `norm_path` as everything else, so they are repo-root-relative POSIX; `coverage.json` and `coverage.sqlite` names are resolved against the working directory coverage.py started in. Every JSON line is UTF-8 (a lone surrogate becomes `?`), every `.gz` has a zero mtime, and each file is written to a temporary name and renamed. `DIR/neutral.tar.gz` holds the same nine files as flat members (owner ids and names cleared), next to `bundle.tar.gz`; its sha256 and size go out in `neutral_written`. The data files are written before `meta.json`, so a failure there lands in `meta.json` `errors`; `manifest.json` is written just before `meta.json` from the same mapping.
+
+**Equivalence.** The export only reads files the session already wrote (`coverage.sqlite`, `coverage.json`, `shapes.jsonl.gz`) and rows already recorded, after measurement stopped, so it cannot change coverage, shapes or results. `test_the_export_changes_nothing_else` runs the fixture project with and without the flag and compares `results.jsonl` (all but the timing fields), every `(context, file, from, to)` row of `coverage.sqlite`, the decoded shapes header and rows, `collect.json`, `invariant_links.jsonl` and `coverage.json` (all but its timestamp): identical. In the workspace, `tests/plugin_conformance/test_neutral_conformance.py` reads the neutral bundle with `coverset_model.io.read_bundle` and the Python bundle of the same run with `coverset.facts.convert.read_python_bundle`, and requires the two `NeutralBundle`s to be equal dataclass by dataclass (tests, collected items, durations, files, run arcs, coverage, shapes, sampling, `meta`), for the fixture project and for a project with every outcome and tests a STOP file kept from running. Two documented differences are applied to the converter's side: it keeps non-statement lines, which the neutral format drops, and it does not read the sampling `cap`, which the neutral rows carry. `coverset_model.io.validate` finds no problem in the directory or the archive, and the archive reads back exactly as the directory.
+
+**Cost.** Median wall time of 8 interleaved runs of the plugin fixture project (24 tests, `--coverset-source fixturepkg`, Python 3.13, this Mac, 2026-10-11): 0.361 s without the flag, 0.394 s with it, so about 0.03 s more; the export itself (the `seconds` in `neutral_written`) took 0.012 to 0.013 s, the rest is importing the extra modules. On a copy of `examples/demo-app` (97 tests) the export took 0.055 s.
+
+**Function regions.** `src/pytest_coverset/regions.py` reproduces the control plane's rules (`coverset.analysis.functions.index_functions`) without depending on coverset: regions found through `ast.iter_child_nodes`, so definitions inside `if`, `try`, `with`, `for` and `match` count; `def_line` the first decorator line; `body_start` the first statement after a docstring (`def_line` for a docstring-only function); CPython's `co_qualname` with `<locals>`; `ordinal` among same-qualname definitions in source order; `key` = blake2b-8 of `path\0qualname\0ordinal`; the same AST-dump `body_hash` and `sig_hash`; kinds `function`, `method`, `class` and `module`. `tests/plugin_conformance/test_regions_match.py` pins the two implementations together field by field on every `.py` file of the plugin's fixture project and of `examples/demo-app/src`, and on edge cases (overloads, property setters, nested and conditional definitions, PEP 695 type parameters, a file that does not parse). The hashes are `ast.dump` digests, which differ between Python minor versions, so compare them only with hashes from the same interpreter version.
+
+**Types.** `functions.jsonl` carries no `types`: for Python the control plane derives parameter type descriptors from the sources itself, and `coverset bundle convert PATH --to DIR --source-root SRC` adds them when it converts a Python bundle into neutral files.
+
+```sh
+pytest --coverset-out .coverset --coverset-neutral
+coverset bundle validate .coverset/neutral
+coverset report .coverset
+```
 
 ## Hypothesis
 
@@ -369,7 +404,7 @@ From the root of a repository whose tests import the code under `src/` (the demo
 python -m pytest --coverset-out out --coverset-source ledger
 ```
 
-`out/` then holds the eight files and `bundle.tar.gz`. On a copy of `examples/demo-app` at the branch head this ran 97 tests, traced 34 functions, capped 4 of them, and recorded `tool_id` 4 and `tracer` `CTracer` in `meta.json`.
+`out/` then holds the eight files and `bundle.tar.gz` (plus `neutral/` and `neutral.tar.gz` with `--coverset-neutral`). On a copy of `examples/demo-app` at the branch head this ran 97 tests, traced 34 functions, capped 4 of them, and recorded `tool_id` 4 and `tracer` `CTracer` in `meta.json`.
 
 The event lines go to stdout among pytest's own output. Set `COVERSET_EVENT_NONCE` to pick the nonce; without it the prefix is `\x1ecoverset - `.
 

@@ -7,7 +7,7 @@ starts, before conftest files and tests are imported. It separates events from l
 looks like one; it is not a security boundary (test code shares the process and can still find it),
 so ``results.jsonl`` in the bundle stays the authoritative record and the runner reconciles streamed
 rows against it. Event kinds: ``collected``, ``test``, ``heartbeat``, ``bundle_written``,
-``done``. If pytest's terminal writer is mid-line (progress dots), a newline is written first so the
+``neutral_written`` (with ``--coverset-neutral``), ``done``. If pytest's terminal writer is mid-line (progress dots), a newline is written first so the
 prefix always starts a line.
 """
 
