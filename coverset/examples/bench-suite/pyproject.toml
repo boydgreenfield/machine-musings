@@ -1,0 +1,26 @@
+[project]
+name = "benchsuite"
+version = "0.1.0"
+description = "Synthetic CPU-bound pytest suite for coverset fan-out benchmarks (generated)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverset]
+source = ["benchsuite"]
+source_root = "src"
+max_shards = 32
+target_shard_seconds = 10
+fail_fast = "finish_in_background"
