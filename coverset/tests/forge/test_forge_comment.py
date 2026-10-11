@@ -419,3 +419,13 @@ def test_a_section_that_cannot_fit_is_named() -> None:
     assert len(text) <= 3_800 + len(STICKY_MARKER) + 4
     assert "Not shown to fit GitHub's size limit" in text and "input classes" in text
     assert text.count("<details>") == text.count("</details>")
+
+
+def test_timings_use_the_shared_seconds_formatter() -> None:
+    """The comment prints seconds by the same rule as the PR page: one decimal under 10 s."""
+    text = render_sticky_comment(replace(FAIL, first_failure_s=0.97, t_first_failure_file_order_est=1.84))
+    assert text.splitlines()[0] == "### coverset · FAIL · first failure in 1.0 s"
+    assert "(file order: 187th, ~1.8 s est.)" in text
+    text = render_sticky_comment(replace(FAIL, first_failure_s=41.2, t_first_failure_file_order_est=725.0))
+    assert "first failure in 41 s" in text
+    assert "~12 min est." in text

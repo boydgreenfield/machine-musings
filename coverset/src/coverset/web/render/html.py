@@ -14,6 +14,8 @@ from collections.abc import Iterable
 
 from markupsafe import Markup, escape
 
+from coverset.units import fmt_ms, fmt_secs
+
 __all__ = [
     "Markup",
     "attr",
@@ -84,28 +86,6 @@ def truncate(text: str, limit: int) -> str:
 def join(parts: Iterable[Markup | str]) -> Markup:
     """Concatenate already-safe pieces (plain strings are escaped)."""
     return Markup("").join(p if isinstance(p, Markup) else escape(p) for p in parts)
-
-
-def fmt_secs(value: float | None) -> str:
-    """Seconds as every page shows them: ``1.0 s``, ``41 s``, ``3 min`` (``–`` for None)."""
-    if value is None:
-        return "–"
-    if value < 10:
-        return f"{value:.1f} s"
-    if value < 600:
-        return f"{value:.0f} s"
-    return f"{value / 60:.0f} min"
-
-
-def fmt_ms(value: float | None) -> str:
-    """Milliseconds as ``0.4 ms``, ``12 ms`` or ``1.4 s`` (``–`` for None)."""
-    if value is None:
-        return "–"
-    if value < 10:
-        return f"{value:.1f} ms"
-    if value < 1000:
-        return f"{value:.0f} ms"
-    return f"{value / 1000:.1f} s"
 
 
 _JOINTS = re.compile(r"(?<=::)|(?<=/)|(?<=\[)|(?<=_)|(?<=-)")

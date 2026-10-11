@@ -21,6 +21,7 @@ from coverset.forge.verdict import (
     MissingClass,
     VerdictSummary,
 )
+from coverset.units import fmt_secs
 
 COMMENT_LIMIT = 60_000
 """GitHub rejects comment bodies over 65,536 characters; stay well below it."""
@@ -53,7 +54,7 @@ def _pct(value: float | None) -> str:
 def _heading(summary: VerdictSummary) -> str:
     parts = ["### coverset", summary.label]
     if summary.first_failure_s is not None:
-        parts.append(f"first failure in {summary.first_failure_s:.1f} s")
+        parts.append(f"first failure in {fmt_secs(summary.first_failure_s)}")
     return " · ".join(parts)
 
 
@@ -157,7 +158,7 @@ def _rank_line(summary: VerdictSummary) -> str | None:
     if summary.rank_file_order is not None:
         estimate = ""
         if summary.t_first_failure_file_order_est is not None:
-            estimate = f", ~{summary.t_first_failure_file_order_est:.0f} s est."
+            estimate = f", ~{fmt_secs(summary.t_first_failure_file_order_est)} est."
         line += f" (file order: {_ordinal(summary.rank_file_order)}{estimate})"
     return line + "."
 
