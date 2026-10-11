@@ -1,14 +1,15 @@
 """Secret redaction for logs, stored run events and captured worker output.
 
-:func:`redact` masks well-known credential shapes (GitHub tokens, Anthropic keys, credentials in git
-URLs, PEM private keys, bearer headers) plus every live secret registered with
-:func:`register_secret`. :class:`RedactingFilter` applies it to log records, and
+:func:`redact` masks well-known credential shapes (GitHub tokens, Anthropic keys, Modal tokens,
+credentials in any URL, PEM private keys, bearer headers, ``NAME=value`` pairs whose name says
+secret, token, password or API key) plus every live secret registered with :func:`register_secret`. :class:`RedactingFilter` applies it to log records, and
 :func:`configure_logging` installs that filter wherever records are emitted.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import threading
@@ -21,10 +22,20 @@ if TYPE_CHECKING:
     from coverset.config import Settings
 
 MIN_SECRET_CHARS = 8
-"""Default floor for :func:`register_secret` and ``extra_secrets``: shorter values would shred text.
+"""Floor for :func:`register_secret` and ``extra_secrets``: shorter values would shred text.
 
-:func:`configure_logging` registers the settings' own secrets whatever their length.
+:func:`configure_logging` applies it to the settings' own secrets too; ``COVERSET_GITHUB_TOKEN``,
+the webhook secret and the admin token have longer minimums of their own (``config.py``).
 """
+
+ENV_SECRETS = ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
+"""Process environment variables whose live values :func:`configure_logging` registers."""
+
+_SECRET_NAME = (
+    r"[A-Za-z0-9_]*?(?:secret[_-]?access[_-]?key|modal[_-]token[_-](?:id|secret)|_secret|_token"
+    r"|_api[_-]?key|_password)"
+)
+"""Names whose value is a secret: ``AWS_SECRET_ACCESS_KEY``, ``MODAL_TOKEN_ID``, ``*_SECRET``, ..."""
 
 _TOKEN_START = r"(?<![A-Za-z0-9])"
 """Start of a token even when glued to a preceding ``_`` (``GH_TOKEN_ghs_...``)."""
@@ -40,6 +51,16 @@ PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(_TOKEN_START + r"(gh[opsur]_)[A-Za-z0-9._-]{20,}"), r"\1[REDACTED]"),
     (re.compile(_TOKEN_START + r"(github_pat_)[A-Za-z0-9_]{20,}"), r"\1[REDACTED]"),
     (re.compile(_TOKEN_START + r"(sk-ant-)[A-Za-z0-9_-]{8,}"), r"\1[REDACTED]"),
+    # Modal token ids and secrets.
+    (re.compile(_TOKEN_START + r"(a[ks]-)[A-Za-z0-9]{20,}"), r"\1[REDACTED]"),
+    # user:password@ in any URL (x-access-token URLs were handled above).
+    (re.compile(r"(://)[^/\s:@]+:(?!\[REDACTED\]@)[^/\s@]+@"), r"\1[REDACTED]@"),
+    # NAME=value and "NAME": "value" where the name says it holds a secret.
+    (re.compile(r"(?i)\b(" + _SECRET_NAME + r"[ \t]*=[ \t]*)(?!\[REDACTED\])[^\s'\"&;,]+"), r"\1[REDACTED]"),
+    (
+        re.compile(r"""(?i)(['"]""" + _SECRET_NAME + r"""['"]\s*:\s*['"])(?!\[REDACTED\])[^'"]+"""),
+        r"\1[REDACTED]",
+    ),
     (
         re.compile(r"""(?i)\b(authorization['"]?\s*[:=]\s*['"]?(?:bearer|token|basic)\s+)[^\s"',;}]+"""),
         r"\1[REDACTED]",
@@ -133,14 +154,17 @@ def _ensure_filter(target: logging.Logger | logging.Handler) -> None:
 
 
 def configure_logging(settings: Settings) -> None:
-    """Register the settings' live secrets (any length) and install :class:`RedactingFilter`.
+    """Register the settings' live secrets and the Modal tokens in the process environment (each at
+    least :data:`MIN_SECRET_CHARS` long) and install :class:`RedactingFilter`.
 
     Logger-level filters only see records created on that logger, so the filter goes on the root
     logger, on the hypercorn/quart loggers, and on every handler attached to any of them. A single
     stderr handler is added to the root logger once (idempotent across ``create_app`` calls).
     """
     for value in settings.secret_values():
-        register_secret(value, min_chars=1)
+        register_secret(value)
+    for name in ENV_SECRETS:
+        register_secret(os.environ.get(name))
     root = logging.getLogger()
     if not any(getattr(h, _HANDLER_MARK, False) for h in root.handlers):
         handler = logging.StreamHandler(sys.stderr)

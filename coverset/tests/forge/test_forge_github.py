@@ -197,6 +197,7 @@ async def test_token_bucket_refills_over_time() -> None:
         TokenBucket(per_minute=0)
 
 
+@pytest.mark.security
 async def test_upsert_falls_back_to_a_marker_scan_of_own_comments(github: MockGitHub, rsa_pem: str) -> None:
     comments = [
         {
@@ -267,6 +268,7 @@ async def test_token_mode_statuses_comments_and_no_checks(github: MockGitHub) ->
     assert credentials.token.startswith("github_pat_")
 
 
+@pytest.mark.security
 async def test_mirror_credentials_are_scoped_and_redacted(github: MockGitHub, rsa_pem: str) -> None:
     forge = app_forge(github, rsa_pem)
     credentials = await forge.fetch_mirror_credentials(55, REPO)
@@ -304,6 +306,7 @@ async def test_http_errors_become_forge_errors(github: MockGitHub, rsa_pem: str)
     assert caught.value.status == 422
 
 
+@pytest.mark.security
 async def test_repo_names_are_checked_before_use(github: MockGitHub, rsa_pem: str) -> None:
     bad = RepoRef(external_id=1, full_name="../../user", installation_id=55)
     with pytest.raises(ForgeError):

@@ -24,6 +24,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyP
     return monkeypatch
 
 
+@pytest.mark.security
 def test_defaults(tmp_path: Path) -> None:
     settings = Settings.for_tests(data_dir=tmp_path)
     assert settings.env == "test"
@@ -145,6 +146,7 @@ def test_ai_anthropic_requires_key() -> None:
 
 
 @pytest.mark.parametrize("audience", ["https://github.com/acme", "https://api.github.com"])
+@pytest.mark.security
 def test_oidc_audience_must_not_be_github(audience: str) -> None:
     with pytest.raises(ValidationError, match="github.com"):
         Settings.for_tests(oidc_audience=audience)
@@ -156,6 +158,7 @@ def test_public_url_must_be_absolute_http(public_url: str) -> None:
         Settings.for_tests(public_url=public_url)
 
 
+@pytest.mark.security
 def test_app_mode_requires_allowed_owners() -> None:
     with pytest.raises(ValidationError, match="COVERSET_ALLOWED_OWNERS"):
         Settings.for_tests(github_app_id=1, github_webhook_secret="w" * 20)
@@ -164,11 +167,19 @@ def test_app_mode_requires_allowed_owners() -> None:
     assert Settings.for_tests(github_token="ghp_" + "a" * 36).allowed_owners == []
 
 
+@pytest.mark.security
 def test_short_webhook_secret_rejected() -> None:
     with pytest.raises(ValidationError, match="at least 16 characters"):
         Settings.for_tests(github_webhook_secret="x" * 15)
     assert Settings.for_tests(github_webhook_secret="x" * 16).github_webhook_secret is not None
     assert Settings.for_tests(github_webhook_secret="").github_webhook_secret is not None
+
+
+@pytest.mark.security
+def test_short_github_token_rejected() -> None:
+    with pytest.raises(ValidationError, match="COVERSET_GITHUB_TOKEN must be at least 16 characters"):
+        Settings.for_tests(github_token="abc")
+    assert Settings.for_tests(github_token="g" * 16).github_token is not None
 
 
 def test_public_url_and_audience_derivation() -> None:
@@ -218,6 +229,7 @@ def test_for_tests_is_hermetic(clean_env: pytest.MonkeyPatch) -> None:
     assert settings.data_dir.is_dir()
 
 
+@pytest.mark.security
 def test_secrets_hidden_from_repr_but_listed_for_redaction() -> None:
     settings = Settings.for_tests(admin_token=LONG_TOKEN, github_token="ghp_" + "a" * 36)
     assert LONG_TOKEN not in repr(settings)

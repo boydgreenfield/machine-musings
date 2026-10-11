@@ -83,6 +83,7 @@ def test_review_changes_reuses_a_stored_finding(ai_settings: Settings, tmp_path:
     assert rows[0].payload == first_rows[0].payload
 
 
+@pytest.mark.security
 def test_review_changes_skips_untrusted_bundles_unless_allowed(ai_settings: Settings, tmp_path: Path) -> None:
     client = CountingClient(FakeReviewClient(tmp_path))
     assert review_changes(client, two_function_bundle(), untrusted=True, settings=ai_settings) == []
@@ -96,6 +97,7 @@ def test_review_changes_with_ai_off_or_a_failing_client(ai_settings: Settings) -
     assert review_changes(FailingClient(), two_function_bundle(), untrusted=False, settings=ai_settings) == []
 
 
+@pytest.mark.security
 def test_review_changes_redacts_model_output(tmp_path: Path) -> None:
     secret = "my-live-github-token-value"
     settings = Settings.for_tests(data_dir=tmp_path / "d", github_token=secret)
@@ -173,6 +175,7 @@ def row_with(
     )
 
 
+@pytest.mark.security
 def test_invariant_statuses_only_replace_needs_review() -> None:
     rows = [
         row_with(("review_only", "satisfied"), ("tested_ok", "violated"), ("tested_bad", "satisfied")),

@@ -251,6 +251,7 @@ def test_heuristic_on_a_method_builds_the_owner() -> None:
 # --- injection ---------------------------------------------------------------------------------
 
 
+@pytest.mark.security
 def test_injected_comment_does_not_change_the_heuristic_verdict(email_bundle: BundleFactory) -> None:
     clean_source = demo_source(EMAIL_PATH)
     injected = clean_source.replace(
@@ -288,6 +289,7 @@ def test_injected_comment_in_a_fixture_backed_function_keeps_the_fixture(email_b
 # --- client selection --------------------------------------------------------------------------
 
 
+@pytest.mark.security
 def test_get_review_client_modes(tmp_path: Path) -> None:
     from coverset.ai.anthropic_client import AnthropicReviewClient
 

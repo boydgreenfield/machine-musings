@@ -91,6 +91,7 @@ BUNDLE_FILES = (COVERAGE_SQLITE, COVERAGE_JSON, SHAPES, RESULTS, COLLECT, DURATI
 _OUTCOMES: frozenset[str] = frozenset(get_args(Outcome.__value__))
 _PHASES = frozenset({"setup", "call", "teardown"})
 _COVERAGE_TABLES = ("file", "context", "line_bits", "arc")
+_MAX_SCHEMA_OBJECTS = 256  # coverage.py's schema v7 has about a dozen tables and indexes
 _MAX_NAME_CHARS = 512
 _MAX_COUNT = 2**63 - 1
 _MAX_JSON_FILE_BYTES = 64 * 1024 * 1024
@@ -106,13 +107,20 @@ _MAX_TRACER_CHARS = 64
 def tracer_mismatch(meta: object) -> str | None:
     """The tracer named by a bundle's ``meta.json`` when it is not the C tracer, else None.
 
-    The name is clipped and stripped to printable characters (the bundle is untrusted).
+    A C tracer that the plugin saw replaced mid-run (``meta.tracer_lost_at``, the context that was
+    running when the trace function changed) also counts: the text is ``"<tracer> lost at
+    <context>"``. The text is clipped and stripped to printable characters (the bundle is
+    untrusted).
     """
     tracer = meta.get("tracer") if isinstance(meta, dict) else None
-    if tracer is None or tracer in C_TRACERS:
-        return None
-    text = "".join(ch for ch in str(tracer)[:_MAX_TRACER_CHARS] if ch.isprintable())
-    return text or "an unnamed tracer"
+    if tracer is not None and not (isinstance(tracer, str) and tracer in C_TRACERS):
+        text = "".join(ch for ch in str(tracer)[:_MAX_TRACER_CHARS] if ch.isprintable())
+        return text or "an unnamed tracer"
+    lost = meta.get("tracer_lost_at") if isinstance(meta, dict) else None
+    if isinstance(lost, str) and lost:
+        text = f"{tracer or 'CTracer'} lost at {lost}"
+        return "".join(ch for ch in text if ch.isprintable())[:_MAX_TRACER_CHARS]
+    return None
 
 
 def numbits_to_lines(numbits: bytes) -> np.ndarray:
@@ -526,13 +534,7 @@ class _CoverageDb:
     def read(
         self, static: dict[str, StaticFile], *, want_arcs: bool
     ) -> tuple[dict[str, dict[str, tuple[int, ...]]], dict[str, tuple[tuple[int, int], ...]]]:
-        kinds = dict(
-            self.con.execute(
-                "SELECT name, type FROM sqlite_master WHERE name IN (?, ?, ?, ?)", _COVERAGE_TABLES
-            ).fetchall()
-        )
-        if any(kind != "table" for kind in kinds.values()) or not {"file", "context"} <= kinds.keys():
-            raise BundleError("coverage.sqlite does not have the schema-v7 tables")
+        kinds = self._schema()
         files: dict[int, str] = {}
         for file_id, raw_path in self.con.execute("SELECT id, path FROM file WHERE typeof(id) = 'integer'"):
             checked = self.reader.rel_path(raw_path)
@@ -556,6 +558,29 @@ class _CoverageDb:
             if want_arcs:
                 arcs = self._run_arcs(files)
         return self._first_lines(raw, static), arcs
+
+    def _schema(self) -> set[str]:
+        """The documented tables present, refusing anything a writer could use to run code on read.
+
+        The four tables must be plain tables (``CREATE TABLE``), never views or virtual tables (a
+        virtual table's module runs on every SELECT, and ``trusted_schema=OFF`` does not stop that);
+        a schema holding any trigger or any virtual table at all is refused outright.
+        """
+        (objects,) = self.con.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        if objects > _MAX_SCHEMA_OBJECTS:
+            raise BundleError(f"coverage.sqlite has more than {_MAX_SCHEMA_OBJECTS} schema objects")
+        present: set[str] = set()
+        for name, kind, sql in self.con.execute("SELECT name, type, sql FROM sqlite_master"):
+            text = sql.lstrip().upper() if isinstance(sql, str) else ""
+            if kind == "trigger" or text.startswith("CREATE VIRTUAL TABLE"):
+                raise BundleError("coverage.sqlite has triggers or virtual tables")
+            if name in _COVERAGE_TABLES:
+                if kind != "table" or not text.startswith("CREATE TABLE"):
+                    raise BundleError("coverage.sqlite does not have the schema-v7 tables")
+                present.add(name)
+        if not {"file", "context"} <= present:
+            raise BundleError("coverage.sqlite does not have the schema-v7 tables")
+        return present
 
     def _add_cells(self, n: int) -> None:
         self.cells += n

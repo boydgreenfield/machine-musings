@@ -95,15 +95,22 @@ async def index() -> str:
     )
 
 
-FORWARDING_HEADERS = frozenset({"forwarded", "via", "x-real-ip", "true-client-ip", "cf-connecting-ip"})
+FORWARDING_HEADERS = frozenset({"via", "true-client-ip", "cf-connecting-ip"})
 """Headers a proxy or tunnel adds; their presence means the caller is not the local operator."""
+
+FORWARDING_HEADER_PARTS = ("forwarded", "client-ip", "real-ip", "proxy")
+"""Any header whose name contains one of these (``Forwarded``, ``X-Forwarded-For``,
+``X-Original-Forwarded-For``, ``X-Client-IP``, ``Fastly-Client-IP``, ``X-Cluster-Client-IP``,
+``X-Real-IP``, ``X-ProxyUser-Ip``, ...) is a proxy's too: proxies invent new names, so the check
+matches the families rather than a list."""
 
 
 def _forwarded() -> bool:
-    return any(
-        name.lower() in FORWARDING_HEADERS or name.lower().startswith("x-forwarded-")
-        for name, _value in request.headers.items()
-    )
+    for name, _value in request.headers.items():
+        lowered = name.lower()
+        if lowered in FORWARDING_HEADERS or any(part in lowered for part in FORWARDING_HEADER_PARTS):
+            return True
+    return False
 
 
 def _admin_session() -> bool:

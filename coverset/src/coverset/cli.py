@@ -52,10 +52,13 @@ def cli() -> None:
 @cli.command("init-db")
 def init_db_command() -> None:
     """Create the data directory and migrate the control-plane database to the latest revision."""
+    from coverset.config import secure_data_dirs
     from coverset.db.session import init_db
 
     settings = load_settings()
+    secure_data_dirs(settings)
     asyncio.run(init_db(settings))
+    secure_data_dirs(settings)  # the database file init_db just created
     url = make_url(settings.database_url).render_as_string(hide_password=True)
     click.echo(f"database ready: {url}")
 

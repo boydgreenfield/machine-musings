@@ -15,6 +15,7 @@ failed and all unknown kids during a fetch outage, for :data:`NEGATIVE_CACHE_S`.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -35,6 +36,8 @@ NEGATIVE_CACHE_S = 30.0
 KNOWN_KEY_TTL_S = 3600.0
 MAX_CACHED_KIDS = 256
 MAX_KID_CHARS = 256
+MAX_ID_CLAIM = 2**63 - 1
+_ID_CLAIM_RE = re.compile(r"[0-9]{1,19}")
 
 
 class OidcError(Exception):
@@ -134,13 +137,17 @@ def _jwk_client(jwks_url: str) -> GuardedJwkClient:
 
 
 def _int_claim(claims: dict[str, Any], name: str) -> int:
+    """A numeric id claim (GitHub sends them as strings): ASCII digits only, at most 2**63 - 1.
+
+    ``int(str(value))`` would also accept Unicode digits (``"٤٢"``), whitespace and ``_``.
+    """
     value = claims.get(name)
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int | str):
         raise OidcError(f"claim {name} is not numeric")
-    try:
-        return int(str(value))
-    except ValueError:
-        raise OidcError(f"claim {name} is not numeric") from None
+    text = str(value)
+    if not _ID_CLAIM_RE.fullmatch(text) or int(text) > MAX_ID_CLAIM:
+        raise OidcError(f"claim {name} is not numeric")
+    return int(text)
 
 
 def verify_actions_oidc(

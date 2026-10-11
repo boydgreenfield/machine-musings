@@ -42,7 +42,7 @@ from coverset.forge.base import (
     check_full_name,
     check_sha,
 )
-from coverset.forge.github_events import parse_github_event
+from coverset.forge.github_events import ALLOWED_EVENTS, parse_github_event
 from coverset.forge.signing import verify_signature, webhook_secret
 from coverset.forge.throttle import TokenBucket
 from coverset.logging import register_secret
@@ -122,6 +122,7 @@ class GitHubForge:
     """The GitHub adapter (see the module docstring). Construct with :meth:`from_settings`."""
 
     name = "github"
+    allowed_events = ALLOWED_EVENTS
 
     def __init__(
         self,
@@ -259,7 +260,7 @@ class GitHubForge:
         """App mode: a fresh installation token scoped to ``repo`` with ``contents: read``.
 
         Token mode returns the configured token. Either way the token is registered for log
-        redaction and must only be used through :meth:`MirrorCredentials.git_config_args`.
+        redaction and reaches git only through :func:`coverset.orchestrator.repos.credential_config`.
         """
         if self.mode == "token":
             assert self._token is not None

@@ -228,6 +228,7 @@ def test_test_ids_select_by_nodeid_prefix() -> None:
     assert (result.status, result.covering_test_ids) == ("satisfied", ["tests/test_allocate.py::test_sum[1]"])
 
 
+@pytest.mark.security
 def test_review_entries_are_advisory(invariants: dict[str, Invariant]) -> None:
     signup = invariants["signup_rejects_existing_domain"]
     flagged = ReviewEvidence(ALLOC.body_hash, "violated", "bob@eng.acme.com is allowed", "fixture")

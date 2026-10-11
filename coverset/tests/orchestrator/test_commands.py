@@ -53,6 +53,7 @@ def test_invariants_check(runner: CliRunner, tmp_path: Path) -> None:
     assert "no invariants file" in runner.invoke(cli, ["invariants", "check", "--repo", str(empty)]).output
 
 
+@pytest.mark.security
 def test_facts_query_allows_only_select(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["facts", "query", "SELECT 1 AS one"])
     assert result.exit_code == 0 and "one" in result.output and "(1 row)" in result.output

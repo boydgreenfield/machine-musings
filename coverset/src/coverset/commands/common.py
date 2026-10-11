@@ -13,7 +13,7 @@ import click
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coverset.config import Settings
+from coverset.config import Settings, secure_data_dirs
 from coverset.db.models import Repo
 from coverset.db.session import init_db
 
@@ -85,8 +85,11 @@ async def _call[T](factory: Callable[[], Awaitable[T]], received: list[int]) -> 
 
 
 async def prepare_db(settings: Settings) -> None:
-    """Create the data directory and migrate the database (idempotent)."""
+    """Create the data directory (private: :func:`coverset.config.secure_data_dirs`) and migrate the
+    database (idempotent)."""
+    secure_data_dirs(settings)
     await init_db(settings)
+    secure_data_dirs(settings)
 
 
 async def find_repo(session: AsyncSession, spec: str | None) -> Repo:

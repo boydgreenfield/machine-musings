@@ -127,6 +127,7 @@ def test_fallback_model_is_priced_and_noted(live_settings: Settings) -> None:
     assert any("fallback model claude-opus-4-8" in note for note in outcome.notes)
 
 
+@pytest.mark.security
 def test_system_prompt_is_cacheable_and_states_the_untrusted_data_rule() -> None:
     assert len(SYSTEM_RUBRIC) > 3_000  # comfortably above the 512-token minimum cacheable prefix
     assert "untrusted data" in SYSTEM_RUBRIC
@@ -349,6 +350,7 @@ def test_missing_key_is_a_config_error(tmp_path: Path) -> None:
 # --- logging hygiene ---------------------------------------------------------------------------
 
 
+@pytest.mark.security
 def test_logs_never_contain_the_bundle_or_the_key(
     live_settings: Settings, email_bundle: BundleFactory, caplog: pytest.LogCaptureFixture
 ) -> None:

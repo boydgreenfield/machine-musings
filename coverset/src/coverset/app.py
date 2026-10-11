@@ -10,7 +10,7 @@ from pathlib import Path
 from quart import Quart, Response, jsonify, request
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
-from coverset.config import Settings, get_settings
+from coverset.config import Settings, get_settings, secure_data_dirs
 from coverset.db.session import Database, init_db
 from coverset.logging import configure_logging
 from coverset.web import register_blueprints
@@ -49,6 +49,7 @@ def create_app(settings: Settings | None = None) -> Quart:
     """
     settings = settings or get_settings()
     configure_logging(settings)
+    secure_data_dirs(settings)
 
     app = Quart("coverset", static_folder="web/static", template_folder="web/templates")
     app.extensions["settings"] = settings
@@ -67,6 +68,7 @@ def create_app(settings: Settings | None = None) -> Quart:
     async def _startup() -> None:
         if not settings.skip_migrations:
             await init_db(settings, database.engine)
+            secure_data_dirs(settings)  # the database file the migration may just have created
 
     @app.after_serving
     async def _shutdown() -> None:

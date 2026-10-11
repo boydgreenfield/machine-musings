@@ -176,6 +176,7 @@ def test_untested_invariant_is_a_gap() -> None:
 HOSTILE = "<script>alert(1)</script> **bold** [link](javascript:alert(1)) ![img](http://x/i.png) @octocat | pipe & <!-- coverset:sticky -->"
 
 
+@pytest.mark.security
 def test_hostile_text_renders_literally() -> None:
     summary = VerdictSummary(
         conclusion="failure",
@@ -261,6 +262,7 @@ def test_safe_url() -> None:
         assert safe_url(bad) is None
 
 
+@pytest.mark.security
 def test_commit_state_mapping() -> None:
     """Only success is green: a neutral (errored, no tests, budget) run must not satisfy a required
     status in token mode."""
@@ -305,6 +307,7 @@ async def test_post_verdict_creates_check_and_comment_then_updates_in_place() ->
     assert forge.checks[posted.check_id].conclusion == "success"
 
 
+@pytest.mark.security
 async def test_post_verdict_ignores_comments_it_did_not_write() -> None:
     forge = FakeForge()
     foreign = forge.add_foreign_comment(REPO, 1, f"looks like coverset {STICKY_MARKER}")

@@ -243,15 +243,38 @@ def test_connect_can_scope_to_a_list_of_runs(facts: FactsStore) -> None:
         facts.connect(run_ids=["run-2"])
 
 
-def test_connection_cannot_reach_other_files(facts: FactsStore) -> None:
+@pytest.mark.security
+def test_connection_has_external_access_off_and_locked(facts: FactsStore) -> None:
+    """Pins ``enable_external_access = false`` (and the lock): without it /etc/hosts is readable."""
     con = facts.connect()
     try:
+        assert con.execute("SELECT current_setting('enable_external_access')").fetchone() == (False,)
         with pytest.raises(duckdb.Error):
             con.execute("SELECT * FROM read_csv('/etc/hosts')")
         with pytest.raises(duckdb.Error):
             con.execute("SET enable_external_access = true")
+        with pytest.raises(duckdb.Error):
+            con.execute("SET allowed_directories = ['/']")
     finally:
         con.close()
+
+
+@pytest.mark.security
+def test_connection_reads_files_only_inside_the_facts_directory(facts: FactsStore) -> None:
+    """Pins ``allowed_directories``: the facts directory is readable, its next-door sibling is not."""
+    root = facts.root.resolve()
+    (root / "probe.csv").write_text("a,b\n1,2\n")
+    sibling = root.parent / (root.name + "-sibling")
+    sibling.mkdir()
+    (sibling / "probe.csv").write_text("a,b\n1,2\n")
+    con = facts.connect()
+    try:
+        assert con.execute(f"SELECT count(*) FROM read_csv('{root}/probe.csv')").fetchone() == (1,)
+        with pytest.raises(duckdb.Error):
+            con.execute(f"SELECT * FROM read_csv('{sibling}/probe.csv')")
+    finally:
+        con.close()
+        (root / "probe.csv").unlink()
 
 
 def test_store_layout_and_validation(facts: FactsStore, tmp_path: Path) -> None:

@@ -95,6 +95,7 @@ def parse_sse(text: str) -> list[tuple[int, str, dict[str, Any]]]:
 # -- what anonymous callers see -------------------------------------------------------------------
 
 
+@pytest.mark.security
 async def test_public_events_are_filtered_to_the_addendum_shapes(
     oidc_app: Quart, client: Client, db: Database, admin_token: str
 ) -> None:
@@ -274,6 +275,7 @@ async def test_bad_sequence_numbers_are_400(
 # -- admin approval route ---------------------------------------------------------------------------
 
 
+@pytest.mark.security
 async def test_admin_can_approve_an_awaiting_run(
     oidc_app: Quart, client: Client, db: Database, admin_token: str
 ) -> None:
@@ -354,6 +356,7 @@ def jwks_server(rsa_key: rsa.RSAPrivateKey) -> Iterator[tuple[str, _Jwks]]:
         server.server_close()
 
 
+@pytest.mark.security
 def test_guarded_client_caches_unknown_kids_and_outages(
     jwks_server: tuple[str, _Jwks], rsa_key: rsa.RSAPrivateKey
 ) -> None:

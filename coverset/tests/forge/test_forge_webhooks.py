@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -76,6 +77,7 @@ async def test_bad_signature_is_403_without_echo(client: Client, db: Database, f
     assert await count(db, WebhookDelivery) == 0
 
 
+@pytest.mark.security
 async def test_missing_signature_is_403(client: Client, db: Database, fake_forge: FakeForge) -> None:
     headers, body = load_fixture("pr_opened")
     del headers["X-Hub-Signature-256"]
@@ -162,6 +164,22 @@ async def test_unknown_event_is_recorded_and_ignored(
 
 
 @pytest.mark.security
+async def test_the_allowlist_is_the_adapters_own(client: Client, db: Database, fake_forge: FakeForge) -> None:
+    from coverset.forge.github import GitHubForge
+    from coverset.forge.github_events import ALLOWED_EVENTS
+
+    assert GitHubForge.allowed_events == ALLOWED_EVENTS and FakeForge.allowed_events == ALLOWED_EVENTS
+    fake_forge.allowed_events = frozenset({"ping"})
+    response = await post_fixture(client, "pr_opened")
+    assert response.status_code == 202
+    assert await response.get_json() == {"status": "ignored_event", "reason": "event not in allowlist"}
+    async with db.session() as session:
+        delivery = await session.scalar(select(WebhookDelivery))
+        assert delivery is not None and delivery.status == "ignored" and delivery.payload is None
+    assert await count(db, Run) == 0
+
+
+@pytest.mark.security
 async def test_ping_is_ignored(client: Client, db: Database, fake_forge: FakeForge) -> None:
     response = await post_fixture(client, "ping")
     assert response.status_code == 202 and (await response.get_json())["reason"] == "ping"
@@ -183,6 +201,77 @@ async def test_malformed_payload_is_400(client: Client, db: Database, fake_forge
 
 
 @pytest.mark.security
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p["pull_request"].update(number=2**70),
+        lambda p: p.update(installation={"id": 2**70}),
+        lambda p: p["repository"]["owner"].update(id=2**70),
+        lambda p: p["pull_request"]["head"].update(ref="--upload-pack=touch /tmp/pwned"),
+        lambda p: p["repository"].update(default_branch="x" * 100_000),
+    ],
+    ids=["pr-number-2^70", "installation-2^70", "owner-2^70", "dash-head-ref", "huge-default-branch"],
+)
+async def test_out_of_range_ids_and_bad_refs_are_400_and_recorded(  # type: ignore[no-untyped-def]
+    client: Client, db: Database, fake_forge: FakeForge, mutate
+) -> None:
+    headers, body = load_fixture("pr_opened")
+    payload = json.loads(body)
+    mutate(payload)
+    raw = json.dumps(payload).encode()
+    headers["X-Hub-Signature-256"] = sign_body(TEST_WEBHOOK_SECRET, raw)
+    response = await client.post("/webhooks/github", data=raw, headers=headers)
+    assert response.status_code == 400 and await response.get_json() == {"error": "invalid_payload"}
+    async with db.session() as session:
+        delivery = await session.scalar(select(WebhookDelivery))
+        assert delivery is not None and delivery.status == "error"
+    assert await count(db, Run) == 0
+    assert await count(db, Repo) == 0
+    # GitHub's redelivery of the same body is now a duplicate, not another 500.
+    again = await client.post("/webhooks/github", data=raw, headers=headers)
+    assert again.status_code == 200
+
+
+@pytest.mark.security
+async def test_payload_clone_urls_never_reach_the_mirror(
+    client: Client, db: Database, fake_forge: FakeForge, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coverset.orchestrator import repos
+
+    evil = "https://evil.example/x.git"
+    headers, body = load_fixture("pr_opened")
+    payload = json.loads(body)
+    for side in (
+        payload["repository"],
+        payload["pull_request"]["head"]["repo"],
+        payload["pull_request"]["base"]["repo"],
+    ):
+        side.update(
+            clone_url=evil, ssh_url="git@evil.example:x.git", git_url="git://evil.example/x", mirror_url=evil
+        )
+    raw = json.dumps(payload).encode()
+    headers["X-Hub-Signature-256"] = sign_body(TEST_WEBHOOK_SECRET, raw)
+    assert (await client.post("/webhooks/github", data=raw, headers=headers)).status_code == 202
+    async with db.session() as session:
+        repo = await session.scalar(select(Repo))
+    assert repo is not None and "evil" not in json.dumps(repo.settings_json or {})
+    calls: list[list[str]] = []
+
+    def fake_git(args: list[str], **_: object) -> bytes:
+        calls.append(args)
+        target = Path(args[-1])
+        target.mkdir(parents=True)
+        (target / "HEAD").write_text("ref: refs/heads/main\n")
+        return b""
+
+    monkeypatch.setattr(repos, "_git", fake_git)
+    repos.ensure_mirror(settings, None, repo)
+    (clone,) = calls
+    assert "https://github.com/coverset-demo/ledger.git" in clone
+    assert not any("evil" in arg for arg in clone)
+
+
+@pytest.mark.security
 async def test_bad_delivery_id_is_400(client: Client, fake_forge: FakeForge) -> None:
     response = await post_fixture(client, "pr_opened", **{"X-GitHub-Delivery": "../../etc/passwd"})
     assert response.status_code == 400
@@ -195,6 +284,7 @@ async def test_unknown_forge_route_is_404(client: Client, fake_forge: FakeForge)
     assert (await client.post("/webhooks/fake", data=body, headers=headers)).status_code == 202
 
 
+@pytest.mark.security
 async def test_fork_pr_gets_the_approval_check(
     app: Quart, client: Client, db: Database, fake_forge: FakeForge
 ) -> None:

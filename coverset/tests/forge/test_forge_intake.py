@@ -438,6 +438,7 @@ async def test_intake_integrity_errors_are_duplicates_only_when_the_delivery_exi
     assert (result.status, result.reason) == ("duplicate", "duplicate delivery")
 
 
+@pytest.mark.security
 async def test_body_digest_dedupes_a_replay_under_a_new_guid(db: Database, settings: Settings) -> None:
     first = event_from("check_run_rerequested")
     second = event_from("check_run_rerequested")
@@ -466,6 +467,7 @@ async def test_untrusted_policies(db: Database, settings: Settings) -> None:
 
 
 @pytest.mark.parametrize("association", ["CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"])
+@pytest.mark.security
 async def test_non_member_authors_are_untrusted_even_without_a_fork(
     db: Database, settings: Settings, association: str
 ) -> None:
@@ -514,6 +516,7 @@ async def test_push_elsewhere_is_ignored(db: Database, settings: Settings) -> No
         assert delivery is not None and delivery.status == "ignored"
 
 
+@pytest.mark.security
 async def test_other_owners_create_nothing(db: Database, settings: Settings) -> None:
     def foreign(payload: dict[str, Any]) -> None:
         payload["repository"]["full_name"] = "someone-else/ledger"

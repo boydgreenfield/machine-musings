@@ -136,6 +136,7 @@ async def test_a_failing_baseline_still_resnapshots_but_cli_runs_get_no_pool(
     assert pooling.fills == [], "without a maintainer (CLI runs) nothing fills a pool"
 
 
+@pytest.mark.security
 async def test_pr_untrusted_and_other_branch_runs_never_snapshot(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int, script: Script, pooling: PoolingFake
 ) -> None:
@@ -154,6 +155,7 @@ async def test_pr_untrusted_and_other_branch_runs_never_snapshot(
     assert pooling.snapshots == [] and pooling.fills == [] and not ctx.background
 
 
+@pytest.mark.security
 async def test_a_baseline_of_a_superseded_head_does_not_snapshot(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int, script: Script, pooling: PoolingFake
 ) -> None:

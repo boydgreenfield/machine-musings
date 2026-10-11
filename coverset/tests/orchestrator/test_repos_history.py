@@ -72,13 +72,18 @@ async def test_mirror_clone_refresh_and_git_helpers(
         resolve_commit(mirror, "--upload-pack=evil")
 
 
+@pytest.mark.security
 def test_forge_mirror_credentials_stay_out_of_urls_and_config(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, tmp_path: Path
 ) -> None:
     calls: list[list[str]] = []
+    envs: list[dict[str, str]] = []
 
-    def fake_git(args: list[str], *, timeout: float = 0, secret_args: int = 0) -> bytes:
+    def fake_git(
+        args: list[str], *, timeout: float = 0, secret_args: int = 0, extra_env: dict[str, str] | None = None
+    ) -> bytes:
         calls.append(args)
+        envs.append(extra_env or {})
         if "clone" in args:
             target = Path(args[-1])
             target.mkdir(parents=True)
@@ -92,10 +97,73 @@ def test_forge_mirror_credentials_stay_out_of_urls_and_config(
     mirror = ensure_mirror(settings, None, row, credentials=credentials)
     ensure_mirror(settings, None, row, credentials=credentials)
     clone, fetch = calls
-    assert clone[0] == "-c" and clone[1].startswith("http.extraHeader=Authorization: Basic ")
-    assert "https://github.com/o/r.git" in clone and all("ghs_" not in a for a in clone if "://" in a)
-    assert fetch[0] == "-c" and "fetch" in fetch
+    header = credentials.http_extra_header
+    for args, env in zip(calls, envs, strict=True):
+        # the header (and so the token) is never on git's command line, where ps shows it
+        assert all(header not in a and "extraHeader" not in a and "ghs_" not in a for a in args)
+        assert env == {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": header,
+        }
+    assert clone[0] == "clone" and "https://github.com/o/r.git" in clone
+    assert "fetch" in fetch
     assert "ghs_" not in (mirror / "config").read_text()
+
+
+@pytest.mark.security
+def test_git_gets_the_credentials_from_its_environment_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end through ``_git``: argv holds no header, and git itself reads it from the env."""
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    real_run = repos.subprocess.run
+
+    def recording_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append((list(argv), dict(kwargs.get("env") or {})))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(repos.subprocess, "run", recording_run)
+    credentials = MirrorCredentials(token="ghs_" + "q" * 40)
+    args, env = repos.credential_config(credentials)
+    if repos.git_version() < repos.GIT_CONFIG_ENV_MIN_VERSION:
+        pytest.skip("git older than 2.31 has no GIT_CONFIG_COUNT")
+    assert args == []
+    out = repos._git([*args, "config", "--get", "http.extraHeader"], extra_env=env)
+    assert out.decode().strip() == credentials.http_extra_header
+    argv, child_env = seen[-1]
+    assert all("Authorization" not in a and "ghs_" not in a for a in argv)
+    assert child_env["GIT_CONFIG_VALUE_0"] == credentials.http_extra_header
+
+
+@pytest.mark.security
+def test_old_git_falls_back_to_the_command_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repos, "git_version", lambda: (2, 30))
+    args, env = repos.credential_config(MirrorCredentials(token="ghs_" + "q" * 40))
+    assert args[0] == "-c" and args[1].startswith("http.extraHeader=Authorization: Basic ") and env == {}
+    assert repos.credential_config(None) == ([], {})
+
+
+@pytest.mark.security
+def test_git_env_is_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "COVERSET_GITHUB_TOKEN",
+        "COVERSET_ADMIN_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN",
+        "GIT_SSH_COMMAND",
+        "GIT_CONFIG_COUNT",
+        "SSH_AUTH_SOCK",
+        "SOME_OTHER_SECRET",
+    ):
+        monkeypatch.setenv(name, "leak-me")
+    monkeypatch.setenv("LC_CTYPE", "C.UTF-8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    env = repos.git_env()
+    assert "leak-me" not in env.values()
+    assert env["PATH"] and env["LC_CTYPE"] == "C.UTF-8" and env["HTTPS_PROXY"].startswith("http://proxy")
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_TERMINAL_PROMPT"] == "0"
 
 
 async def test_update_test_stats_windows_and_flaky(
@@ -163,6 +231,7 @@ async def test_register_tests_finds_existing_rows(ctx: OrchestratorContext, repo
     assert first["t.py::a"].id == again["t.py::a"].id and count == 2
 
 
+@pytest.mark.security
 async def test_event_sink_batches_and_redacts(ctx: OrchestratorContext, repo: TestRepo, repo_id: int) -> None:
     async with ctx.db.session() as session:
         run = Run(

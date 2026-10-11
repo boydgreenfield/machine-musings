@@ -55,8 +55,10 @@ There are two ways to connect a repository, and they combine:
    always needs an admin session (sign in with `COVERSET_ADMIN_TOKEN`); in open mode remove the old
    key and `.env` entries yourself instead. Without an admin session the callback and finish steps
    are accepted only from the local operator: a loopback client address, a loopback `Host` and no
-   `Forwarded`/`X-Forwarded-*`/`Via` headers. A tunnel also connects from 127.0.0.1, so the address
-   alone proves nothing. A wrong or reused `state` is a 400, and a code is used once.
+   proxy headers (`Via`, `True-Client-IP`, `CF-Connecting-IP`, or any header whose name contains
+   `forwarded`, `client-ip`, `real-ip` or `proxy`, such as `X-Forwarded-For`, `X-Client-IP`,
+   `Fastly-Client-IP` or `X-Original-Forwarded-For`). A tunnel also connects from 127.0.0.1, so the
+   address alone proves nothing. A wrong or reused `state` is a 400, and a code is used once.
 5. Restart `coverset serve`, then install the App on the repositories coverset should watch
    (the success page links to `https://github.com/apps/<slug>/installations/new`).
 
@@ -104,7 +106,7 @@ Without an App, coverset can post a commit status and the sticky comment:
 1. Create a fine-grained personal access token limited to the watched repositories with
    *Commit statuses: read and write*, *Pull requests: read and write*, *Issues: read and write* and
    *Contents: read*.
-2. Set `COVERSET_GITHUB_TOKEN`, `COVERSET_ALLOWED_OWNERS` and a random
+2. Set `COVERSET_GITHUB_TOKEN` (at least 16 characters), `COVERSET_ALLOWED_OWNERS` and a random
    `COVERSET_GITHUB_WEBHOOK_SECRET` of at least 16 characters.
 3. Add a repository webhook (Settings → Webhooks): payload URL `COVERSET_PUBLIC_URL/webhooks/github`,
    content type `application/json`, the same secret, events *Pull requests* and *Pushes*.
@@ -143,11 +145,16 @@ fake forge, `POST /webhooks/fake` is accepted as well as `/webhooks/github`.
    delivery could otherwise resend it under a fresh GUID. (Two genuinely different deliveries are
    never byte-identical in practice; a double click on a check button may be, and is then
    handled once.)
-5. `X-GitHub-Event` outside `pull_request`, `push`, `check_suite`, `check_run`, `installation`,
-   `installation_repositories`, `repository`, `ping` is recorded and answered **202**
-   `ignored_event`.
-6. The payload is parsed (every SHA must match `^[0-9a-f]{40}$`, repositories are identified by
-   `repository.id`, `clone_url`/`ssh_url` are never read; malformed ⇒ **400**) and handed to intake.
+5. `X-GitHub-Event` outside the adapter's allowlist (`pull_request`, `push`, `check_suite`,
+   `check_run`, `installation`, `installation_repositories`, `repository`, `ping`; each forge
+   adapter carries its own `allowed_events`) is recorded and answered **202** `ignored_event`.
+6. The payload is parsed and handed to intake. Every SHA must match `^[0-9a-f]{40}$`; every numeric
+   id (`repository.id`, `repository.owner.id`, `installation.id`, `pull_request.number`, ...) must
+   be an integer in `0..2**63-1` (a PR number at least 1), so nothing overflows a database column;
+   `repository.default_branch`, `pull_request.head.ref` and `base.ref` must be at most 255
+   characters, pass `git check-ref-format --allow-onelevel`'s rules and not start with `-`;
+   repositories are identified by `repository.id`, and `clone_url`/`ssh_url` are never read.
+   A malformed payload is **400**, recorded as `error`, so GitHub's redelivery of it is a duplicate.
    The answer is **202** with `{"status": ..., "run_id": ...}`; forge calls (the approval check,
    the approver's permission check) and the run-queue hand-off happen after the database commit,
    so GitHub's 10 s budget is never at risk.

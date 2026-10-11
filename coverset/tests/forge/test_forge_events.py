@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from types import ModuleType
 
 import pytest
@@ -11,7 +12,7 @@ from forge_helpers import DEMO_OWNER_ID, DEMO_REPO_ID, FIXTURE_NAMES, ROOT, load
 from pydantic import SecretStr
 
 from coverset.config import Settings
-from coverset.forge.base import ForgeEventError, MirrorCredentials, PullRef
+from coverset.forge.base import MAX_REF_CHARS, ForgeEventError, MirrorCredentials, PullRef, check_ref
 from coverset.forge.github_events import ALLOWED_EVENTS, decode_payload, parse_github_event
 from coverset.forge.signing import TEST_WEBHOOK_SECRET, sign_body, verify_signature, webhook_secret
 
@@ -20,6 +21,7 @@ GITHUB_VECTOR_PAYLOAD = b"Hello, World!"
 GITHUB_VECTOR_SIGNATURE = "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
 
 
+@pytest.mark.security
 def test_github_published_hmac_vector() -> None:
     assert sign_body(GITHUB_VECTOR_SECRET, GITHUB_VECTOR_PAYLOAD) == GITHUB_VECTOR_SIGNATURE
     headers = {"x-hub-signature-256": GITHUB_VECTOR_SIGNATURE}
@@ -57,6 +59,7 @@ def test_no_secret_never_verifies() -> None:
     assert not verify_signature(None, {"X-Hub-Signature-256": signature}, b"{}")
 
 
+@pytest.mark.security
 def test_secret_policy() -> None:
     assert webhook_secret(Settings.for_tests()) == (None, "unset")
     assert webhook_secret(Settings.for_tests(github_webhook_secret=TEST_WEBHOOK_SECRET)) == (
@@ -125,6 +128,7 @@ def test_parse_pr_synchronize() -> None:
     assert event.kind == "pr_sync" and event.pull is not None and event.pull.number == 2
 
 
+@pytest.mark.security
 def test_parse_fork_pr_is_untrusted() -> None:
     event = parse_github_event(*load_fixture("pr_opened_fork"))
     assert event.kind == "pr_opened" and event.pull is not None
@@ -187,9 +191,137 @@ def test_branch_creation_push_has_no_base() -> None:
     ],
     ids=["ref-name", "short", "uppercase", "path-name", "string-id", "missing-pr"],
 )
+@pytest.mark.security
 def test_malformed_pull_requests_raise(mutate) -> None:  # type: ignore[no-untyped-def]
     with pytest.raises(ForgeEventError):
         parse_github_event(*_mutated("pr_opened", mutate))
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p["pull_request"].update(number=2**70),
+        lambda p: p["pull_request"].update(number=2**63),
+        lambda p: p["pull_request"].update(number=-1),
+        lambda p: p["pull_request"].update(number=0),
+        lambda p: p["repository"].update(id=2**64),
+        lambda p: p["repository"].update(id=-5),
+        lambda p: p["repository"]["owner"].update(id=2**70),
+        lambda p: p.update(installation={"id": 2**70}),
+        lambda p: p["pull_request"]["head"]["repo"].update(id=2**70),
+    ],
+    ids=[
+        "pr-2^70",
+        "pr-2^63",
+        "pr-negative",
+        "pr-zero",
+        "repo-2^64",
+        "repo-negative",
+        "owner",
+        "installation",
+        "head-repo",
+    ],
+)
+def test_ids_outside_int64_raise(mutate) -> None:  # type: ignore[no-untyped-def]
+    with pytest.raises(ForgeEventError, match="out of range"):
+        parse_github_event(*_mutated("pr_opened", mutate))
+
+
+@pytest.mark.security
+def test_largest_int64_ids_are_accepted() -> None:
+    def mutate(p: dict) -> None:  # type: ignore[type-arg]
+        p["pull_request"]["number"] = 2**63 - 1
+        p["repository"]["owner"]["id"] = 2**63 - 1
+
+    event = parse_github_event(*_mutated("pr_opened", mutate))
+    assert event.pull is not None and event.pull.number == 2**63 - 1
+    assert event.repo is not None and event.repo.owner_id == 2**63 - 1
+
+
+BAD_REFS = [
+    "--upload-pack=touch /tmp/pwned",
+    "-c",
+    "x" * 256,
+    "a..b",
+    "a b",
+    "a~1",
+    "a^",
+    "a:b",
+    "a?",
+    "a*",
+    "a[b",
+    "a\\b",
+    "a@{u}",
+    "@",
+    "/a",
+    "a/",
+    "a//b",
+    "a.",
+    ".hidden",
+    "a/.b",
+    "x.lock",
+    "a/x.lock/b",
+    "a\x00b",
+    "a\x7fb",
+    "a\nb",
+    "",
+    "\ud800",
+]
+GOOD_REFS = [
+    "main",
+    "feature/x",
+    "refs/heads/--x",
+    "release-1.2",
+    "a.b",
+    "a@b",
+    "é",
+    "x" * 255,
+]
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("ref", BAD_REFS)
+@pytest.mark.parametrize("where", ["default_branch", "head", "base"])
+def test_bad_refs_in_payloads_raise(ref: str, where: str) -> None:
+    def mutate(p: dict) -> None:  # type: ignore[type-arg]
+        if where == "default_branch":
+            p["repository"]["default_branch"] = ref
+        else:
+            p["pull_request"][where]["ref"] = ref
+
+    with pytest.raises(ForgeEventError):
+        parse_github_event(*_mutated("pr_opened", mutate))
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("ref", GOOD_REFS)
+def test_good_refs_in_payloads_parse(ref: str) -> None:
+    def mutate(p: dict) -> None:  # type: ignore[type-arg]
+        p["repository"]["default_branch"] = ref
+        p["pull_request"]["head"]["ref"] = ref
+
+    event = parse_github_event(*_mutated("pr_opened", mutate))
+    assert event.repo is not None and event.repo.default_branch == ref
+    assert event.pull is not None and event.pull.head_ref == ref
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    "ref", [r for r in BAD_REFS + GOOD_REFS if "\x00" not in r and "\ud800" not in r and r]
+)
+def test_check_ref_agrees_with_git_check_ref_format(ref: str) -> None:
+    proc = subprocess.run(
+        ["git", "check-ref-format", "--allow-onelevel", ref], capture_output=True, check=False
+    )
+    git_ok = proc.returncode == 0 and not ref.startswith("-") and len(ref) <= MAX_REF_CHARS
+    try:
+        check_ref(ref, "ref")
+    except ForgeEventError:
+        ours = False
+    else:
+        ours = True
+    assert ours == git_ok
 
 
 def test_pull_request_closed_and_draft() -> None:
@@ -230,6 +362,7 @@ def test_unknown_event_and_bad_delivery() -> None:
         parse_github_event(headers, b"[1, 2]")
 
 
+@pytest.mark.security
 def test_mirror_credentials_never_expose_the_token() -> None:
     credentials = MirrorCredentials("ghs_" + "x" * 40)
     assert "ghs_" not in repr(credentials)
@@ -238,6 +371,7 @@ def test_mirror_credentials_never_expose_the_token() -> None:
     assert "ghs_" not in args[1] and "x-access-token" not in args[1]
 
 
+@pytest.mark.security
 def test_deeply_nested_json_is_a_payload_error() -> None:
     with pytest.raises(ForgeEventError, match="nested too deeply"):
         decode_payload(b"[" * 100_000 + b"]" * 100_000)
@@ -261,6 +395,7 @@ def test_repository_events_are_allowed_and_parsed() -> None:
     assert event.kind == "repo_visibility" and event.repo is not None and event.repo.private is False
 
 
+@pytest.mark.security
 def test_composite_action_requires_a_pinned_package() -> None:
     yaml = pytest.importorskip("yaml")
     action = yaml.safe_load((ROOT / "src" / "coverset" / "forge" / "gha" / "action.yml").read_text())

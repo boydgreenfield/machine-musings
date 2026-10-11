@@ -150,6 +150,7 @@ async def test_no_capacity_is_a_plan_error(
     assert info.value.reason == "capacity"
 
 
+@pytest.mark.security
 def test_parse_collect_json_validates_items() -> None:
     raw = json.dumps(
         {

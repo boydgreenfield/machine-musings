@@ -20,6 +20,9 @@ route still learns about admin credentials: :func:`current_auth` is ``open``, ``
 some other bearer, such as a GitHub Actions OIDC token). Every view on a public route must authorize
 ``public`` callers itself: webhooks check their HMAC, and the ``/v1`` views verify the OIDC token
 and bind its ``repository_id`` to the requested repo or run. :func:`is_admin` tells the two apart.
+
+``POST /login`` accepts at most :data:`LOGIN_ATTEMPTS_PER_MINUTE` attempts per client address in any
+60 s window (429 with ``Retry-After`` beyond that), checked before the token is compared.
 """
 
 from __future__ import annotations
@@ -29,14 +32,27 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
-from quart import Blueprint, Response, g, jsonify, redirect, render_template_string, request, session
+from quart import (
+    Blueprint,
+    Response,
+    current_app,
+    g,
+    jsonify,
+    redirect,
+    render_template_string,
+    request,
+    session,
+)
 from werkzeug.exceptions import Forbidden, MisdirectedRequest, NotFound, Unauthorized
 
 from coverset.config import is_loopback_host
 from coverset.web.context import app_settings
+
+if TYPE_CHECKING:
+    from coverset.web.api import SlidingWindowLimiter
 
 AuthMethod = Literal["open", "bearer", "cookie", "public"]
 """How the current request was admitted (``public`` = a route that needs no auth)."""
@@ -49,6 +65,11 @@ CSRF_HEADER = "X-CSRF-Token"
 CSRF_FORM_FIELD = "csrf_token"
 LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 """Host names always accepted in open mode (``*.localhost`` names are accepted too)."""
+
+LOGIN_ATTEMPTS_PER_MINUTE = 20
+"""``POST /login`` attempts allowed per client address per minute (the admin token is 32+ characters,
+so this only blunts online guessing and log flooding)."""
+LOGIN_LIMITER_EXTENSION = "login_limiter"
 
 _SESSION_ADMIN = "admin"
 _SESSION_CSRF = "csrf"
@@ -272,6 +293,12 @@ async def login() -> Response | tuple[str | Response, int]:
     """
     if _expected_token() is None:
         raise NotFound()
+    retry_after = _login_limiter().hit(request.remote_addr or "unknown")
+    if retry_after is not None:
+        response = jsonify({"error": "rate_limited"})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(int(retry_after + 0.999))
+        return response
     if request.is_json:
         body = await request.get_json(silent=True)
         supplied = body.get("token") if isinstance(body, dict) else None
@@ -291,6 +318,17 @@ async def login() -> Response | tuple[str | Response, int]:
     if request.is_json:
         return jsonify({"ok": True, "csrf_token": token})
     return redirect(next_path, code=303)
+
+
+def _login_limiter() -> SlidingWindowLimiter:
+    from coverset.web.api import SlidingWindowLimiter
+
+    limiter = current_app.extensions.get(LOGIN_LIMITER_EXTENSION)
+    if limiter is None:
+        limiter = current_app.extensions[LOGIN_LIMITER_EXTENSION] = SlidingWindowLimiter(
+            LOGIN_ATTEMPTS_PER_MINUTE
+        )
+    return limiter
 
 
 @bp.post("/logout")

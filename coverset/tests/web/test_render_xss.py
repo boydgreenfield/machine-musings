@@ -25,6 +25,8 @@ from coverset.web.render.timeline import Milestone, OrderRow, render_gantt, rend
 from coverset.web.render.treemap import TreeItem, render_treemap
 from coverset.web.runstate import Block
 
+pytestmark = pytest.mark.security
+
 SCRIPT = "<script>alert(1)</script>"
 BREAKOUT = '"onmouseover="alert(1)'
 JS_URL = "javascript:alert(1)"

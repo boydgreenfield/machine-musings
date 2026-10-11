@@ -252,6 +252,7 @@ async def test_patch_report_and_facts(
     assert coverage.complete and coverage.covered == 1
 
 
+@pytest.mark.security
 async def test_untrusted_local_run_is_skipped(ctx: OrchestratorContext, repo: TestRepo, repo_id: int) -> None:
     run_id = await create_run(
         ctx,

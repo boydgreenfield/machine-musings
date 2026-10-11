@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from quart.typing import TestClientProtocol as Client
 from web_helpers import Demo
 
@@ -85,6 +87,20 @@ async def test_replay_freezes_mid_run(client: Client, demo: Demo) -> None:
     final = int(re.search(r"<strong>(\d+)</strong>", heads[-1]).group(1))  # type: ignore[union-attr]
     assert 0 < final < 100
     assert 'data-key="finished"' not in [d for _, e, d in events if e == "timeline"][-1]
+
+
+@pytest.mark.security
+async def test_slow_replay_ends_after_the_stream_limit(
+    client: Client, demo: Demo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coverset.web import sse
+
+    monkeypatch.setattr(sse, "SSE_MAX_STREAM_S", 0.3)
+    started = time.monotonic()
+    response = await client.get(f"/runs/{demo.pr1_run}/events?replay=1&speed=0.01")
+    events = frames(await response.get_data(as_text=True))
+    assert time.monotonic() - started < 5
+    assert events[-1][1] == "done" and 'data-replay="stopped"' in events[-1][2]
 
 
 async def test_runstate_blocks_from_events() -> None:

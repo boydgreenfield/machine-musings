@@ -33,6 +33,7 @@ def reviewer_view_size(bundle: ReviewBundle) -> int:
 # --- redaction --------------------------------------------------------------------------------
 
 
+@pytest.mark.security
 def test_token_in_a_test_body_is_redacted(email_bundle: BundleFactory) -> None:
     body = f'def test_with_token():\n    client = Client(token="{GITHUB_TOKEN}")\n    assert client\n'
     bundle = email_bundle(tests=[("tests/test_emailcheck.py::test_with_token", body)])
@@ -169,6 +170,7 @@ def test_size_cap_drops_oracle_notes_first(email_bundle: BundleFactory, tmp_path
     assert set(bundle.dropped) == {"oracle_notes"}
 
 
+@pytest.mark.security
 def test_size_cap_then_drops_extra_tests_before_touching_sources(
     email_bundle: BundleFactory, tmp_path
 ) -> None:
@@ -186,6 +188,7 @@ def test_size_cap_then_drops_extra_tests_before_touching_sources(
     assert fn.covering_test_count == 6  # the count still says how many tests ran the body
 
 
+@pytest.mark.security
 def test_size_cap_truncates_long_sources_last(email_bundle: BundleFactory, tmp_path) -> None:
     filler = "".join(f'    _note_{i} = "{"z" * 60}"\n' for i in range(150))
     long_source = demo_source(EMAIL_PATH).replace(
@@ -201,6 +204,7 @@ def test_size_cap_truncates_long_sources_last(email_bundle: BundleFactory, tmp_p
     assert fn.source.startswith("def validate_email")
 
 
+@pytest.mark.security
 def test_size_cap_drops_whole_functions_as_a_last_resort(email_bundle: BundleFactory, tmp_path) -> None:
     settings = Settings.for_tests(data_dir=tmp_path / "tiny", ai_max_bundle_chars=300)
     bundle = email_bundle(settings=settings)

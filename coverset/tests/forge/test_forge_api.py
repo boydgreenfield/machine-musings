@@ -59,6 +59,12 @@ def test_valid_token(rsa_key: rsa.RSAPrivateKey, jwk_client: StubJwkClient) -> N
         {"repository_owner_id": None},
         {"sub": None},
         {"repository_id": "not-a-number"},
+        {"repository_id": "\u0664\u0662\u0664\u0662\u0664\u0662"},
+        {"repository_owner_id": " 777"},
+        {"repository_id": "424_242"},
+        {"repository_id": str(2**63)},
+        {"repository_id": -1},
+        {"repository_id": 4.0},
     ],
     ids=[
         "wrong-aud",
@@ -69,6 +75,12 @@ def test_valid_token(rsa_key: rsa.RSAPrivateKey, jwk_client: StubJwkClient) -> N
         "no-owner-id",
         "no-sub",
         "bad-repo-id",
+        "arabic-indic-digits",
+        "padded-owner-id",
+        "underscored-id",
+        "id-beyond-int64",
+        "negative-id",
+        "float-id",
     ],
 )
 def test_rejected_claims(
@@ -77,6 +89,18 @@ def test_rejected_claims(
     token = sign_token(rsa_key, oidc_claims(AUDIENCE, **overrides))
     with pytest.raises(OidcError):
         verify_actions_oidc(token, audience=AUDIENCE, jwk_client=jwk_client)
+
+
+@pytest.mark.security
+def test_oversized_tokens_are_refused_before_parsing(jwk_client: StubJwkClient) -> None:
+    from coverset.forge.oidc import MAX_TOKEN_CHARS
+
+    assert MAX_TOKEN_CHARS == 16_384
+    with pytest.raises(OidcError, match="oversized"):
+        verify_actions_oidc("a" * (MAX_TOKEN_CHARS + 1), audience=AUDIENCE, jwk_client=jwk_client)
+    with pytest.raises(OidcError, match="malformed"):  # at the limit the token is parsed (and refused)
+        verify_actions_oidc("a" * MAX_TOKEN_CHARS, audience=AUDIENCE, jwk_client=jwk_client)
+    assert jwk_client.calls == 0
 
 
 @pytest.mark.security
@@ -89,6 +113,7 @@ def _b64(data: dict[str, Any]) -> str:
     return base64.urlsafe_b64encode(json.dumps(data, default=str).encode()).rstrip(b"=").decode()
 
 
+@pytest.mark.security
 def test_alg_none_rejected_before_key_lookup(jwk_client: StubJwkClient) -> None:
     claims = {
         k: (int(v.timestamp()) if isinstance(v, datetime) else v) for k, v in oidc_claims(AUDIENCE).items()

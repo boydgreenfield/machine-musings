@@ -243,6 +243,7 @@ def _visible(store: FactsStore) -> dict[str, list[dict]]:
     return {t: _rows(store, t) for t in ("test_lines", "tests_dim", "file_static", "call_shapes", "files")}
 
 
+@pytest.mark.security
 def test_a_rejected_bundle_changes_nothing_but_the_log(store: FactsStore, bundle: NeutralBundle) -> None:
     ctx = make_ctx()
     ingest_shard(store, ctx, bundle, 0)

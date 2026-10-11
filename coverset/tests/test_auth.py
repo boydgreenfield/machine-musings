@@ -207,6 +207,23 @@ async def test_bad_login_rejected(client: Client, admin_token: str) -> None:
 
 
 @pytest.mark.security
+async def test_login_attempts_are_rate_limited_per_client(client: Client, admin_token: str) -> None:
+    from coverset.web.auth import LOGIN_ATTEMPTS_PER_MINUTE
+
+    statuses = [
+        (await client.post("/login", json={"token": f"wrong-{i}"})).status_code
+        for i in range(LOGIN_ATTEMPTS_PER_MINUTE)
+    ]
+    assert set(statuses) == {401}
+    limited = await client.post("/login", json={"token": admin_token})
+    assert limited.status_code == 429 and int(limited.headers["Retry-After"]) >= 1
+    assert await limited.get_json() == {"error": "rate_limited"}
+    assert (await client.post("/login", form={"token": admin_token})).status_code == 429
+    # other routes and bearer callers are unaffected
+    assert (await client.get("/", headers=bearer(admin_token))).status_code == 200
+
+
+@pytest.mark.security
 async def test_cookie_write_needs_csrf_header(client: Client, admin_token: str) -> None:
     csrf = await login(client, admin_token)
     assert (await client.post("/logout")).status_code == 403
@@ -281,6 +298,7 @@ class TestOpenMode:
         assert (await client.post("/login", json={"token": admin_token})).status_code == 404
 
     @pytest.mark.parametrize("host", ["attacker.example", "attacker.example:8000", "10.0.0.5:8000"])
+    @pytest.mark.security
     async def test_foreign_host_rejected(self, client: Client, host: str) -> None:
         """A page that rebinds its DNS name to 127.0.0.1 must not reach coverset."""
         assert (await client.get("/", headers={"Host": host})).status_code == 421
@@ -308,6 +326,7 @@ class TestOpenMode:
         assert (await client.get("/healthz", headers={"Host": "ci.example.test"})).status_code == 421
         assert (await client.get("/healthz", headers={"Host": "127.0.0.1:8000"})).status_code == 200
 
+    @pytest.mark.security
     async def test_writes_need_csrf(self, client: Client) -> None:
         assert (await client.post("/logout")).status_code == 403
         async with client.session_transaction() as session:

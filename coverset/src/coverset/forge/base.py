@@ -40,6 +40,14 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FULL_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 """``owner/name`` as GitHub allows them; checked before a name is interpolated into an API path."""
 
+MAX_REF_CHARS = 255
+"""Longest branch name accepted from a payload (GitHub's own limit is 255 bytes)."""
+
+MAX_ID = 2**63 - 1
+"""Largest numeric id accepted from a payload (the database columns are signed 64-bit)."""
+
+_REF_FORBIDDEN_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{|//")
+
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 """``author_association`` values whose non-fork PRs run without approval."""
 
@@ -216,9 +224,11 @@ class ForgeCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class MirrorCredentials:
-    """A short-lived token for fetching a mirror, used only as ``git -c http.extraHeader=...``.
+    """A short-lived token for fetching a mirror, handed to git as ``http.extraHeader``.
 
-    The token never goes into a URL or ``.git/config``; ``repr`` hides it.
+    The header travels in the git child's environment (:meth:`git_config_env`, git 2.31+), never on
+    its command line (visible to every local user through ``ps``), in a URL or in ``.git/config``;
+    ``repr`` hides the token. :meth:`git_config_args` is the fallback for older git only.
     """
 
     token: str = field(repr=False)
@@ -231,8 +241,17 @@ class MirrorCredentials:
         raw = f"{self.username}:{self.token}".encode()
         return "Authorization: Basic " + base64.b64encode(raw).decode("ascii")
 
+    def git_config_env(self) -> dict[str, str]:
+        """``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_0``/``GIT_CONFIG_VALUE_0`` for the git child's environment."""
+        return {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": self.http_extra_header,
+        }
+
     def git_config_args(self) -> list[str]:
-        """``["-c", "http.extraHeader=..."]`` to put before a git subcommand."""
+        """``["-c", "http.extraHeader=..."]``: only for git older than 2.31, which ignores
+        :meth:`git_config_env` (the header is then visible in ``ps`` while git runs)."""
         return ["-c", f"http.extraHeader={self.http_extra_header}"]
 
 
@@ -241,6 +260,10 @@ class Forge(Protocol):
     """A code host adapter. All network methods are async; parsing and verification are pure."""
 
     name: str
+    allowed_events: frozenset[str]
+    """Webhook event names this forge's route acts on; any other delivery is recorded and ignored
+    (202) before its payload is parsed. Each adapter owns its list (GitHub's is
+    :data:`coverset.forge.github_events.ALLOWED_EVENTS`)."""
 
     def verify_webhook(self, headers: Mapping[str, str], raw_body: bytes) -> bool:
         """True when ``raw_body`` carries a valid signature; False when unsigned, bad or no secret."""
@@ -340,6 +363,40 @@ def check_sha(value: object, what: str) -> str:
     """Return ``value`` if it is a 40-hex SHA; raise :class:`ForgeEventError` otherwise."""
     if not isinstance(value, str) or not SHA_RE.fullmatch(value):
         raise ForgeEventError(f"{what} is not a 40-hex SHA")
+    return value
+
+
+def check_id(value: object, what: str, *, minimum: int = 0) -> int:
+    """Return ``value`` if it is an integer in ``[minimum, 2**63 - 1]``; raise :class:`ForgeEventError`.
+
+    Larger values would overflow the signed 64-bit columns (a 500 that GitHub redelivers forever).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ForgeEventError(f"{what} is not an integer")
+    if not minimum <= value <= MAX_ID:
+        raise ForgeEventError(f"{what} is out of range")
+    return value
+
+
+def check_ref(value: object, what: str) -> str:
+    """Return ``value`` if it is a branch name ``git check-ref-format --allow-onelevel`` accepts,
+    at most 255 characters and not starting with ``-``; raise :class:`ForgeEventError` otherwise.
+
+    The rules are git's (no ``..``, ``@{``, ``//``, control characters, space, ``~^:?*[\\``; no
+    component starting with ``.`` or ending with ``.lock``; not ``@``; no leading or trailing ``/``,
+    no trailing ``.``), applied without a subprocess.
+    """
+    if not isinstance(value, str) or not 0 < len(value) <= MAX_REF_CHARS:
+        raise ForgeEventError(f"{what} is not a ref name of 1-{MAX_REF_CHARS} characters")
+    if (
+        value.startswith(("-", "/"))
+        or value.endswith(("/", "."))
+        or value == "@"
+        or _REF_FORBIDDEN_RE.search(value)
+        or any(part.startswith(".") or part.endswith(".lock") for part in value.split("/"))
+        or any("\ud800" <= ch <= "\udfff" for ch in value)
+    ):
+        raise ForgeEventError(f"{what} is not a valid ref name")
     return value
 
 

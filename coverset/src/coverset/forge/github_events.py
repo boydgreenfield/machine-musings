@@ -2,7 +2,10 @@
 
 Pure functions over the decoded JSON, shared by the GitHub adapter and the fake forge (whose
 fixtures are GitHub-shaped). Repositories are identified by ``repository.id``; ``clone_url``,
-``ssh_url`` and friends are never read. Every SHA is checked against ``^[0-9a-f]{40}$``.
+``ssh_url`` and friends are never read. Every SHA is checked against ``^[0-9a-f]{40}$``; every
+numeric id must fit a signed 64-bit column (``0 <= id <= 2**63 - 1``); every branch name
+(``default_branch``, ``head.ref``, ``base.ref``) must pass :func:`~coverset.forge.base.check_ref`.
+A payload that breaks any of these raises :class:`ForgeEventError` (a 400, recorded as ``error``).
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ from coverset.forge.base import (
     PullRef,
     RepoRef,
     check_full_name,
+    check_id,
+    check_ref,
     check_sha,
     header,
 )
@@ -101,14 +106,20 @@ def _obj(value: object, what: str) -> Mapping[str, Any]:
     return value
 
 
-def _int(value: object, what: str) -> int:
+def _int(value: object, what: str, *, minimum: int = 0) -> int:
+    return check_id(value, what, minimum=minimum)
+
+
+def _opt_int(value: object, what: str) -> int | None:
+    """None when absent or not an integer; an integer outside the int64 id range is an error."""
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ForgeEventError(f"{what} is not an integer")
-    return value
+        return None
+    return check_id(value, what)
 
 
-def _opt_int(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+def _opt_ref(value: object, what: str) -> str | None:
+    """None when absent; a present ref must be a valid branch name (:func:`check_ref`)."""
+    return None if value is None else check_ref(value, what)
 
 
 def _str(value: object) -> str | None:
@@ -121,18 +132,21 @@ def _login(value: object) -> str | None:
 
 def _installation_id(payload: Mapping[str, Any]) -> int | None:
     installation = payload.get("installation")
-    return _opt_int(installation.get("id")) if isinstance(installation, Mapping) else None
+    return _opt_int(installation.get("id"), "installation.id") if isinstance(installation, Mapping) else None
 
 
 def repo_ref(repository: object, installation_id: int | None = None) -> RepoRef:
     """A :class:`RepoRef` from a ``repository`` object (id, full_name, owner, private, default branch)."""
     repo = _obj(repository, "repository")
     owner = repo.get("owner")
-    default_branch = _str(repo.get("default_branch")) or _str(repo.get("master_branch")) or "main"
+    branch = repo.get("default_branch")
+    if branch is None:
+        branch = repo.get("master_branch")
+    default_branch = "main" if branch is None else check_ref(branch, "repository.default_branch")
     return RepoRef(
         external_id=_int(repo.get("id"), "repository.id"),
         full_name=check_full_name(_str(repo.get("full_name")) or ""),
-        owner_id=_opt_int(owner.get("id")) if isinstance(owner, Mapping) else None,
+        owner_id=_opt_int(owner.get("id"), "repository.owner.id") if isinstance(owner, Mapping) else None,
         private=repo.get("private") is not False,
         default_branch=default_branch,
         installation_id=installation_id,
@@ -152,15 +166,17 @@ def _pull_request(payload: Mapping[str, Any], base: dict[str, Any]) -> ForgeEven
     head = _obj(pr.get("head"), "pull_request.head")
     base_side = _obj(pr.get("base"), "pull_request.base")
     head_repo = head.get("repo")
-    head_repo_id = _opt_int(head_repo.get("id")) if isinstance(head_repo, Mapping) else None
+    head_repo_id = (
+        _opt_int(head_repo.get("id"), "pull_request.head.repo.id") if isinstance(head_repo, Mapping) else None
+    )
     from_fork = head_repo_id is None or head_repo_id != repo.external_id
     association = _str(pr.get("author_association")) or "NONE"
     pull = PullRef(
-        number=_int(pr.get("number", payload.get("number")), "pull_request.number"),
+        number=_int(pr.get("number", payload.get("number")), "pull_request.number", minimum=1),
         head_sha=check_sha(head.get("sha"), "pull_request.head.sha"),
         base_sha=check_sha(base_side.get("sha"), "pull_request.base.sha"),
-        head_ref=_str(head.get("ref")),
-        base_ref=_str(base_side.get("ref")),
+        head_ref=_opt_ref(head.get("ref"), "pull_request.head.ref"),
+        base_ref=_opt_ref(base_side.get("ref"), "pull_request.base.ref"),
         title=(_str(pr.get("title")) or "")[:1000],
         author=_login(pr.get("user")),
         author_association=association,
@@ -213,7 +229,7 @@ def _check_run(payload: Mapping[str, Any], base: dict[str, Any]) -> ForgeEvent:
     common = {
         "repo": repo,
         "head_sha": check_sha(run.get("head_sha"), "check_run.head_sha"),
-        "check_run_id": _opt_int(run.get("id")),
+        "check_run_id": _opt_int(run.get("id"), "check_run.id"),
         "check_external_id": (_str(run.get("external_id")) or None),
         **base,
     }
@@ -242,7 +258,9 @@ def _account_repos(payload: Mapping[str, Any], key: str, installation_id: int | 
     """Repos listed under ``key`` of an installation event (they carry no owner or default branch)."""
     installation = payload.get("installation")
     account = installation.get("account") if isinstance(installation, Mapping) else None
-    owner_id = _opt_int(account.get("id")) if isinstance(account, Mapping) else None
+    owner_id = (
+        _opt_int(account.get("id"), "installation.account.id") if isinstance(account, Mapping) else None
+    )
     listed = payload.get(key)
     if not isinstance(listed, list):
         return ()

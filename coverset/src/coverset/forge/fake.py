@@ -31,7 +31,7 @@ from coverset.forge.base import (
     RepoRef,
     check_sha,
 )
-from coverset.forge.github_events import parse_github_event
+from coverset.forge.github_events import ALLOWED_EVENTS, parse_github_event
 from coverset.forge.signing import TEST_WEBHOOK_SECRET, verify_signature
 
 FIRST_CHECK_ID = 1_000
@@ -86,6 +86,8 @@ class FakeForge:
     """The fake forge (see the module docstring)."""
 
     name = "fake"
+    allowed_events = ALLOWED_EVENTS
+    """The fixtures are GitHub-shaped, so the fake forge accepts GitHub's event names."""
 
     def __init__(
         self,

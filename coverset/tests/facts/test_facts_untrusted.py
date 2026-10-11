@@ -152,18 +152,56 @@ def test_symlinked_bundle_file_is_refused(bundle_copy: Path, tmp_path: Path) -> 
 
 
 @pytest.mark.security
-def test_sqlite_views_masquerading_as_tables_are_refused(bundle_copy: Path) -> None:
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        pytest.param(
+            "CREATE TABLE real_file (id integer, path text);"
+            "CREATE VIEW file AS SELECT * FROM real_file;"
+            "CREATE TABLE context (id integer, context text);",
+            "schema-v7",
+            id="view",
+        ),
+        pytest.param(
+            "CREATE VIRTUAL TABLE file USING fts5(path, id);CREATE TABLE context (id integer, context text);",
+            "virtual tables",
+            id="virtual-table",
+        ),
+        pytest.param(
+            "CREATE TABLE file (id integer, path text);"
+            "CREATE TABLE context (id integer, context text);"
+            "CREATE VIRTUAL TABLE elsewhere USING fts5(x);",
+            "virtual tables",
+            id="unrelated-virtual-table",
+        ),
+        pytest.param(
+            "CREATE TABLE file (id integer, path text);"
+            "CREATE TABLE context (id integer, context text);"
+            "CREATE TRIGGER t AFTER INSERT ON file BEGIN SELECT load_extension('/tmp/x'); END;",
+            "triggers",
+            id="trigger",
+        ),
+    ],
+)
+def test_sqlite_views_masquerading_as_tables_are_refused(
+    bundle_copy: Path, script: str, message: str
+) -> None:
     path = bundle_copy / "coverage.sqlite"
     path.unlink()
     db = sqlite3.connect(path)
-    db.executescript(
-        "CREATE TABLE real_file (id integer, path text);"
-        "CREATE VIEW file AS SELECT * FROM real_file;"
-        "CREATE TABLE context (id integer, context text);"
-    )
+    db.executescript(script)
     db.close()
-    with pytest.raises(BundleError, match="schema-v7"):
+    with pytest.raises(BundleError, match=message):
         read_python_bundle(bundle_copy)
+
+
+@pytest.mark.security
+def test_the_real_coverage_schema_still_reads(bundle_copy: Path) -> None:
+    db = sqlite3.connect(bundle_copy / "coverage.sqlite")
+    kinds = {kind for (kind,) in db.execute("SELECT type FROM sqlite_master")}
+    db.close()
+    assert "trigger" not in kinds
+    assert read_python_bundle(bundle_copy).tests
 
 
 @pytest.mark.security

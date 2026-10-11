@@ -329,6 +329,7 @@ def test_invariant_links_accept_the_plugin_and_legacy_keys(bundle_copy: Path) ->
     assert bundle.meta["convert"]["dropped"] == {}
 
 
+@pytest.mark.security
 def test_paths_outside_the_head_tree_are_dropped(minimal_bundle: Path) -> None:
     head = {MODULE_PATH, "src/factspkg/__init__.py", "tests/test_calc.py"}
     full = read_python_bundle(minimal_bundle, head_paths=head)

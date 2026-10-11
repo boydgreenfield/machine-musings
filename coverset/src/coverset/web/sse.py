@@ -11,7 +11,9 @@ One stream per page (``sse-connect`` on the run page), one named event per live 
   ends after ``done`` or :data:`~coverset.web.api.SSE_MAX_STREAM_S`.
 * **Replay** (``?replay=1&speed=0.25``): the run's stored events are re-emitted with their original
   spacing divided by ``speed``; ``freeze=<seconds>`` stops the replay at that point of the run's own
-  clock (screenshots of a run "frozen mid-replay").
+  clock (screenshots of a run "frozen mid-replay"). A replay, like a live stream, ends after
+  :data:`~coverset.web.api.SSE_MAX_STREAM_S` (``speed=0.01`` would otherwise hold a connection for
+  hours); it then renders where it got to and sends ``done`` labelled ``stopped``.
 """
 
 from __future__ import annotations
@@ -99,6 +101,7 @@ async def _replay(
     previous_at = None
     last_render = 0.0
     dirty = False
+    cut = False
     for event in events:
         if event.seq <= after:
             previous_at = event.at
@@ -118,6 +121,9 @@ async def _replay(
                     yield chunk
                 dirty = False
                 last_render = time.monotonic()
+            if time.monotonic() + delay - started > SSE_MAX_STREAM_S:
+                cut = True
+                break
             await asyncio.sleep(delay)
         state.apply(event.seq, event.kind, event.payload, event.at)
         dirty = True
@@ -134,7 +140,7 @@ async def _replay(
         regions_context(bundle, state, replay=True, final_clock=final), state.last_seq
     ):
         yield chunk
-    label = "frozen" if stop is not None and state.done is None else "finished"
+    label = "stopped" if cut else "frozen" if stop is not None and state.done is None else "finished"
     yield frame("done", f'<span class="replay-status" data-replay="{label}">replay {label}</span>')
 
 

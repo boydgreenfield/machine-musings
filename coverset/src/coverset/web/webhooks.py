@@ -10,7 +10,8 @@ Order of checks (nothing is parsed or written before the signature is verified):
 3. ``X-GitHub-Delivery`` must look like a GUID (400); a delivery already seen, by GUID or by the
    SHA-256 of its signed body (a captured delivery resent under a fresh GUID), answers 200 with
    no work;
-4. events outside the allowlist are recorded and answered 202 ``ignored_event``;
+4. events outside the adapter's allowlist (``forge.allowed_events``) are recorded and answered
+   202 ``ignored_event``;
 5. the payload is parsed (malformed ⇒ 400, delivery recorded as ``error``), handed to
    :func:`coverset.orchestrator.intake.intake`, and answered 202. Forge follow-ups (the "awaiting
    approval" check, the approver's permission check) and the run-queue hand-off happen after the
@@ -36,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.db.models import DeliveryStatus, ForgeKind, WebhookDelivery
 from coverset.forge.base import ForgeEventError
-from coverset.forge.github_events import ALLOWED_EVENTS, delivery_id, event_name
+from coverset.forge.github_events import delivery_id, event_name
 from coverset.forge.registry import webhook_forge
 from coverset.forge.signing import webhook_secret
 from coverset.orchestrator import enqueue_run
@@ -101,7 +102,7 @@ async def receive(forge_name: str) -> tuple[Response, int]:
                 async with database.session() as session:
                     if await delivery_seen(session, delivery, digest):
                         return _answer(200, status="duplicate")
-                    if name not in ALLOWED_EVENTS:
+                    if name not in forge.allowed_events:
                         await _record(session, delivery, digest, kind, name, "ignored", received_at)
                         return _answer(202, status="ignored_event", reason="event not in allowlist")
                     try:

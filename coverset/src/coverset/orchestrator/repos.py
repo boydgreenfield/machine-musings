@@ -3,9 +3,11 @@
 Every repo has a bare mirror at ``<data_dir>/mirrors/<repo_id>.git``. For a local source (a bare or
 working repository on disk) the mirror is a ``git clone --mirror`` of it, refreshed with ``git fetch
 --prune``. For a forge repository the mirror is fetched over HTTPS from the forge's canonical URL
-(never a URL from a webhook payload) with a short-lived token passed only as ``-c
-http.extraHeader=Authorization: ...`` on the command line: it is never written into a URL, the
-mirror's ``config`` or a log line. Workers never see the mirror: they get ``git archive`` tarballs.
+(never a URL from a webhook payload) with a short-lived token passed only as
+``http.extraHeader=Authorization: ...`` through ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_0``/
+``GIT_CONFIG_VALUE_0`` in git's environment (git 2.31+; older git falls back to ``-c`` on the
+command line, with a warning): it is never on the command line, in a URL, the mirror's ``config``
+or a log line. Workers never see the mirror: they get ``git archive`` tarballs.
 Clone and fetch of a mirror hold an exclusive lock (``<repo_id>.git.lock`` next to it), so concurrent
 runs of one repo (in this process or another) never race a clone or interleave fetches, and a
 complete mirror is never deleted.
@@ -14,14 +16,18 @@ Local repositories are registered with ``forge='local'`` and ``external_id`` = s
 resolved source path, so registering the same path twice finds the same row.
 
 The git helpers here are synchronous (callers in async code wrap them in ``asyncio.to_thread``) and
-run git with a scrubbed environment that ignores user and system configuration.
+run git with a minimal environment (:func:`git_env`: ``PATH``, ``HOME``, locale, ``TZ``, ``TMPDIR``,
+CA bundles and proxies; never ``COVERSET_*``, ``ANTHROPIC_*``, ``MODAL_*``, ``AWS_*``, ``GITHUB_*``
+or an inherited ``GIT_*``) that ignores user and system configuration.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import io
+import logging
 import os
 import re
 import shutil
@@ -61,6 +67,8 @@ __all__ = [
     "tree_paths",
 ]
 
+log = logging.getLogger(__name__)
+
 GIT_TIMEOUT_S = 300
 FORGE_GIT_HOSTS = {"github": "https://github.com"}
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -70,9 +78,42 @@ class RepoError(RuntimeError):
     """A git operation on a source or mirror failed."""
 
 
+_GIT_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "CURL_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    }
+)
+"""Variables git may inherit (plus ``LC_*``); everything else, secrets included, stays behind."""
+
+GIT_CONFIG_ENV_MIN_VERSION = (2, 31)
+"""The first git that reads ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_n``/``GIT_CONFIG_VALUE_n``."""
+
+
 def git_env() -> dict[str, str]:
-    """Environment for git: no inherited ``GIT_*``, no user/system config, never prompt."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    """A minimal environment for git: only :data:`_GIT_ENV_NAMES` and ``LC_*`` from the process (no
+    ``COVERSET_*``, ``ANTHROPIC_*``, ``MODAL_*``, ``AWS_*``, ``GITHUB_*``, no inherited ``GIT_*``),
+    no user or system config, never prompt."""
+    env = {key: value for key, value in os.environ.items() if key in _GIT_ENV_NAMES or key.startswith("LC_")}
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL=os.devnull,
@@ -83,12 +124,46 @@ def git_env() -> dict[str, str]:
     return env
 
 
-def _git(args: list[str], *, timeout: float = GIT_TIMEOUT_S, secret_args: int = 0) -> bytes:
-    """Run ``git <args>``; ``secret_args`` leading arguments are hidden from error messages."""
+@functools.cache
+def git_version() -> tuple[int, int]:
+    """The installed git's ``(major, minor)``, or ``(0, 0)`` when it cannot be told."""
+    try:
+        out = subprocess.run(
+            ["git", "--version"], env=git_env(), capture_output=True, timeout=30, check=False
+        ).stdout.decode("ascii", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return (0, 0)
+    match = re.search(r"(\d+)\.(\d+)", out)
+    return (int(match[1]), int(match[2])) if match else (0, 0)
+
+
+def credential_config(credentials: MirrorCredentials | None) -> tuple[list[str], dict[str, str]]:
+    """``(leading git args, extra environment)`` that hand ``credentials`` to git.
+
+    The header goes into the environment (git 2.31+). Older git only reads ``-c``, which puts the
+    header on the command line where ``ps`` shows it; that fallback logs a warning.
+    """
+    if credentials is None:
+        return [], {}
+    if git_version() >= GIT_CONFIG_ENV_MIN_VERSION:
+        return [], credentials.git_config_env()
+    log.warning("git older than 2.31: the mirror token is passed on git's command line")
+    return credentials.git_config_args(), {}
+
+
+def _git(
+    args: list[str],
+    *,
+    timeout: float = GIT_TIMEOUT_S,
+    secret_args: int = 0,
+    extra_env: dict[str, str] | None = None,
+) -> bytes:
+    """Run ``git <args>``; ``secret_args`` leading arguments are hidden from error messages and
+    ``extra_env`` (e.g. credentials) is added to :func:`git_env` for this one process."""
     try:
         proc = subprocess.run(
             ["git", *args],
-            env=git_env(),
+            env={**git_env(), **(extra_env or {})},
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
@@ -189,11 +264,10 @@ def ensure_mirror(
     the forge's canonical HTTPS URL with ``credentials`` as an extra header.
     """
     mirror = mirror_path(settings, repo_row.id)
-    secret: list[str] = credentials.git_config_args() if credentials is not None else []
     recorded = repo_source or (repo_row.settings_json or {}).get("source")
+    secret, secret_env = credential_config(None if recorded else credentials)
     if recorded:
         url = _source_url(recorded)
-        secret = []
     elif repo_row.forge == "local":
         raise RepoError(f"local source of {repo_row.full_name} is not recorded")
     else:
@@ -201,14 +275,16 @@ def ensure_mirror(
         if host is None:
             raise RepoError(f"no git host known for forge {repo_row.forge!r}")
         url = f"{host}/{repo_row.full_name}.git"
-    mirror.parent.mkdir(parents=True, exist_ok=True)
+    mirror.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with file_lock(mirror.parent / f"{mirror.name}.lock"):
         if not (mirror / "HEAD").is_file():
             staging = Path(tempfile.mkdtemp(dir=mirror.parent, prefix=f".{mirror.name}.tmp-"))
             try:
                 target = staging / "repo.git"
                 _git(
-                    [*secret, "clone", "--mirror", "--quiet", "--", url, str(target)], secret_args=len(secret)
+                    [*secret, "clone", "--mirror", "--quiet", "--", url, str(target)],
+                    secret_args=len(secret),
+                    extra_env=secret_env,
                 )
                 if mirror.exists():  # an incomplete leftover (no HEAD): nobody can be reading it
                     shutil.rmtree(mirror)
@@ -220,6 +296,7 @@ def ensure_mirror(
                 [*secret, "--git-dir", str(mirror), "fetch", "--prune", "--quiet", "--", url,
                  "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
                 secret_args=len(secret),
+                extra_env=secret_env,
             )  # fmt: skip
     return mirror
 

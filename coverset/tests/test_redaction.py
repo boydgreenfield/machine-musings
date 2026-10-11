@@ -19,6 +19,8 @@ from coverset.logging import (
     register_secret,
 )
 
+pytestmark = pytest.mark.security
+
 ALNUM = string.ascii_letters + string.digits
 
 
@@ -127,9 +129,68 @@ def test_short_registered_value_masked_when_floor_lowered() -> None:
     assert redact("secret=shhh12") == f"secret={REDACTED}"
 
 
-def test_configure_logging_masks_short_settings_secrets() -> None:
-    configure_logging(Settings.for_tests(github_token="shhh12"))
-    assert redact("token shhh12 used") == f"token {REDACTED} used"
+def test_configure_logging_skips_settings_secrets_too_short_to_redact() -> None:
+    # A 1-7 character value would shred every log line it happens to occur in.
+    configure_logging(Settings.for_tests(github_app_client_secret="shhh12"))
+    assert redact("the word shhh12 stays") == "the word shhh12 stays"
+    configure_logging(Settings.for_tests(github_app_client_secret="client-secret-0451"))
+    assert redact("x client-secret-0451 y") == f"x {REDACTED} y"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "expected"),
+    [
+        (
+            "MODAL_TOKEN_SECRET=as-abcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyz",
+            f"MODAL_TOKEN_SECRET={REDACTED}",
+        ),
+        (
+            "token ak-ABCDEFGHIJKLMNOPQRSTUV0123 used",
+            "ABCDEFGHIJKLMNOPQRSTUV0123",
+            f"token ak-{REDACTED} used",
+        ),
+        ("https://user:pass@github.com/x.git", "user:pass", f"https://{REDACTED}@github.com/x.git"),
+        (
+            "fetch http://bob:s3cr3t-pw@10.0.0.1:8080/r",
+            "s3cr3t-pw",
+            f"fetch http://{REDACTED}@10.0.0.1:8080/r",
+        ),
+        (
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "wJalrXUtnFEMI",
+            f"AWS_SECRET_ACCESS_KEY={REDACTED}",
+        ),
+        ("aws_secret_access_key = abcdef", "abcdef", f"aws_secret_access_key = {REDACTED}"),
+        (
+            "COVERSET_GITHUB_WEBHOOK_SECRET=hunter2hunter2 x",
+            "hunter2",
+            f"COVERSET_GITHUB_WEBHOOK_SECRET={REDACTED} x",
+        ),
+        ("GET /x?access_token=abc123&y=1", "abc123", f"GET /x?access_token={REDACTED}&y=1"),
+        ('{"MODAL_TOKEN_ID": "ak-shortish"}', "shortish", f'{{"MODAL_TOKEN_ID": "{REDACTED}"}}'),
+        ("ANTHROPIC_API_KEY=sk-ant-admin01-xxxxxxxxxxxx", "admin01", f"ANTHROPIC_API_KEY={REDACTED}"),
+    ],
+)
+def test_modal_tokens_url_credentials_and_secret_named_values_masked(
+    text: str, secret: str | None, expected: str
+) -> None:
+    out = redact(text)
+    assert out == expected
+    if secret is not None:
+        assert secret not in out
+
+
+def test_configure_logging_registers_modal_tokens_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-" + "i" * 22)
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "unusual-modal-secret-shape")
+    configure_logging(Settings.for_tests())
+    assert (
+        redact("id ak-" + "i" * 22 + " secret unusual-modal-secret-shape")
+        == f"id {REDACTED} secret {REDACTED}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -139,6 +200,9 @@ def test_configure_logging_masks_short_settings_secrets() -> None:
         "plain log line: 212 tests passed in 1.8 s",
         "ghost_town and gh_ and sk-ant and github_pat are words",
         "x-access-token is a username, not a secret",
+        "as-is and ak-47 and as-built are words",
+        "see https://github.com/acme/app and http://[::1]:8000/runs",
+        "invalid_token: bad signature",
         "def parse_duration(text: str) -> int: ...",
     ],
 )

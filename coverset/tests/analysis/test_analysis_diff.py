@@ -168,6 +168,7 @@ def test_adapter_changed_functions_single_file() -> None:
 
 
 @pytest.mark.parametrize("ref", ["--output=/tmp/x", "-p", "a..b", "x\0y", "", "foo bar", "HEAD~1"])
+@pytest.mark.security
 def test_bad_refs_are_rejected(ref: str) -> None:
     with pytest.raises(GitDiffError):
         validate_ref(ref)

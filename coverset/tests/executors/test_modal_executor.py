@@ -776,6 +776,7 @@ def _git(*args: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
+@pytest.mark.security
 async def test_ensure_snapshot_only_snapshots_default_branch_commits(
     db_settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec, tmp_path: Path
 ) -> None:

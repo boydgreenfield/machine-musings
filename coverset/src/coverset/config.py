@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
+import stat
 import tempfile
 from datetime import UTC, datetime
 from functools import cache
@@ -22,8 +24,14 @@ from pydantic import AliasChoices, Field, SecretStr, field_validator, model_vali
 from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
 MIB = 1024 * 1024
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+log = logging.getLogger(__name__)
 MIN_ADMIN_TOKEN_CHARS = 32
 MIN_WEBHOOK_SECRET_CHARS = 16
+MIN_GITHUB_TOKEN_CHARS = 16
+"""GitHub tokens are 40+ characters; a short value is a mistake, and too short to redact safely."""
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 CommaList = Annotated[list[str], NoDecode]
@@ -215,6 +223,9 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"COVERSET_GITHUB_WEBHOOK_SECRET must be at least {MIN_WEBHOOK_SECRET_CHARS} characters"
             )
+        github_token_chars = len(self.github_token.get_secret_value()) if self.github_token else 0
+        if 0 < github_token_chars < MIN_GITHUB_TOKEN_CHARS:
+            raise ValueError(f"COVERSET_GITHUB_TOKEN must be at least {MIN_GITHUB_TOKEN_CHARS} characters")
         if self.github_app_id is not None and not self.allowed_owners:
             raise ValueError("COVERSET_ALLOWED_OWNERS is required when COVERSET_GITHUB_APP_ID is set")
         if self.ai == "anthropic" and not (
@@ -310,3 +321,44 @@ class _HermeticSettings(Settings):
 def get_settings() -> Settings:
     """Return the process-wide settings, read once from the environment and ``.env``."""
     return Settings()
+
+
+def secure_data_dirs(settings: Settings) -> None:
+    """Create ``data_dir`` and its ``mirrors``, ``facts`` and ``runs`` directories with mode 0700,
+    tighten existing ones to 0700, and a SQLite database file (and its WAL files) to 0600.
+
+    The mirrors hold private source, the database and facts describe it: other local users must not
+    read them. A directory or file coverset cannot chmod (another owner) is left alone with a warning.
+    """
+    for path in (settings.data_dir, settings.mirrors_dir, settings.facts_dir, settings.runs_dir):
+        path.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+        _restrict(path, PRIVATE_DIR_MODE)
+    database = _sqlite_file(settings.database_url)
+    if database is not None:
+        for path in (
+            database,
+            *(database.with_name(database.name + s) for s in ("-wal", "-shm", "-journal")),
+        ):
+            if path.is_file() and not path.is_symlink():
+                _restrict(path, PRIVATE_FILE_MODE)
+
+
+def _sqlite_file(url: str) -> Path | None:
+    """The file behind a file-backed SQLite URL, else None."""
+    from sqlalchemy.engine import make_url
+
+    try:
+        parsed = make_url(url)
+    except Exception:  # noqa: BLE001 - an unparsable URL fails later, where it is used
+        return None
+    if not parsed.drivername.startswith("sqlite") or not parsed.database or parsed.database == ":memory:":
+        return None
+    return Path(parsed.database)
+
+
+def _restrict(path: Path, mode: int) -> None:
+    try:
+        if stat.S_IMODE(path.stat().st_mode) != mode:
+            os.chmod(path, mode)
+    except OSError as exc:
+        log.warning("cannot restrict %s to mode %o: %s", path, mode, exc)

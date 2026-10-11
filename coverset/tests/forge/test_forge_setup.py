@@ -117,6 +117,7 @@ async def test_org_form_and_bad_org(client: Client, exchange: list[httpx.Request
     assert (await client.get("/setup?org=../evil")).status_code == 400
 
 
+@pytest.mark.security
 async def test_callback_writes_env_and_key_with_mode_0600(
     client: Client, app: Quart, exchange: list[httpx.Request], tmp_path: Path
 ) -> None:
@@ -152,6 +153,7 @@ async def test_callback_writes_env_and_key_with_mode_0600(
     assert again.status_code == 400 and len(exchange) == 1, "the code is single use"
 
 
+@pytest.mark.security
 async def test_bad_or_missing_state_is_400(client: Client, exchange: list[httpx.Request]) -> None:
     await start(client)
     for query in ("code=good-code&state=wrong", "code=good-code", "state="):
@@ -206,6 +208,15 @@ async def test_callback_only_from_loopback_without_an_admin_session(
         {"X-Forwarded-Host": "coverset-demo.ngrok.app", "X-Forwarded-Proto": "https"},
         {"Forwarded": "for=203.0.113.66;proto=https"},
         {"Host": "coverset-demo.ngrok.app", "X-Forwarded-For": "203.0.113.66"},
+        {"X-Real-IP": "203.0.113.66"},
+        {"True-Client-IP": "203.0.113.66"},
+        {"CF-Connecting-IP": "203.0.113.66"},
+        {"Via": "1.1 proxy"},
+        {"X-Client-IP": "203.0.113.66"},
+        {"Fastly-Client-IP": "203.0.113.66"},
+        {"X-Cluster-Client-IP": "203.0.113.66"},
+        {"X-ProxyUser-Ip": "203.0.113.66"},
+        {"X-Original-Forwarded-For": "203.0.113.66"},
     ],
 )
 async def test_callback_through_a_tunnel_is_refused(
@@ -223,6 +234,7 @@ async def test_callback_through_a_tunnel_is_refused(
     assert exchange == [] and not (tmp_path / ".env").exists()
 
 
+@pytest.mark.security
 def test_tunnel_public_url_without_admin_token_refuses_to_start(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="COVERSET_ADMIN_TOKEN"):
         Settings.for_tests(data_dir=tmp_path, public_url="https://coverset-demo.ngrok.app")

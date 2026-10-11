@@ -80,6 +80,7 @@ async def _worker(executor: LocalExecutor):  # type: ignore[no-untyped-def]
     return worker
 
 
+@pytest.mark.security
 async def test_child_environment_is_scrubbed(
     monkeypatch: pytest.MonkeyPatch, executor: LocalExecutor
 ) -> None:
