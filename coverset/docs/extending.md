@@ -138,7 +138,7 @@ Identify repositories by the forge's stable numeric id (`RepoRef.external_id`), 
 
 1. Add the kind to `ForgeKind` in `db/models.py` (`Literal["github", "fake", "local"]` today). `repos.forge` and `webhook_deliveries.forge` are `VARCHAR(32)` checked in Python, so no migration is needed.
 2. Return the adapter from `forge/registry.py` (`get_forge`, `forge_mode`) and resolve its route name in `webhook_forge`, so `POST /webhooks/<name>` reaches it. The access guard already treats every `POST /webhooks/*` as public, so the adapter's `verify_webhook` is the only gate.
-3. Add the forge's event names to the route's allowlist. Today `web/webhooks.py` checks `forge.github_events.ALLOWED_EVENTS` for every forge; a second forge needs its own list.
+3. Give the adapter an `allowed_events` frozenset of the forge's event names (the `Forge` protocol requires it); `web/webhooks.py` records and answers 202 `ignored_event` for any delivery whose event is not in the route's `forge.allowed_events`, before the payload is parsed.
 4. Record signed fixtures the way `scripts/make_fixtures.py` does for GitHub, and test parsing, signatures and intake against them (`tests/forge/test_forge_events.py`, `test_forge_intake.py`).
 
 Designed, not built: `forge/gitlab.py` and a Bitbucket adapter.
