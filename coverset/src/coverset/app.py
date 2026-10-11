@@ -83,6 +83,11 @@ def create_app(settings: Settings | None = None) -> Quart:
         app.register_error_handler(code, _http_error)
 
     register_blueprints(app)
+    if settings.env != "test":
+        # The dispatcher that turns queued runs into executions; tests drive runs explicitly.
+        from coverset.orchestrator.queue import install_run_queue
+
+        install_run_queue(app)
     return app
 
 
