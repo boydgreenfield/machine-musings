@@ -329,7 +329,7 @@ Tracing makes every traced call slower, and Hypothesis's default deadline of 200
 ```python
 from hypothesis import settings
 
-settings.register_profile("coverset", deadline=None, print_blob=True)
+settings.register_profile("coverset", deadline=None, print_blob=True, derandomize=True)
 settings.load_profile("coverset")
 ```
 

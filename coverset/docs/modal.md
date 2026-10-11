@@ -258,9 +258,10 @@ flaky), PR 1 FAIL with `test_refund_partial` confirmed at rank 1 (66th in file o
 `uv run python scripts/bench_modal.py --max-cost-usd 2` on 2026-10-11 (modal 1.6.1, region
 us-central, Starter plan, Python 3.13, every sandbox 0.125-2.0 CPU and 512-2048 MiB). Medians of 5
 (p90 in brackets; the cold image build is n = 1). Full table, raw values and commands:
-[benchmarks.md](benchmarks.md); the keys are in `docs/numbers.json`. The four replayed-webhook rows
-come from one later session of 5 trials on the same day (the `webhook` scenario on its own, after
-`coverset demo --executor modal --no-serve`; see [Webhook to verdict](benchmarks.md#webhook-to-verdict)).
+[benchmarks.md](benchmarks.md); the keys are in `docs/numbers.json`. The five replayed-webhook rows
+come from one later session of 5 trials on the same day: the second pass, after the demo SHAs and the
+file-order estimate changed, running the `webhook` scenario on its own after
+`coverset demo --executor modal --no-serve` (see [Webhook to verdict](benchmarks.md#webhook-to-verdict)).
 
 | what | seconds |
 | --- | ---: |
@@ -270,17 +271,18 @@ come from one later session of 5 trials on the same day (the `webhook` scenario 
 | create from the trusted snapshot, then the first exec | 1.02 (1.42) |
 | exec on a pooled sandbox idle for 10 s | 0.32 (0.40) |
 | trusted snapshot build (upload, collect, compile, snapshot; n = 1) | 4.0 |
-| replayed webhook to first test, pooled sandboxes (demo refunds PR rerun) | 3.77 (4.67) |
-| replayed webhook to all workers holding the source | 0.77 (1.19) |
-| replayed webhook to the failing test's first result | 3.9 (5.2) |
-| replayed webhook to the first confirmed failure (after its retry) and the verdict | 5.0 (6.59) |
+| replayed webhook to first test, pooled sandboxes (demo refunds PR rerun) | 5.54 (6.41) |
+| replayed webhook to all workers holding the source | 1.51 (2.73) |
+| replayed webhook to the failing test's first result | 5.98 (6.57) |
+| replayed webhook to the first confirmed failure (after its retry) and the verdict | 7.33 (7.99) |
+| that run's file-order estimate, from the first test | 7.9 (8.88) |
 | bench suite (1,200 synthetic tests), 1 shard: start to last test | 181.1 (188.4) |
 | the same across 16 shards | 19.6 (21.2) |
 | the same across 32 shards | 13.2 (14.4) |
 | measured cold path, bench suite: fresh sandbox, install, plain pytest | 179.3 (190.6) |
 | measured cold path, demo refunds PR: failing test reported | 6.4 (7.8) |
 
-Costs, priced at the limits over each sandbox's lifetime (an upper bound): $0.017 per 1-shard,
+Costs, priced at the limits over each sandbox's lifetime (the recorded `runs.cost_estimate`, which also spans the terminate calls, comes out slightly higher): $0.017 per 1-shard,
 $0.036 per 16-shard and $0.061 per 32-shard bench-suite run. No capacity errors up to 32 shards.
 The whole benchmark was estimated at $0.70 the same way.
 
@@ -288,6 +290,7 @@ Two caveats. The bench suite's `busy()` calibrates itself at import time under w
 active, so its tests take their drawn durations with or without instrumentation: it measures fan-out,
 not coverage overhead (the 1-shard coverset run and the plain cold path both take about 180 s for
 that reason). And the demo app is small: on the refunds PR the cold path reports the failure 6.4 s
-after the sandbox is requested, coverset confirms it (failure plus retry) 5.0 s after the webhook
-arrives, with planning, collection and the retry included; the gap grows with suite size, which is
-what the bench-suite rows show.
+after the sandbox is requested; coverset reports the failed result 6.0 s after the webhook arrives
+and confirms it (failure plus retry) at 7.3 s, with planning, collection and the retry included,
+while file order on the same sandbox would reach the test after an estimated 7.9 s. With a suite this
+small, start-up dominates; the bench-suite rows show where the time goes on a larger one.

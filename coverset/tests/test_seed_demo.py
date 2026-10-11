@@ -24,17 +24,17 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "seed_demo.py"
 
 EXPECTED_COMMITS = {
-    "main-1": "eda863e92a7bf2269129c68df0d5d12054e47d95",
-    "main-2": "7dd009564f67ae6cf170ba7cd2993f6f1e09222b",
-    "main-3": "7e69f42787cc03fc9d844473734095ed8ee35629",
-    "main-4": "4cfa98b76930b9d77c92023e43fc31e591a390bb",
-    "main-5": "2f957cf12d81c4d56086a5d33fdbc37d68bf7323",
-    "main-6": "b1d3b0c56e0f1b77f2d6121625ed7e3396f59ca9",
+    "main-1": "5598d93ba74ad627a19b2d1f1a47d621a08d55c2",
+    "main-2": "415127f7ce1143a7a66c22c5aa6f753a64c88221",
+    "main-3": "ca9ab713fa46283402286cb186a1cfae05f0f5f4",
+    "main-4": "bf3c1c40e3d83000031566702e260ff7bc8034f9",
+    "main-5": "d0e6be8c81905e016c1a44f626f4b8ab473d6756",
+    "main-6": "77e37dc692c5ec51c62ff80a2fdc5aa135583bc1",
 }
 EXPECTED_BRANCHES = {
-    "main": "b1d3b0c56e0f1b77f2d6121625ed7e3396f59ca9",
-    "pr-1-partial-refunds": "e304df15b0bfa85822acb5343d194534587524f2",
-    "pr-2-subdomain-signups": "2a82673345ef94430603206223a49a6cbb23fdcb",
+    "main": "77e37dc692c5ec51c62ff80a2fdc5aa135583bc1",
+    "pr-1-partial-refunds": "2bb99b1de9818b9646784e085b02dd6f2c9b0c78",
+    "pr-2-subdomain-signups": "517d7d3cfd2929d1edad804b8ab7ccc507cf86c6",
 }
 
 # A pytest plugin, loaded into the demo suite's own environment, that records which tests each

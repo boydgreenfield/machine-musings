@@ -485,9 +485,9 @@ def _input_coverage(
     for key, region in regions.items():
         rows = shapes_for_function(store, repo.id, key, 1, branch=repo.default_branch)
         observations[key] = [_observation(region, row) for row in rows]
-        sampling = _sampling(store, repo.id, run_id, region)
+        sampling, called = _sampling(store, repo.id, run_id, region)
         found = function_catalogue(region, sources.get(region.path))
-        covs[key] = found.input_cov(region, observations[key], sampling)
+        covs[key] = found.input_cov(region, observations[key], sampling, tests_called=called)
     return covs, observations
 
 

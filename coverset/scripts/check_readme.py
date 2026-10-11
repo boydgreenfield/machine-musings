@@ -15,8 +15,9 @@ generated:
     uv run python scripts/check_readme.py --data-dir <demo data>   # numbers and shapes tables
     uv run python scripts/check_readme.py --fix [--data-dir <dir>] # rewrite the regions in place
 
-``--loose-examples`` ignores the example values of observed classes, which can differ between two
-seeded demos because the demo's Hypothesis tests are not derandomized.
+``--loose-examples`` ignores the example values of observed classes. The demo app's Hypothesis
+profile is derandomized, so they should not differ; the flag is for a target suite whose property
+tests draw fresh examples on every run.
 
 After a re-measurement that updates ``docs/numbers.json``, ``--fix`` is all the README needs.
 """
@@ -52,15 +53,22 @@ NUMBERS_TEMPLATE = (
     "of {rank_file_order} in file order. Its failed result arrives {t_webhook_first_failed_result} s "
     "after the webhook and a retry confirms it at {t_verdict} s{verdict_where}, when the verdict is "
     "posted; file order would reach it after an estimated {t_first_failure_file_order_est} s on the same "
-    "sandbox (sandbox ready plus the median durations of the tests before it, no collection). The demo "
-    "suite's tests take {demo_suite_s} s in all, about as long as collecting and planning "
-    "({t_webhook_collect} s), so on this suite the saving shows in the rank, not the clock. Fan-out is "
-    "where time is saved: the benchmark suite takes {t_bench_1} s in one sandbox, {t_bench_16} s across "
-    "16 and {t_bench_32} s across 32, about ${cost_bench_16} per 16-shard run. Per-test coverage plus "
-    "argument shapes cost {overhead_x}× plain pytest. The three functions below are at 100% line and "
-    "branch coverage, and their tests never exercise {missing_classes} of {expected_classes} input "
-    "classes."
+    "sandbox (estimated from the first test: the time to the first test result plus the median durations "
+    "of the tests before it). {saving_clause} Fan-out is where larger suites save time: the benchmark "
+    "suite takes {t_bench_1} s in one sandbox, {t_bench_16} s across 16 and {t_bench_32} s across 32, "
+    "about ${cost_bench_16} per 16-shard run. Per-test coverage plus argument shapes cost {overhead_x}× "
+    "plain pytest. The three functions below are at 100% line and branch coverage, and their tests never "
+    "exercise {missing_classes} of {expected_classes} input classes."
 )
+SAVING = (
+    "Running it first reports the failure {saving_s} s before file order would even reach it; the demo "
+    "suite's tests take only {demo_suite_s} s in all, so that is most of what ordering can save here."
+)
+NO_SAVING = (
+    "The demo suite's tests take {demo_suite_s} s in all, about as long as collecting and planning "
+    "({t_webhook_collect} s), so on this suite the saving shows in the rank, not the clock."
+)
+"""The sentence after the estimate: the measured saving when the failed result beats the estimate."""
 MEDIANS_TEMPLATE = (
     "Medians of {n_trials} runs on {bench_date} (the cold image build and the snapshot build are single "
     "runs), modal {modal_version}, Modal region {region} on the {plan_tier} plan, {cpu} CPU per sandbox; "
@@ -114,6 +122,11 @@ def fields(numbers: Mapping[str, Any]) -> dict[str, str]:
     out["rank_file_order"] = ordinal(int(numbers["rank_file_order"]))
     out["cpu"] = cpu_phrase(str(numbers["cpu"]))
     out["verdict_where"] = "" if numbers.get("t_verdict_executor") == "modal" else " on the local executor"
+    saving = float(numbers["t_first_failure_file_order_est"]) - float(
+        numbers["t_webhook_first_failed_result"]
+    )
+    out["saving_s"] = fmt(round(saving, 1))
+    out["saving_clause"] = (SAVING if saving > 0 else NO_SAVING).format_map(out)
     return out
 
 
@@ -234,9 +247,9 @@ def _replace_bullet(text: str, numbers: Mapping[str, Any], findings: list[Findin
 def mask_observed_examples(table: str) -> str:
     """``table`` with the example cell of every observed ("yes") row blanked.
 
-    The demo's Hypothesis tests are not derandomized, so the shortest recorded example of a class
-    they feed (``text:multi-unit``: ``'1h30m'`` or ``'10m4s'``) can change between seeded demos;
-    the classes, the observed column, the strategies of missing classes and the counts cannot.
+    With property tests that draw fresh examples on every run, the shortest recorded example of a
+    class they feed can change between runs; the classes, the observed column, the strategies of
+    missing classes and the counts cannot. (The demo app's profile is derandomized.)
     """
     out = []
     for line in table.split("\n"):
@@ -327,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--loose-examples",
         action="store_true",
-        help="ignore the example values of observed classes (they vary with Hypothesis's random inputs)",
+        help="ignore the example values of observed classes (for suites whose property tests are random)",
     )
     args = parser.parse_args(argv)
     findings = check(

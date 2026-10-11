@@ -2,8 +2,7 @@
 
 The numbers paragraph, the inline numbers and the root README's coverset bullet are rendered from
 ``docs/numbers.json``; the three shapes tables are compared with ``coverset shapes FUNC --markdown``
-on the default branch of a freshly seeded local demo (example values of observed classes compared
-loosely: the demo's Hypothesis tests are not derandomized).
+on the default branch of a freshly seeded local demo, byte for byte.
 """
 
 from __future__ import annotations
@@ -107,9 +106,8 @@ def demo_data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.mark.slow
 def test_shapes_tables_match_coverset_shapes(demo_data_dir: Path) -> None:
-    # Observed rows' example values come partly from non-derandomized Hypothesis tests in the demo
-    # app, so they are compared loosely here; everything else must match byte for byte.
-    findings = check_readme.check(data_dir=demo_data_dir, loose_examples=True)
+    # Strict: the demo app's Hypothesis profile is derandomized, so even the example values are stable.
+    findings = check_readme.check(data_dir=demo_data_dir)
     assert not findings, _report(findings)
 
 
