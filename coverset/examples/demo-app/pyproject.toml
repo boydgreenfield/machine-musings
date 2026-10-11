@@ -1,0 +1,48 @@
+[project]
+name = "ledger"
+version = "0.1.0"
+description = "Demo target for coverset: a small billing ledger with invoices, durations, accounts and intervals."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "hypothesis==6.168.5",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--strict-markers"
+markers = [
+  "invariant(id): links a test to an invariant in invariants.yaml",
+]
+
+[tool.coverset]
+source = ["ledger"]
+source_root = "src"
+testpaths = ["tests"]
+python = "3.13"
+max_shards = 8
+target_shard_seconds = 1
+fail_fast = "finish_in_background"
+invariants = "invariants.yaml"
+trace_modules = []
+tracked_globs = ["uv.lock", "conftest.py"]
+reorder = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ledger"]
