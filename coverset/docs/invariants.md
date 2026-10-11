@@ -160,7 +160,7 @@ A `review` entry asks the advisory AI reviewer ([docs/ai-review.md](ai-review.md
 | Command | Status |
 |---|---|
 | `coverset invariants check [--repo PATH]` | built: loads and validates a checkout's `invariants.yaml` with the repo's `[tool.coverset]` and prints a table (`commands/maintenance.py`; test `test_invariants_check`) |
-| `coverset invariants scan` | **designed, not built**: registered as a placeholder that exits with "arrives in phase 7". It is meant to run the review client over review-kind invariants at the default-branch head after each baseline run, storing results with `trigger = 'scan'` (the column already allows it). |
+| `coverset invariants scan [--repo PATH\|NAME] [--executor local\|modal]` | built: reviews every invariant with a `review` entry at the head of the latest completed, trusted baseline run of the default branch, through the configured review client (the offline fake unless `COVERSET_AI=anthropic` and the repo opted in). Findings land in `review_findings` under that run and the invariant's row is rewritten with `trigger = 'scan'`: review-only invariants take the review's status (`satisfied` or `needs_review`), mixed invariants keep the status their tests decided and gain the review as evidence; a review never yields `violated`. It is a command, not an automatic step after baselines (`commands/invariants.py`; tests in `tests/orchestrator/test_invariants_scan.py`). |
 
 ## Runtime checks (designed, not built)
 

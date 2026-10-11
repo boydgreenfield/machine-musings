@@ -4,7 +4,7 @@ coverset has four seams, each a `typing.Protocol`: where tests run (`Executor`),
 
 | Seam | Protocol | Registered in | Existing implementations |
 |---|---|---|---|
-| executor | `coverset.executors.base.Executor`, `Worker` | `coverset.executors.get_executor` | `LocalExecutor`; `ModalExecutor` (in progress) |
+| executor | `coverset.executors.base.Executor`, `Worker` | `coverset.executors.get_executor` | `LocalExecutor`, `ModalExecutor` |
 | forge | `coverset.forge.base.Forge` | `coverset.forge.registry` | `GitHubForge`, `FakeForge` |
 | language | `coverset.lang.base.LanguageAdapter` | `OrchestratorContext.adapter` | `PythonAdapter` |
 | reviewer | `coverset.ai.client.ReviewClient` | `coverset.ai.client.get_review_client` | `FakeReviewClient`, `AnthropicReviewClient` |

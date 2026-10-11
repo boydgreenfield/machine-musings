@@ -18,7 +18,7 @@ This page is the map. Each part has its own page:
 | [docs/modal.md](docs/modal.md) | the Modal executor: images, trusted snapshots, the warm pool, the reaper, cost guards |
 | [docs/ui.md](docs/ui.md) | the web UI (being written alongside this page) |
 
-Status words used throughout: **verified** means read in the committed code on branch `boyd/testing` and covered by a test; **in progress** means another agent is building it on the same branch right now; **designed, not built** means the plan describes it and no code exists.
+Status words used throughout: **verified** means read in the committed code on branch `boyd/testing` and covered by a test; **designed, not built** means the plan describes it and no code exists.
 
 ## What coverset is, and what it is not
 
@@ -55,7 +55,7 @@ flowchart LR
     AI["ai/<br/>ReviewClient"]
     DB[("db/: SQLite<br/>runs, tests, events")]
     FA[("facts/: Parquet<br/>per run + DuckDB views")]
-    UI["web UI<br/>(in progress)"]
+    UI["web UI<br/>(Quart + HTMX + SSE)"]
   end
 
   subgraph ex["Executor"]
@@ -118,9 +118,9 @@ These terms are used the same way in code, UI and docs.
 | **shape** | The recorded features of one argument value: type, None-ness, sign, length bucket, string kind, element summary. Written as a canonical shape key such as `str\|ascii\|kind:email/plain\|len:11-100`. | `pytest_coverset/features.py` (`shape_key`) |
 | **input class** | A named block of a parameter's input space, written `<param>:<class>`, for example `email:multi-label-domain` or `weights:zero-element`. | `analysis/shapes.py` (`InputClass`) |
 | **input-class coverage** | Observed ÷ expected input classes over a function's parameters (each-choice coverage). | `analysis/shapes.py` (`Catalogue.function_input_cov`) |
-| **shape grid** | The per-function picture of parameters × input classes. A filled square is a class some test exercised; a hollow dashed square is one no test ever passed in. | data from `Catalogue.function_input_cov`; rendering in progress (`docs/ui.md`) |
-| **flow ribbon** | The test files → in-repo callers → parameters picture, drawn from each observation's caller. | data in `call_shapes.caller_kind/caller_key`; rendering in progress |
-| **data-flow overlay** | Shape grids, flow ribbons, inlay chips in the source view and the treemap's Gap mode, together. | treemap aggregates in `facts/queries.py` (`treemap`); rendering in progress |
+| **shape grid** | The per-function picture of parameters × input classes. A filled square is a class some test exercised; a hollow dashed square is one no test ever passed in. | data from `Catalogue.function_input_cov`; rendered by `web/render/shapegrid.py` (see [docs/ui.md](docs/ui.md)) |
+| **flow ribbon** | The test files → in-repo callers → parameters picture, drawn from each observation's caller. | data in `call_shapes.caller_kind/caller_key`; rendered by `web/render/ribbon.py` |
+| **data-flow overlay** | Shape grids, flow ribbons, inlay chips in the source view and the treemap's Gap mode, together. | treemap aggregates in `facts/queries.py` (`treemap`); rendered by `web/render/treemap.py`, the inlay chips of `web/render/source.py` and `web/render/shapegrid.py` |
 | **invariant** | A user-declared behavioural rule in `invariants.yaml` with the statuses `satisfied`, `violated`, `untested`, `stale`, `needs_review`. | `analysis/invariants.py` |
 | **wave 1** (the change-covering set) | The greedy set cover of tests over the PR's changed function bodies, plus tests in changed files and tests with no coverage history. Wave 1 runs first on every shard. | `analysis/cover.py` (`change_covering_set`), `analysis/sharding.py` |
 
@@ -144,7 +144,7 @@ These terms are used the same way in code, UI and docs.
 | `src/coverset/forge/` | Forge contract, GitHub App and token adapters, fake forge, signatures, OIDC, sticky comment, App manifest, composite action | `Forge`, `GitHubForge`, `FakeForge`, `verify_signature`, `verify_actions_oidc`, `post_verdict` | `tests/forge/` |
 | `src/coverset/ai/` | Redacted review bundles, fake and Anthropic reviewers, findings | `ReviewClient`, `get_review_client`, `build_review_bundle`, `review_changes` | `tests/ai/` |
 | `src/coverset/web/` (committed part) | Access guard, `/v1` API, webhook route, `/setup` | `register_blueprints`, `access_guard`, `authorize_repo` | `tests/test_auth.py`, `tests/forge/test_forge_api.py`, `test_forge_api_hardening.py`, `test_forge_webhooks.py`, `test_forge_setup.py` |
-| `src/coverset/web/` (UI pages) | Runs, PR, source view, shape grid, treemap, outbox | in progress | see [docs/ui.md](docs/ui.md) |
+| `src/coverset/web/` (UI pages) | Runs, PR, source view, shape grid, treemap, outbox | verified (`tests/web/`) | see [docs/ui.md](docs/ui.md) |
 | `src/coverset/demo/`, `scripts/` | Deterministic demo repository, demo flow, fixture and benchmark generators | `seed_demo_repo`, `run_demo` | `tests/test_seed_demo.py`, `tests/e2e/test_demo_local.py`, `tests/bench/test_gen_bench_suite.py` |
 
 ## Trust boundaries
