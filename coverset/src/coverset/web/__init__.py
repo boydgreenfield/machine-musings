@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from quart import Quart
 
-from coverset.web import api, auth, home
+from coverset.web import api, auth, home, setup, webhooks
 
 
 def register_blueprints(app: Quart) -> None:
@@ -12,3 +12,5 @@ def register_blueprints(app: Quart) -> None:
     app.register_blueprint(auth.bp)
     app.register_blueprint(api.bp)
     app.register_blueprint(home.bp)
+    app.register_blueprint(webhooks.bp)
+    app.register_blueprint(setup.bp)

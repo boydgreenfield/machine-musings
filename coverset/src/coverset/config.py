@@ -32,6 +32,7 @@ CommaList = Annotated[list[str], NoDecode]
 Env = Literal["dev", "test", "prod"]
 AiMode = Literal["off", "fake", "anthropic"]
 ExecutorKind = Literal["local", "modal"]
+ForgeKind = Literal["auto", "github", "fake"]
 UntrustedPrPolicy = Literal["approve", "run_blocked_network", "skip"]
 SandboxNetwork = Literal["blocked", "allowlist", "open"]
 
@@ -58,6 +59,18 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+SPECIAL_USE_SUFFIXES = (".localhost", ".test", ".invalid", ".example")
+"""RFC 6761 special-use names: never resolvable on the public internet, so never a tunnel URL."""
+
+
+def is_private_host(host: str | None) -> bool:
+    """True for loopback hosts and RFC 6761 special-use names (nothing on the internet can reach them)."""
+    name = (host or "").lower().rstrip(".")
+    if not name:
+        return False
+    return is_loopback_host(name) or any(name.endswith(suffix) for suffix in SPECIAL_USE_SUFFIXES)
 
 
 class Settings(BaseSettings):
@@ -98,6 +111,7 @@ class Settings(BaseSettings):
     ai_max_bundle_chars: int = Field(default=120_000, gt=0)
     ai_exclude_globs: CommaList = Field(default_factory=list)
 
+    forge: ForgeKind = "auto"
     executor: ExecutorKind = "local"
     local_max_workers: int = Field(default_factory=_default_workers, gt=0)
     local_allow_webhook_runs: bool = False
@@ -182,6 +196,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"COVERSET_BIND={self.bind} is not a loopback address: set COVERSET_ADMIN_TOKEN "
                 f"(at least {MIN_ADMIN_TOKEN_CHARS} characters) or bind to 127.0.0.1"
+            )
+        if not token and not is_private_host(public.hostname):
+            # A public URL means a tunnel or proxy forwards internet traffic to the loopback bind,
+            # where open mode would treat every caller as the operator.
+            raise ValueError(
+                f"COVERSET_PUBLIC_URL={self.public_url} is reachable from outside this machine: set "
+                f"COVERSET_ADMIN_TOKEN (at least {MIN_ADMIN_TOKEN_CHARS} characters) before exposing "
+                "coverset through a tunnel or proxy"
             )
         webhook_secret = self.github_webhook_secret  # empty means unset: webhooks then fail closed
         webhook_secret_chars = len(webhook_secret.get_secret_value()) if webhook_secret else 0

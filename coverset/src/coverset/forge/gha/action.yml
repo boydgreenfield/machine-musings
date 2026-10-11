@@ -1,0 +1,93 @@
+# coverset: wait for the verdict on this commit and replay its results like pytest.
+#
+# Usage (see docs/github.md):
+#   permissions:
+#     id-token: write      # lets the step prove which repository it runs for
+#     contents: read
+#   steps:
+#     - uses: <owner>/<repo>/coverset/src/coverset/forge/gha@<sha>
+#       with:
+#         server: https://coverset.example.com
+#         # pytest-coverset is not on PyPI: install it from the repository, pinned to a commit.
+#         package: git+https://github.com/<owner>/<repo>@<sha>#subdirectory=coverset/packages/pytest-coverset
+name: coverset wait
+description: Block on the coverset verdict for this commit instead of running pytest again.
+inputs:
+  server:
+    description: Base URL of the coverset control plane (COVERSET_PUBLIC_URL).
+    required: true
+  repo-id:
+    description: GitHub repository id coverset knows the repository by.
+    required: false
+    default: ${{ github.repository_id }}
+  sha:
+    description: Commit to wait for (default the PR head, else the pushed commit).
+    required: false
+    default: ""
+  audience:
+    description: OIDC audience coverset expects (COVERSET_OIDC_AUDIENCE; default the server URL).
+    required: false
+    default: ""
+  timeout:
+    description: Seconds to wait before giving up (exit 2).
+    required: false
+    default: "1800"
+  junit:
+    description: Also write JUnit XML to this path.
+    required: false
+    default: ""
+  package:
+    description: >-
+      pip requirement that provides coverset-ci (the pytest-coverset package). Required, with no
+      default: the name pytest-coverset is not published on PyPI, so a bare name would install
+      whoever registers it there. Use a VCS URL pinned to a commit, e.g.
+      git+https://github.com/<owner>/<repo>@<sha>#subdirectory=coverset/packages/pytest-coverset
+      (or, once published, an exact version installed with --require-hashes).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install coverset-ci
+      shell: bash
+      env:
+        COVERSET_CI_PACKAGE: ${{ inputs.package }}
+      # Composite actions do not enforce `required`, so check here. The install runs with the OIDC
+      # request variables removed: a build backend or dependency cannot mint tokens for this job.
+      run: |
+        set -euo pipefail
+        if [ -z "${COVERSET_CI_PACKAGE}" ]; then
+          echo "::error::coverset: set the 'package' input (a pinned git URL of pytest-coverset; see docs/github.md)"
+          exit 2
+        fi
+        env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+          python -m pip install --quiet --disable-pip-version-check "${COVERSET_CI_PACKAGE}"
+    - name: Wait for the coverset verdict
+      shell: bash
+      env:
+        COVERSET_SERVER: ${{ inputs.server }}
+        COVERSET_REPO_ID: ${{ inputs.repo-id }}
+        COVERSET_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+        COVERSET_AUDIENCE: ${{ inputs.audience || inputs.server }}
+        COVERSET_TIMEOUT: ${{ inputs.timeout }}
+        COVERSET_JUNIT: ${{ inputs.junit }}
+      run: |
+        set -euo pipefail
+        args=(wait --server "${COVERSET_SERVER}" --repo-id "${COVERSET_REPO_ID}" --sha "${COVERSET_SHA}" --timeout "${COVERSET_TIMEOUT}")
+        if [ -n "${COVERSET_JUNIT}" ]; then
+          args+=(--junit "${COVERSET_JUNIT}")
+        fi
+        # Fork PRs and jobs without `id-token: write` get no OIDC token; coverset then answers only
+        # for public repositories.
+        if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          COVERSET_OIDC_TOKEN="$(curl --silent --show-error --fail --get \
+            --header "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=${COVERSET_AUDIENCE}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}" \
+            | python -c 'import json, sys; print(json.load(sys.stdin)["value"])')"
+          echo "::add-mask::${COVERSET_OIDC_TOKEN}"
+          export COVERSET_OIDC_TOKEN
+          args+=(--token-env COVERSET_OIDC_TOKEN)
+        else
+          echo "coverset: no OIDC token available; continuing without one"
+        fi
+        exec coverset-ci "${args[@]}"

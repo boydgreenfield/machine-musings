@@ -3,11 +3,15 @@
 With ``COVERSET_ADMIN_TOKEN`` unset (only allowed on a loopback bind) every route is open, but
 state-changing requests still need the CSRF header, because any web page the operator visits can
 make their browser POST to ``127.0.0.1``. Open mode also answers only requests whose ``Host`` names
-this server (loopback names, the bind host or the ``COVERSET_PUBLIC_URL`` host): otherwise a page
-that rebinds its own DNS name to ``127.0.0.1`` would be same-origin with coverset and could read
-pages and CSRF tokens. With a token, every request except the public routes below needs
+this server (loopback names or the bind host): otherwise a page that rebinds its own DNS name to
+``127.0.0.1`` would be same-origin with coverset and could read pages and CSRF tokens. The
+``COVERSET_PUBLIC_URL`` host is deliberately not accepted in open mode (configuration refuses a
+public URL without a token): a tunnel forwarding that host would make every internet caller the
+operator. With a token, every request except the public routes below needs
 ``Authorization: Bearer <token>`` or the session cookie issued by ``POST /login``. Bearer requests
-are exempt from CSRF: browsers never attach that header cross-site on their own.
+are exempt from CSRF: browsers never attach that header cross-site on their own. The CSRF token
+travels in the ``X-CSRF-Token`` header, or for plain HTML forms on non-public routes in a
+``csrf_token`` form field.
 
 Public routes: ``POST /webhooks/*``, ``GET|HEAD /v1/verdict``, ``GET|HEAD /v1/runs/<id>`` and
 ``/v1/runs/<id>/events``, ``GET|HEAD /healthz``, ``GET|POST /login`` and ``/static/*``. A public
@@ -31,6 +35,7 @@ from urllib.parse import urlsplit
 from quart import Blueprint, Response, g, jsonify, redirect, render_template_string, request, session
 from werkzeug.exceptions import Forbidden, MisdirectedRequest, NotFound, Unauthorized
 
+from coverset.config import is_loopback_host
 from coverset.web.context import app_settings
 
 AuthMethod = Literal["open", "bearer", "cookie", "public"]
@@ -41,6 +46,7 @@ ADMIN_METHODS: frozenset[AuthMethod] = frozenset({"open", "bearer", "cookie"})
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 CSRF_HEADER = "X-CSRF-Token"
+CSRF_FORM_FIELD = "csrf_token"
 LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 """Host names always accepted in open mode (``*.localhost`` names are accepted too)."""
 
@@ -88,15 +94,16 @@ def _request_host_name() -> str:
     return name.rstrip(".")
 
 
+def request_host_is_loopback() -> bool:
+    """True when the request's ``Host`` is a loopback name (``localhost``, ``*.localhost``, 127/8, ::1)."""
+    name = _request_host_name()
+    return name in LOOPBACK_HOST_NAMES or name.endswith(".localhost") or is_loopback_host(name)
+
+
 def _host_allowed() -> bool:
     """True when ``Host`` names this server (see the module docstring on DNS rebinding)."""
-    settings = app_settings()
     name = _request_host_name()
-    known = {*LOOPBACK_HOST_NAMES, settings.bind_host.lower()}
-    public_host = urlsplit(settings.public_url).hostname
-    if public_host:
-        known.add(public_host.lower())
-    return name in known or name.endswith(".localhost")
+    return request_host_is_loopback() or name == app_settings().bind_host.lower()
 
 
 def _expected_token() -> bytes | None:
@@ -157,10 +164,22 @@ def csrf_token() -> str:
     return token
 
 
-def _csrf_ok() -> bool:
+def _csrf_ok(supplied: str | None = None) -> bool:
     expected = session.get(_SESSION_CSRF)
-    supplied = request.headers.get(CSRF_HEADER, "")
+    if supplied is None:
+        supplied = request.headers.get(CSRF_HEADER, "")
     return bool(expected) and hmac.compare_digest(supplied.encode(), expected.encode())
+
+
+async def _csrf_ok_with_form() -> bool:
+    """The header, else a ``csrf_token`` field of a urlencoded or multipart form (plain HTML forms)."""
+    if _csrf_ok():
+        return True
+    if request.mimetype not in ("application/x-www-form-urlencoded", "multipart/form-data"):
+        return False
+    form = await request.form
+    field = form.get(CSRF_FORM_FIELD)
+    return isinstance(field, str) and _csrf_ok(field)
 
 
 def _admin_credentials() -> AuthMethod | None:
@@ -199,7 +218,7 @@ async def access_guard() -> Response | None:
         return None
     if admin is None:
         return _deny(Unauthorized, "unauthorized")
-    if _csrf_required(admin) and not _csrf_ok():
+    if _csrf_required(admin) and not await _csrf_ok_with_form():
         return _deny(Forbidden, "csrf_failed")
     g.coverset_auth = admin
     return None

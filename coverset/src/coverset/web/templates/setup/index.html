@@ -1,0 +1,59 @@
+{% extends "setup/_layout.html" %}
+{% block title %}Connect GitHub{% endblock %}
+{% block main %}
+<h1>Connect coverset to GitHub</h1>
+
+<section aria-labelledby="status">
+<h2 id="status">Current configuration</h2>
+<dl>
+  <dt>Forge mode</dt><dd><code>{{ mode }}</code></dd>
+  <dt>Public URL</dt><dd><code>{{ public_url }}</code></dd>
+  <dt>Allowed owners</dt>
+  <dd>{% if allowed_owners %}{% for owner in allowed_owners %}<code>{{ owner }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none configured (every owner is accepted outside App mode){% endif %}</dd>
+  {% if allowed_repos %}<dt>Allowed repositories</dt><dd>{% for repo in allowed_repos %}<code>{{ repo }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+  <dt>OIDC audience for <code>coverset-ci wait</code></dt><dd><code>{{ oidc_audience }}</code></dd>
+</dl>
+</section>
+
+<section aria-labelledby="app">
+<h2 id="app">Option 1: create a GitHub App (check runs, buttons, sticky comment)</h2>
+{% if not reachable %}
+<p role="alert"><strong>{{ public_url }} is a loopback address.</strong> GitHub cannot deliver webhooks to it.
+Start a tunnel (smee or ngrok, see <code>docs/github.md</code>), set <code>COVERSET_ADMIN_TOKEN</code> (at least 32 characters), then set <code>COVERSET_PUBLIC_URL</code> to the tunnel URL and restart <code>coverset serve</code> before creating the App. coverset refuses a public URL without an admin token.</p>
+{% endif %}
+{% if existing %}
+<p role="status">Credentials are already stored ({% for item in existing %}<code>{{ item }}</code>{% if not loop.last %}, {% endif %}{% endfor %}). Finishing this flow asks before replacing them.</p>
+{% endif %}
+<p>The button below sends this manifest to GitHub, which creates a <strong>private</strong> App owned by
+{% if organization %}the organization <code>{{ organization }}</code>{% else %}your account{% endif %}
+and sends you back here. coverset then writes the App id, client id and secrets to <code>{{ env_path }}</code>
+and the private key to <code>{{ key_path }}</code> (both readable only by you). Restart <code>coverset serve</code> afterwards.</p>
+<ul>
+  <li>Permissions: {% for name, level in manifest.default_permissions.items() %}<code>{{ name }}: {{ level }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</li>
+  <li>Events: {% for name in manifest.default_events %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %} (installation events are always delivered)</li>
+  <li>Webhook URL: <code>{{ manifest.hook_attributes.url }}</code></li>
+  <li>Redirect URL: <code>{{ manifest.redirect_url }}</code></li>
+</ul>
+<form method="post" action="{{ action }}">
+  <input type="hidden" name="manifest" value="{{ manifest_json }}">
+  <button type="submit">Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
+</form>
+<p>For an organization, open <code>/setup?org=&lt;organization&gt;</code> instead.</p>
+<details>
+<summary>Manifest</summary>
+<pre><code>{{ manifest_json }}</code></pre>
+</details>
+</section>
+
+<section aria-labelledby="token">
+<h2 id="token">Option 2: token mode (commit statuses and comments only)</h2>
+<p>Without an App, coverset can post a commit status named <code>coverset</code> and the sticky PR comment using a token:</p>
+<ol>
+  <li>Create a fine-grained personal access token limited to the repositories coverset should watch, with
+      <em>Commit statuses: read and write</em>, <em>Pull requests: read and write</em>, <em>Issues: read and write</em> and <em>Contents: read</em>.</li>
+  <li>Set <code>COVERSET_GITHUB_TOKEN</code>, <code>COVERSET_ALLOWED_OWNERS</code> and a webhook secret of at least 16 characters in <code>COVERSET_GITHUB_WEBHOOK_SECRET</code>.</li>
+  <li>Add a repository webhook (Settings → Webhooks) pointing at <code>{{ manifest.hook_attributes.url }}</code>, content type <code>application/json</code>, with the same secret and the events <em>Pull requests</em>, <em>Pushes</em>.</li>
+</ol>
+<p>Token mode has no check runs, so untrusted pull requests cannot be approved with a button; use <code>COVERSET_UNTRUSTED_PR_POLICY=run_blocked_network</code> or <code>skip</code>.</p>
+</section>
+{% endblock %}

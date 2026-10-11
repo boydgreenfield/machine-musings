@@ -266,3 +266,36 @@ def test_iter_sse_parsing() -> None:
     ]
     events = list(iter_sse(raw))
     assert [(e.id, e.event, e.data) for e in events] == [("4", "test", '{"a":\n1}'), ("4", "message", "x")]
+
+
+def test_errored_run_exits_2_not_5() -> None:
+    """An errored run reports neutral with exit_code 2 and no tests: the server's code wins."""
+    zero = dict.fromkeys(COUNTS_PASS, 0)
+    events = event_list(("done", {"conclusion": "neutral", "exit_code": 2, "counts": zero}))
+    with serve(Scenario(verdicts=[verdict_found()], events=events)) as server:
+        code, _ = run_cli(server)
+    assert code == EXIT_INTERRUPTED
+
+
+@pytest.mark.parametrize(
+    ("conclusion", "server_code", "counts", "expected"),
+    [
+        ("neutral", 2, {"passed": 0}, 2),
+        ("neutral", 0, {"passed": 3}, 2),
+        ("neutral", 5, {"passed": 0}, 5),
+        ("success", 5, {"passed": 0}, 5),
+        ("success", 0, {"passed": 1}, 0),
+        ("failure", 0, {"failed": 1}, 1),
+        ("cancelled", 2, {}, 2),
+        ("success", 99, {"passed": 1}, 2),
+        ("neutral", None, {"passed": 0}, 5),
+        ("success", None, {"passed": 2}, 0),
+        ("timed_out", None, None, 2),
+    ],
+)
+def test_exit_code_for_honours_the_server_code(
+    conclusion: str, server_code: int | None, counts: dict[str, int] | None, expected: int
+) -> None:
+    from pytest_coverset.ci import exit_code_for
+
+    assert exit_code_for(conclusion, server_code, counts) == expected

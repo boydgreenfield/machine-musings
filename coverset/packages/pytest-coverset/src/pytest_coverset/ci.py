@@ -52,17 +52,32 @@ class Fatal(Exception):
         self.code = code
 
 
+SERVER_EXIT_CODES = frozenset({EXIT_SUCCESS, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_NO_TESTS})
+
+
 def exit_code_for(
     conclusion: str | None, exit_code: int | None = None, counts: Mapping[str, int] | None = None
 ) -> int:
-    """Map a run's conclusion (plus its pytest exit code and counts) to ``coverset-ci`` exit codes."""
+    """Map a run's conclusion (plus the server's exit code and counts) to ``coverset-ci`` exit codes.
+
+    A ``failure`` always exits 1. Otherwise an ``exit_code`` sent by the server (the ``done``
+    event) wins, so an errored run (``neutral``, exit 2) is not mistaken for "no tests"; it can
+    never turn a conclusion other than ``success`` into 0. Only without one do the counts decide:
+    no test ran ⇒ 5.
+    """
+    if conclusion == "failure":
+        return EXIT_FAILURE
+    if exit_code is not None:
+        if exit_code not in SERVER_EXIT_CODES:
+            return EXIT_INTERRUPTED
+        if exit_code == EXIT_SUCCESS and conclusion != "success":
+            return EXIT_INTERRUPTED
+        return exit_code
     ran = sum(v for k, v in (counts or {}).items() if k != "not_run") if counts is not None else None
-    if exit_code == EXIT_NO_TESTS or (ran == 0 and conclusion in (None, "success", "neutral")):
+    if ran == 0 and conclusion in (None, "success", "neutral"):
         return EXIT_NO_TESTS
     if conclusion == "success":
         return EXIT_SUCCESS
-    if conclusion == "failure":
-        return EXIT_FAILURE
     return EXIT_INTERRUPTED
 
 

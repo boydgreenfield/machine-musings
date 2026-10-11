@@ -1,0 +1,20 @@
+{% extends "setup/_layout.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block main %}
+<h1>{{ title }}</h1>
+<p>{{ message }}</p>
+{% if existing %}
+<p>Already stored:</p>
+<ul>{% for item in existing %}<li><code>{{ item }}</code></li>{% endfor %}</ul>
+{% endif %}
+{% if confirm_action %}
+<form method="post" action="{{ confirm_action }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="overwrite" value="1">
+  <button type="submit">Replace the stored credentials with the new App</button>
+</form>
+{% elif hint %}
+<p>{{ hint }}</p>
+{% endif %}
+<p><a href="{{ url_for('setup.index') }}">Back to setup</a></p>
+{% endblock %}

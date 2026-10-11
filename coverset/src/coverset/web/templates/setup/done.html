@@ -1,0 +1,17 @@
+{% extends "setup/_layout.html" %}
+{% block title %}GitHub App created{% endblock %}
+{% block main %}
+<h1>GitHub App created</h1>
+<dl>
+  <dt>App</dt><dd>{% if app_url %}<a href="{{ app_url }}">{{ credentials.slug }}</a>{% else %}{{ credentials.slug }}{% endif %} (id <code>{{ credentials.app_id }}</code>)</dd>
+  {% if credentials.owner %}<dt>Owner</dt><dd><code>{{ credentials.owner }}</code></dd>{% endif %}
+  <dt>Settings written to</dt><dd><code>{{ env_path }}</code></dd>
+  <dt>Private key written to</dt><dd><code>{{ key_path }}</code></dd>
+</dl>
+<h2>Next steps</h2>
+<ol>
+  <li>Restart <code>coverset serve</code> so it loads the new settings.</li>
+  <li><a href="{{ credentials.install_url }}">Install the App</a> on the repositories coverset should watch.</li>
+  <li>Optionally require the <code>coverset</code> check in branch protection (pick it from this App).</li>
+</ol>
+{% endblock %}

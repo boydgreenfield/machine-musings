@@ -169,10 +169,28 @@ def test_short_webhook_secret_rejected() -> None:
 
 
 def test_public_url_and_audience_derivation() -> None:
-    settings = Settings.for_tests(public_url="https://ci.example.org/")
+    settings = Settings.for_tests(public_url="https://ci.example.org/", admin_token=LONG_TOKEN)
     assert settings.public_url == "https://ci.example.org"
     assert settings.oidc_audience == "https://ci.example.org"
     assert Settings.for_tests(bind="[::1]:9000").public_url == "http://[::1]:9000"
+
+
+@pytest.mark.parametrize(
+    "public_url", ["https://coverset-demo.ngrok.app", "https://ci.example.org", "http://192.168.1.5:8000"]
+)
+def test_public_url_reachable_from_outside_requires_admin_token(public_url: str) -> None:
+    """A tunnel forwards internet callers to the loopback bind, where open mode trusts everyone."""
+    with pytest.raises(ValidationError, match="set COVERSET_ADMIN_TOKEN"):
+        Settings.for_tests(public_url=public_url)
+    assert Settings.for_tests(public_url=public_url, admin_token=LONG_TOKEN).public_url == public_url
+
+
+@pytest.mark.parametrize(
+    "public_url",
+    ["http://localhost:8000", "http://127.0.0.2:8000", "http://[::1]:8000", "http://ci.example.test"],
+)
+def test_loopback_and_special_use_public_urls_allowed_without_token(public_url: str) -> None:
+    assert Settings.for_tests(public_url=public_url).admin_token is None
 
 
 def test_fake_now(clean_env: pytest.MonkeyPatch) -> None:

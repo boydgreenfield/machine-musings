@@ -32,8 +32,16 @@ def probe_app(settings: Settings) -> Client:
     async def report(**_view_args: str) -> dict[str, str | bool | None]:
         return {"auth": current_auth(), "admin": is_admin()}
 
-    for rule in ("/v1/verdict", "/v1/runs", "/v1/runs/<run_id>", "/v1/runs/<run_id>/events"):
-        probes.add_url_rule(rule, view_func=report, methods=["GET"], endpoint=rule)
+    probed = ("/v1/verdict", "/v1/runs", "/v1/runs/<run_id>", "/v1/runs/<run_id>/events")
+    # Real views already serve some of these paths (the first registered rule wins): swap them out.
+    existing = {
+        rule.rule: rule.endpoint for rule in app.url_map.iter_rules() if "GET" in (rule.methods or ())
+    }
+    for rule in probed:
+        if rule in existing:
+            app.view_functions[existing[rule]] = report
+        else:
+            probes.add_url_rule(rule, view_func=report, methods=["GET"], endpoint=rule)
     probes.add_url_rule("/webhooks/github", view_func=report, methods=["POST"], endpoint="hook")
     app.register_blueprint(probes)
     return app.test_client()
@@ -278,11 +286,13 @@ class TestOpenMode:
     async def test_loopback_hosts_accepted(self, client: Client, host: str) -> None:
         assert (await client.get("/", headers={"Host": host})).status_code == 200
 
-    async def test_public_url_host_accepted(self, tmp_path: Path) -> None:
-        settings = Settings.for_tests(data_dir=tmp_path, public_url="https://ci.example.org")
+    async def test_public_url_host_not_trusted_in_open_mode(self, tmp_path: Path) -> None:
+        """Open mode never answers for the public URL's host: a tunnel forwarding it would make every
+        internet caller the operator (configuration refuses a reachable public URL without a token)."""
+        settings = Settings.for_tests(data_dir=tmp_path, public_url="https://ci.example.test")
         client = create_app(settings).test_client()
-        assert (await client.get("/healthz", headers={"Host": "ci.example.org"})).status_code == 200
-        assert (await client.get("/healthz", headers={"Host": "other.example.org"})).status_code == 421
+        assert (await client.get("/healthz", headers={"Host": "ci.example.test"})).status_code == 421
+        assert (await client.get("/healthz", headers={"Host": "127.0.0.1:8000"})).status_code == 200
 
     async def test_writes_need_csrf(self, client: Client) -> None:
         assert (await client.post("/logout")).status_code == 403

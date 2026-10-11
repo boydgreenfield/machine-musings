@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from coverset.config import ExecutorKind
+from coverset.config import ExecutorKind, SandboxNetwork
 from coverset.db.types import UTCDateTime, new_id, str_enum, utc_now
 
 SECRET_COLUMN_LEN = 2048
@@ -44,10 +44,18 @@ PATH_LEN = 1024
 
 ForgeKind = Literal["github", "fake", "local"]
 RunStatus = Literal[
-    "queued", "awaiting_approval", "running", "completed", "cancelled", "abandoned", "skipped", "error"
+    "queued",
+    "awaiting_approval",
+    "paused",
+    "running",
+    "completed",
+    "cancelled",
+    "abandoned",
+    "skipped",
+    "error",
 ]
 Conclusion = Literal["success", "failure", "neutral", "cancelled", "timed_out"]
-RunTrigger = Literal["pull_request", "push", "rerun", "manual"]
+RunTrigger = Literal["pull_request", "push", "baseline", "rerun", "manual"]
 PrState = Literal["open", "closed", "merged"]
 ShardStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 SnapshotStatus = Literal["building", "ready", "failed", "expired"]
@@ -166,6 +174,8 @@ class PullRequest(Base):
     head_ref: Mapped[str | None] = mapped_column(String(NAME_LEN))
     base_ref: Mapped[str | None] = mapped_column(String(NAME_LEN))
     title: Mapped[str] = mapped_column(String(PATH_LEN), default="")
+    author: Mapped[str | None] = mapped_column(String(NAME_LEN))
+    """The PR author's login (an untrusted author may not approve their own PR's run)."""
     author_association: Mapped[str] = mapped_column(String(32), default="NONE")
     from_fork: Mapped[bool] = mapped_column(Boolean, default=False)
     draft: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -196,6 +206,15 @@ class Run(Base):
     verdict: Mapped[Conclusion | None] = mapped_column(str_enum(Conclusion))
     reason: Mapped[str | None] = mapped_column(Text)
     trusted: Mapped[bool] = mapped_column(Boolean, default=True)
+    network: Mapped[SandboxNetwork | None] = mapped_column(str_enum(SandboxNetwork))
+    """Sandbox network override for this run (``blocked`` for untrusted PRs); None = the setting."""
+    approval_check_id: Mapped[int | None] = mapped_column(BigInteger)
+    """The forge's "coverset: awaiting approval" check run, while an untrusted PR waits."""
+    approved_by: Mapped[str | None] = mapped_column(String(NAME_LEN))
+    approval_requested_by: Mapped[str | None] = mapped_column(String(NAME_LEN))
+    """Who last pressed Approve run; the run stays awaiting until their write access is verified."""
+    check_run_id: Mapped[int | None] = mapped_column(BigInteger)
+    """The forge's verdict check run for this run (set by :func:`coverset.forge.verdict.post_verdict`)."""
     executor: Mapped[ExecutorKind] = mapped_column(str_enum(ExecutorKind), default="local")
     env_hash: Mapped[str | None] = mapped_column(ForeignKey("envs.env_hash"), index=True)
     snapshot_id: Mapped[int | None] = mapped_column(
@@ -213,6 +232,12 @@ class Run(Base):
     t_first_failure_file_order_est: Mapped[float | None] = mapped_column(Float)
     timeline: Mapped[dict[str, str]] = mapped_column(JSONDict, default=dict)
     ci_first_contact_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    extra_env: Mapped[dict[str, str]] = mapped_column(JSONDict, default=dict)
+    """Environment variables applied to every exec of this run (sanitised by the executor)."""
+    retry_increment_keys: Mapped[list[str]] = mapped_column(JSONList, default=list)
+    """``extra_env`` keys whose integer value a retry exec increments by one."""
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSONDict)
+    """The final :class:`~coverset.forge.verdict.VerdictSummary` as JSON (what the forge was sent)."""
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 
 
@@ -337,6 +362,8 @@ class WebhookDelivery(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     delivery_id: Mapped[str] = mapped_column(String(KEY_LEN), unique=True)
+    body_sha256: Mapped[str | None] = mapped_column(String(HASH_LEN), unique=True)
+    """SHA-256 of the signed raw body: a captured delivery replayed with a fresh GUID is a duplicate."""
     forge: Mapped[ForgeKind] = mapped_column(str_enum(ForgeKind))
     event: Mapped[str] = mapped_column(String(64))
     action: Mapped[str | None] = mapped_column(String(64))

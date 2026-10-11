@@ -44,6 +44,8 @@ PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"""(?i)\b(authorization['"]?\s*[:=]\s*['"]?(?:bearer|token|basic)\s+)[^\s"',;}]+"""),
         r"\1[REDACTED]",
     ),
+    # GitHub App manifest codes in /setup/github/callback request lines (hypercorn's access log).
+    (re.compile(r"(/setup/github/callback\?(?:[^\s\"'#]*?[&;])?code=)[^\s\"'&;#]+"), r"\1[REDACTED]"),
 )
 """Credential shapes masked in all text, applied in order (PEM blocks first)."""
 
