@@ -1,0 +1,178 @@
+# Security
+
+coverset runs other people's code and reports on it. This page is the threat model and the checklist the hardening phase runs. Every control names the module that implements it and the test that covers it. "No test" marks a control that is in the code but not pinned by a test; "in progress" marks parts another agent is building now ([docs/modal.md](modal.md), [docs/ui.md](ui.md)); "designed" marks parts that do not exist yet.
+
+Running the security-marked suite today, `uv run pytest -m security`, selects 3 tests (all in `tests/analysis/test_analysis_invariants.py`). The other tests named below run in the normal suite (`uv run pytest`). Marking them is a hardening-phase task.
+
+## Threat model
+
+| Actor | Can | Wants |
+|---|---|---|
+| PR author (outside contributor or fork) | write any code that runs in a worker: tests, conftest, the package under test, `pyproject.toml`, `invariants.yaml`, `uv.lock` | a green verdict on bad code; secrets; a foothold on the control plane; free compute |
+| PR author (trusted collaborator, possibly an AI agent) | the same, without needing approval | usually nothing hostile; mistakes are the main risk |
+| Anyone on the internet | reach `/webhooks/*` and the public `/v1` routes when coverset is exposed through a tunnel or proxy | forged runs, replays, information about private repos, denial of service |
+| Another GitHub Actions job | present an OIDC token for its own repository | another repository's verdict |
+| A web page the operator visits | make the operator's browser send requests to `127.0.0.1:8000` | state-changing requests (CSRF), reading pages (DNS rebinding) |
+| The AI reviewer, steered by PR text | return arbitrary structured output | change a verdict |
+
+Assets: forge credentials (App private key, installation tokens, `COVERSET_GITHUB_TOKEN`), the webhook secret, the admin token and session key, `ANTHROPIC_API_KEY`, Modal tokens, the control database, the facts, the git mirrors, and the operator's machine when the LocalExecutor is used.
+
+## 1. Webhook ingress
+
+Order of checks in `src/coverset/web/webhooks.py` (`receive`): nothing is parsed or written before the signature is verified.
+
+| # | Control | Module | Test |
+|---|---|---|---|
+| W1 | HMAC-SHA256 of the raw body in `X-Hub-Signature-256`, compared in constant time (`githubkit` `webhooks.verify`, `hmac.compare_digest`); the legacy SHA-1 header is never honoured | `forge/signing.py` (`verify_signature`) | `tests/forge/test_forge_events.py::test_github_published_hmac_vector`, `test_bad_signatures_rejected`, `test_signature_covers_the_raw_bytes`; `tests/forge/test_forge_webhooks.py::test_missing_signature_is_403`, `test_tampered_body_is_403` |
+| W2 | a bad signature is 403 with no part of the body echoed | `web/webhooks.py` | `test_bad_signature_is_403_without_echo` |
+| W3 | fail closed: no secret is 503; the fixtures' secret `coverset-test-secret` is refused unless `COVERSET_ENV=test`; a configured secret shorter than 16 characters refuses to start | `forge/signing.py` (`webhook_secret`), `config.py` | `test_empty_secret_fails_closed`, `test_test_secret_rejected_outside_test_env`, `test_forge_events.py::test_secret_policy`, `test_no_secret_never_verifies`, `tests/test_config.py::test_short_webhook_secret_rejected` |
+| W4 | deduplication by `X-GitHub-Delivery` and by the SHA-256 of the raw body, so a captured delivery resent under a fresh GUID is a duplicate; both are unique columns | `orchestrator/intake.py` (`delivery_seen`), `db/models.py` (`WebhookDelivery`) | `test_duplicate_delivery_is_processed_once`, `test_replay_with_a_fresh_guid_is_a_duplicate`, `tests/forge/test_forge_intake.py::test_body_digest_dedupes_a_replay_under_a_new_guid`, `test_duplicate_delivery_is_a_no_op` |
+| W5 | `X-GitHub-Delivery` must match `^[A-Za-z0-9-]{1,128}$` (400) | `forge/github_events.py` (`delivery_id`) | `test_bad_delivery_id_is_400` |
+| W6 | event allowlist: `pull_request`, `push`, `check_suite`, `check_run`, `installation`, `installation_repositories`, `repository`, `ping`; anything else is recorded without payload and answered 202 | `forge/github_events.py` (`ALLOWED_EVENTS`) | `test_unknown_event_is_recorded_and_ignored`, `test_ping_is_ignored` |
+| W7 | size limits: bodies over 25 MiB are 413 before the view runs; payloads nested too deeply are 400 | `app.py` (`MAX_CONTENT_LENGTH`, `_reject_oversized_body`), `forge/github_events.py` (`decode_payload`) | `test_oversized_body_is_413`, `tests/test_app.py::test_oversized_body_rejected`, `test_deeply_nested_payload_is_400`, `test_forge_events.py::test_deeply_nested_json_is_a_payload_error` |
+| W8 | repositories are identified by `repository.id` only; `clone_url` and `ssh_url` are never read; `owner/name` is checked before it goes into an API path; mirrors fetch from the forge's canonical URL | `forge/github_events.py`, `forge/base.py` (`check_full_name`), `orchestrator/repos.py` | `tests/forge/test_forge_github.py::test_repo_names_are_checked_before_use`; the `clone_url` rule has no test (code review) |
+| W9 | every SHA from a payload must match `^[0-9a-f]{40}$`; refs reach git only after `git check-ref-format`, never starting with `-`, behind `--end-of-options` and `--` | `forge/base.py` (`check_sha`), `analysis/diff.py` (`validate_ref`, `run_git_diff`) | `test_forge_events.py::test_malformed_pull_requests_raise`; `tests/analysis/test_analysis_diff.py::test_bad_refs_are_rejected`, `test_good_refs_pass` |
+| W10 | owner allowlist: events for owners outside `COVERSET_ALLOWED_OWNERS` (or repos outside `COVERSET_ALLOWED_REPOS`) are stored as `ignored_owner` without payload, answered 202, and create nothing; App mode refuses to start without allowed owners | `orchestrator/intake.py` (`owner_allowed`), `config.py` | `test_other_owner_answered_202_without_rows`, `test_forge_intake.py::test_other_owners_create_nothing`, `test_allowed_repos_narrow_allowed_owners`, `tests/test_config.py::test_app_mode_requires_allowed_owners` |
+| W11 | one delivery at a time per process; a unique-key conflict retries the whole intake once, then 503 with nothing half-stored | `web/webhooks.py` (intake lock) | `test_concurrent_deliveries_are_all_recorded`, `test_integrity_error_is_retried_once_then_503` |
+| W12 | the answer is ready before any forge API call: approval checks and permission lookups run as background tasks after the commit | `web/webhooks.py`, `orchestrator/intake.py` (`apply_forge_followups`) | no timing test |
+| W13 | unknown webhook route names are 404; `/webhooks/fake` exists only while the fake forge is configured | `forge/registry.py` (`webhook_forge`) | `test_unknown_forge_route_is_404` |
+
+## 2. Untrusted pull requests and approval
+
+| # | Control | Module | Test |
+|---|---|---|---|
+| U1 | a PR is trusted only when it is not from a fork (a deleted head repository counts as a fork) and `author_association` is `OWNER`, `MEMBER` or `COLLABORATOR` | `forge/base.py` (`PullRef.trusted`), `forge/github_events.py` | `test_forge_events.py::test_parse_fork_pr_is_untrusted`, `test_deleted_head_repo_counts_as_fork`, `test_forge_intake.py::test_non_member_authors_are_untrusted_even_without_a_fork` |
+| U2 | `COVERSET_UNTRUSTED_PR_POLICY`: `approve` (default), `run_blocked_network` or `skip`; token mode, which has no buttons, defaults to `run_blocked_network` unless the policy is set explicitly | `orchestrator/intake.py`, `forge/registry.py` (`effective_untrusted_pr_policy`) | `test_untrusted_policies`, `test_token_mode_defaults_untrusted_prs_to_run_blocked_network` |
+| U3 | `approve`: the run waits as `awaiting_approval` behind a neutral "coverset: awaiting approval" check with an **Approve run** button | `orchestrator/intake.py` (`apply_forge_followups`) | `test_fork_pr_awaits_approval_with_a_neutral_check`, `test_forge_webhooks.py::test_fork_pr_gets_the_approval_check` |
+| U4 | a button press is a request: coverset asks GitHub for the sender's role (`GET /repos/{o}/{r}/collaborators/{login}/permission`) and queues only for `admin`, `maintain` or `write`; the untrusted PR's own author is refused; a lookup failure leaves the run waiting; of two concurrent approvals exactly one wins | `orchestrator/intake.py` (`_approval_refusal`, `approve_awaiting_run`) | `test_approve_run_queues_with_network_blocked`, `test_approve_run_by_a_non_writer_is_refused`, `test_untrusted_author_cannot_approve_their_own_pr`, `test_permission_lookup_failure_keeps_the_run_waiting`, `test_concurrent_approvals_queue_once`, `test_approve_run_from_a_non_writer_is_not_queued` |
+| U5 | the approval is bound to the run by the check's `external_id` | `orchestrator/intake.py` (`_approve`) | `test_approve_run_by_external_id`, `test_approval_fixture_binds_the_check_external_id` |
+| U6 | an admin can approve with `POST /runs/<id>/approve` (bearer, or cookie plus CSRF) | `web/api.py` (`approve_run`) | `tests/forge/test_forge_api_hardening.py::test_admin_can_approve_an_awaiting_run`, `test_token_mode_approval_status_and_admin_approval` |
+| U7 | a new head cancels the PR's runs still waiting for approval; a rerun of an unapproved untrusted run needs approval again | `orchestrator/intake.py` | `test_new_head_supersedes_an_awaiting_run`, `test_rerun_of_unapproved_untrusted_run_needs_approval` |
+| U8 | untrusted runs always have `network = blocked` | `orchestrator/intake.py` (`_new_run`, `approve_awaiting_run`) | `test_approve_run_queues_with_network_blocked` |
+| U9 | untrusted runs never use the LocalExecutor | `orchestrator/runner.py` (`_policy`) | `tests/orchestrator/test_runner.py::test_untrusted_local_run_is_skipped` |
+| U10 | webhook-triggered runs use the LocalExecutor only with `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true` | `orchestrator/runner.py` (`_policy`) | no negative test (the e2e demo sets it to true) |
+| U11 | untrusted runs never update `test_stats` | `orchestrator/history.py` (`update_test_stats`) | no test |
+| U12 | untrusted runs get no AI review unless `COVERSET_AI_REVIEW_UNTRUSTED=true` | `orchestrator/verdict.py` (`_ai_review`), `ai/review.py` | `tests/ai/test_ai_review.py::test_review_changes_skips_untrusted_bundles_unless_allowed` |
+| U13 | untrusted runs never build or refresh trusted snapshots | in progress, `executors/modal_.py` (snapshots only for default-branch commits) | in progress |
+
+## 3. OIDC for `coverset-ci wait`
+
+`forge/oidc.py` (`verify_actions_oidc`) and `web/api.py` (`authorize_repo`).
+
+| # | Control | Test (`tests/forge/`) |
+|---|---|---|
+| O1 | `alg` must be `RS256`, checked before any key lookup: `none` and HMAC tokens are refused without touching the network | `test_forge_api.py::test_alg_none_rejected_before_key_lookup`, `test_hs256_key_confusion_rejected` |
+| O2 | issuer `https://token.actions.githubusercontent.com`; audience `COVERSET_OIDC_AUDIENCE` (default `COVERSET_PUBLIC_URL`); 60 s leeway; required claims `exp, iat, nbf, iss, aud, sub, repository_id, repository_owner_id` | `test_valid_token`, `test_rejected_claims`, `test_leeway_accepts_a_just_expired_token`, `test_wrong_key_and_garbage_rejected` |
+| O3 | the audience may not be a `github.com` URL (refused at start-up) | `tests/test_config.py::test_oidc_audience_must_not_be_github` |
+| O4 | the token's `repository_id` and `repository_owner_id` must match a repository stored from a verified webhook (`forge` `github` or `fake`); otherwise 404 | `test_oidc_token_for_another_repo_is_404`, `test_verdict_with_a_valid_oidc_token` |
+| O5 | an invalid token is 401 | `test_invalid_oidc_token_is_401` |
+| O6 | JWKS from GitHub through `PyJWKClient` (keys cached 1 h, 5 s timeout) behind `GuardedJwkClient`: known `kid`s answered from cache, unknown `kid`s and fetch outages answered from a 30 s negative cache, at most 256 cached `kid`s, `kid` at most 256 characters | `test_forge_api_hardening.py::test_guarded_client_caches_unknown_kids_and_outages`, `test_guarded_client_rejects_tokens_without_a_kid` |
+| O7 | tokens over 16,384 characters are refused; bearer requests are limited to 1,200 a minute per client address before verification | `test_bearer_path_is_rate_limited_before_verification` |
+| O8 | the composite action requires a pinned `package` (no default), removes `ACTIONS_ID_TOKEN_REQUEST_*` while installing, requests the token only when `ACTIONS_ID_TOKEN_REQUEST_URL` is set, and masks it | `test_forge_events.py::test_composite_action_requires_a_pinned_package` |
+
+## 4. Access control
+
+`web/auth.py` (`access_guard`), `config.py`, `app.py`, `web/api.py`, `web/setup.py`.
+
+| # | Control | Test |
+|---|---|---|
+| A1 | `coverset serve` binds `127.0.0.1:8000` by default | `tests/test_config.py::test_defaults`, `test_loopback_binds_need_no_token` |
+| A2 | a non-loopback bind needs `COVERSET_ADMIN_TOKEN` of at least 32 characters; a shorter token is refused even on loopback | `test_non_loopback_bind_requires_long_admin_token`, `test_short_admin_token_rejected_even_on_loopback` |
+| A3 | a `COVERSET_PUBLIC_URL` reachable from outside (anything but loopback and RFC 6761 names such as `*.test`) needs the admin token, because a tunnel would hand every caller open-mode access | `test_public_url_reachable_from_outside_requires_admin_token`, `test_loopback_and_special_use_public_urls_allowed_without_token`, `tests/forge/test_forge_setup.py::test_tunnel_public_url_without_admin_token_refuses_to_start` |
+| A4 | open mode (no token) answers only requests whose `Host` is a loopback name or the bind host, never the public URL host (DNS-rebinding defence); 421 `bad_host` otherwise | `tests/test_auth.py::TestOpenMode::test_foreign_host_rejected`, `test_loopback_hosts_accepted`, `test_public_url_host_not_trusted_in_open_mode` |
+| A5 | with a token, every non-public route needs `Authorization: Bearer <token>` or the `POST /login` cookie; a wrong bearer never falls back to the cookie; the session key is derived from the token, so rotating the token invalidates every cookie | `test_protected_route_requires_auth`, `test_wrong_bearer_never_falls_back_to_cookie`, `test_rotating_admin_token_invalidates_cookies`, `tests/test_app.py::test_secret_key_derived_from_admin_token` |
+| A6 | CSRF: state-changing requests with cookie or open-mode access need `X-CSRF-Token` (or a `csrf_token` form field); bearer requests are exempt | `test_cookie_write_needs_csrf_header`, `test_bearer_write_needs_no_csrf`, `TestOpenMode::test_writes_need_csrf` |
+| A7 | session cookie `HttpOnly`, `SameSite=Lax`, `Secure` when the public URL is https; login redirects stay on the site | `test_form_login_sets_cookie_and_redirects`, `test_login_redirect_stays_on_site`, `test_login_form_drops_unsafe_next` |
+| A8 | every response carries `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` | `tests/test_app.py::test_security_headers_on_every_response` |
+| A9 | public routes are exactly `POST /webhooks/*`, `GET\|HEAD /v1/verdict`, `/v1/runs/<id>`, `/v1/runs/<id>/events`, `/healthz`, `/login` and `/static/*`; each view authorises its own callers | `test_is_public`, `test_public_routes_need_no_auth`, `test_non_admin_bearer_reaches_self_authorizing_views`, `test_require_admin_blocks_public_paths` |
+| A10 | anonymous `/v1` callers: only repos recorded `private=false` from a verified webhook, unknown and private both 404; `COVERSET_PUBLIC_VERDICT_RPM` (60) per client address, JSON polls on a separate budget of twice that; no free-text reasons, no `log` events, `longrepr` null, only the documented event fields; at most 4 anonymous streams per address and 64 in all, each ending after 120 s | `test_private_unknown_and_local_repos_are_404_without_token`, `test_public_repo_without_token_gets_a_reduced_answer`, `test_public_callers_are_rate_limited`, `test_forge_api_hardening.py::test_public_events_are_filtered_to_the_addendum_shapes`, `test_public_run_detail_has_no_free_text_reason`, `test_json_polls_use_their_own_budget`, `test_anonymous_sse_streams_are_capped_per_client`, `test_anonymous_streams_end_after_their_short_lifetime`, `test_events_authorization_follows_the_runs_repo` |
+| A11 | `/v1` parameters are validated: `repo_id` up to 19 digits, `sha` 40 hex, `since` and `Last-Event-ID` up to 18 digits; anything else is 400 | `test_bad_repo_ids_are_400`, `test_bad_sequence_numbers_are_400`, `test_largest_repo_id_is_a_plain_404` |
+| A12 | `/setup`: a random `state` kept in the session; the callback and finish steps accepted from an admin session or, in open mode, only from a loopback client with a loopback `Host` and no `Forwarded`/`X-Forwarded-*`/`Via` headers; the one-time code moved out of the URL and redacted from access logs; existing credentials are a 409 and replacing them needs an admin session plus CSRF | `tests/forge/test_forge_setup.py::test_bad_or_missing_state_is_400`, `test_callback_only_from_loopback_without_an_admin_session`, `test_callback_through_a_tunnel_is_refused`, `test_existing_credentials_cannot_be_replaced_in_open_mode`, `test_admin_session_replaces_credentials_with_a_csrf_post`, `test_manifest_code_is_redacted_from_access_logs` |
+| A13 | UI rendering: Jinja autoescape, `Markup` only in `web/render/`, markdown through markdown-it-py with `html=False`, XSS tests per renderer | in progress ([docs/ui.md](ui.md)) |
+
+## 5. Secrets
+
+| # | Control | Module | Test |
+|---|---|---|---|
+| S1 | every secret setting is a `pydantic.SecretStr`, hidden from `repr` | `config.py` | `tests/test_config.py::test_secrets_hidden_from_repr_but_listed_for_redaction` |
+| S2 | `RedactingFilter` on the root, Hypercorn and Quart loggers and their handlers masks PEM private keys, `x-access-token:...@`, `gh[opsur]_...`, `github_pat_...`, `sk-ant-...`, `Authorization` headers, `/setup/github/callback?code=...`, and the live value of every secret setting | `logging.py` | `tests/test_redaction.py` (all 16 tests) |
+| S3 | `run_events` payload strings are redacted before they are stored | `orchestrator/runner.py` (`EventSink`) | `tests/orchestrator/test_repos_history.py::test_event_sink_batches_and_redacts` |
+| S4 | `.gitignore` covers `.env`, `.env.*` (except `.env.example`), `secrets/`, `*.pem`, `*.key`, `data/` | `.gitignore` | the pre-push check in the hardening phase |
+| S5 | the App private key defaults to `secrets/github-app.pem`; `/setup` writes it and `.env` atomically with mode 0600 | `forge/manifest.py` (`write_credentials`) | `test_forge_setup.py::test_callback_writes_env_and_key_with_mode_0600` |
+| S6 | without an admin token the session key is random, kept in `<data_dir>/secret_key` with mode 0600 | `app.py` (`_persistent_random_key`) | `tests/test_app.py::test_random_secret_key_persisted_with_private_mode` |
+| S7 | mirror tokens are scoped to `contents: read` and one repository, passed only as `git -c http.extraHeader=Authorization: Basic ...`, never in a URL, `.git/config` or a log line | `forge/base.py` (`MirrorCredentials`), `forge/github.py`, `orchestrator/repos.py` | `tests/orchestrator/test_repos_history.py::test_forge_mirror_credentials_stay_out_of_urls_and_config`, `test_forge_events.py::test_mirror_credentials_never_expose_the_token`, `test_forge_github.py::test_mirror_credentials_are_scoped_and_redacted` |
+| S8 | nothing secret enters a worker: the LocalExecutor builds the child environment from scratch, and `sanitize_env` drops `PATH`, `HOME`, `VIRTUAL_ENV`, `PYTHONHOME`, `SSH_AUTH_SOCK` and every name starting `COVERSET_GITHUB_`, `COVERSET_ADMIN`, `COVERSET_DATABASE`, `ANTHROPIC_`, `MODAL_`, `AWS_`, `GITHUB_`, `PYTEST_`, `COVERAGE_`, `LD_`, `DYLD_` | `executors/local.py` (`child_env`), `executors/base.py` (`sanitize_env`) | `tests/executors/test_local_executor.py::test_child_environment_is_scrubbed`, `test_sanitize_env_rules` |
+| S9 | Modal sandboxes get `secrets=[]` and `include_oidc_identity_token=False` | in progress, `executors/modal_.py` | in progress |
+| S10 | the event nonce is removed from the environment before conftest files load | `pytest_coverset/events.py` | `packages/pytest-coverset/tests/test_robustness.py::test_nonce_is_hidden_from_tests_and_their_subprocesses` |
+| S11 | argument examples are redacted inside the worker by name and by credential pattern; emails keep only their domain | `pytest_coverset/redact.py` | `test_features.py::test_example_redaction`, `test_return_values_of_secret_named_functions_are_redacted`, `test_secret_dict_keys_are_redacted_in_container_examples`, `test_robustness.py::test_hostile_values_keep_every_parameter_and_hide_secrets` |
+
+
+## 6. Executors
+
+| # | Control | Module | Test |
+|---|---|---|---|
+| E1 | **The LocalExecutor is not a sandbox.** Test code runs as the operator's user, can read the operator's files and reach the network. It is for trusted code on a developer machine. | `executors/local.py` | documented; enforced only through U9 and U10 |
+| E2 | scrubbed child environment | see S8 | see S8 |
+| E3 | every exec runs in its own session; cancel and timeout send SIGTERM to the process group, then SIGKILL after 5 s | `executors/local.py` (`LocalWorker._kill`) | `test_timeout_kills_the_process_group`, `test_sigterm_ignoring_process_gets_sigkill` |
+| E4 | per-exec stdout capped at `COVERSET_MAX_STDOUT_BYTES` (50 MiB; then the exec is killed and the shard errors); lines cut at 1 MiB | `executors/local.py` (`_Pump`), `executors/base.py` | `test_stdout_cap_and_line_cap` |
+| E5 | source extraction uses tarfile's `data` filter; worker paths must be relative without `..`; `get_file` refuses symlinks and anything but a regular file, up to 1 GiB | `executors/local.py` | `test_files_in_and_out` |
+| E6 | each worker has a private `coverset-run-*` temp directory removed on release; leftovers older than an hour owned by the user are swept at start-up | `executors/local.py` | `test_startup_sweep_removes_old_run_dirs`, `test_acquire_respects_max_workers_and_release` |
+| E7 | environments are built in a staging directory under an exclusive `flock` and renamed into place; a failed build leaves nothing | `executors/local.py`, `executors/env_export.py` | `test_venv_cache_builds_once_under_the_lock`, `test_failed_venv_build_leaves_nothing` |
+| E8 | repository-supplied configuration is read strictly: `pyproject.toml`, `.python-version` and `uv.lock` must be regular files (no symlinks, no FIFOs), are size-capped, and error messages echo at most a sanitised 20-character fragment; `uv export` runs offline, ignores `uv.toml` and `[tool.uv]`, never emits the project, workspace members or local paths | `lang/python.py` | `tests/analysis/test_analysis_python_adapter.py::test_symlinked_python_version_is_refused_without_echo`, `test_symlinked_pyproject_and_lock_are_refused`, `test_fifo_python_version_does_not_hang`, `test_oversized_pyproject_is_refused`, `test_bad_python_version_file_is_not_echoed`, `test_symlinked_source_root_is_not_inferred`, `test_env_spec_never_emits_workspace_or_local_packages` |
+| E9 | cost and concurrency guards committed today: `COVERSET_MAX_CONCURRENT_RUNS` (4), `COVERSET_PAUSED`, `COVERSET_RETRY_BUDGET_PER_RUN` (5), `COVERSET_MAX_SHARDS` (32), and the daily Modal budget (`COVERSET_MODAL_DAILY_BUDGET_USD`, 5.00: a Modal run past it concludes `neutral`, "budget exhausted") | `orchestrator/queue.py`, `orchestrator/runner.py`, `orchestrator/planner.py`, `orchestrator/budget.py` | `tests/orchestrator/test_queue.py::test_concurrency_cap`, `test_paused_dispatches_nothing`, `test_budget_counts_only_todays_modal_runs`, `test_modal_run_over_budget_is_neutral`, `tests/orchestrator/test_runner.py::test_retry_budget_exhausted_confirms_without_retry` |
+| E10 | Modal: network `blocked` by default (`COVERSET_SANDBOX_NETWORK`), CPU and memory limits, run timeout, idle timeout, tags instead of names, `COVERSET_MAX_SANDBOXES` (48) over pool, shards and snapshot builds, the budget check before every create, the reaper | in progress, `executors/modal_.py`; see [docs/modal.md](modal.md) | in progress |
+| E11 | the reaper loop (every 60 s while serving) | `orchestrator/reaper.py` defines `reap_forever`; nothing in the committed code starts it | designed for the Modal executor |
+
+## 7. Bundle limits
+
+A bundle was written next to the PR's code, so every byte is attacker-controlled. Limits live in `facts/untrusted.py` (`BundleLimits`) and are applied by `extract_bundle` and `read_python_bundle` (`facts/convert.py`). Tests are in `tests/facts/test_facts_untrusted.py` unless named otherwise.
+
+| # | Control | Test |
+|---|---|---|
+| B1 | the pulled archive is at most `COVERSET_MAX_BUNDLE_BYTES` (200 MiB); the extracted directory too | `test_total_bundle_size_limit` |
+| B2 | every gzip stream is capped at 10 × its compressed size, never below 16 MiB and never above 500 MiB | `test_gzip_bomb_is_capped`, `test_extract_caps_the_decompressed_stream` |
+| B3 | tar members: regular files and directories only (no symlinks, hard links, devices, FIFOs, sparse members); relative, normalised paths; no duplicates; at most 256 members; declared sizes summed and capped before any byte is written; an empty destination | `test_extract_refuses_links_and_devices`, `test_extract_refuses_sparse_members`, `test_extract_refuses_unsafe_paths`, `test_extract_refuses_duplicates_and_member_floods`, `test_extract_caps_declared_member_sizes`, `test_extract_needs_an_empty_destination` |
+| B4 | bundle files are opened with `O_NOFOLLOW` and must be regular files | `test_symlinked_bundle_file_is_refused` |
+| B5 | `coverage.sqlite` is opened `mode=ro&immutable=1` with `PRAGMA trusted_schema=OFF`; the four tables must be tables, not views | `test_sqlite_views_masquerading_as_tables_are_refused`, `test_garbage_sqlite_is_a_bundle_error` |
+| B6 | numbits blobs longer than `max_line_number / 8 + 1` bytes are dropped before decoding (numbits bombs); line numbers above 1,000,000 are dropped | `test_numbits_bomb_is_dropped_before_decoding` |
+| B7 | at most 25,000,000 (test, file, line) cells; more than twice that many arc rows rejects the bundle; at most 50,000 distinct node ids, 50,000 paths, 20,000 shape keys | `test_coverage_cells_are_capped`, `test_distinct_names_are_capped`, `test_arc_rows_with_bad_values_are_dropped` |
+| B8 | every path must be relative and normalised and present in the head commit's tree; `n_lines` is read from the head checkout without following symlinks out of it | `test_path_traversal_in_coverage_json_is_dropped`, `tests/facts/test_facts_convert.py::test_paths_outside_the_head_tree_are_dropped`, `test_n_lines_never_follows_a_symlink_out_of_the_checkout` |
+| B9 | JSON lines over 1 MiB are dropped; node ids over 512 characters, example reprs over 200 and `longrepr` over 8 KiB are dropped or cut; non-finite and out-of-range numbers are dropped; deep nesting is counted, not raised; shape keys must follow the grammar | `test_oversized_and_bad_result_lines_are_dropped`, `test_huge_and_odd_numbers_are_dropped`, `test_deeply_nested_json_is_counted_not_raised`, `test_shape_counts_and_keys_are_validated`, `test_shape_rows_with_bad_paths_or_indexes_are_dropped` |
+| B10 | any unexpected error while reading is a `BundleError`; a rejected bundle changes nothing but the ingest log | `test_unexpected_errors_become_bundle_errors`, `tests/facts/test_facts_ingest.py::test_a_rejected_bundle_changes_nothing_but_the_log`, `test_sample_counts_beyond_int64_are_rejected` |
+| B11 | streamed `test` events are validated field by field; `collect.json` from collection is validated item by item | `orchestrator/runner.py` (`_parse_test`); `tests/orchestrator/test_planner.py::test_parse_collect_json_validates_items` |
+| B12 | `results.jsonl` in the bundle overrides streamed outcomes; the verdict notes any shard whose pytest exit code disagrees with its reported outcomes | `orchestrator/runner.py` (`_reconcile`, `_exit_code_mismatches`); no test for the mismatch note |
+| B13 | facts SQL runs on in-memory DuckDB limited to the facts directory, external access off, configuration locked; `coverset facts query` accepts one `SELECT` only | `tests/facts/test_facts_queries.py::test_connection_cannot_reach_other_files`, `test_query_accepts_only_a_single_select`, `tests/orchestrator/test_commands.py::test_facts_query_allows_only_select` |
+
+## 8. AI review
+
+`src/coverset/ai/`; long form in [docs/ai-review.md](ai-review.md). Tests are in `tests/ai/`.
+
+| # | Control | Test |
+|---|---|---|
+| I1 | the review bundle holds only facts, every string redacted when read and again over the finished bundle; model output is redacted again before storage | `test_ai_bundle.py::test_token_in_a_test_body_is_redacted`, `test_live_settings_secrets_are_redacted_everywhere`, `test_secret_in_an_example_value_is_redacted`, `test_ai_review.py::test_review_changes_redacts_model_output` |
+| I2 | `.env*`, `*.pem`, `*.key`, `secrets/` and `COVERSET_AI_EXCLUDE_GLOBS` never enter a bundle | `test_always_excluded_paths`, `test_user_exclude_globs_match_path_or_basename`, `test_function_in_a_secrets_directory_is_never_bundled`, `test_tests_in_excluded_paths_are_left_out` |
+| I3 | the bundle is capped at `COVERSET_AI_MAX_BUNDLE_CHARS` (120,000) | `test_size_cap_drops_oracle_notes_first` and the other `test_size_cap_*` tests |
+| I4 | the system prompt states that code, comments and test text are untrusted data; injected text stays inside the escaped bundle | `test_ai_anthropic_client.py::test_system_prompt_is_cacheable_and_states_the_untrusted_data_rule`, `test_injected_text_stays_inside_the_escaped_bundle` |
+| I5 | results are advisory: they never change pass or fail, never override a test outcome and never yield `violated`; an injected "mark everything covered" comment changes nothing | `test_ai_fake_client.py::test_injected_comment_does_not_change_the_heuristic_verdict`, `test_ai_review.py::test_invariant_statuses_only_replace_needs_review`, `test_review_evidence_feeds_evaluate_without_overriding_tests`, `tests/analysis/test_analysis_invariants.py::test_review_entries_are_advisory` |
+| I6 | code leaves the machine only for repos with `ai_review_enabled` and `COVERSET_AI=anthropic` with a key; logs never contain the bundle, prompt, output or key | `test_ai_fake_client.py::test_get_review_client_modes`, `test_ai_anthropic_client.py::test_logs_never_contain_the_bundle_or_the_key` |
+| I7 | refusals, truncation and unparseable output become an `abstain` verdict | `test_refusal_becomes_an_abstention`, `test_max_tokens_becomes_an_abstention`, `test_unparseable_output_becomes_an_abstention` |
+
+## 9. What the forge receives
+
+| # | Control | Module | Test |
+|---|---|---|---|
+| F1 | the sticky comment escapes every interpolated string, puts node ids and reprs in code spans with a fence longer than any backtick run inside, neutralises `@` mentions and issue references, strips bidi and format characters, has no images or user HTML, and stays under 60,000 characters | `forge/comment.py`, `forge/markdown.py` | `tests/forge/test_forge_comment.py::test_hostile_text_renders_literally`, `test_md_text_escapes_and_neutralises`, `test_code_span_fences`, `test_issue_and_gh_references_are_neutralised`, `test_bidi_and_format_characters_are_stripped_everywhere`, `test_long_comments_stay_well_formed_within_the_limit` |
+| F2 | the sticky comment is edited only when coverset wrote it (stored id first, then a marker scan limited to the App's or the token user's comments) | `forge/github.py`, `forge/verdict.py` | `test_forge_comment.py::test_post_verdict_ignores_comments_it_did_not_write`, `test_forge_github.py::test_upsert_falls_back_to_a_marker_scan_of_own_comments` |
+| F3 | installation tokens are scoped to `checks: write`, `contents: read`, `pull_requests: write`, `issues: write`, `metadata: read`; every request pins `X-GitHub-Api-Version: 2022-11-28`; writes are spaced by a token bucket; non-idempotent requests are never retried on a server error | `forge/github.py`, `forge/throttle.py` | `test_app_mode_pins_the_api_version_on_every_request`, `test_writes_are_spaced_by_the_token_bucket`, `test_retry_decision_never_retries_non_idempotent_server_errors`, `test_post_server_error_is_sent_once` |
+| F4 | a required status in token mode is green only for `success` | `forge/verdict.py` | `test_forge_comment.py::test_commit_state_mapping` |
+
+## 10. Residual risks
+
+These are not fixed by any control above. The README's caveats must state them.
+
+1. **A PR's own code self-reports its results.** The plugin runs in the same Python process as the PR's tests. A hostile PR can monkeypatch pytest or the plugin, write a fake `results.jsonl` and bundle, or print well-formed events (the nonce is readable from inside the process before the plugin removes it from the environment, and from memory after). The exit-code cross-check and the bundle limits catch accidents, not a determined author. Treat verdicts on untrusted PRs as advisory.
+2. **Single trust domain.** One control plane holds one set of forge credentials, one admin token and one database for every repository. An admin sees every repository; there is no per-repository authorisation; a compromise of the control plane exposes all of them. Run one control plane per trust domain.
+3. **The rate-limit key behind a tunnel or proxy is the proxy's address.** coverset does not trust `X-Forwarded-For` (anyone can send it), so every anonymous caller behind a tunnel shares one budget, fork-PR CI jobs and strangers alike. Raise `COVERSET_PUBLIC_VERDICT_RPM` if fork jobs see 429s. The limiters are in memory and reset when the process restarts.
+4. **The LocalExecutor is not a sandbox** (E1).
+5. **Approval trusts GitHub's permission answer at the moment of the press.** A collaborator's access revoked afterwards does not cancel a run already queued.
+6. **Shape examples can still leak data a pattern does not recognise.** Redaction covers secret-looking names, known credential shapes and email local parts. A customer's name passed as a plain string appears in the example column (up to 48 characters) unless `--coverset-repr-examples off` is set for the repository.
