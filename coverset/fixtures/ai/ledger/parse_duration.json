@@ -1,0 +1,81 @@
+{
+  "description": "100% line coverage, but findall skips text it does not recognise: '100ms' parses as 100 minutes.",
+  "applies_to": {
+    "path": "src/ledger/durations/parse.py"
+  },
+  "source": "fixture",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd_estimate": 0.0,
+  "requests": 0,
+  "notes": [
+    "canned demo review; not produced by a model"
+  ],
+  "result": {
+    "functions": [
+      {
+        "qualname": "parse_duration",
+        "verdict": "partially_covered",
+        "confidence": "high",
+        "evidence": [
+          {
+            "test_id": "tests/test_parse.py::test_parse_duration",
+            "what_it_exercises": "Asserts seconds for five well-formed strings from 0s to 1d2h3m4s."
+          },
+          {
+            "test_id": "tests/test_parse.py::test_parse_duration_rejects_text_without_a_token",
+            "what_it_exercises": "Asserts ValueError only when no token at all is present (never, h, empty)."
+          },
+          {
+            "test_id": "tests/test_properties.py::test_every_token_counts",
+            "what_it_exercises": "Property over well-formed token runs; never generates text with unknown units or garbage."
+          }
+        ],
+        "missing_input_classes": [
+          {
+            "name": "text:multi-letter-unit",
+            "description": "A unit longer than one letter, e.g. \"100ms\".",
+            "why_likely": "The token regex matches 100m and drops the s, so parse_duration('100ms') returns 6000 seconds instead of raising: a typo becomes a window 60,000 times too long.",
+            "example_value": "'100ms'",
+            "severity": "high",
+            "hypothesis_strategy": "st.sampled_from([\"100ms\", \"2min\", \"3hr\"])"
+          },
+          {
+            "name": "text:decimal",
+            "description": "A decimal amount, e.g. \"1.5h\".",
+            "why_likely": "The regex skips '1.' and reads 5h, so '1.5h' is 18000 seconds instead of an error.",
+            "example_value": "'1.5h'",
+            "severity": "high",
+            "hypothesis_strategy": "st.just(\"1.5h\")"
+          },
+          {
+            "name": "text:trailing-garbage",
+            "description": "Trailing text after the last unit, e.g. \"5m!\".",
+            "why_likely": "Unrecognised text between or after tokens is ignored instead of rejected.",
+            "example_value": "'5m!'",
+            "severity": "medium",
+            "hypothesis_strategy": "st.just(\"5m!\")"
+          }
+        ],
+        "suggested_tests": [
+          {
+            "name": "test_parse_duration_consumes_whole_input",
+            "style": "hypothesis",
+            "code": "import re\n\nimport pytest\nfrom hypothesis import example, given, strategies as st\n\nfrom ledger.durations.parse import parse_duration\n\nWHOLE_INPUT = re.compile(r\"\\A(\\d{1,6}[smhd])+\\Z\")\n\n\n@pytest.mark.invariant(\"durations_consume_whole_input\")\n@given(st.from_regex(r\"\\A(\\d{1,6}[smhd])+\\Z\") | st.text(max_size=12))\n@example(\"100ms\")\n@example(\"1.5h\")\ndef test_parse_duration_consumes_whole_input(text):\n    if WHOLE_INPUT.match(text):\n        assert parse_duration(text) >= 0\n    else:\n        with pytest.raises(ValueError):\n            parse_duration(text)\n"
+          }
+        ],
+        "invariant_findings": [
+          {
+            "invariant_id": "durations_consume_whole_input",
+            "status": "violated",
+            "evidence": "parse_duration('100ms') returns 6000: the token regex consumes '100m' and the trailing 's' is silently ignored instead of raising ValueError."
+          }
+        ],
+        "abstain_reason": ""
+      }
+    ]
+  }
+}

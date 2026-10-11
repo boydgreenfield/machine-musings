@@ -1,0 +1,86 @@
+{
+  "description": "Tests and the property only use non-negative totals and positive weights.",
+  "applies_to": {
+    "path": "src/ledger/billing/allocate.py"
+  },
+  "source": "fixture",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd_estimate": 0.0,
+  "requests": 0,
+  "notes": [
+    "canned demo review; not produced by a model"
+  ],
+  "result": {
+    "functions": [
+      {
+        "qualname": "allocate_cents",
+        "verdict": "partially_covered",
+        "confidence": "high",
+        "evidence": [
+          {
+            "test_id": "tests/test_allocate.py::test_allocate_cents_examples",
+            "what_it_exercises": "Asserts exact shares and their sum for five non-negative totals with positive weights."
+          },
+          {
+            "test_id": "tests/test_properties.py::test_allocation_conserves_cents",
+            "what_it_exercises": "Property: shares sum to the total, but totals are drawn from 0 to 10**7 only."
+          },
+          {
+            "test_id": "tests/test_allocate.py::test_leftover_cent_goes_to_largest_fraction",
+            "what_it_exercises": "Asserts the remainder cent goes to the largest fractional share."
+          }
+        ],
+        "missing_input_classes": [
+          {
+            "name": "total_cents:negative",
+            "description": "A negative total, as a refund posts, e.g. -100.",
+            "why_likely": "int() truncates negative shares toward zero and the negative remainder slice adds cents, so allocate_cents(-100, [1, 2]) returns [-32, -66], which sums to -98.",
+            "example_value": "-100",
+            "severity": "high",
+            "hypothesis_strategy": "st.integers(max_value=-1)"
+          },
+          {
+            "name": "weights:all-zero",
+            "description": "Only zero weights, e.g. [0, 0].",
+            "why_likely": "sum(weights) is 0 and the division raises ZeroDivisionError instead of a clear error.",
+            "example_value": "[0, 0]",
+            "severity": "medium",
+            "hypothesis_strategy": "st.lists(st.just(0), min_size=1)"
+          },
+          {
+            "name": "weights:nan-element",
+            "description": "A NaN weight, e.g. [1.0, float(\"nan\")].",
+            "why_likely": "int(nan) raises ValueError: cannot convert float NaN to integer, from deep inside the split.",
+            "example_value": "[1.0, float(\"nan\")]",
+            "severity": "low",
+            "hypothesis_strategy": "st.lists(st.floats(0, 100), min_size=1).map(lambda xs: xs + [float(\"nan\")])"
+          }
+        ],
+        "suggested_tests": [
+          {
+            "name": "test_allocation_conserves_cents_for_refunds",
+            "style": "hypothesis",
+            "code": "import pytest\nfrom hypothesis import example, given, strategies as st\n\nfrom ledger.billing.allocate import allocate_cents\n\n\n@pytest.mark.invariant(\"cents_conserved\")\n@given(\n    total_cents=st.integers(min_value=-10**7, max_value=10**7),\n    weights=st.lists(st.integers(min_value=1, max_value=1_000), min_size=1, max_size=8),\n)\n@example(total_cents=-100, weights=[1, 2])\ndef test_allocation_conserves_cents_for_refunds(total_cents, weights):\n    assert sum(allocate_cents(total_cents, weights)) == total_cents\n"
+          },
+          {
+            "name": "test_allocate_cents_rejects_all_zero_weights",
+            "style": "example",
+            "code": "import pytest\n\nfrom ledger.billing.allocate import allocate_cents\n\n\ndef test_allocate_cents_rejects_all_zero_weights():\n    with pytest.raises(ValueError):\n        allocate_cents(100, [0, 0])\n"
+          }
+        ],
+        "invariant_findings": [
+          {
+            "invariant_id": "cents_conserved",
+            "status": "violated",
+            "evidence": "allocate_cents(-100, [1, 2]) returns [-32, -66] (sum -98); the linked tests only draw totals >= 0, so the refund case named in the statement is never checked."
+          }
+        ],
+        "abstain_reason": ""
+      }
+    ]
+  }
+}

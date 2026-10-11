@@ -1,0 +1,86 @@
+{
+  "description": "The property only generates start-ordered slots that overlap or leave a gap.",
+  "applies_to": {
+    "path": "src/ledger/intervals/merge.py"
+  },
+  "source": "fixture",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd_estimate": 0.0,
+  "requests": 0,
+  "notes": [
+    "canned demo review; not produced by a model"
+  ],
+  "result": {
+    "functions": [
+      {
+        "qualname": "merge_intervals",
+        "verdict": "partially_covered",
+        "confidence": "medium",
+        "evidence": [
+          {
+            "test_id": "tests/test_merge.py::test_merge_intervals",
+            "what_it_exercises": "Five start-ordered examples, including nested and negative intervals."
+          },
+          {
+            "test_id": "tests/test_properties.py::test_merging_twice_changes_nothing",
+            "what_it_exercises": "Idempotence property over booking_slots(), which never produces touching or unsorted slots."
+          },
+          {
+            "test_id": "tests/test_merge.py::test_merge_intervals_leaves_input_unchanged",
+            "what_it_exercises": "Asserts the input list is not mutated."
+          }
+        ],
+        "missing_input_classes": [
+          {
+            "name": "intervals:touching-endpoints",
+            "description": "Intervals that share an endpoint, e.g. [(1, 3), (3, 5)].",
+            "why_likely": "start <= end merges them into (1, 5), silently choosing closed-interval semantics; booking slots are usually half-open, where (1, 3) and (3, 5) do not overlap.",
+            "example_value": "[(1, 3), (3, 5)]",
+            "severity": "medium",
+            "hypothesis_strategy": "st.integers(-50, 50).flatmap(lambda a: st.tuples(st.just((a - 2, a)), st.just((a, a + 2)))).map(list)"
+          },
+          {
+            "name": "intervals:unsorted",
+            "description": "Intervals out of start order, e.g. [(5, 7), (1, 6)].",
+            "why_likely": "The function trusts sorted input: [(5, 7), (1, 6)] merges to [(5, 7)] and loses the time from 1 to 5.",
+            "example_value": "[(5, 7), (1, 6)]",
+            "severity": "high",
+            "hypothesis_strategy": "st.lists(st.tuples(st.integers(), st.integers()), min_size=2, unique=True).map(lambda xs: sorted(xs)[::-1])"
+          },
+          {
+            "name": "intervals:inverted-pair",
+            "description": "A pair whose start exceeds its end, e.g. [(5, 2)].",
+            "why_likely": "Inverted pairs pass through unchanged and can mask overlaps that follow them.",
+            "example_value": "[(5, 2)]",
+            "severity": "low",
+            "hypothesis_strategy": "st.lists(st.tuples(st.integers(), st.integers()).filter(lambda p: p[0] > p[1]), min_size=1)"
+          }
+        ],
+        "suggested_tests": [
+          {
+            "name": "test_merge_is_idempotent_for_any_order",
+            "style": "hypothesis",
+            "code": "import pytest\nfrom hypothesis import example, given, strategies as st\n\nfrom ledger.intervals.merge import merge_intervals\n\nINTERVALS = st.lists(\n    st.tuples(st.integers(-50, 50), st.integers(-50, 50)).map(lambda p: (min(p), max(p))),\n    max_size=8,\n)\n\n\n@pytest.mark.invariant(\"merge_idempotent\")\n@given(INTERVALS)\n@example([(1, 3), (3, 5)])\n@example([(5, 7), (1, 6)])\ndef test_merge_is_idempotent_for_any_order(intervals):\n    once = merge_intervals(sorted(intervals))\n    assert merge_intervals(once) == once\n"
+          },
+          {
+            "name": "test_touching_intervals_semantics",
+            "style": "example",
+            "code": "from ledger.intervals.merge import merge_intervals\n\n\ndef test_touching_intervals_semantics():\n    # Decide and pin down whether (1, 3) and (3, 5) touch (closed) or not (half-open).\n    assert merge_intervals([(1, 3), (3, 5)]) == [(1, 5)]\n"
+          }
+        ],
+        "invariant_findings": [
+          {
+            "invariant_id": "merge_idempotent",
+            "status": "untested",
+            "evidence": "test_merging_twice_changes_nothing draws only start-ordered slots that overlap or leave a gap, so touching endpoints and unsorted input are never generated."
+          }
+        ],
+        "abstain_reason": ""
+      }
+    ]
+  }
+}

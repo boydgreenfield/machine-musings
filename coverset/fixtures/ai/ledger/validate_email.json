@@ -1,0 +1,63 @@
+{
+  "description": "PR #2 widens the vendor pattern to multi-label domains, but no test passes one.",
+  "applies_to": {
+    "path": "src/ledger/accounts/emailcheck.py"
+  },
+  "source": "fixture",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd_estimate": 0.0,
+  "requests": 0,
+  "notes": [
+    "canned demo review; not produced by a model"
+  ],
+  "result": {
+    "functions": [
+      {
+        "qualname": "validate_email",
+        "verdict": "partially_covered",
+        "confidence": "high",
+        "evidence": [
+          {
+            "test_id": "tests/test_emailcheck.py::test_validate_email_returns_the_domain",
+            "what_it_exercises": "Asserts the lowercased domain for two-label domains such as example.com and Example.ORG."
+          },
+          {
+            "test_id": "tests/test_emailcheck.py::test_validate_email_rejects_malformed",
+            "what_it_exercises": "Asserts ValueError for eight malformed addresses (no @, empty, leading space, display name)."
+          }
+        ],
+        "missing_input_classes": [
+          {
+            "name": "email:multi-label-domain",
+            "description": "An address whose domain has three or more labels, e.g. bob@eng.acme.com.",
+            "why_likely": "This PR exists to accept subdomain addresses, yet every test domain has two labels; the returned domain for bob@eng.acme.com is eng.acme.com, which callers compare to customer domains.",
+            "example_value": "'bob@eng.acme.com'",
+            "severity": "high",
+            "hypothesis_strategy": "st.emails(domains=st.from_regex(r\"[a-z0-9]{1,10}(\\.[a-z0-9]{1,10}){1,2}\\.[a-z]{2,6}\", fullmatch=True))"
+          },
+          {
+            "name": "email:idn",
+            "description": "An internationalised domain, e.g. bob@bücher.de.",
+            "why_likely": "The vendor pattern only allows ASCII labels, so such addresses are rejected; no test pins that down.",
+            "example_value": "'bob@bücher.de'",
+            "severity": "low",
+            "hypothesis_strategy": "st.just(\"bob@bücher.de\")"
+          }
+        ],
+        "suggested_tests": [
+          {
+            "name": "test_validate_email_returns_multi_label_domain",
+            "style": "hypothesis",
+            "code": "import re\n\nfrom hypothesis import assume, example, given, strategies as st\n\nfrom ledger.accounts.emailcheck import validate_email\n\nVENDOR_LOCAL_PART = re.compile(r\"[A-Za-z0-9._+-]+\")\nMULTI_LABEL_DOMAINS = st.from_regex(r\"[a-z0-9]{1,10}(\\.[a-z0-9]{1,10}){1,2}\\.[a-z]{2,6}\", fullmatch=True)\n\n\n@given(st.emails(domains=MULTI_LABEL_DOMAINS))\n@example(\"bob@eng.acme.com\")\ndef test_validate_email_returns_multi_label_domain(email):\n    local, _, domain = email.rpartition(\"@\")\n    assume(VENDOR_LOCAL_PART.fullmatch(local))\n    assert validate_email(email) == domain.lower()\n"
+          }
+        ],
+        "invariant_findings": [],
+        "abstain_reason": ""
+      }
+    ]
+  }
+}
