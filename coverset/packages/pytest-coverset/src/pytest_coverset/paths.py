@@ -1,7 +1,10 @@
 """One path normalisation shared by coverage, the shape tracer and the bundle writer.
 
 Every path that leaves the worker is git-root-relative POSIX (``src/ledger/billing.py``), so coverage
-file keys, shape-tracer function keys, ``git diff`` paths and AST indexes join without translation.
+file keys, shape-tracer function keys, ``git diff`` paths and AST indexes join without translation,
+whichever directory pytest ran in: coverage.py names files relative to the working directory, and
+:func:`coverage_name` turns those names into repository paths (``meta.cwd`` and ``meta.rootdir``,
+from :func:`rel_dir`, say where the run happened).
 """
 
 from __future__ import annotations
@@ -41,6 +44,28 @@ def norm_path(path: str | os.PathLike[str], git_root: str | os.PathLike[str]) ->
         return None
     rel = full[len(prefix) :]
     return rel if os.sep == "/" else rel.replace(os.sep, "/")
+
+
+def rel_dir(path: str | os.PathLike[str], git_root: str | os.PathLike[str]) -> str | None:
+    """Directory ``path`` relative to ``git_root`` as POSIX (``.`` for the root), None when outside it."""
+    root = os.path.realpath(git_root)
+    full = os.path.realpath(path)
+    if full == root:
+        return "."
+    return norm_path(full, root)
+
+
+def coverage_name(name: str, cwd: str, git_root: str | os.PathLike[str]) -> str:
+    """A ``coverage.sqlite``/``coverage.json`` file name as a git-root-relative path.
+
+    coverage.py (``relative_files``) writes a file under the working directory ``cwd`` relative to
+    it and any other file absolute. Both are resolved against ``cwd`` and made relative to
+    ``git_root``; a file outside the repository keeps an absolute name, which every reader drops.
+    """
+    if not name or name.startswith("<"):
+        return name
+    full = os.path.join(cwd, name)
+    return norm_path(full, git_root) or os.path.normpath(full)
 
 
 def is_test_file(rel_path: str) -> bool:

@@ -19,4 +19,5 @@ def project(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> pytes
     )
     monkeypatch.setenv("COVERSET_EVENT_NONCE", NONCE)
     monkeypatch.delenv("COVERAGE_PROCESS_START", raising=False)
+    monkeypatch.delenv("COVERSET", raising=False)
     return pytester

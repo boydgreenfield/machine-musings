@@ -19,6 +19,15 @@ Every reader enforces :class:`~coverset.facts.untrusted.BundleLimits`; dropped r
 in ``NeutralBundle.meta['convert']`` instead of failing the shard, and anything malformed beyond
 that raises :class:`~coverset.facts.untrusted.BundleError` (never another exception type).
 
+File names are repository-relative. pytest-coverset writes every path that way from any working
+directory and says so with ``meta.coverage_paths == "repository"``. Otherwise ``coverage.json`` and
+``coverage.sqlite`` names are coverage.py's, relative to the directory pytest ran in, and
+``meta.cwd`` (that directory relative to the repository root) is joined in front of each relative
+name; a test's file taken from its nodeid gets ``meta.rootdir`` in front, since nodeids are
+rootdir-relative. Values that are not normalised relative paths (bundles written before these keys
+existed recorded absolute ``cwd`` and ``rootdir``) join nothing, so such bundles read as they always
+did. Absolute names are dropped and counted (``bad_paths``) either way.
+
 ``meta.json``'s ``tracer`` is checked: per-test contexts need coverage.py's C tracer, so any other
 named tracer (``PyTracer``, ``SysMonitor``) sets ``meta['convert']['tracer_mismatch'] = True`` and
 ``meta['convert']['tracer']`` to the (clipped) name; the shard is still ingested. A bundle without a
@@ -192,8 +201,33 @@ class _Reader:
     nodeids: set[str] = field(default_factory=set)
     shape_keys: set[str] = field(default_factory=set)
     measured_lengths: set[str] = field(default_factory=set)
+    coverage_prefix: str = ""
+    """Joined in front of relative ``coverage.json``/``coverage.sqlite`` names (``meta.cwd + "/"``)."""
+    rootdir_prefix: str = ""
+    """Joined in front of a test file taken from a (rootdir-relative) nodeid (``meta.rootdir + "/"``)."""
 
     # -- generic helpers -------------------------------------------------------------------
+
+    def locate(self, meta: dict[str, Any]) -> None:
+        """Set the name prefixes from ``meta`` (see the module docstring)."""
+        if meta.get("coverage_paths") != "repository":
+            self.coverage_prefix = _dir_prefix(meta.get("cwd"))
+        self.rootdir_prefix = _dir_prefix(meta.get("rootdir"))
+
+    def coverage_path(self, value: object) -> str | None:
+        """A ``coverage.json``/``coverage.sqlite`` file name as a repository path (or None, counted)."""
+        if self.coverage_prefix and isinstance(value, str) and safe_rel_path(value) is not None:
+            value = self.coverage_prefix + value
+        return self.rel_path(value)
+
+    def test_file(self, raw: dict[str, Any], nodeid: str) -> str | None:
+        """A result's or collected item's ``file``, else its nodeid's file part under the rootdir."""
+        value = raw.get("file")
+        if not value:
+            value = nodeid.split("::", 1)[0]
+            if self.rootdir_prefix and safe_rel_path(value) is not None:
+                value = self.rootdir_prefix + value
+        return self.rel_path(value)
 
     def path(self, name: str) -> Path | None:
         return self.root / name if name in self.present else None
@@ -331,7 +365,7 @@ class _Reader:
         static: dict[str, StaticFile] = {}
         run_arcs: dict[str, tuple[tuple[int, int], ...]] = {}
         for raw_path, entry in files.items():
-            path = self.rel_path(raw_path)
+            path = self.coverage_path(raw_path)
             if path is None:
                 continue
             parsed = _parse_file_entry(entry, self.limits.max_line_number)
@@ -396,7 +430,7 @@ class _Reader:
         outcome = raw.get("outcome")
         if nodeid is None or outcome not in _OUTCOMES:
             return None
-        file = self.rel_path(raw.get("file") or nodeid.split("::", 1)[0])
+        file = self.test_file(raw, nodeid)
         duration = _number(raw.get("duration_s", raw.get("duration")))
         phase = raw.get("failed_phase")
         if file is None:
@@ -438,7 +472,7 @@ class _Reader:
         nodeid = self.nodeid(raw.get("nodeid"))
         if nodeid is None:
             return None
-        file = self.rel_path(raw.get("file") or nodeid.split("::", 1)[0])
+        file = self.test_file(raw, nodeid)
         if file is None:
             return None
         invariants = {i for i in _names(raw.get("invariant_ids")) if i}
@@ -512,6 +546,12 @@ def _names(value: object) -> list[str]:
     return [v for v in value if isinstance(v, str) and len(v) <= _MAX_NAME_CHARS]
 
 
+def _dir_prefix(value: object) -> str:
+    """``value/`` for a normalised relative directory, empty for ``.`` and anything else."""
+    checked = safe_rel_path(value)
+    return f"{checked}/" if checked is not None else ""
+
+
 def _remember(seen: set[str], value: str, limit: int, what: str) -> None:
     """Add ``value`` to ``seen``; more than ``limit`` distinct values reject the bundle."""
     if value not in seen:
@@ -536,7 +576,7 @@ class _CoverageDb:
         kinds = self._schema()
         files: dict[int, str] = {}
         for file_id, raw_path in self.con.execute("SELECT id, path FROM file WHERE typeof(id) = 'integer'"):
-            checked = self.reader.rel_path(raw_path)
+            checked = self.reader.coverage_path(raw_path)
             if checked is not None:
                 files[file_id] = checked
         contexts: dict[int, str] = {}
@@ -865,6 +905,8 @@ def read_python_bundle(
 
 def _read(reader: _Reader) -> NeutralBundle:
     reader.inventory()
+    meta = reader.meta()
+    reader.locate(meta)
     static_result = reader.static()
     static, run_arcs = static_result if static_result is not None else ({}, {})
     coverage, sqlite_arcs = reader.coverage(static, want_arcs=static_result is None)
@@ -872,7 +914,6 @@ def _read(reader: _Reader) -> NeutralBundle:
         run_arcs = sqlite_arcs
     tests = reader.tests()
     shapes, sampling = reader.shapes()
-    meta = reader.meta()
     bundle = NeutralBundle(
         meta=meta,
         collected=reader.collected(),

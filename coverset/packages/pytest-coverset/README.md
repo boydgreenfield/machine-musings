@@ -4,16 +4,32 @@ The in-sandbox half of [coverset](../../README.md): a pytest plugin that records
 
 Python 3.12+ (the shape tracer uses `sys.monitoring`); dependencies: `coverage` and `pytest`.
 
+## Quick start
+
+```sh
+pytest --coverset                  # run the suite instrumented; the bundle goes to <rootdir>/.coverset
+coverset report .coverset --open   # build the pages and open them
+```
+
+`--coverset` (or `COVERSET=1` in the environment) is the local switch: the bundle goes to `<rootdir>/.coverset`, the packages to measure come from `[tool.coverset]` in `<rootdir>/pyproject.toml` (`source`, else the packages found under `source_root`, default `src` when it exists), the neutral bundle is written too, and one line at the end says where everything went:
+
+```
+coverset: wrote .coverset (24 tests, 4 files); `coverset report .coverset` for the pages
+```
+
+Any explicit `--coverset-*` option wins over these defaults. With nothing to measure (no `source`, no package found) the run stops with a usage error that says to set `[tool.coverset] source` or pass `--coverset-source`. A directory the plugin creates gets a `.gitignore` of `*`, so `.coverset/` is never committed by accident; an output directory that is a symlink is refused. The plugin removes `COVERSET` from the environment once read, so pytest runs your tests start are not instrumented too.
+
 ## Options
 
-Installing the plugin changes nothing about a normal run except registering the `invariant(id)` marker. Instrumentation starts with `--coverset-out`.
+Installing the plugin changes nothing about a normal run except registering the `invariant(id)` marker. Instrumentation starts with `--coverset` or `--coverset-out`.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--coverset-out DIR` | off | write the facts bundle to `DIR` (turns instrumentation on) |
-| `--coverset-neutral` | off | also write the language-neutral bundle, `DIR/neutral/` and `DIR/neutral.tar.gz` (`COVERSET_NEUTRAL=1` does the same) |
+| `--coverset` | off | instrument with the local defaults (quick start); `COVERSET=1` does the same |
+| `--coverset-out DIR` | off (`<rootdir>/.coverset` with `--coverset`) | write the facts bundle to `DIR` (turns instrumentation on) |
+| `--coverset-neutral` | off (on with `--coverset`) | also write the language-neutral bundle, `DIR/neutral/` and `DIR/neutral.tar.gz` (`COVERSET_NEUTRAL=1` does the same) |
 | `--coverset-scores FILE` | off | JSON `{nodeid: score}`; sort by `(-max(module), module, -max(class), class, -score, nodeid)` |
-| `--coverset-source PKG` | all in-repo code | package name or path to measure and trace (repeatable) |
+| `--coverset-source PKG` | all in-repo code (`[tool.coverset]` with `--coverset`) | package name or path to measure and trace (repeatable) |
 | `--coverset-trace-module MOD` | none | extra module (and submodules) to trace (repeatable) |
 | `--coverset-full-trace FILE` | none | repo-relative paths, one per line, traced without the adaptive sample cap |
 | `--coverset-shapes on\|off` | `on` | record argument and return shapes |
@@ -23,7 +39,7 @@ Installing the plugin changes nothing about a normal run except registering the 
 | `--coverset-shape-settle N` | 64 | consecutive calls with no new shape before sampling stops |
 | `--coverset-full-trace-cap N` | 100000 | safety cap on sampled calls per full-trace function (recorded as `truncated`, `cap: "full"`) |
 
-Every option takes `--opt value` or `--opt=value`. Scripts that pass paths outside the repository should use the `=` form: pytest looks for its ini file before plugins register their options, so a separate path word can move the rootdir and drop the repo's pytest configuration. `--coverset-out` with pytest-xdist workers (`-n 2`, `-n auto`) is a usage error, and so is Python below 3.12.
+Every option takes `--opt value` or `--opt=value`. Scripts that pass paths outside the repository should use the `=` form: pytest looks for its ini file before plugins register their options, so a separate path word can move the rootdir and drop the repo's pytest configuration. `--coverset-out` with pytest-xdist workers (`-n 2`, `-n auto`) is a usage error, and so are Python below 3.12 and an output directory that is a symlink or a file.
 
 Coverage uses the ctrace core with one dynamic context per test whose name is exactly the nodeid (no static context is prefixed, so `|` in parametrize ids needs no special parsing); the `''` context holds imports and collection. A foreign `sys.settrace` function at start is a usage error; a tracer lost later (a test calling `sys.settrace(None)`, or pytest-cov started without `--no-cov`) is recorded as `tracer_lost_at`/`tracer_losses` in `meta.json` and re-installed when possible. coverage.py's own warnings (for example a `--coverset-source` package the shard never imports) are captured into `meta.json` `coverage_warnings` instead of raised, so target repos that run with `-W error` or `filterwarnings = error` are unaffected, and an error while recording a result or emitting an event goes to `meta.json` `errors` instead of aborting the run. A conftest that fails to import still yields a bundle and a `done` event with exit code 4.
 
@@ -40,15 +56,17 @@ Shape keys follow plan Addendum B. Infinities do not count as the finite sign cl
 
 ## Bundle
 
-`DIR/bundle.tar.gz` holds `coverage.sqlite`, `coverage.json` (format 3), `shapes.jsonl.gz` (plan Addendum B), `results.jsonl` (one final row per test, authoritative), `collect.json` (`items` with file, line, markers, invariant ids, hypothesis flag; `errors` for collection errors), `durations.json`, `invariant_links.jsonl` and `meta.json` (versions, `tracer`, `tracer_lost_at`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `configfile`, `cwd`, `shapes_disabled_reason`, `tracer_errors`, counts, timings). Shape and result paths are relative to the git root (the rootdir when there is no `.git`); `coverage.json` and `coverage.sqlite` paths are relative to the working directory, which is the repo root in a worker.
+`DIR/bundle.tar.gz` holds `coverage.sqlite`, `coverage.json` (format 3), `shapes.jsonl.gz` (plan Addendum B), `results.jsonl` (one final row per test, authoritative), `collect.json` (`items` with file, line, markers, invariant ids, hypothesis flag; `errors` for collection errors), `durations.json`, `invariant_links.jsonl` and `meta.json` (versions, `tracer`, `tracer_lost_at`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `cwd`, `coverage_paths`, `configfile`, `shapes_disabled_reason`, `tracer_errors`, counts, timings).
+
+Every path is repository-relative (POSIX, relative to the git root, or the rootdir when there is no `.git`), whichever directory pytest runs in: coverage.py names files relative to the working directory, and the plugin rewrites `coverage.json` and `coverage.sqlite` to repository paths when the run ends (`meta.coverage_paths: "repository"`). `meta.cwd` and `meta.rootdir` say where the run happened, relative to the same root. Test node ids stay pytest's (rootdir-relative).
 
 ## Neutral bundle
 
 With `--coverset-neutral` (or `COVERSET_NEUTRAL=1`) the plugin also writes the language-neutral bundle of coverset's `docs/neutral-bundle.md` into `DIR/neutral/` and packs it, flat, as `DIR/neutral.tar.gz` next to `bundle.tar.gz`: `manifest.json` (`meta` is the same mapping as `meta.json`; `shard` comes from `COVERSET_SHARD`), `tests.jsonl.gz` (every collected test, `outcome` null for one that never ran), `files.jsonl.gz`, `coverage.jsonl.gz` (per test and file, statement first lines, `<import>` for code outside tests, with the test's arcs), `arcs.jsonl.gz`, `functions.jsonl.gz` (function regions by the control plane's rules, `regions.py`; no `types`, which the control plane derives from the sources for Python), `shapes.jsonl.gz` (self-contained `obs` and `sampling` rows) and `links.jsonl`. It is built from the files already written, after measurement stopped, so coverage, shapes and results are identical with and without the flag; it is written on every path that writes `bundle.tar.gz`, after `meta.json` and `bundle.tar.gz` (an interrupt during the export never costs the Python bundle). `meta.json` is then rewritten with the outcome in `neutral` (`status` `written`, `failed` or `interrupted`, `rows`, `dropped`, `seconds`); the `neutral_written` event (`path`, `sha256`, `bytes`, `seconds`, `rows`, `dropped`) precedes `done` and is emitted only when every file, the manifest and the archive were written. Sources are decoded as CPython decodes them (BOM, PEP 263 cookie), lines are counted as Python counts them, test ids over 512 characters are left out and counted, and stale files of an earlier export (either `.jsonl` variant, an old `neutral.tar.gz`, also when the flag is off) are removed. The export takes about 0.013 s on the fixture project.
 
 ```sh
-pytest --coverset-out .coverset --coverset-neutral
-coverset report .coverset
+pytest --coverset-out .coverset --coverset-source mypkg --coverset-neutral   # the explicit form
+coverset report .coverset --open
 ```
 
 ## Events

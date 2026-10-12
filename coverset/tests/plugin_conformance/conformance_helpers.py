@@ -16,6 +16,7 @@ DEMO_SRC = ROOT / "examples" / "demo-app" / "src"
 NONCE = "conformance-nonce"
 _SCRUBBED_ENV = (
     "COVERAGE_PROCESS_START",
+    "COVERSET",
     "COVERSET_NEUTRAL",
     "COVERSET_SHARD",
     "PYTEST_ADDOPTS",

@@ -17,14 +17,24 @@ switch :meth:`CoverageContext.switch` compares ``sys.gettrace()`` with the colle
 mismatch it records the context that was running (``tracer_lost_at``) and re-installs the tracer
 through coverage.py's public ``stop()``/``start()`` when this Coverage object is the active one; when
 another Coverage object sits on top of it (pytest-cov started without ``--no-cov``) it records only.
+
+Repository-relative names: coverage.py (``relative_files``) names a file under the working
+directory relative to it and any other file absolute, so a run from a subdirectory would name
+``src/pkg/x.py`` as ``../src/pkg/x.py``'s absolute path or as ``x.py``. After ``coverage.json`` is
+written, :meth:`CoverageContext.remap_files` renames every file of both data files through
+:func:`pytest_coverset.paths.coverage_name`: ``coverage.json``'s keys are rewritten, and
+``coverage.sqlite`` is rebuilt with coverage.py's public ``CoverageData.update(..., map_path=)`` (the
+same call ``coverage combine`` uses for ``[paths]``). Both are written under temporary names and
+renamed into place; nothing is rebuilt when no name changes (a run from the git root).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -213,6 +223,69 @@ class CoverageContext:
                 "totals": {},
             }
             self.json_file.write_text(json.dumps(empty), encoding="utf-8")
+
+    def remap_files(self, mapper: Callable[[str], str]) -> int:
+        """Rename every file of ``coverage.json`` and ``coverage.sqlite`` through ``mapper``.
+
+        Call after :meth:`stop` and :meth:`write_json`. Returns how many files ``coverage.json``
+        lists with a relative (repository) name afterwards. Two names that map to one path are
+        merged in ``coverage.sqlite`` (coverage.py unions them) and the first is kept in
+        ``coverage.json``. Raises when either file cannot be rewritten; then neither was replaced,
+        unless the failure was renaming ``coverage.json`` after ``coverage.sqlite`` was replaced.
+        """
+        try:
+            report = json.loads(self.json_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:  # writing it failed (recorded): the data file is still remapped
+            report = None
+        files = report.get("files") if isinstance(report, dict) else None
+        renamed: dict[str, Any] = {}
+        for name, entry in (files or {}).items():
+            renamed.setdefault(mapper(name), entry)
+        json_changed = isinstance(report, dict) and isinstance(files, dict) and list(renamed) != list(files)
+        sqlite_tmp: Path | None = None
+        json_tmp = self.json_file.with_name(self.json_file.name + ".tmp")
+        try:
+            if self.data_file.is_file():
+                sqlite_tmp = self._remapped_data(mapper)
+            if json_changed:
+                assert isinstance(report, dict)
+                report["files"] = renamed
+                json_tmp.write_text(json.dumps(report), encoding="utf-8")
+            if sqlite_tmp is not None:
+                os.replace(sqlite_tmp, self.data_file)
+                sqlite_tmp = None
+            if json_changed:
+                os.replace(json_tmp, self.json_file)
+        finally:
+            if sqlite_tmp is not None:
+                sqlite_tmp.unlink(missing_ok=True)
+            json_tmp.unlink(missing_ok=True)
+        return sum(1 for name in renamed if not os.path.isabs(name))
+
+    def _remapped_data(self, mapper: Callable[[str], str]) -> Path | None:
+        """``coverage.sqlite`` rebuilt with mapped names under a temporary name; None when unchanged."""
+        with self._quiet():
+            original = coverage.CoverageData(basename=str(self.data_file), suffix=False)
+            original.read()
+            try:
+                mapping = {name: mapper(name) for name in original.measured_files()}
+                if all(name == mapped for name, mapped in mapping.items()):
+                    return None
+                tmp = self.data_file.with_name(self.data_file.name + ".remap")
+                tmp.unlink(missing_ok=True)
+                rebuilt = coverage.CoverageData(basename=str(tmp), suffix=False)
+                try:
+                    rebuilt.update(original, map_path=lambda name: mapping.get(name, name))
+                    if rebuilt.has_arcs() != original.has_arcs():
+                        raise RuntimeError("the rebuilt coverage data lost its branch (arc) flag")
+                except BaseException:
+                    rebuilt.close(force=True)
+                    tmp.unlink(missing_ok=True)
+                    raise
+                rebuilt.close(force=True)
+            finally:
+                original.close(force=True)
+        return tmp
 
     def _tracer_name(self) -> str | None:
         try:

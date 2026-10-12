@@ -64,8 +64,8 @@ def test_bundle_contents_and_schemas(project: pytest.Pytester) -> None:
     assert meta["exit_code"] == 0
     assert meta["counts"]["passed"] == 24 and meta["counts"]["not_run"] == 0
     assert meta["hypothesis"]["deadline_ms"] == 200.0
-    assert meta["repo_root"] == meta["rootdir"]
-    assert meta["git_root"] is None
+    assert meta["git_root"] is None  # no .git: paths are relative to the rootdir
+    assert (meta["rootdir"], meta["cwd"], meta["coverage_paths"]) == (".", ".", "repository")
     assert meta["timings"]["session_wall_s"] > 0
     assert {"python", "plugin_version", "coverage_version", "cwd", "rootdir"} <= meta.keys()
 

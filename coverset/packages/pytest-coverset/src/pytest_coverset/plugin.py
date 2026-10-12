@@ -2,8 +2,14 @@
 
 Installing the plugin changes nothing about a normal pytest run: it only registers the
 ``invariant(id)`` marker. Instrumentation (per-test coverage, the shape tracer, JSON-line events and
-the facts bundle) switches on with ``--coverset-out DIR``; priority ordering switches on with
+the facts bundle) switches on with ``--coverset-out DIR``, or with ``--coverset`` (``COVERSET=1``),
+which adds local defaults (:mod:`pytest_coverset.local`); priority ordering switches on with
 ``--coverset-scores FILE``.
+
+Every path the plugin writes is repository-relative (the git root, else the rootdir), whichever
+directory pytest runs in; ``meta.cwd`` and ``meta.rootdir`` say where the run happened, relative to
+the same root, and ``meta.coverage_paths`` says whether ``coverage.json``/``coverage.sqlite`` names
+were rewritten (``repository``) or are still coverage.py's, relative to ``meta.cwd`` (``cwd``).
 
 Stopping: the runner either creates the ``--coverset-stop-file`` (checked before each test) or sends
 SIGTERM. While instrumentation is on, SIGTERM is turned into a ``KeyboardInterrupt`` (once), so a
@@ -30,6 +36,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 - a clear error instead of a TypeE
     )
 
 import argparse
+import json
 import os
 import signal
 import threading
@@ -58,10 +65,18 @@ from pytest_coverset.bundle import (
 )
 from pytest_coverset.coverage_ctx import CoverageContext, ForeignTracerError
 from pytest_coverset.events import EventWriter
+from pytest_coverset.local import (
+    DEFAULT_OUT,
+    display_path,
+    pop_switch,
+    prepare_out_dir,
+    sources_from_pyproject,
+    summary_line,
+)
 from pytest_coverset.neutral import NeutralWriter, env_enabled, remove_previous, shard_from_env
 from pytest_coverset.ordering import PriorityOrdering, load_scores
 from pytest_coverset.outcomes import exception_name, fold_reports, truncate_utf8
-from pytest_coverset.paths import find_git_root, norm_path
+from pytest_coverset.paths import coverage_name, find_git_root, norm_path, rel_dir
 from pytest_coverset.redact import ReprMode
 from pytest_coverset.shapes import FULL_TRACE_CAP, ShapeTracer, TargetSpec, read_full_trace_file
 
@@ -70,6 +85,8 @@ ORDERING_PLUGIN = "coverset-ordering"
 STOP_REASON = "coverset: stop requested"
 SIGTERM_REASON = "coverset: SIGTERM received"
 INVARIANT_MARKER = "invariant(id): link this test to the invariant `id` declared in invariants.yaml"
+ENV_SWITCH = pytest.StashKey[bool]()
+"""Whether ``COVERSET=1`` was in the environment (read, and removed, once per config)."""
 
 
 def _positive_int(text: str) -> int:
@@ -81,7 +98,17 @@ def _positive_int(text: str) -> int:
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Register the ``--coverset-*`` options."""
-    group = parser.getgroup("coverset", "coverset instrumentation (inert unless --coverset-out is given)")
+    group = parser.getgroup(
+        "coverset", "coverset instrumentation (inert unless --coverset or --coverset-out is given)"
+    )
+    group.addoption(
+        "--coverset",
+        action="store_true",
+        default=False,
+        help=f"instrument this run with local defaults: the bundle in <rootdir>/{DEFAULT_OUT}, sources "
+        "from [tool.coverset] in <rootdir>/pyproject.toml, the neutral export, a summary line; "
+        "COVERSET=1 does the same",
+    )
     group.addoption(
         "--coverset-out", metavar="DIR", default=None, help="write the coverset facts bundle to DIR"
     )
@@ -166,13 +193,29 @@ class Options:
     shape_settle: int
     full_trace_cap: int
     neutral: bool = False
+    local: bool = False
+    """``--coverset``: defaults came from the project, and a summary line is printed at the end."""
 
     @classmethod
-    def from_namespace(cls, ns: Any) -> Options:
-        """Build from an argparse namespace (``early_config.known_args_namespace`` or ``config.option``)."""
+    def from_namespace(cls, ns: Any, *, local: bool = False, rootdir: Path | None = None) -> Options:
+        """Build from an argparse namespace (``early_config.known_args_namespace`` or ``config.option``).
+
+        With ``local`` (``--coverset``), an option left unset takes its local default: the output
+        directory ``<rootdir>/.coverset``, the sources of ``[tool.coverset]`` (a usage error when
+        there are none), the neutral export on.
+        """
+        sources = tuple(ns.coverset_source or ())
+        if ns.coverset_out:
+            out_dir = Path(ns.coverset_out).absolute()
+        elif local and rootdir is not None:
+            out_dir = Path(rootdir).absolute() / DEFAULT_OUT
+        else:
+            raise pytest.UsageError("coverset: no output directory (pass --coverset-out=DIR or --coverset)")
+        if local and not sources:
+            sources = sources_from_pyproject(Path(rootdir) if rootdir is not None else Path.cwd())
         return cls(
-            out_dir=Path(ns.coverset_out).absolute(),
-            sources=tuple(ns.coverset_source or ()),
+            out_dir=out_dir,
+            sources=sources,
             trace_modules=tuple(ns.coverset_trace_module or ()),
             full_trace_file=ns.coverset_full_trace,
             shapes=ns.coverset_shapes == "on",
@@ -181,7 +224,8 @@ class Options:
             shape_samples=ns.coverset_shape_samples,
             shape_settle=ns.coverset_shape_settle,
             full_trace_cap=ns.coverset_full_trace_cap,
-            neutral=bool(getattr(ns, "coverset_neutral", False)) or env_enabled(),
+            neutral=bool(getattr(ns, "coverset_neutral", False)) or env_enabled() or local,
+            local=local,
         )
 
 
@@ -195,8 +239,14 @@ class CoversetSession:
         self.started = time.perf_counter()
         self.git_root = find_git_root(config.rootpath) or find_git_root(Path.cwd())
         self.repo_root = str(self.git_root or config.rootpath)
-        options.out_dir.mkdir(parents=True, exist_ok=True)
+        prepare_out_dir(options.out_dir)
         self.start_cwd = os.getcwd()
+        self.cwd_rel = rel_dir(self.start_cwd, self.repo_root)
+        """The working directory relative to the repository root (``.``), None when outside it."""
+        self.rootdir_rel = rel_dir(config.rootpath, self.repo_root)
+        self.coverage_paths = "cwd"
+        """``repository`` once coverage.json and coverage.sqlite names are repository-relative."""
+        self.files_measured: int | None = None
         self.shard = shard_from_env()
         self.neutral = (
             NeutralWriter(options.out_dir, self.repo_root, self.start_cwd) if options.neutral else None
@@ -400,6 +450,7 @@ class CoversetSession:
             self.tracer.stop()
         self._attempt("coverage save", self.coverage.stop)
         self._attempt("coverage json", self.coverage.write_json)
+        self._attempt("coverage paths", self._repository_paths)
         if self.tracer is not None:
             self._attempt("shapes", lambda: self.tracer.write(out / SHAPES_FILE))  # type: ignore[union-attr]
         else:
@@ -421,11 +472,45 @@ class CoversetSession:
             self._record_error("tarball", exc)
         else:
             self._emit("bundle_written", path=str(path), sha256=digest, bytes=size)
-        if neutral is not None:
-            self._export_neutral(neutral, meta)
-        else:
-            self._attempt("neutral cleanup", lambda: remove_previous(out))
-        self._emit("done", exit_code=exit_code, counts=counts)
+        try:
+            if neutral is not None:
+                neutral.name_prefix = self._name_prefix()
+                self._export_neutral(neutral, meta)
+            else:
+                self._attempt("neutral cleanup", lambda: remove_previous(out))
+            self._emit("done", exit_code=exit_code, counts=counts)
+        finally:
+            if self.options.local:
+                self._attempt("summary", self._print_summary)
+
+    def _repository_paths(self) -> None:
+        """Make every ``coverage.json``/``coverage.sqlite`` file name repository-relative."""
+        cwd, root = self.start_cwd, self.repo_root
+        self.files_measured = self.coverage.remap_files(lambda name: coverage_name(name, cwd, root))
+        self.coverage_paths = "repository"
+
+    def _name_prefix(self) -> str:
+        """What the neutral export joins in front of coverage names (the converter's rule)."""
+        if self.coverage_paths == "repository" or self.cwd_rel in (None, "."):
+            return ""
+        return f"{self.cwd_rel}/"
+
+    def _print_summary(self) -> None:
+        """``--coverset``'s one line: where the bundle went, how much it holds, how to read it."""
+        reporter = self.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is None:
+            return
+        out = display_path(self.options.out_dir, self.start_cwd, self.repo_root)
+        files = self.files_measured
+        if files is None:  # the rewrite failed: count coverage.json's relative names instead
+            try:
+                report = json.loads(self.coverage.json_file.read_text(encoding="utf-8"))
+                files = sum(1 for name in report["files"] if not os.path.isabs(name))
+            except (OSError, ValueError, KeyError, TypeError):
+                files = 0
+        line = summary_line(out, len(self.results.results), files, len(self.errors))
+        reporter.ensure_newline()
+        reporter.write_line(line)
 
     def _export_neutral(self, neutral: NeutralWriter, meta: dict[str, Any]) -> None:
         """Write the neutral files, manifest and archive; record the outcome in ``meta.json``.
@@ -531,9 +616,10 @@ class CoversetSession:
             "tool_id": tracer.tool_id if tracer is not None else None,
             "git_root": str(self.git_root) if self.git_root is not None else None,
             "repo_root": self.repo_root,
-            "rootdir": str(self.config.rootpath),
+            "rootdir": self.rootdir_rel,
             "configfile": str(self.config.inipath) if self.config.inipath is not None else None,
-            "cwd": os.getcwd(),
+            "cwd": self.cwd_rel,
+            "coverage_paths": self.coverage_paths,
             "sources": list(self.options.sources),
             "trace_modules": list(self.options.trace_modules),
             "full_trace": list(self.full_trace),
@@ -572,11 +658,27 @@ class CoversetSession:
         self.results.close()
 
 
+def _local(config: pytest.Config, namespace: Any) -> bool:
+    """``--coverset`` or ``COVERSET=1`` (the variable is read, and removed, once per config)."""
+    if getattr(namespace, "coverset", False):
+        return True
+    if ENV_SWITCH not in config.stash:
+        config.stash[ENV_SWITCH] = pop_switch()
+    return config.stash[ENV_SWITCH]
+
+
+def _wanted(config: pytest.Config, namespace: Any) -> bool:
+    """Whether this run is instrumented: ``--coverset-out``, ``--coverset`` or ``COVERSET=1``."""
+    local = _local(config, namespace)
+    return bool(getattr(namespace, "coverset_out", None)) or local
+
+
 def _start_session(config: pytest.Config, namespace: Any) -> None:
     if config.pluginmanager.has_plugin(SESSION_PLUGIN):
         return
     _refuse_xdist(namespace)
-    session = CoversetSession(config, Options.from_namespace(namespace))
+    options = Options.from_namespace(namespace, local=_local(config, namespace), rootdir=config.rootpath)
+    session = CoversetSession(config, options)
     session.start()
     config.pluginmanager.register(session, SESSION_PLUGIN)
 
@@ -622,14 +724,14 @@ def pytest_load_initial_conftests(
 ) -> None:
     """Start instrumentation before conftest files are imported, so their imports are measured."""
     namespace = early_config.known_args_namespace
-    if getattr(namespace, "coverset_out", None):
+    if _wanted(early_config, namespace):
         _start_session(early_config, namespace)
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register the invariant marker; enable ordering and (if not yet started) instrumentation."""
     config.addinivalue_line("markers", INVARIANT_MARKER)
-    if config.option.coverset_out:
+    if _wanted(config, config.option):
         _refuse_xdist(config.option)
         _start_session(config, config.option)
     scores_file = config.option.coverset_scores

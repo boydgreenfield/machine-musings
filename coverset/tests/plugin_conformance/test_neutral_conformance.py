@@ -1,8 +1,9 @@
 """pytest-coverset's ``--coverset-neutral`` bundle against the reader, the validator and the converter.
 
 For a run of the plugin's fixture project, of a project with every outcome (failures, errors,
-skips, xfail/xpass and tests a stop file kept from running), and of a git repository whose tests
-pytest runs from a subdirectory:
+skips, xfail/xpass and tests a stop file kept from running), of the fixture project run from its
+``tests/`` directory, and of a git repository whose package (and pytest's rootdir) is a
+subdirectory:
 
 * ``coverset_model.io.validate`` finds no problem in ``<out>/neutral`` nor in ``neutral.tar.gz``;
 * ``coverset_model.io.read_bundle(<out>/neutral)`` equals ``read_python_bundle(<out>)`` (the
@@ -13,7 +14,11 @@ pytest runs from a subdirectory:
   only statement lines (the neutral format drops the rest, ``docs/neutral-bundle.md``). Sampling
   rows need no adjustment: both readers carry the plugin's ``cap``;
 * the shipped function regions equal the control plane's index of the measured sources;
-* the archive reads back exactly as the directory.
+* the archive reads back exactly as the directory;
+* every path is repository-relative whatever the working directory: the strict subdirectory tests
+  compare each path with the git-root-relative one. When the plugin could not rewrite the coverage
+  file names (``meta.coverage_paths == "cwd"``), both readers join ``meta.cwd`` in front and still
+  agree; a bundle with the old absolute ``meta.cwd``/``meta.rootdir`` reads as it always did.
 """
 
 from __future__ import annotations
@@ -152,8 +157,11 @@ def _sorted(rows: Any, key: Any = repr) -> list[Any]:
     return sorted(rows, key=key)
 
 
-def assert_equivalent(project: Path, *, functions: bool = True) -> tuple[NeutralBundle, NeutralBundle]:
-    out = project / "out"
+def assert_equivalent(
+    project: Path, *, out: Path | None = None, functions: bool = True
+) -> tuple[NeutralBundle, NeutralBundle]:
+    """``project`` is the repository root (sources are read under it); ``out`` the bundle directory."""
+    out = out or project / "out"
     neutral = model_io.read_bundle(out / "neutral")
     python = _converter_view(read_python_bundle(out, source_root=project if functions else None))
 
@@ -186,25 +194,73 @@ def assert_equivalent(project: Path, *, functions: bool = True) -> tuple[Neutral
     return neutral, python
 
 
-@pytest.fixture(scope="module")
-def subdir_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A git repository whose tests pytest runs from ``app/`` (rootdir ``app``, git root above)."""
-    project = tmp_path_factory.mktemp("conformance") / "subdir"
+SUB_TEST = "from subpkg.mod import classify\n\n\ndef test_pos():\n    assert classify(3) == 'pos'\n"
+BREAK_REMAP = """
+from pytest_coverset.coverage_ctx import CoverageContext
+
+
+def _fail(self, mapper):
+    raise OSError("simulated: the coverage data cannot be rewritten")
+
+
+CoverageContext.remap_files = _fail
+"""
+
+
+def _package_below_root(project: Path) -> Path:
+    """A git repository at ``project`` whose package, tests and pyproject.toml live in ``app/``."""
     app = project / "app"
     (app / "subpkg").mkdir(parents=True)
     (project / ".git").mkdir()  # find_git_root only looks for the directory
     (app / "subpkg" / "__init__.py").write_text("")
     (app / "subpkg" / "mod.py").write_text(MIXED_MODULE)
     (app / "tests").mkdir()
-    (app / "tests" / "test_sub.py").write_text(
-        "from subpkg.mod import classify\n\n\ndef test_pos():\n    assert classify(3) == 'pos'\n"
-    )
+    (app / "tests" / "test_sub.py").write_text(SUB_TEST)
     (app / "pyproject.toml").write_text(
         '[tool.pytest.ini_options]\npythonpath = ["."]\ntestpaths = ["tests"]\n'
     )
-    proc = run_pytest(app, "--coverset-out=out", "--coverset-source=subpkg", "--coverset-neutral")
-    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     return app
+
+
+@pytest.fixture(scope="module")
+def subdir_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """pytest run from ``app/`` (rootdir ``app``, git root above); returns the git root."""
+    project = tmp_path_factory.mktemp("conformance") / "subdir"
+    app = _package_below_root(project)
+    proc = run_pytest(app, "--coverset-out=../out", "--coverset-source=subpkg", "--coverset-neutral")
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return project
+
+
+@pytest.fixture(scope="module")
+def tests_cwd_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The fixture project, a git repository, run from its ``tests/`` directory."""
+    project = copy_fixture_project(tmp_path_factory.mktemp("conformance") / "testscwd")
+    (project / ".git").mkdir()
+    proc = run_pytest(
+        project / "tests", "--coverset-out=../out", "--coverset-source=fixturepkg", "--coverset-neutral"
+    )
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return project
+
+
+@pytest.fixture(scope="module")
+def unrewritten_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """As ``subdir_run``, with the coverage file-name rewrite failing (``coverage_paths: cwd``)."""
+    project = tmp_path_factory.mktemp("conformance") / "unrewritten"
+    app = _package_below_root(project)
+    (project / "break_remap.py").write_text(BREAK_REMAP)
+    proc = run_pytest(
+        app,
+        "-p",
+        "break_remap",
+        "--coverset-out=../out",
+        "--coverset-source=subpkg",
+        "--coverset-neutral",
+        env={"PYTHONPATH": str(project)},
+    )
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return project
 
 
 def test_fixture_project_validates(fixture_run: Path) -> None:
@@ -245,17 +301,106 @@ def test_every_outcome_reads_like_the_python_bundle(mixed_run: Path) -> None:
     assert neutral.meta["bundle"]["shard"] == 2
 
 
-def test_a_subdirectory_run_reads_like_the_python_bundle(subdir_run: Path) -> None:
-    """coverage.py names files relative to the directory pytest ran in; the converter reads those
-    names as git-root-relative, and so does the neutral export, so the two readings agree."""
+APP_SOURCES = {"app/subpkg/__init__.py", "app/subpkg/mod.py"}
+FIXTURE_SOURCES = {
+    "src/fixturepkg/__init__.py",
+    "src/fixturepkg/accounts.py",
+    "src/fixturepkg/core.py",
+    "src/fixturepkg/full.py",
+}
+
+
+def _paths(bundle: NeutralBundle) -> dict[str, set[str]]:
+    """Every file path a bundle names, by where it appears."""
+    return {
+        "static": set(bundle.static),
+        "run_arcs": set(bundle.run_arcs),
+        "coverage": {path for by_path in bundle.coverage.values() for path in by_path},
+        "tests": {row.file for row in bundle.tests},
+        "collected": {item.file for item in bundle.collected},
+        "shapes": {obs.func[0] for obs in bundle.shapes},
+        "sampling": {row.func[0] for row in bundle.sampling},
+        "functions": {region.path for region in bundle.functions},
+    }
+
+
+def test_a_run_from_the_tests_directory_names_every_path_from_the_git_root(tests_cwd_run: Path) -> None:
+    """From ``tests/`` coverage.py names the sources by absolute path (they lie outside the working
+    directory): the plugin makes them git-root-relative, and both readers read them that way."""
+    out = tests_cwd_run / "out"
+    assert model_io.validate(out / "neutral") == []
+    neutral, python = assert_equivalent(tests_cwd_run)
+    tests = {"tests/test_accounts.py", "tests/test_core.py"}
+    for name, paths in (("neutral", _paths(neutral)), ("python", _paths(python))):
+        assert paths["static"] == paths["run_arcs"] == FIXTURE_SOURCES, name
+        # an empty or docstring-only module has no statement a test executes
+        assert paths["coverage"] <= FIXTURE_SOURCES and "src/fixturepkg/core.py" in paths["coverage"], name
+        assert paths["tests"] == paths["collected"] == tests, name
+        assert paths["shapes"] and paths["shapes"] <= FIXTURE_SOURCES, name
+        assert paths["sampling"] and paths["sampling"] <= FIXTURE_SOURCES, name
+    assert _paths(neutral)["functions"] == FIXTURE_SOURCES
+    meta = json.loads((out / "meta.json").read_text())
+    assert (meta["cwd"], meta["rootdir"], meta["coverage_paths"]) == ("tests", ".", "repository")
+    assert len(neutral.tests) == 24 and len(neutral.coverage) == 25
+
+
+def test_a_package_below_the_git_root_reads_like_the_python_bundle(subdir_run: Path) -> None:
+    """rootdir and working directory ``app/``: coverage names (``subpkg/mod.py`` to coverage.py)
+    and test files are ``app/...`` in both readings."""
     out = subdir_run / "out"
     assert model_io.validate(out / "neutral") == []
-    neutral, python = assert_equivalent(subdir_run, functions=False)
-    assert set(neutral.static) == set(python.static) == {"subpkg/__init__.py", "subpkg/mod.py"}
-    assert neutral.tests[0].file == "app/tests/test_sub.py"  # results are git-root-relative
+    neutral, python = assert_equivalent(subdir_run)
+    for name, paths in (("neutral", _paths(neutral)), ("python", _paths(python))):
+        assert paths["static"] == APP_SOURCES and paths["coverage"] == {"app/subpkg/mod.py"}, name
+        assert paths["tests"] == paths["collected"] == {"app/tests/test_sub.py"}, name
+        assert paths["shapes"] == {"app/subpkg/mod.py"}, name
+    assert neutral.tests[0].nodeid == "tests/test_sub.py::test_pos"  # nodeids stay rootdir-relative
+    meta = json.loads((out / "meta.json").read_text())
+    assert (meta["cwd"], meta["rootdir"], meta["coverage_paths"]) == ("app", "app", "repository")
 
 
-@pytest.mark.parametrize("run", ["fixture_run", "mixed_run", "subdir_run"])
+def test_without_the_rewrite_both_readers_join_meta_cwd(unrewritten_run: Path) -> None:
+    out = unrewritten_run / "out"
+    meta = json.loads((out / "meta.json").read_text())
+    assert meta["coverage_paths"] == "cwd" and meta["cwd"] == "app"
+    assert any(error.startswith("coverage paths: OSError: simulated") for error in meta["errors"])
+    assert set(json.loads((out / "coverage.json").read_text())["files"]) == {
+        "subpkg/__init__.py",
+        "subpkg/mod.py",
+    }
+    assert model_io.validate(out / "neutral") == []
+    neutral, python = assert_equivalent(unrewritten_run)
+    assert set(neutral.static) == set(python.static) == APP_SOURCES
+    assert _paths(neutral)["coverage"] == _paths(python)["coverage"] == {"app/subpkg/mod.py"}
+
+
+def test_old_bundles_read_as_before(unrewritten_run: Path, tmp_path: Path) -> None:
+    """Bundles written before ``meta.coverage_paths`` recorded absolute ``cwd`` and ``rootdir``:
+    nothing is joined, so coverage names and nodeid-derived files read exactly as they always did."""
+    old = tmp_path / "old"
+    old.mkdir()
+    for name in ("coverage.sqlite", "coverage.json", "results.jsonl", "collect.json", "meta.json"):
+        (old / name).write_bytes((unrewritten_run / "out" / name).read_bytes())
+    meta = json.loads((old / "meta.json").read_text())
+    meta.pop("coverage_paths")
+    meta["cwd"] = meta["rootdir"] = str(unrewritten_run / "app")
+    (old / "meta.json").write_text(json.dumps(meta))
+    rows = [json.loads(line) for line in (old / "results.jsonl").read_text().splitlines()]
+    (old / "results.jsonl").write_text("".join(json.dumps({**r, "file": None}) + "\n" for r in rows))
+    bundle = read_python_bundle(old)
+    assert set(bundle.static) == {"subpkg/__init__.py", "subpkg/mod.py"}
+    assert {row.file for row in bundle.tests} == {"tests/test_sub.py"}
+
+    meta["cwd"], meta["rootdir"] = "app", "app"  # the same bundle with the new keys
+    (old / "meta.json").write_text(json.dumps(meta))
+    bundle = read_python_bundle(old)
+    assert set(bundle.static) == APP_SOURCES
+    assert {row.file for row in bundle.tests} == {"app/tests/test_sub.py"}
+
+
+@pytest.mark.parametrize(
+    "run", ["fixture_run", "mixed_run", "subdir_run", "tests_cwd_run", "unrewritten_run"]
+)
 def test_archive_reads_back_as_the_directory(run: str, request: pytest.FixtureRequest) -> None:
     out = request.getfixturevalue(run) / "out"
     from_dir = model_io.read_bundle(out / "neutral")

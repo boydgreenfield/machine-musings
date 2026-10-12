@@ -6,8 +6,11 @@ With ``--coverset-neutral`` (or ``COVERSET_NEUTRAL=1``) the session writes ``<ou
 bundle; ``meta.json`` is then rewritten with the export's outcome in ``meta.neutral``. Everything is
 derived from files already on disk or rows already recorded, so the export cannot change coverage,
 shapes or results. File names in ``coverage.json`` and ``coverage.sqlite`` are read as the control
-plane's converter reads them: relative names relative to the git root, absolute names (files
-outside the directory pytest ran in) dropped and counted, so both readings of one run agree.
+plane's converter reads them: the session has already made them repository-relative
+(``meta.coverage_paths == "repository"``), so a relative name is a repository path and an absolute
+name (a file outside the repository) is dropped and counted; should that rewrite have failed, the
+names are still relative to the working directory and ``meta.cwd`` is joined in front, as the
+converter does. Either way both readings of one run agree, from any working directory.
 
 * ``tests.jsonl.gz``: every collected test (``outcome`` null when it never ran) merged with its
   final result; results for tests that were not collected are appended.
@@ -263,8 +266,10 @@ class NeutralWriter:
     out_dir: Path
     repo_root: str
     cwd: str
-    """The working directory when coverage started: ``coverage.json``/``coverage.sqlite`` paths are
-    relative to it."""
+    """The working directory when coverage started (absolute)."""
+    name_prefix: str = ""
+    """Joined in front of every relative ``coverage.json``/``coverage.sqlite`` name: empty once the
+    session made the names repository-relative, else ``meta.cwd + "/"`` (the converter's rule)."""
     stats: Counter[str] = field(default_factory=Counter)
     rows: dict[str, int] = field(default_factory=dict)
     seconds: float = 0.0
@@ -276,16 +281,16 @@ class NeutralWriter:
     def rel(self, raw: str) -> str | None:
         """A ``coverage.json``/``coverage.sqlite`` file name as the control plane's converter reads it.
 
-        A relative name is taken relative to the git root (coverage.py writes names relative to
-        the directory pytest ran in, which is the git root in CI); an absolute name, a name with
-        empty, ``.`` or ``..`` segments, a backslash or a control character is not a path the
-        converter accepts, so it is None (the caller counts it).
+        A relative name is a repository path once :attr:`name_prefix` is joined in front (empty
+        when the session made the names repository-relative); an absolute name, a name with empty,
+        ``.`` or ``..`` segments, a backslash or a control character is not a path the converter
+        accepts, so it is None (the caller counts it).
         """
         if not raw or os.path.isabs(raw) or "\\" in raw or not raw.isprintable():
             return None
         if any(part in ("", ".", "..") for part in raw.split("/")):
             return None
-        return raw
+        return self.name_prefix + raw
 
     def outcome(self) -> dict[str, Any]:
         """``rows``, ``dropped`` and ``seconds`` so far (the ``meta.neutral`` counters)."""

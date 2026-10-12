@@ -23,14 +23,33 @@ The control plane itself runs on Python 3.13. Instrumented repositories need 3.1
 
 ## Turning it on
 
-Installing the plugin changes nothing about a normal run except registering the marker. Instrumentation starts with `--coverset-out DIR`. Test `test_inert_without_out` checks that a run without it writes no coverage data and no events.
+Installing the plugin changes nothing about a normal run except registering the marker. Instrumentation starts with `--coverset-out DIR` (what the runner passes) or with `--coverset` (what a developer types). Test `test_inert_without_out` checks that a run without either writes no coverage data and no events.
+
+On a laptop, three lines give the pages for the local suite:
+
+```sh
+pytest --coverset                  # instrument the run; the bundle goes to <rootdir>/.coverset
+coverset report .coverset --open   # build the pages and open them
+```
+
+`--coverset` (or `COVERSET=1` in the environment) turns instrumentation on with local defaults, and every explicit option still wins:
+
+- the bundle goes to `<rootdir>/.coverset` (pytest's rootdir, so a run from `tests/` writes to the same place);
+- the measured packages come from `[tool.coverset]` in `<rootdir>/pyproject.toml`: `source` (a module name or a list of them), else the top-level packages found under `source_root` (default `src` when it is a directory, else `.`), minus `tests`, `docs` and the like, which is how the control plane infers them. A malformed table, or nothing to measure, is a usage error (exit 4) that says to set `source` or pass `--coverset-source`;
+- the neutral export is on;
+- one line is printed after the bundle is written, ``coverset: wrote .coverset (24 tests, 4 files); `coverset report .coverset` for the pages`` (the directory relative to the working directory, the tests that ran, the files measured).
+
+The plugin removes `COVERSET` from the environment once it has read it, so pytest runs the tests start themselves (subprocesses, `pytester`) are not instrumented as well. The runner never uses the switch: `--coverset-out` keeps its meaning, reads no `pyproject.toml`, writes the neutral bundle only on request and prints nothing extra; without `--coverset-source` it measures all in-repo code (`test_out_without_sources_still_measures_in_repo_code`). Tests: `packages/pytest-coverset/tests/test_local.py`.
+
+The output directory must not be a symlink (even one to a directory) or a file: either is a usage error before anything is written. A directory the plugin creates gets a `.gitignore` holding `*`, so a bundle is never committed by accident; a directory that already existed is left as it is (`test_gitignore_only_in_a_directory_the_plugin_created`).
 
 | Option | Default | Effect |
 |---|---|---|
-| `--coverset-out DIR` | off | write the bundle to `DIR`; turns instrumentation on |
-| `--coverset-neutral` | off | also write the language-neutral bundle, `DIR/neutral/` and `DIR/neutral.tar.gz`; `COVERSET_NEUTRAL=1` in the environment does the same ([The neutral bundle](#the-neutral-bundle)) |
+| `--coverset` | off | turn instrumentation on with the local defaults above; `COVERSET=1` does the same |
+| `--coverset-out DIR` | off (`<rootdir>/.coverset` with `--coverset`) | write the bundle to `DIR`; turns instrumentation on |
+| `--coverset-neutral` | off (on with `--coverset`) | also write the language-neutral bundle, `DIR/neutral/` and `DIR/neutral.tar.gz`; `COVERSET_NEUTRAL=1` in the environment does the same ([The neutral bundle](#the-neutral-bundle)) |
 | `--coverset-scores FILE` | off | JSON `{nodeid: score}`; run the riskiest tests first |
-| `--coverset-source PKG` | all in-repo code | package name or path to measure and trace (repeatable) |
+| `--coverset-source PKG` | all in-repo code (`[tool.coverset]` with `--coverset`) | package name or path to measure and trace (repeatable) |
 | `--coverset-trace-module MOD` | none | extra module, and its submodules, to trace (repeatable) |
 | `--coverset-full-trace FILE` | none | repo-relative paths, one per line, traced without a sample cap |
 | `--coverset-shapes on\|off` | `on` | record argument and return shapes |
@@ -61,7 +80,7 @@ coverage.py has two tracer cores that matter here: the C `settrace` tracer (`ctr
 | Option | Value | Why |
 |---|---|---|
 | `run:core` | `ctrace` | dynamic contexts (the constructor has no `core=` argument) |
-| `run:relative_files` | `True` | paths relative to the working directory, which is the repo root in a worker |
+| `run:relative_files` | `True` | names relative to the working directory; the plugin makes them repository-relative when the run ends ([Paths](#paths)) |
 | `run:dynamic_context` | `None` | the plugin switches contexts itself |
 | `run:context` | `None` | no static context prefix, so a context is exactly a node id |
 | `run:parallel` | `False` | one data file per shard |
@@ -115,7 +134,7 @@ The plugin does not invent exit codes; these are pytest's, and the plugin reache
 | 0 | every test passed |
 | 1 | some test failed (also after collection errors with `--continue-on-collection-errors`, `test_collection_errors_still_write_a_bundle`) |
 | 2 | interrupted: STOP file or SIGTERM |
-| 4 | usage error: a foreign tracer, xdist workers, Python below 3.12, an unreadable `--coverset-scores` file, or a conftest that fails to import |
+| 4 | usage error: a foreign tracer, xdist workers, Python below 3.12, an unreadable `--coverset-scores` file, an output directory that is a symlink or a file, `--coverset` with nothing to measure, or a conftest that fails to import |
 | 5 | no tests collected |
 
 The runner treats 0, 1 and 5 as normal shard ends, and 2 as normal only after it asked for a stop (`runner._shard_error`).
@@ -281,7 +300,17 @@ Surrogates: a lone surrogate (`"\udcff"`, from a `surrogateescape`d file name or
 
 At session end the plugin writes every file below into `--coverset-out`, then packs them into `bundle.tar.gz`. The tarball is flat, streamed to disk, renamed into place atomically, and has owner ids and names cleared. Its sha256 and size go out in the `bundle_written` event. An error while writing the coverage, shapes or static files is recorded in `meta.json` `errors`, and the remaining files are still written.
 
-Paths in `shapes.jsonl.gz`, `results.jsonl` and `collect.json` are git-root-relative POSIX (the rootdir when there is no `.git`). Paths in `coverage.sqlite` and `coverage.json` are relative to the working directory, which is the repo root in a worker. `paths.py` holds the one normaliser, so coverage file keys, tracer function keys, `git diff` paths and AST indexes join without translation (`test_paths_agree_between_coverage_and_shapes`).
+### Paths
+
+Every path is repository-relative: POSIX, relative to the git root (the rootdir when there is no `.git`), whichever directory pytest runs in. `meta.cwd` and `meta.rootdir` say where the run happened, relative to the same root (`.` for the root itself; `null` for a directory outside it). `paths.py` holds the one normaliser, so coverage file keys, tracer function keys, `git diff` paths and AST indexes join without translation (`test_paths_agree_between_coverage_and_shapes`).
+
+| Where | How the path is made |
+|---|---|
+| `shapes.jsonl.gz` function paths, `results.jsonl` and `collect.json` `file`, the neutral `functions` and `tests` | `norm_path` of the code object's file or the test item's path, relative to the git root |
+| `coverage.json` keys, `coverage.sqlite`'s `file` table | coverage.py (`relative_files`) names a file under the working directory relative to it and any other file absolute. When the run ends, after `coverage.json` is written, each name is resolved against the working directory and made git-root-relative (`paths.coverage_name`): `coverage.json`'s keys are rewritten, and `coverage.sqlite` is rebuilt through coverage.py's public `CoverageData.update(..., map_path=)`, the call `coverage combine` uses for `[paths]`. Both are written under temporary names and renamed into place, and nothing is rebuilt when no name changes (a run from the git root, as in a worker). A file outside the repository keeps its absolute name, which every reader drops and counts. `meta.coverage_paths` is `repository` once this is done; if it failed (recorded in `meta.errors` as `coverage paths`), it is `cwd` and the names are still coverage.py's |
+| test node ids | unchanged: pytest's, relative to the rootdir. They are test identities (coverage contexts, scores, args files), not paths |
+
+Readers apply one rule (`coverset.facts.convert.read_python_bundle` and the neutral export alike): with `meta.coverage_paths == "repository"` names are taken as they are; otherwise `meta.cwd` is joined in front of each relative coverage name, and a test file taken from a node id gets `meta.rootdir` in front. Bundles written before these keys existed recorded absolute `cwd` and `rootdir`, which are not relative paths, so nothing is joined and they read exactly as they always did. `tests/plugin_conformance/test_neutral_conformance.py` runs the fixture project from its `tests/` directory and a package whose rootdir sits below the git root, and requires every path to be the git-root-relative one in both readings; it also forces the rewrite to fail and checks both readers still agree, and reads an old-style bundle as before.
 
 | File | Schema |
 |---|---|
@@ -292,7 +321,7 @@ Paths in `shapes.jsonl.gz`, `results.jsonl` and `collect.json` are git-root-rela
 | `collect.json` | `{"items": [{nodeid, file, line, markers, invariant_ids, hypothesis}], "errors": [{nodeid, longrepr, truncated}]}`. `line` is 1-based (the first decorator line). `hypothesis` is true for `@given` tests. |
 | `durations.json` | `{nodeid: duration_s}` |
 | `invariant_links.jsonl` | `{"test_id": <nodeid>, "invariant_id": <id>}` per marker link |
-| `meta.json` | `schema`, `plugin_version`, `python`, `coverage_version`, `pytest_version`, `core`, `tracer`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `context_format`, `tool_id`, `git_root`, `repo_root`, `rootdir`, `configfile`, `cwd`, `sources`, `trace_modules`, `full_trace`, `shapes`, `shapes_disabled_reason`, `repr_examples`, `shape_samples`, `shape_settle`, `full_trace_cap`, `neutral` (`{"requested": false}` without `--coverset-neutral`; with it, the export's outcome: `status` `written`, `failed` or `interrupted`, `rows`, `dropped`, `seconds`, and `path`, `sha256`, `bytes` of the archive when written; the copy inside `bundle.tar.gz`, packed before the export, says `pending`), `functions_traced`, `functions_truncated`, `tracer_errors`, `hypothesis` (`version`, `deadline_ms`), `exit_code`, `counts`, `stop_requested`, `errors`, `started_at`, `finished_at`, `timings` (`session_wall_s`, `tracer_callback_s`, `tracer_events`) |
+| `meta.json` | `schema`, `plugin_version`, `python`, `coverage_version`, `pytest_version`, `core`, `tracer`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `context_format`, `tool_id`, `git_root`, `repo_root` (both absolute), `rootdir` and `cwd` (relative to `repo_root`, [Paths](#paths)), `coverage_paths` (`repository` or `cwd`), `configfile`, `sources`, `trace_modules`, `full_trace`, `shapes`, `shapes_disabled_reason`, `repr_examples`, `shape_samples`, `shape_settle`, `full_trace_cap`, `neutral` (`{"requested": false}` without `--coverset-neutral`; with it, the export's outcome: `status` `written`, `failed` or `interrupted`, `rows`, `dropped`, `seconds`, and `path`, `sha256`, `bytes` of the archive when written; the copy inside `bundle.tar.gz`, packed before the export, says `pending`), `functions_traced`, `functions_truncated`, `tracer_errors`, `hypothesis` (`version`, `deadline_ms`), `exit_code`, `counts`, `stop_requested`, `errors`, `started_at`, `finished_at`, `timings` (`session_wall_s`, `tracer_callback_s`, `tracer_events`) |
 
 With `--coverset-neutral` the directory also holds `neutral/` and `neutral.tar.gz` ([below](#the-neutral-bundle)); neither is a member of `bundle.tar.gz`, whose eight members are unchanged.
 
@@ -339,11 +368,11 @@ The block above is an excerpt of the bundle from the hand run described in [Runn
 | `shapes.jsonl.gz` | the plugin's header-indexed `shapes.jsonl.gz` rewritten as self-contained `obs` rows (`func`, `param`, `shape`, `caller`, `samples`, `tests`, `truncated`, `example`, `example_test`) and `sampling` rows (`func`, `calls`, `tests`, `truncated`, `cap`). Observations whose caller is `<import>` (a decorator applied at import time) are left out, as the control plane's Python reader leaves them out. |
 | `links.jsonl` | `invariant_links.jsonl` as `{"test", "invariant"}` |
 
-Test files and shape paths go through the same `norm_path` as everything else, so they are repo-root-relative POSIX. `coverage.json` and `coverage.sqlite` file names are read the way the control plane's converter reads them: a relative name (coverage.py writes them relative to the directory pytest ran in) is taken as relative to the git root, and an absolute name (a file outside that directory) is dropped and counted (`coverage_files_not_relative`). Run pytest from the git root, as CI does; from a subdirectory both readings name the source files wrongly or drop them, and they still agree (`test_a_subdirectory_run_reads_like_the_python_bundle`). Every JSON line is UTF-8 (a lone surrogate becomes `?`), every `.gz` has a zero mtime, and each file is written to a temporary name and renamed. `DIR/neutral.tar.gz` holds the same eight files (the manifest and seven data files) as flat members (owner ids and names cleared), next to `bundle.tar.gz`; its sha256 and size go out in `neutral_written`.
+Test files, shape paths and `coverage.json`/`coverage.sqlite` file names are repository-relative by the time the export reads them ([Paths](#paths)), from any working directory; a name outside the repository is absolute, which the format does not allow, so it is dropped and counted (`files_dropped`, `coverage_files_not_relative`). Should the session have failed to rewrite the coverage names (`meta.coverage_paths == "cwd"`), the export joins `meta.cwd` in front of each relative name, exactly as the converter does, so the two readings still agree. Every JSON line is UTF-8 (a lone surrogate becomes `?`), every `.gz` has a zero mtime, and each file is written to a temporary name and renamed. `DIR/neutral.tar.gz` holds the same eight files (the manifest and seven data files) as flat members (owner ids and names cleared), next to `bundle.tar.gz`; its sha256 and size go out in `neutral_written`.
 
 **Order and failures.** `finalize` writes `meta.json`, packs `bundle.tar.gz` and emits `bundle_written` first; only then does the export start. It removes what an earlier export left (`DIR/neutral.tar.gz`, the manifest and both variants of every file, so a stale `tests.jsonl` never sits next to a new `tests.jsonl.gz`), writes the seven data files (a failure in one does not stop the others), then the manifest only if every data file was written, then the archive only if the manifest was. `meta.json` is rewritten at the end with `neutral.status`: `written` (and `neutral_written` emitted), `failed` (each error in `meta.errors` under `neutral`, `neutral manifest` or `neutral tarball`; no manifest over incomplete data, no archive, no event) or `interrupted`. A directory or a file where the export needs to write (`DIR/neutral.tar.gz/`, `DIR/neutral` as a file, a read-only `DIR/neutral/`, a directory named `tests.jsonl.gz`) is such a failure (`test_a_failed_export_is_recorded_and_never_announced`). Without the flag, a neutral bundle an earlier run left in `DIR` is removed.
 
-**Equivalence.** The export only reads files the session already wrote (`coverage.sqlite`, `coverage.json`, `shapes.jsonl.gz`) and rows already recorded, after measurement stopped, so it cannot change coverage, shapes or results. `test_the_export_changes_nothing_else` runs the fixture project with and without the flag and compares `results.jsonl` (all but the timing fields), every `(context, file, from, to)` row of `coverage.sqlite`, the decoded shapes header and rows, `collect.json`, `invariant_links.jsonl` and `coverage.json` (all but its timestamp): identical. In the workspace, `tests/plugin_conformance/test_neutral_conformance.py` reads the neutral bundle with `coverset_model.io.read_bundle` and the Python bundle of the same run with `coverset.facts.convert.read_python_bundle`, and requires the two `NeutralBundle`s to be equal dataclass by dataclass (tests, collected items, durations, files, run arcs, coverage, shapes, sampling, `meta`), for the fixture project, for a project with every outcome and tests a STOP file kept from running, and for a git repository whose tests run from a subdirectory. One documented difference is applied to the converter's side: it keeps non-statement lines, which the neutral format drops. Both readers carry the sampling `cap`, so sampling rows compare as they are. `meta.neutral` is compared apart: `meta.json` has the export's final outcome, the manifest the data files' counters. `coverset_model.io.validate` finds no problem in the directory or the archive, and the archive reads back exactly as the directory.
+**Equivalence.** The export only reads files the session already wrote (`coverage.sqlite`, `coverage.json`, `shapes.jsonl.gz`) and rows already recorded, after measurement stopped, so it cannot change coverage, shapes or results. `test_the_export_changes_nothing_else` runs the fixture project with and without the flag and compares `results.jsonl` (all but the timing fields), every `(context, file, from, to)` row of `coverage.sqlite`, the decoded shapes header and rows, `collect.json`, `invariant_links.jsonl` and `coverage.json` (all but its timestamp): identical. In the workspace, `tests/plugin_conformance/test_neutral_conformance.py` reads the neutral bundle with `coverset_model.io.read_bundle` and the Python bundle of the same run with `coverset.facts.convert.read_python_bundle`, and requires the two `NeutralBundle`s to be equal dataclass by dataclass (tests, collected items, durations, files, run arcs, coverage, shapes, sampling, `meta`), for the fixture project, for a project with every outcome and tests a STOP file kept from running, for the fixture project run from its `tests/` directory, for a git repository whose package and rootdir are a subdirectory, and for that repository with the coverage-name rewrite forced to fail. One documented difference is applied to the converter's side: it keeps non-statement lines, which the neutral format drops. Both readers carry the sampling `cap`, so sampling rows compare as they are. `meta.neutral` is compared apart: `meta.json` has the export's final outcome, the manifest the data files' counters. `coverset_model.io.validate` finds no problem in the directory or the archive, and the archive reads back exactly as the directory.
 
 **Cost.** `pytest_coverset.neutral` is imported whether or not the flag is on, so the flag costs the export itself and nothing else. The export (the `seconds` in `neutral_written`) takes 0.013 s on the plugin fixture project (24 tests, `--coverset-source fixturepkg`, Python 3.13, this Mac, 2026-10-11; 0.0126 to 0.0133 s over 8 runs). The median wall time of interleaved runs with and without the flag differs by about that plus run-to-run noise: +0.011 s and +0.003 s in two series of 8 runs, +0.018 s in a third (0.392 s without, 0.410 s with). On a copy of `examples/demo-app` (97 tests) the export took 0.055 s; on a module of 18,000 functions, 1.1 to 1.4 s, most of it indexing the regions.
 
@@ -400,7 +429,14 @@ The re-measurements ran `measure_overhead.py --python <venv> --target <tight-loo
 
 ## Running it by hand
 
-From the root of a repository whose tests import the code under `src/` (the demo app sets `pythonpath = ["src"]` in its pytest configuration):
+From a repository whose tests import the code under `src/` (the demo app sets `pythonpath = ["src"]` in its pytest configuration), the local workflow is:
+
+```sh
+pytest --coverset
+coverset report .coverset --open
+```
+
+The explicit form, what the runner's flags amount to:
 
 ```sh
 python -m pytest --coverset-out out --coverset-source ledger
@@ -433,4 +469,4 @@ To test the plugin itself:
 uv run pytest packages/pytest-coverset/tests -q -p no:cacheprovider
 ```
 
-The check on Python 3.12, outside the workspace lock, is `uv run --no-cache --isolated --no-project --python 3.12 --with ./packages/pytest-coverset --with pytest==9.1.1 --with hypothesis==6.168.5 pytest packages/pytest-coverset/tests -q -p no:cacheprovider` (146 passed on 2026-10-11, as on 3.13).
+The check on Python 3.12, outside the workspace lock, is `uv run --no-cache --isolated --no-project --python 3.12 --with ./packages/pytest-coverset --with pytest==9.1.1 --with hypothesis==6.168.5 pytest packages/pytest-coverset/tests -q -p no:cacheprovider` (187 passed on 2026-10-11, as on 3.13).
