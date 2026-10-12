@@ -195,16 +195,28 @@ def source_access(
 ) -> SourceAccess:
     """Where to read the sources of a bundle from (never from the bundle's own meta):
 
-    * ``repo_root`` given: under it, and only the files git tracks there when it is a git work tree;
+    * ``repo_root`` given: under it, and only the files git tracks there when it is a git work tree
+      (a subdirectory that tracks none of the bundle's repository-relative paths falls back to the
+      top of its work tree when that tracks some);
     * a ``--coverset-out`` directory: the current directory, when it is a git work tree that tracks
       at least one of the bundle's paths (and only the tracked ones are read);
     * otherwise (an archive, a neutral bundle, or a current directory that is not such a work tree):
       nothing, with a notice saying to pass ``--repo-root``.
     """
+    wanted = list(paths)
     if repo_root is not None:
         root = Path(repo_root).resolve()
-        root = git_toplevel(root) or root
-        return SourceAccess(root, tracked_files(root))
+        tracked = tracked_files(root)
+        # An explicit root is read as given. Only when git tracks none of the bundle's paths under
+        # it, but does under the enclosing work tree (bundle paths are repository-relative and the
+        # root named a subdirectory), the work tree's top is used instead.
+        if tracked is not None and wanted and not any(p in tracked for p in wanted):
+            top = git_toplevel(root)
+            if top is not None and top != root:
+                top_tracked = tracked_files(top)
+                if top_tracked and any(p in top_tracked for p in wanted):
+                    root, tracked = top, top_tracked
+        return SourceAccess(root, tracked)
     if not is_plugin_dir(source, kind):
         return SourceAccess(
             None,
@@ -220,7 +232,6 @@ def source_access(
             notice=f"the current directory ({here}) is not a git work tree, and a bundle never chooses "
             "the local directory sources come from: run from the repository, or pass --repo-root DIR.",
         )
-    wanted = list(paths)
     if wanted and not any(p in tracked for p in wanted):
         return SourceAccess(
             None,
