@@ -39,6 +39,7 @@ APP = ROOT / "examples" / "ts-app"
 PREFIX = "examples/ts-app"
 PRICING, EMAIL, SHIPPING = f"{PREFIX}/src/pricing.ts", f"{PREFIX}/src/email.ts", f"{PREFIX}/src/shipping.ts"
 PRICING_TESTS = f"{PREFIX}/tests/pricing.test.ts"
+EMAIL_TESTS = f"{PREFIX}/tests/email.test.ts"
 REPO, RUN = 11, "vitest-run-1"
 NPM_TIMEOUT_S = 240
 
@@ -132,13 +133,28 @@ def test_the_bundle_validates_with_no_problem(run: dict) -> None:  # type: ignor
     assert manifest["meta"]["recorder_errors"] == 0 and manifest["meta"]["dropped"] == {}
 
 
+def _tests_without_timings(path: Path) -> list[dict]:  # type: ignore[type-arg]
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    return [{k: v for k, v in row.items() if k not in ("duration_s", "start", "stop")} for row in rows]
+
+
 def test_the_instrumentation_changes_no_statement_branch_or_line(run: dict) -> None:  # type: ignore[type-arg]
     plain = run["tmp"] / "neutral-no-shapes"
     _npm_test(plain, COVERSET_SHAPES="0")
     for name in ("files.jsonl", "coverage.jsonl", "arcs.jsonl", "functions.jsonl"):
         assert (plain / name).read_text() == (run["out"] / name).read_text(), name
+    # Outcomes, messages and failure signatures (stack lines) too.
+    assert _tests_without_timings(plain / "tests.jsonl") == _tests_without_timings(run["out"] / "tests.jsonl")
     assert (plain / "shapes.jsonl").read_text() == ""
     assert (run["out"] / "shapes.jsonl").read_text() != ""
+
+
+def test_stack_traces_name_the_original_line(ingested: dict) -> None:  # type: ignore[type-arg]
+    # The example's own check: a frame thrown from src/email.ts names the `throw` line, with
+    # Istanbul and the plugin both instrumenting the file (it failed when Istanbul kept the code
+    # of one pass and the source map of the other).
+    outcomes = {t.nodeid: t.outcome for t in ingested["bundle"].tests}
+    assert outcomes[f"{EMAIL_TESTS} > validateEmail > reports the line it throws on"] == "passed"
 
 
 def test_tests_and_outcomes(ingested: dict) -> None:  # type: ignore[type-arg]
@@ -148,7 +164,7 @@ def test_tests_and_outcomes(ingested: dict) -> None:  # type: ignore[type-arg]
     assert outcomes[f"{PRICING_TESTS} > formatPrice > formats currencies without minor units"] == "skipped"
     assert outcomes[f"{PREFIX}/tests/shipping.test.ts > rateFor > ships worldwide"] == "skipped"
     summary = queries.run_summary(ingested["store"], REPO, RUN)
-    assert summary is not None and summary.outcomes == {"passed": 18, "skipped": 2}
+    assert summary is not None and summary.outcomes == {"passed": 19, "skipped": 2}
     collected = {c.nodeid: c for c in bundle.collected}
     assert collected[f"{PRICING_TESTS} > formatPrice > always shows two decimals"].hypothesis  # fast-check
     assert not collected[f"{PRICING_TESTS} > formatPrice > formats dollars"].hypothesis

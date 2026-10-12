@@ -1,6 +1,6 @@
 {
   "name": "coverset-vitest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Vitest reporter that writes coverset's neutral bundle: per-test coverage, function regions with declared types, and argument shapes.",
   "license": "MIT",
   "private": true,

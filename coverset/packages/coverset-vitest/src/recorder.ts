@@ -14,11 +14,14 @@
  *   returns (which truncates the stack to its own frame) or the test ends (which clears it).
  * * Calls outside a test (module loading) count towards the sampling state but are not written,
  *   as pytest-coverset leaves out `<import>` observations.
+ * * Observations are aggregated per (function, parameter, shape, caller, test): the reporter
+ *   merges the tests of one caller, and can re-attribute an observation whose caller turns out
+ *   not to be measured to its test exactly.
  * * Everything is wrapped so the recorder never throws into user code; failures are counted.
  */
 import { types as utilTypes } from "node:util";
 
-import { classToken, constructorOf, setClassNamer, shapeKey } from "./features.js";
+import { classToken, constructorOf, PROXY_TOKEN, setClassNamer, shapeKey } from "./features.js";
 import { type EnumSpec, exampleRepr, RETURN_PARAM } from "./redact.js";
 
 export const MAX_SAMPLES = 2048;
@@ -238,9 +241,9 @@ export class Recorder {
     }
     if (st.flags & FLAG_RECEIVER) {
       try {
-        const receiver = this.receiverClass(st, self);
+        const receiver = this.receiverToken(st, self);
         if (receiver !== undefined) {
-          fresh = this.observe(st, RECEIVER, classToken(receiver), caller, NO_EXAMPLE, undefined) || fresh;
+          fresh = this.observe(st, RECEIVER, receiver, caller, NO_EXAMPLE, undefined) || fresh;
         }
       } catch {
         this.errors++;
@@ -250,21 +253,32 @@ export class Recorder {
   }
 
   /**
-   * The concrete class of `this` (the class itself for a static member, `new.target` for a
-   * constructor), registering the owning class's module on the way so `obj:` tokens of its
-   * instances name the defining file.
+   * The `obj:` token of the concrete class of `this` (the class itself for a static member,
+   * `new.target` for a constructor), registering the owning class's module on the way so `obj:`
+   * tokens of its instances name the defining file. A proxied receiver, prototype or class is
+   * `obj:Proxy` and is never read.
    */
-  private receiverClass(st: FuncState, self: unknown): Function | undefined {
+  private receiverToken(st: FuncState, self: unknown): string | undefined {
     let concrete: Function | undefined;
     if (st.flags & (FLAG_CONSTRUCTOR | FLAG_STATIC)) {
       concrete = typeof self === "function" ? self : undefined;
-    } else if (typeof self === "object" && self !== null && !utilTypes.isProxy(self)) {
-      concrete = constructorOf(Object.getPrototypeOf(self) as object | null);
+    } else if (typeof self === "object" && self !== null) {
+      if (utilTypes.isProxy(self)) return PROXY_TOKEN;
+      const proto = Object.getPrototypeOf(self) as object | null;
+      if (proto !== null && utilTypes.isProxy(proto)) return PROXY_TOKEN;
+      concrete = constructorOf(proto);
     }
-    if (concrete === undefined || st.owner === undefined) return concrete;
+    if (concrete === undefined) return undefined;
+    if (st.owner !== undefined) this.learnClass(st, concrete);
+    return classToken(concrete);
+  }
+
+  /** Walk from `concrete` up its constructor chain to the class that declares `st`, and name it. */
+  private learnClass(st: FuncState, concrete: Function): void {
     let ctor: unknown = concrete;
     for (let hop = 0; hop < MAX_PROTO_HOPS && typeof ctor === "function"; hop++) {
-      if (this.classes.has(ctor)) break;
+      // A proxied class (or one extending it) is never looked into: classToken names it obj:Proxy.
+      if (utilTypes.isProxy(ctor) || this.classes.has(ctor)) break;
       const name = Object.getOwnPropertyDescriptor(ctor, "name");
       if (name !== undefined && "value" in name && name.value === st.owner) {
         this.classes.set(ctor, `${moduleOf(st.path)}.${st.classQualname}`);
@@ -272,7 +286,6 @@ export class Recorder {
       }
       ctor = Object.getPrototypeOf(ctor);
     }
-    return concrete;
   }
 
   private observe(
@@ -285,7 +298,7 @@ export class Recorder {
   ): boolean {
     const test = this.test;
     if (test !== null) {
-      const callerKey = caller === null ? "t" + test : "f" + caller.uid;
+      const callerKey = caller === null ? "t" + test : `f${caller.uid}\0${test}`;
       const key = `${st.uid}\0${param}\0${shape}\0${callerKey}`;
       let agg = this.agg.get(key);
       if (agg === undefined) {

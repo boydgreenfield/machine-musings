@@ -86,3 +86,24 @@ describe("redactMessage", () => {
     expect(redactMessage("x".repeat(10_000)).length).toBe(8192);
   });
 });
+
+describe("scrub", () => {
+  it("applies the control plane's patterns, and bare secret names", () => {
+    expect(scrub("DB_PASSWORD=hunter2 next")).toBe("DB_PASSWORD=[REDACTED] next");
+    expect(scrub("password=hunter2&user=bob")).toBe("password=[REDACTED]&user=bob");
+    expect(scrub('{"password": "hunter2", "user": "bob"}')).toBe('{"password": "[REDACTED]", "user": "bob"}');
+    expect(scrub("'api_key': 'abc123'")).toBe("'api_key': '[REDACTED]'");
+    expect(scrub("https://bob:hunter2@example.com/x")).toBe("https://[REDACTED]@example.com/x");
+    expect(scrub("https://x-access-token:ghs_abc@github.com")).toBe("https://x-access-token:[REDACTED]@github.com");
+    expect(scrub("Authorization: Basic dXNlcjpwYXNz")).toBe("Authorization: Basic [REDACTED]");
+    expect(scrub('"authorization": "Bearer abc.def"')).toBe('"authorization": "Bearer [REDACTED]"');
+    expect(scrub("GH_TOKEN_ghs_" + "a".repeat(30))).toBe("GH_TOKEN_ghs_[REDACTED]");
+    expect(scrub("ak-" + "A".repeat(24))).toBe("ak-[REDACTED]");
+    expect(scrub("monkey=1 tokens=2 page=3")).toBe("monkey=1 tokens=2 page=3");
+  });
+
+  it("scrubs failure messages with the same patterns", () => {
+    const message = "login failed for password=hunter2 Authorization: Bearer abc url https://bob:pw@example.com";
+    expect(redactMessage(message)).toBe("login failed for password=[REDACTED] Authorization: Bearer [REDACTED] url https://[REDACTED]@example.com");
+  });
+});

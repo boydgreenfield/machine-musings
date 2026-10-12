@@ -13,9 +13,15 @@
  * Safety: no user code ever runs. Only `typeof`, `Array.isArray`, `Object.getPrototypeOf`,
  * `Object.getOwnPropertyDescriptor` (data properties only: an accessor's value is never read),
  * `Object.keys` (own enumerable keys) and the intrinsic iterators of exact `Map` and `Set`
- * instances are used; a `Proxy` is never looked into. Containers are summarised over at most
- * {@link MAX_ELEMENTS} leading elements; whitespace and digit features of long strings over a
- * {@link SCAN_CHARS} prefix, and strings longer than {@link MAX_KIND_CHARS} get no `kind:`.
+ * instances are used; a `Proxy` is never looked into: a proxy value, an object whose prototype is
+ * a proxy and a proxied constructor are `obj:Proxy`, checked with `util.types.isProxy` before any
+ * read that could reach a trap. Containers are summarised over at most {@link MAX_ELEMENTS}
+ * leading elements; whitespace and digit features of long strings over a {@link SCAN_CHARS}
+ * code-point prefix, and strings longer than {@link MAX_KIND_CHARS} get no `kind:`.
+ *
+ * `obj:` names are sanitised as the grammar requires (whitespace, `|` and characters Python does
+ * not print become `_`) and cut at {@link MAX_NAME_CHARS}, so even `dict|elem:obj:…|key:obj:…`
+ * stays within the 512-character key limit.
  */
 import { types as utilTypes } from "node:util";
 
@@ -23,6 +29,10 @@ export const MAX_ELEMENTS = 32;
 export const MAX_KIND_CHARS = 2048;
 export const SCAN_CHARS = 4096;
 export const BIG_INT = 2 ** 31;
+/** Longest `obj:` name: two of them plus the other features of a key stay under 512 characters. */
+export const MAX_NAME_CHARS = 200;
+/** Bytes compared when ordering lists of byte strings (a longer common prefix counts as equal). */
+export const SCAN_BYTES = 4096;
 
 /** Python's `str.isspace()` set (also what `\s` matches in a Python `str` pattern). */
 const WS = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
@@ -106,14 +116,26 @@ function ownData(obj: object, key: PropertyKey): { ok: boolean; value: unknown }
   return { ok: true, value: desc.value };
 }
 
-function safeName(text: string): string {
-  const cleaned = text.replace(/[\s|]+/gu, "_");
-  return cleaned.length ? cleaned.slice(0, 200) : "<anonymous>";
+/**
+ * A name usable after `obj:`: whitespace, `|` and every character Python's `str.isprintable()`
+ * rejects (Unicode categories C and Z: controls, format characters such as U+200D, separators)
+ * become `_`, and the result is cut at {@link MAX_NAME_CHARS} code points.
+ */
+export function safeName(text: string): string {
+  const cleaned = text.replace(/[\s|\p{C}\p{Z}]+/gu, "_");
+  if (!cleaned.length) return "<anonymous>";
+  return cleaned.length <= MAX_NAME_CHARS ? cleaned : codePointPrefix(cleaned, MAX_NAME_CHARS);
 }
 
-/** The constructor whose prototype `proto` is (read as a data property), or undefined. */
+/** The token of a proxied prototype or constructor (never looked into). */
+export const PROXY_TOKEN = "obj:Proxy";
+
+/**
+ * The constructor whose prototype `proto` is (read as a data property), or undefined; never
+ * reads a proxy (callers check {@link utilTypes.isProxy} on `proto` to name it `obj:Proxy`).
+ */
 export function constructorOf(proto: object | null): Function | undefined {
-  if (proto === null) return undefined;
+  if (proto === null || utilTypes.isProxy(proto)) return undefined;
   const ctor = ownData(proto, "constructor");
   return ctor.ok && typeof ctor.value === "function" ? (ctor.value as Function) : undefined;
 }
@@ -121,10 +143,19 @@ export function constructorOf(proto: object | null): Function | undefined {
 /** `obj:` name of a constructor: the recorder's `module.Class`, else the function's own name. */
 export function classToken(ctor: Function | undefined): string {
   if (ctor === undefined) return "obj:Object";
+  if (utilTypes.isProxy(ctor)) return PROXY_TOKEN;
   const known = classNamer(ctor);
-  if (known !== undefined) return "obj:" + known;
+  if (known !== undefined) return "obj:" + safeName(known);
   const name = ownData(ctor, "name");
   return "obj:" + safeName(typeof name.value === "string" ? name.value : "");
+}
+
+/** `obj:` token of an object that is not a builtin container: its class, or `obj:Proxy`. */
+export function instanceToken(obj: object): string {
+  if (utilTypes.isProxy(obj)) return PROXY_TOKEN;
+  const proto = Object.getPrototypeOf(obj) as object | null;
+  if (proto !== null && utilTypes.isProxy(proto)) return PROXY_TOKEN;
+  return classToken(constructorOf(proto));
 }
 
 type Kind =
@@ -155,13 +186,14 @@ function classify(value: unknown): Classified {
   }
   if (value === null) return { kind: "none", token: "NoneType" };
   const obj = value as object;
-  if (utilTypes.isProxy(obj)) return { kind: "obj", token: "obj:Proxy" };
+  if (utilTypes.isProxy(obj)) return { kind: "obj", token: PROXY_TOKEN };
   if (utilTypes.isUint8Array(obj) || utilTypes.isArrayBuffer(obj)) return { kind: "bytes", token: "bytes" };
   const proto = Object.getPrototypeOf(obj) as object | null;
   if (Array.isArray(obj) && proto === ARRAY_PROTO) return { kind: "list", token: "list" };
   if (proto === OBJECT_PROTO || proto === null) return { kind: "dict", token: "dict" };
   if (proto === MAP_PROTO && utilTypes.isMap(obj)) return { kind: "map", token: "dict" };
   if (proto === SET_PROTO && utilTypes.isSet(obj)) return { kind: "set", token: "set" };
+  if (proto !== null && utilTypes.isProxy(proto)) return { kind: "obj", token: PROXY_TOKEN };
   return { kind: "obj", token: classToken(constructorOf(proto)) };
 }
 
@@ -266,6 +298,30 @@ export function codePointLength(text: string): number {
   return n;
 }
 
+/** The first `n` code points of `text` (a surrogate pair is never split). */
+export function codePointPrefix(text: string, n: number): string {
+  if (text.length <= n) return text;
+  let units = 0;
+  for (let i = 0; i < n && units < text.length; i++) {
+    const c = text.charCodeAt(units);
+    units += c >= 0xd800 && c <= 0xdbff && units + 1 < text.length && (text.charCodeAt(units + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+  }
+  return text.slice(0, units);
+}
+
+/** Python's `str` comparison: by code point (JavaScript's `<` compares UTF-16 units). */
+export function compareCodePoints(a: string, b: string): number {
+  if (a === b) return 0;
+  let i = 0;
+  while (i < a.length && i < b.length) {
+    const x = a.codePointAt(i)!;
+    const y = b.codePointAt(i)!;
+    if (x !== y) return x - y;
+    i += x > 0xffff ? 2 : 1;
+  }
+  return (i < a.length ? 1 : 0) - (i < b.length ? 1 : 0);
+}
+
 function isAscii(text: string): boolean {
   for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) > 0x7f) return false;
   return true;
@@ -278,7 +334,7 @@ function strFeatures(value: string): string[] {
     feats.push("empty");
     return feats;
   }
-  const head = value.length <= SCAN_CHARS ? value : value.slice(0, SCAN_CHARS);
+  const head = value.length <= SCAN_CHARS ? value : codePointPrefix(value, SCAN_CHARS);
   if (ALL_WS_RE.test(head)) {
     feats.push("whitespace");
     return feats;
@@ -363,18 +419,84 @@ function isNumber(x: unknown): x is number | bigint {
   return typeof x === "number" || typeof x === "bigint";
 }
 
-/** Python 3.12's `sum()` of floats: Neumaier-compensated, so `[0.1, 0.2, -0.3]` sums to 0. */
-function compensatedSum(values: number[]): number {
-  let total = 0;
-  let compensation = 0;
-  for (const x of values) {
-    const t = total + x;
-    if (Number.isFinite(t)) {
-      compensation += Math.abs(total) >= Math.abs(x) ? total - t + x : x - t + total;
-    }
-    total = t;
+const LONG_MAX = 2n ** 63n - 1n;
+const LONG_MIN = -(2n ** 63n);
+const SMALL_INT = 2 ** 47;
+
+/** `a + b` with Python's int/float semantics (`bigint` is an int, `number` a float); null for OverflowError. */
+function pyAdd(a: bigint | number, b: bigint | number): bigint | number | null {
+  if (typeof a === "bigint" && typeof b === "bigint") return a + b;
+  const fa = typeof a === "bigint" ? Number(a) : a;
+  const fb = typeof b === "bigint" ? Number(b) : b;
+  if ((typeof a === "bigint" && !Number.isFinite(fa)) || (typeof b === "bigint" && !Number.isFinite(fb))) return null;
+  return fa + fb;
+}
+
+/**
+ * CPython 3.12+'s `sum()` of the Python values these numbers stand for (integral numbers and
+ * bigints are ints, other numbers floats), step for step, or null where Python raises
+ * `OverflowError` (an int too large for a float next to a float):
+ *
+ * 1. while the items are ints and the running total fits a C `long`, the total is exact;
+ * 2. the first float `x` makes it `float(total) + x`, and from then on floats are added with
+ *    Neumaier's compensation while ints that fit a `long` are added as plain floats
+ *    (uncompensated); the compensation is folded in at the end, or before 3. when it is finite;
+ * 3. an int beyond a `long` (in 1. or 2.) switches to plain `+` for the rest: exact between ints,
+ *    rounded as soon as a float is involved.
+ *
+ * Checked against CPython 3.13's `sum` on random lists (`test/features.test.ts`).
+ */
+export function pythonSum(values: readonly (number | bigint)[]): bigint | number | null {
+  if (values.length <= 64 && values.every((x) => typeof x === "number" && Number.isInteger(x) && Math.abs(x) <= SMALL_INT)) {
+    // At most 64 integers of at most 2**47: the double sum is exact, and so is Python's.
+    return (values as number[]).reduce((a, b) => a + b, 0);
   }
-  return Number.isFinite(total) && compensation !== 0 && Number.isFinite(compensation) ? total + compensation : total;
+  const xs = values.map((v) => (typeof v === "bigint" ? v : Number.isInteger(v) ? BigInt(v) : v));
+  let k = 0;
+  let exact = 0n;
+  let result: bigint | number | null | undefined;
+  for (; k < xs.length; k++) {
+    const x = xs[k]!;
+    if (typeof x === "bigint" && x >= LONG_MIN && x <= LONG_MAX && exact + x >= LONG_MIN && exact + x <= LONG_MAX) {
+      exact += x;
+      continue;
+    }
+    result = pyAdd(exact, x);
+    k++;
+    break;
+  }
+  if (result === undefined) return exact;
+  if (result === null) return null;
+  if (typeof result === "number") {
+    let total = result;
+    let compensation = 0;
+    let fallback: bigint | undefined;
+    for (; k < xs.length; k++) {
+      const x = xs[k]!;
+      if (typeof x === "number") {
+        const t = total + x;
+        compensation += Math.abs(total) >= Math.abs(x) ? total - t + x : x - t + total;
+        total = t;
+        continue;
+      }
+      if (x >= LONG_MIN && x <= LONG_MAX) {
+        total += Number(x);
+        continue;
+      }
+      fallback = x;
+      k++;
+      break;
+    }
+    if (compensation !== 0 && Number.isFinite(compensation)) total += compensation;
+    if (fallback === undefined) return total;
+    result = pyAdd(total, fallback);
+    if (result === null) return null;
+  }
+  for (; k < xs.length; k++) {
+    result = pyAdd(result, xs[k]!);
+    if (result === null) return null;
+  }
+  return result;
 }
 
 function numericFeatures(sample: unknown[]): string[] {
@@ -387,12 +509,9 @@ function numericFeatures(sample: unknown[]): string[] {
   if (numbers.some((x) => x < 0)) feats.push("any_neg");
   if (numbers.some((x) => typeof x === "number" && Number.isNaN(x))) feats.push("any_nan");
   if (numbers.some((x) => typeof x === "number" && !Number.isFinite(x) && !Number.isNaN(x))) feats.push("any_inf");
-  if (numbers.every((x) => typeof x === "bigint")) {
-    if ((numbers as bigint[]).reduce((a, b) => a + b, 0n) === 0n) feats.push("sum_zero");
-  } else if (numbers.every((x) => typeof x === "number")) {
-    if (compensatedSum(numbers as number[]) === 0) feats.push("sum_zero");
-  }
-  // A mix of bigint and number has no common sum (Python's OverflowError case): no sum_zero.
+  // Python's `sum(numbers) == 0`; an OverflowError (null) means no sum_zero.
+  const total = pythonSum(numbers);
+  if (total !== null && total == 0) feats.push("sum_zero");
   return feats;
 }
 
@@ -452,13 +571,39 @@ function comparable(sample: unknown[], pairs: Pair[] | null): Comparable | null 
     };
   }
   if (sample.every((x) => typeof x === "string")) {
-    return {
-      values: sample,
-      cmp: (a, b) => ((a as string) < (b as string) ? -1 : (a as string) > (b as string) ? 1 : 0),
-      key: (a) => a as string,
-    };
+    return { values: sample, cmp: (a, b) => compareCodePoints(a as string, b as string), key: (a) => a as string };
+  }
+  if (sample.every((x) => x !== HOLE && classify(x).kind === "bytes")) {
+    const views = sample.map(byteView);
+    return { values: views, cmp: (a, b) => compareBytes(a as Uint8Array, b as Uint8Array), key: (a) => bytesKey(a as Uint8Array) };
   }
   return null;
+}
+
+const U8 = Uint8Array;
+
+/** The bytes of a `Uint8Array`/`Buffer` (itself) or an `ArrayBuffer` (a view on it). */
+function byteView(x: unknown): Uint8Array {
+  return utilTypes.isArrayBuffer(x) ? new U8(x) : (x as Uint8Array);
+}
+
+/** Python's `bytes` order over the first {@link SCAN_BYTES} bytes (a longer common prefix compares equal). */
+function compareBytes(a: Uint8Array, b: Uint8Array): number {
+  const la = TYPED_LENGTH.call(a) as number;
+  const lb = TYPED_LENGTH.call(b) as number;
+  const n = Math.min(la, lb, SCAN_BYTES);
+  for (let i = 0; i < n; i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return Math.min(la, lb) <= SCAN_BYTES ? la - lb : 0;
+}
+
+function bytesKey(a: Uint8Array): string {
+  const length = TYPED_LENGTH.call(a) as number;
+  let key = length + ":";
+  for (let i = 0; i < Math.min(length, SCAN_BYTES); i++) key += String.fromCharCode(a[i] ?? 0);
+  return length > SCAN_BYTES ? key + "…" : key;
 }
 
 function orderFeatures(c: Comparable): string[] {

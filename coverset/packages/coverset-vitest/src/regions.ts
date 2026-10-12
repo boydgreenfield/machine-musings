@@ -11,7 +11,8 @@
  * * `qualname` joins the enclosing regions' names with `.`: `Cart.addItem`, `outer.inner`,
  *   `rateFor.<anonymous>`; a function expression or arrow takes the name it is bound to (a
  *   variable, a class field, an object property, `export default`), else its own name, else
- *   `<anonymous>`; `const api = { get() {} }` gives `api.get`; a `namespace N` adds `N`;
+ *   `<anonymous>`; `const api = { get() {} }` gives `api.get` and `{ nested: { put() {} } }`
+ *   `api.nested.put` (a quoted key's blanks and dots become `_`); a `namespace N` adds `N`;
  * * `ordinal` numbers same-qualname regions of the file in source order (get/set pairs, two
  *   anonymous callbacks of one function);
  * * `def_line` is the first line of the declaration (decorators and `export` included; for a
@@ -73,7 +74,11 @@ function line(sf: ts.SourceFile, pos: number): number {
 export function propertyNameText(name: ts.PropertyName | ts.BindingName | undefined, sf: ts.SourceFile): string {
   if (name === undefined) return ANONYMOUS;
   if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) return name.text;
-  if (ts.isStringLiteral(name) || ts.isNumericLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  if (ts.isStringLiteral(name) || ts.isNumericLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) {
+    // A quoted key may hold what separates qualname parts (`"a.b"`) or blanks: `_` instead.
+    const text = name.text.replace(/[\s.]+/gu, "_");
+    return text.length ? text : ANONYMOUS;
+  }
   if (ts.isComputedPropertyName(name)) return "[" + name.expression.getText(sf).replace(/\s+/g, "") + "]";
   return ANONYMOUS;
 }
@@ -286,6 +291,16 @@ export function indexRegions(sf: ts.SourceFile): Region[] {
       ts.isObjectLiteralExpression(node.initializer)
     ) {
       const name = node.name.text;
+      ts.forEachChild(node.initializer, (child) => visit(child, [...scope, name], parent, classQualname));
+      return;
+    }
+    // `nested: { put() {} }` inside an object literal: `api.nested.put`, every key kept.
+    if (
+      ts.isPropertyAssignment(node) &&
+      ts.isObjectLiteralExpression(node.parent) &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const name = propertyNameText(node.name, sf);
       ts.forEachChild(node.initializer, (child) => visit(child, [...scope, name], parent, classQualname));
       return;
     }

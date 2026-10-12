@@ -27,26 +27,39 @@ export default defineConfig({
 checks it and `uv run coverset report .coverset/neutral --repo-root "$(git rev-parse --show-toplevel)"`
 renders it (both from this repository's Python side).
 
+What the plugin changes, and what it does not:
+
+* Measured code behaves the same, also where no test worker loaded the setup file (a
+  `globalSetup`, a script): the instrumentation finds the recorder at each call and does nothing
+  without one; it works through circular imports and whatever a module calls `globalThis`.
+* No line moves, and Istanbul counts the same statements and branches. The plugin also wraps
+  Vitest's Istanbul instrumenter (`coverage.instrumenter`) so that stack traces of measured files
+  name their original lines, as they do without the plugin.
+* `include` defaults to the directories of `coverage.include`; the setup file is moved to the
+  front of `setupFiles`.
+* Values are never looked into beyond own data properties and intrinsic iterators: no getter,
+  `toString` or proxy trap runs.
+
 ## Layout
 
 | File | Role |
 |---|---|
-| `src/plugin.ts` | `coversetPlugin()`: the Vite plugin (instruments measured sources, adds the setup file) |
-| `src/instrument.ts` | the source transform: `enter`/`leave` calls, Istanbul ignore hints, enum lookup |
+| `src/plugin.ts` | `coversetPlugin()`: the Vite plugin (instruments measured sources, puts the setup file first, wraps Istanbul's instrumenter) |
+| `src/instrument.ts` | the source transform: the `__cs$E`/`__cs$L` helpers and their calls, Istanbul ignore hints, enum constants |
 | `src/regions.ts` | function regions (qualnames, ordinals, lines), shared by the plugin and the reporter |
 | `src/setup.ts` | `coversetSetup`: per-test counter diffs and the worker's spool |
 | `src/counters.ts`, `src/branches.ts` | Istanbul counters → original lines and branch arcs |
 | `src/recorder.ts` | the shape recorder (`globalThis.__coverset__`): adaptive cap, callers, receivers |
 | `src/features.ts`, `src/redact.ts` | shape keys and redacted examples (ports of `pytest_coverset`'s) |
 | `src/descriptors.ts`, `src/functions.ts` | type descriptors through the checker; `functions.jsonl` rows and hashes |
-| `src/reporter.ts` | `coversetReporter()`: merges everything and writes the bundle |
+| `src/reporter.ts` | `coversetReporter()`: a spool directory per run, merges everything, unique test ids, writes the bundle |
 
 ## Development
 
 ```sh
 npm install        # .npmrc sets legacy-peer-deps (npm 10.9 trips over Vitest 5's optional peers)
 npm run build      # tsc → dist/
-npm test           # vitest: shape keys against pytest-coverset, redaction, regions, types, instrumentation
+npm test           # vitest: shape keys against pytest-coverset, redaction, regions, types, instrumentation, plugin wiring
 npm run typecheck  # tsc --noEmit over src and test
 ```
 

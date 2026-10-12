@@ -7,15 +7,16 @@
  * string keeps its first 22 and last 23 characters around `...`. A value is redacted to
  * `<redacted:len=N>` (`<redacted>` when it has no length) when the name it is bound to looks
  * secret: the parameter name, the function name for the pseudo-parameter `return`, or a string
- * key inside an object example. Every string is scrubbed with the control plane's credential
- * patterns *before* it is shortened, and the finished text once more; an email keeps its domain
+ * key inside an object example. Every string is scrubbed with {@link SECRET_PATTERNS} (the control
+ * plane's `coverset.logging.PATTERNS`, plus bare secret names) *before* it is shortened, and the
+ * finished text once more; an email keeps its domain
  * and the first character of its local part (`b***@acme.com`). Class instances print as
  * `<module.Class>` inside containers and are not recorded at the top level. No user code runs:
  * values are read as `features.ts` reads them.
  */
 import { types as utilTypes } from "node:util";
 
-import { classToken, codePointLength, constructorOf } from "./features.js";
+import { codePointLength, instanceToken } from "./features.js";
 
 export const MAX_EXAMPLE_CHARS = 200;
 export const MAX_INT_BITS = 128;
@@ -34,14 +35,38 @@ export const SECRET_NAME_RE = /pass|secret|token|key|auth|cookie|session|cred/i;
 
 const WS = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 
-/** Credential shapes masked in example text (kept in sync with `coverset.logging.PATTERNS`). */
+/**
+ * Names whose value is a secret: the control plane's (`AWS_SECRET_ACCESS_KEY`, `MODAL_TOKEN_ID`,
+ * `*_SECRET`, `*_TOKEN`, `*_API_KEY`, `*_PASSWORD`) and, unlike it, the bare `password`, `passwd`,
+ * `secret`, `token`, `api_key`/`apikey` (test failure messages are full of them).
+ */
+const SECRET_NAME =
+  "[A-Za-z0-9_]*?(?:secret[_-]?access[_-]?key|modal[_-]token[_-](?:id|secret)|_?secret|_?token|_?api[_-]?key|_?password|passwd)";
+/** Start of a token even when glued to a preceding `_` (`GH_TOKEN_ghs_...`). */
+const TOKEN_START = "(?<![A-Za-z0-9])";
+
+/**
+ * Credential shapes masked in example text and failure messages, in order: the patterns of
+ * `coverset.logging.PATTERNS` (private-key blocks, `x-access-token:…@`, `ghp_`/`gho_`/`ghs_`/`ghu_`/
+ * `ghr_…`, `github_pat_…`, `sk-ant-…`, Modal `ak-`/`as-…`, `user:password@` in a URL,
+ * `NAME=value` and `"NAME": "value"` for a secret name, `Authorization: Bearer|Token|Basic …`)
+ * except the control plane's GitHub-callback `code=` rule, with {@link SECRET_NAME} also matching
+ * the bare names.
+ */
 export const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[REDACTED PRIVATE KEY]"],
   [new RegExp(`(x-access-token:)[^@${WS}]+@`, "giu"), "$1[REDACTED]@"],
-  [/\b(gh[opsur]_)[A-Za-z0-9._-]{20,}/g, "$1[REDACTED]"],
-  [/\b(github_pat_)[A-Za-z0-9_]{20,}/g, "$1[REDACTED]"],
-  [/\b(sk-ant-)[A-Za-z0-9_-]{8,}/g, "$1[REDACTED]"],
-  [new RegExp(`\\b(authorization:[${WS}]*(?:bearer|token)[${WS}]+)[^${WS}"',;]+`, "giu"), "$1[REDACTED]"],
+  [new RegExp(`${TOKEN_START}(gh[opsur]_)[A-Za-z0-9._-]{20,}`, "g"), "$1[REDACTED]"],
+  [new RegExp(`${TOKEN_START}(github_pat_)[A-Za-z0-9_]{20,}`, "g"), "$1[REDACTED]"],
+  [new RegExp(`${TOKEN_START}(sk-ant-)[A-Za-z0-9_-]{8,}`, "g"), "$1[REDACTED]"],
+  [new RegExp(`${TOKEN_START}(a[ks]-)[A-Za-z0-9]{20,}`, "g"), "$1[REDACTED]"],
+  [new RegExp(`(://)[^/${WS}:@]+:(?!\\[REDACTED\\]@)[^/${WS}@]+@`, "gu"), "$1[REDACTED]@"],
+  [new RegExp(`\\b(${SECRET_NAME}[ \\t]*=[ \\t]*)(?!\\[REDACTED\\])[^${WS}'"&;,]+`, "giu"), "$1[REDACTED]"],
+  [new RegExp(`(['"]${SECRET_NAME}['"][${WS}]*:[${WS}]*['"])(?!\\[REDACTED\\])[^'"]+`, "giu"), "$1[REDACTED]"],
+  [
+    new RegExp(`\\b(authorization['"]?[${WS}]*[:=][${WS}]*['"]?(?:bearer|token|basic)[${WS}]+)[^${WS}"',;}]+`, "giu"),
+    "$1[REDACTED]",
+  ],
 ];
 
 const EMAIL_LOCAL_RE = new RegExp(
@@ -238,8 +263,7 @@ function repr1(x: unknown, level: number): string {
 function otherName(x: unknown): string {
   if (typeof x === "function") return "Function";
   if (typeof x === "symbol") return "Symbol";
-  if (utilTypes.isProxy(x)) return "Proxy";
-  return classToken(constructorOf(Object.getPrototypeOf(x) as object | null)).slice("obj:".length);
+  return instanceToken(x as object).slice("obj:".length);
 }
 
 /** An enum declared for a parameter: its name and member name by member value. */

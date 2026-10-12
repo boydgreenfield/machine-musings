@@ -4,18 +4,23 @@
  *
  * Vitest calls `onCoverage` (the remapped coverage map of every measured file, untested ones
  * included) before `onTestRunEnd`; the bundle is written in `onTestRunEnd`.
+ *
+ * Workers spool into a directory of this run's own (`run-<pid>-<8 hex>` under `COVERSET_SPOOL`,
+ * default `.coverset/spool`), removed once the bundle is written, so concurrent runs over one
+ * project never read each other's rows. When that directory cannot be created (`.coverset` is a
+ * file, a read-only tree) the reporter warns and writes nothing; the test run is unaffected.
  */
-import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import type { Reporter, TestCase, TestModule, Vitest } from "vitest/node";
 
 import { branchTargets } from "./branches.js";
 import { relPath, repoRoot } from "./paths.js";
-import { redactMessage, wellFormed } from "./redact.js";
+import { redactMessage } from "./redact.js";
 import type { ShapeDump } from "./recorder.js";
-import { SPOOL_ENV } from "./spool.js";
+import { SPOOL_ENV, SPOOL_OFF } from "./spool.js";
 import { PRODUCER, VERSION } from "./version.js";
 
 export const OUT_ENV = "COVERSET_OUT";
@@ -24,6 +29,8 @@ export const IMPORT_ID = "<import>";
 const MAX_ID = 512;
 /** `<pid>-<thread id>-<8 hex>.jsonl`, the name `setup.ts` gives a worker's spool. */
 const SPOOL_FILE = /^\d+-\d+-[0-9a-f]{8}\.jsonl$/;
+/** `run-<pid>-<8 hex>`, a run's spool directory. */
+const RUN_DIR = /^run-(\d+)-[0-9a-f]{8}$/;
 const MAX_EXAMPLE = 200;
 const BUNDLE_FILES = ["manifest.json", ...["tests", "files", "coverage", "arcs", "functions", "shapes", "links"].flatMap((s) => [`${s}.jsonl`, `${s}.jsonl.gz`])];
 
@@ -125,8 +132,42 @@ function sortArcs(arcs: Iterable<[number, number]>): [number, number][] {
   return [...arcs].sort((x, y) => x[0] - y[0] || x[1] - y[1]);
 }
 
+/** `JSON.stringify` replacer: every string well-formed (a lone surrogate becomes U+FFFD, never `\\udXXX`). */
+function wellFormedStrings(_key: string, value: unknown): unknown {
+  return typeof value === "string" ? value.toWellFormed() : value;
+}
+
+/** `JSON.stringify` with every string value well-formed (row keys are the reporter's own). */
+export function toJson(value: unknown, space?: number): string {
+  return JSON.stringify(value, wellFormedStrings, space);
+}
+
 function jsonl(rows: object[]): string {
-  return rows.map((r) => wellFormed(JSON.stringify(r))).join("\n") + (rows.length ? "\n" : "");
+  return rows.map((r) => toJson(r)).join("\n") + (rows.length ? "\n" : "");
+}
+
+/**
+ * Bundle test ids for Vitest's `<file> > <full name>` ids, in order: unique and at most
+ * {@link MAX_ID} characters. A repeated id gets ` [2]`, ` [3]`, ... (as `test.each` rows with the
+ * same title do); one that is too long keeps its head and ends with ` #` and 16 hex digits of the
+ * sha256 of the whole id. Lone surrogates become U+FFFD first, so ids are what the bundle stores.
+ */
+export function uniqueIds(raw: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const fit = (id: string, suffix: string): string => {
+    if (id.length + suffix.length <= MAX_ID) return id + suffix;
+    const tag = ` #${sha16(id)}`;
+    let head = id.slice(0, MAX_ID - suffix.length - tag.length);
+    if (/[\ud800-\udbff]$/.test(head)) head = head.slice(0, -1);
+    return head + tag + suffix;
+  };
+  return raw.map((original) => {
+    const base = original.toWellFormed();
+    let id = fit(base, "");
+    for (let n = 2; seen.has(id); n++) id = fit(base, ` [${n}]`);
+    seen.add(id);
+    return id;
+  });
 }
 
 function stringList(value: unknown): string[] {
@@ -223,6 +264,8 @@ export class CoversetReporter implements Reporter {
   private projectRoot = process.cwd();
   private outDir = "";
   private spoolDir = "";
+  /** Why this reporter writes nothing (set once, warned once). */
+  private disabled: string | undefined;
 
   constructor(private readonly options: CoversetReporterOptions = {}) {}
 
@@ -231,14 +274,29 @@ export class CoversetReporter implements Reporter {
     this.projectRoot = vitest.config.root;
     this.root = repoRoot(this.projectRoot, this.options.root);
     this.outDir = resolve(this.projectRoot, this.options.outDir ?? process.env[OUT_ENV] ?? join(".coverset", "neutral"));
-    this.spoolDir = process.env[SPOOL_ENV] || join(this.projectRoot, ".coverset", "spool");
+    const fromEnv = process.env[SPOOL_ENV];
+    const base = resolve(this.projectRoot, fromEnv && fromEnv !== SPOOL_OFF ? fromEnv : join(".coverset", "spool"));
+    this.spoolDir = join(base, `run-${process.pid}-${randomBytes(4).toString("hex")}`);
+    try {
+      mkdirSync(this.spoolDir, { recursive: true });
+    } catch (error) {
+      this.disable(`cannot create the spool directory ${this.spoolDir} (${String(error)})`);
+      return;
+    }
     process.env[SPOOL_ENV] = this.spoolDir;
-    this.clearSpool();
+    removeStaleRuns(base);
   }
 
   onTestRunStart(): void {
     this.coverage = undefined;
-    this.clearSpool();
+    if (this.disabled === undefined) this.clearSpool();
+  }
+
+  private disable(reason: string): void {
+    if (this.disabled !== undefined) return;
+    this.disabled = reason;
+    process.env[SPOOL_ENV] = SPOOL_OFF;
+    console.warn(`coverset-vitest: ${reason}: no bundle will be written`);
   }
 
   onCoverage(coverage: unknown): void {
@@ -247,20 +305,38 @@ export class CoversetReporter implements Reporter {
     this.coverage = JSON.parse(JSON.stringify(data ?? {})) as Record<string, FileCoverageData>;
   }
 
-  /** Remove the spool files of an earlier run (only the names workers write: never anything else). */
+  /** Remove the spool files of an earlier run in watch mode (only the names workers write). */
   private clearSpool(): void {
-    mkdirSync(this.spoolDir, { recursive: true });
-    for (const name of readdirSync(this.spoolDir)) {
-      if (SPOOL_FILE.test(name)) rmSync(join(this.spoolDir, name), { force: true });
+    try {
+      mkdirSync(this.spoolDir, { recursive: true });
+      for (const name of readdirSync(this.spoolDir)) {
+        if (SPOOL_FILE.test(name)) rmSync(join(this.spoolDir, name), { force: true });
+      }
+    } catch (error) {
+      this.disable(`cannot use the spool directory ${this.spoolDir} (${String(error)})`);
+    }
+  }
+
+  /** Remove this run's spool directory (it holds only the workers' spool files). */
+  private removeSpool(): void {
+    try {
+      for (const name of readdirSync(this.spoolDir)) {
+        if (SPOOL_FILE.test(name)) rmSync(join(this.spoolDir, name), { force: true });
+      }
+      rmdirSync(this.spoolDir);
+    } catch {
+      // already gone, or not empty: left for the next run's stale-run sweep
     }
   }
 
   async onTestRunEnd(testModules: ReadonlyArray<TestModule>): Promise<void> {
+    if (this.disabled !== undefined) return;
     if (this.coverage === undefined) {
       // Coverage switched off for this run (`--coverage.enabled=false`): say so, fail nothing.
       console.warn(
         'coverset-vitest: no coverage map reached the reporter, so no bundle was written: enable coverage with the istanbul provider (test.coverage: { enabled: true, provider: "istanbul", include: [...] })',
       );
+      this.removeSpool();
       return;
     }
     try {
@@ -268,6 +344,8 @@ export class CoversetReporter implements Reporter {
     } catch (error) {
       console.error(`coverset-vitest: the neutral bundle was not written: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
       process.exitCode = 1;
+    } finally {
+      this.removeSpool();
     }
   }
 
@@ -309,27 +387,22 @@ export class CoversetReporter implements Reporter {
     const taskToId = new Map<string, string>();
     const testRows: Record<string, unknown>[] = [];
     const links: { test: string; invariant: string }[] = [];
-    const seenIds = new Set<string>();
+    const modules: { module: TestModule; file: string; cases: TestCase[] }[] = [];
     for (const module of testModules) {
       const file = this.rel(module.moduleId);
       if (file === null) {
         drop("tests.path");
         continue;
       }
+      modules.push({ module, file, cases: [...module.children.allTests()] });
+    }
+    const ids = uniqueIds(modules.flatMap(({ file, cases }) => cases.map((c) => `${file} > ${c.fullName}`)));
+    let next = 0;
+    for (const { module, file, cases } of modules) {
       let source: string[] | null = null;
-      const cases = [...module.children.allTests()];
       const lines = cases.map((c) => c.location?.line).filter((n): n is number => n !== undefined).sort((a, b) => a - b);
       for (const testCase of cases) {
-        const id = `${file} > ${testCase.fullName}`;
-        if (id.length > MAX_ID) {
-          drop("tests.long_id");
-          continue;
-        }
-        if (seenIds.has(id)) {
-          drop("tests.duplicate_id");
-          continue;
-        }
-        seenIds.add(id);
+        const id = ids[next++]!;
         taskToId.set(testCase.id, id);
         source ??= this.readLines(module.moduleId);
         const row = testRowOf(testCase, id, file, source, lines, (abs) => this.rel(abs));
@@ -337,7 +410,7 @@ export class CoversetReporter implements Reporter {
         for (const invariant of row["invariants"] as string[]) links.push({ test: id, invariant });
       }
     }
-    testRows.sort((a, b) => (String(a["id"]) < String(b["id"]) ? -1 : 1));
+    testRows.sort((a, b) => (String(a["id"]) < String(b["id"]) ? -1 : String(a["id"]) > String(b["id"]) ? 1 : 0));
 
     // files.jsonl and arcs.jsonl ----------------------------------------------------------------
     const files = new Map<string, StaticFile>();
@@ -420,7 +493,7 @@ export class CoversetReporter implements Reporter {
     const functionRows = await this.functions(files, warnings);
 
     // shapes.jsonl ------------------------------------------------------------------------------
-    const { rows: shapeRows, errors: recorderErrors } = this.shapes(dumps, taskToId, files, drop);
+    const { rows: shapeRows, errors: recorderErrors, reattributed } = this.shapes(dumps, taskToId, files, drop);
 
     // write ---------------------------------------------------------------------------------------
     const manifest = {
@@ -437,6 +510,7 @@ export class CoversetReporter implements Reporter {
         typescript_api: (await import("typescript")).default.version,
         coverage: "istanbul (per-test counter deltas)",
         recorder_errors: recorderErrors,
+        reattributed_callers: reattributed,
         dropped,
         warnings,
       },
@@ -449,7 +523,7 @@ export class CoversetReporter implements Reporter {
       "functions.jsonl": jsonl(functionRows),
       "shapes.jsonl": jsonl(shapeRows),
       "links.jsonl": jsonl(links),
-      "manifest.json": JSON.stringify(manifest, null, 1) + "\n",
+      "manifest.json": toJson(manifest, 1) + "\n",
     });
     const summary = `${testRows.length} tests, ${fileRows.length} files, ${coverageRows.length} coverage rows, ${functionRows.length} functions, ${shapeRows.length} shape rows`;
     console.log(`coverset-vitest: wrote ${this.outDir} (${summary})`);
@@ -512,7 +586,7 @@ export class CoversetReporter implements Reporter {
     taskToId: Map<string, string>,
     files: Map<string, StaticFile>,
     drop: (code: string, n?: number) => void,
-  ): { rows: object[]; errors: number } {
+  ): { rows: object[]; errors: number; reattributed: number } {
     type Triple = [string, string, number];
     const funcs = new Map<string, { func: Triple; calls: number; tests: Set<string>; truncated: boolean; cap: string | null }>();
     const obs = new Map<
@@ -520,6 +594,7 @@ export class CoversetReporter implements Reporter {
       { func: Triple; param: string; shape: string; caller: Triple | { test: string }; samples: number; tests: Set<string>; example: string | null; exampleTest: string | null }
     >();
     let errors = 0;
+    let reattributed = 0;
     const tripleKey = (t: Triple): string => `${t[0]}\0${t[1]}\0${t[2]}`;
     for (const dump of dumps) {
       errors += dump.errors ?? 0;
@@ -557,8 +632,20 @@ export class CoversetReporter implements Reporter {
           caller = { test: id };
         } else {
           const callerFunc = byUid.get(o.c.func);
-          if (callerFunc === undefined) continue;
-          caller = callerFunc;
+          if (callerFunc !== undefined) {
+            caller = callerFunc;
+          } else {
+            // The caller is instrumented but not measured (outside coverage.include): as for
+            // pytest-coverset, where only measured code is traced, the call comes from the test.
+            // The recorder aggregates per test, so the row's one test is the caller.
+            const id = o.t.length === 1 ? taskToId.get(o.t[0]!) : undefined;
+            if (id === undefined) {
+              drop("shapes.unmeasured_caller");
+              continue;
+            }
+            caller = { test: id };
+            reattributed++;
+          }
         }
         const tests = o.t.map((t) => taskToId.get(t)).filter((t): t is string => t !== undefined);
         if (!tests.length) continue;
@@ -613,7 +700,7 @@ export class CoversetReporter implements Reporter {
         cap: f.truncated ? f.cap : null,
       });
     }
-    return { rows, errors };
+    return { rows, errors, reattributed };
   }
 
   private shard(): number | null {
@@ -632,6 +719,33 @@ export class CoversetReporter implements Reporter {
       const tmp = join(this.outDir, `.${name}.tmp`);
       writeFileSync(tmp, contents[name]!, "utf8");
       renameSync(tmp, join(this.outDir, name));
+    }
+  }
+}
+
+/** Remove `run-<pid>-*` spool directories under `base` whose process no longer exists (a killed run). */
+function removeStaleRuns(base: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(base);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = RUN_DIR.exec(name);
+    if (match === null || Number(match[1]) === process.pid) continue;
+    try {
+      process.kill(Number(match[1]), 0);
+      continue; // alive (or someone else's): leave it
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+    }
+    const dir = join(base, name);
+    try {
+      for (const file of readdirSync(dir)) if (SPOOL_FILE.test(file)) rmSync(join(dir, file), { force: true });
+      rmdirSync(dir);
+    } catch {
+      // not ours to force
     }
   }
 }

@@ -7,11 +7,17 @@
  * `none`), string, number and boolean literals (and unions of them, integral numbers included) →
  * `literal`, an `enum` → `enum` with its member names, `T[]`/`Array<T>`/`ReadonlyArray<T>`/
  * `Iterable<T>` → `list`, `[A, B]` → a fixed `tuple`, `Set<T>` → `set`, `Map<K, V>`/`Record<K, V>`/
- * an index signature → `dict`, `Uint8Array`/`Buffer`/`ArrayBuffer` → `bytes`, classes and
- * interfaces → `object` (named `<module>.<Name>` when declared in the repository, as `obj:` shape
- * tokens are), `any`/`unknown`/`never`/type parameters → `any`. An unannotated parameter is `null`.
+ * an index signature → `dict`, `Uint8Array`/`Buffer`/`ArrayBuffer` → `bytes`, a class (or a
+ * library class declared as an interface and a constructor variable, such as `Date`) → `object`
+ * (named `<module>.<Name>` when declared in the repository, as `obj:` shape tokens are), a type
+ * with call or construct signatures (a function type, `typeof SomeClass`) → `object` `Function`,
+ * any other object type (an interface, a type literal, a mapped type, an alias of one) → `dict`
+ * with `str` keys (what a plain object observes as; the descriptor has no field for its name),
+ * `any`/`unknown`/`never`/type parameters → `any`. An unannotated parameter is `null`.
  * `async` functions describe the awaited return type (the recorder sees the value before the
- * promise wraps it). Descriptors nest at most 30 levels and hold at most 256 arms or values.
+ * promise wraps it). Union arms and literal values keep the order they are written in (through
+ * type aliases), the literal arm standing where its first value is. Descriptors nest at most 30
+ * levels and hold at most 256 arms or values.
  */
 import ts from "typescript";
 
@@ -50,6 +56,53 @@ function isEnumSymbol(symbol: ts.Symbol | undefined): boolean {
   return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Enum) !== 0;
 }
 
+/** A class, or a library class written as an interface merged with a constructor variable (`Date`). */
+function isClassSymbol(symbol: ts.Symbol | undefined): boolean {
+  if (symbol === undefined) return false;
+  if (symbol.flags & ts.SymbolFlags.Class) return true;
+  return (symbol.flags & ts.SymbolFlags.Interface) !== 0 && (symbol.flags & ts.SymbolFlags.Variable) !== 0;
+}
+
+/** What a plain object observes as (`dict|...|key:str`). */
+function plainObject(ctx: DescribeContext, type: ts.Type, depth: number): Descriptor {
+  const index = ctx.checker.getIndexInfoOfType(type, ts.IndexKind.String);
+  return index === undefined
+    ? { kind: "dict", key: { kind: "str" } }
+    : { kind: "dict", key: { kind: "str" }, value: describeType(ctx, index.type, depth + 1) };
+}
+
+/**
+ * The constituents a union type node lists, in the order they are written: through parentheses,
+ * nested unions and (non-generic) type aliases; anything else is the checker's type of the node
+ * (an enum's members in declaration order).
+ */
+export function declaredOrder(checker: ts.TypeChecker, node: ts.TypeNode | undefined, depth = 0): ts.Type[] {
+  if (node === undefined || depth > 16) return [];
+  if (ts.isParenthesizedTypeNode(node)) return declaredOrder(checker, node.type, depth + 1);
+  if (ts.isUnionTypeNode(node)) return node.types.flatMap((t) => declaredOrder(checker, t, depth + 1));
+  if (ts.isTypeReferenceNode(node) && node.typeArguments === undefined) {
+    let symbol = checker.getSymbolAtLocation(node.typeName);
+    if (symbol !== undefined && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+    const alias = symbol?.declarations?.find(ts.isTypeAliasDeclaration);
+    if (alias !== undefined && alias.typeParameters === undefined) return declaredOrder(checker, alias.type, depth + 1);
+  }
+  const type = checker.getTypeFromTypeNode(node);
+  return type.isUnion() ? [...type.types] : [type];
+}
+
+/** `types` sorted by their first position in `order` (unlisted ones last, in their own order). */
+function inOrder(types: readonly ts.Type[], order: readonly ts.Type[] | undefined): readonly ts.Type[] {
+  if (order === undefined || order.length === 0) return types;
+  const rank = new Map<ts.Type, number>();
+  order.forEach((t, i) => {
+    if (!rank.has(t)) rank.set(t, i);
+  });
+  return types
+    .map((t, i) => ({ t, r: rank.get(t) ?? order.length + i }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.t);
+}
+
 function enumDescriptor(ctx: DescribeContext, symbol: ts.Symbol): Descriptor {
   const members: string[] = [];
   symbol.exports?.forEach((_, key) => {
@@ -73,45 +126,79 @@ function typeArgs(ctx: DescribeContext, type: ts.Type): readonly ts.Type[] {
   return [];
 }
 
-function unionDescriptor(ctx: DescribeContext, type: ts.UnionType, depth: number): Descriptor {
-  const arms: Descriptor[] = [];
-  const literals: (string | number | boolean)[] = [];
-  const bools = new Set<boolean>();
-  const enumArms = new Map<ts.Symbol, { values: (string | number)[]; total: number }>();
-  for (const arm of type.types) {
+function unionDescriptor(ctx: DescribeContext, type: ts.UnionType, depth: number, order?: readonly ts.Type[]): Descriptor {
+  type Item =
+    | { cat: "enum"; symbol: ts.Symbol; value: string | number | undefined; total: number }
+    | { cat: "bool"; value: boolean }
+    | { cat: "lit"; value: string | number | boolean }
+    | { cat: "desc"; arm: ts.Type };
+  const items: Item[] = [];
+  for (const arm of inOrder(type.types, order)) {
     if (arm.flags & ts.TypeFlags.EnumLiteral && !(arm.flags & ts.TypeFlags.Union)) {
       const base = ctx.checker.getBaseTypeOfLiteralType(arm);
       const symbol = base.getSymbol() ?? base.aliasSymbol;
       if (isEnumSymbol(symbol)) {
-        const entry = enumArms.get(symbol!) ?? { values: [], total: base.isUnion() ? base.types.length : 1 };
         const value = literalValue(arm);
-        if (typeof value === "string" || typeof value === "number") entry.values.push(value);
-        enumArms.set(symbol!, entry);
+        items.push({
+          cat: "enum",
+          symbol: symbol!,
+          value: typeof value === "string" || typeof value === "number" ? value : undefined,
+          total: base.isUnion() ? base.types.length : 1,
+        });
         continue;
       }
     }
     if (arm.flags & ts.TypeFlags.BooleanLiteral) {
-      bools.add(literalValue(arm) as boolean);
+      items.push({ cat: "bool", value: literalValue(arm) as boolean });
       continue;
     }
     const value = literalValue(arm);
-    if (value !== undefined) {
-      literals.push(value);
-      continue;
+    if (value !== undefined) items.push({ cat: "lit", value });
+    else items.push({ cat: "desc", arm });
+  }
+  const enumCounts = new Map<ts.Symbol, number>();
+  for (const item of items) if (item.cat === "enum") enumCounts.set(item.symbol, (enumCounts.get(item.symbol) ?? 0) + 1);
+  const bothBools = new Set(items.filter((i) => i.cat === "bool").map((i) => i.value)).size === 2;
+  // Arms in written order; the literal arm stands where its first value is.
+  const LITERAL = Symbol("literal");
+  const slots: (Descriptor | typeof LITERAL)[] = [];
+  const literals: (string | number | boolean)[] = [];
+  const done = new Set<unknown>();
+  const literal = (value: string | number | boolean | undefined): void => {
+    if (value === undefined) return;
+    if (!done.has(LITERAL)) {
+      done.add(LITERAL);
+      slots.push(LITERAL);
     }
-    arms.push(describeType(ctx, arm, depth + 1));
+    literals.push(value);
+  };
+  for (const item of items) {
+    if (item.cat === "enum") {
+      // The whole enum is the enum; a subset of its members is a literal of their values.
+      if ((enumCounts.get(item.symbol) ?? 0) >= item.total) {
+        if (!done.has(item.symbol)) {
+          done.add(item.symbol);
+          slots.push(enumDescriptor(ctx, item.symbol));
+        }
+      } else {
+        literal(item.value);
+      }
+    } else if (item.cat === "bool") {
+      if (!bothBools) literal(item.value);
+      else if (!done.has("bool")) {
+        done.add("bool");
+        slots.push({ kind: "bool" });
+      }
+    } else if (item.cat === "lit") {
+      literal(item.value);
+    } else {
+      slots.push(describeType(ctx, item.arm, depth + 1));
+    }
   }
-  for (const [symbol, entry] of enumArms) {
-    // The whole enum is the enum; a subset of its members is a literal of their values.
-    if (entry.values.length >= entry.total) arms.push(enumDescriptor(ctx, symbol));
-    else literals.push(...entry.values);
-  }
-  if (bools.size === 2) arms.push({ kind: "bool" });
-  else for (const b of bools) literals.push(b);
-  if (literals.length) arms.unshift({ kind: "literal", values: literals.slice(0, MAX_ITEMS) });
   const unique: Descriptor[] = [];
   const seen = new Set<string>();
-  for (const arm of arms) {
+  for (const slot of slots) {
+    const arm: Descriptor = slot === LITERAL ? { kind: "literal", values: literals.slice(0, MAX_ITEMS) } : slot;
     const key = JSON.stringify(arm);
     if (!seen.has(key)) {
       seen.add(key);
@@ -122,8 +209,11 @@ function unionDescriptor(ctx: DescribeContext, type: ts.UnionType, depth: number
   return { kind: "union", arms: unique.slice(0, MAX_ITEMS) };
 }
 
-/** The descriptor of a checker type. */
-export function describeType(ctx: DescribeContext, type: ts.Type, depth = 0): Descriptor {
+/**
+ * The descriptor of a checker type; `order` (from {@link declaredOrder}) puts the arms of a union
+ * in written order.
+ */
+export function describeType(ctx: DescribeContext, type: ts.Type, depth = 0, order?: readonly ts.Type[]): Descriptor {
   if (depth > MAX_DEPTH) return ANY;
   const { checker } = ctx;
   const flags = type.flags;
@@ -134,7 +224,7 @@ export function describeType(ctx: DescribeContext, type: ts.Type, depth = 0): De
   if (flags & ts.TypeFlags.EnumLiteral && flags & ts.TypeFlags.Union && isEnumSymbol(symbol)) {
     return enumDescriptor(ctx, symbol!);
   }
-  if (type.isUnion()) return unionDescriptor(ctx, type, depth);
+  if (type.isUnion()) return unionDescriptor(ctx, type, depth, order);
   const literal = literalValue(type);
   if (literal !== undefined) {
     if (flags & ts.TypeFlags.EnumLiteral) {
@@ -202,13 +292,12 @@ export function describeType(ctx: DescribeContext, type: ts.Type, depth = 0): De
     case "ArrayBuffer":
       return { kind: "bytes" };
   }
-  const props = type.getProperties();
-  const stringIndex = checker.getIndexInfoOfType(type, ts.IndexKind.String);
-  if (stringIndex !== undefined && props.length === 0) {
-    return { kind: "dict", key: { kind: "str" }, value: describeType(ctx, stringIndex.type, depth + 1) };
-  }
-  if (type.getCallSignatures().length > 0 && props.length === 0) return { kind: "object", name: "Function" };
-  return { kind: "object", name: objectName(ctx, type.getSymbol() ?? type.aliasSymbol) };
+  // Functions and constructors (`typeof SomeClass`) observe as obj:Function.
+  if (type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0) return { kind: "object", name: "Function" };
+  const objectSymbol = type.getSymbol();
+  if (isClassSymbol(objectSymbol)) return { kind: "object", name: objectName(ctx, objectSymbol) };
+  // An interface, a type literal, a mapped type or an alias of one: a plain object at runtime.
+  return plainObject(ctx, type, depth);
 }
 
 function withNone(d: Descriptor): Descriptor {
@@ -222,7 +311,7 @@ function withNone(d: Descriptor): Descriptor {
 /** A parameter's declared descriptor (`null` when it has no annotation). */
 export function paramDescriptor(ctx: DescribeContext, param: ts.ParameterDeclaration): Descriptor | null {
   if (param.type === undefined) return null;
-  const d = describeType(ctx, ctx.checker.getTypeFromTypeNode(param.type));
+  const d = describeType(ctx, ctx.checker.getTypeFromTypeNode(param.type), 0, declaredOrder(ctx.checker, param.type));
   return param.questionToken !== undefined ? withNone(d) : d;
 }
 
@@ -230,6 +319,10 @@ export function paramDescriptor(ctx: DescribeContext, param: ts.ParameterDeclara
 export function returnDescriptor(ctx: DescribeContext, fn: ts.FunctionLikeDeclaration, isAsync: boolean): Descriptor | null {
   if (fn.type === undefined) return null;
   let type = ctx.checker.getTypeFromTypeNode(fn.type);
-  if (isAsync) type = ctx.checker.getAwaitedType(type) ?? type;
-  return describeType(ctx, type);
+  let node: ts.TypeNode | undefined = fn.type;
+  if (isAsync) {
+    type = ctx.checker.getAwaitedType(type) ?? type;
+    node = ts.isTypeReferenceNode(node) && node.typeArguments?.length === 1 ? node.typeArguments[0] : undefined;
+  }
+  return describeType(ctx, type, 0, declaredOrder(ctx.checker, node));
 }

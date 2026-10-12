@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { TestCase } from "vitest/node";
 
 import { branchTargets } from "../src/branches.js";
-import { testRowOf } from "../src/reporter.js";
+import { testRowOf, toJson, uniqueIds } from "../src/reporter.js";
 
 function fakeCase(over: Record<string, unknown>): TestCase {
   return {
@@ -81,5 +81,42 @@ describe("branchTargets", () => {
   it("exits when nothing follows, and keeps one-line expressions on their line", () => {
     expect(branchTargets("if", 12, 13, [{ start: 12, end: 13 }, { start: null, end: null }], statements)).toEqual([12, -12]);
     expect(branchTargets("binary-expr", 9, 9, [{ start: 9, end: 9 }, { start: 9, end: 9 }], statements)).toEqual([9, 9]);
+  });
+});
+
+describe("uniqueIds", () => {
+  it("numbers repeated ids instead of dropping the tests", () => {
+    // test.each([[1], [1]])("dup %s") gives two tests with one title.
+    expect(uniqueIds(["f.test.ts > dup 1", "f.test.ts > dup 1", "f.test.ts > dup 1", "f.test.ts > other"])).toEqual([
+      "f.test.ts > dup 1",
+      "f.test.ts > dup 1 [2]",
+      "f.test.ts > dup 1 [3]",
+      "f.test.ts > other",
+    ]);
+  });
+
+  it("cuts long ids to 512 characters with a hash, unique and well-formed", () => {
+    const long = "f.test.ts > " + "x".repeat(600);
+    const other = "f.test.ts > " + "x".repeat(599) + "y";
+    const ids = uniqueIds([long, other, long, "f.test.ts > " + "\u{1F600}".repeat(300)]);
+    for (const id of ids) {
+      expect(id.length).toBeLessThanOrEqual(512);
+      expect(id.isWellFormed()).toBe(true);
+    }
+    expect(new Set(ids).size).toBe(4);
+    expect(ids[0]).toMatch(/^f\.test\.ts > x+ #[0-9a-f]{16}$/);
+    expect(ids[2]).toMatch(/ #[0-9a-f]{16} \[2\]$/);
+  });
+
+  it("makes lone surrogates U+FFFD before comparing", () => {
+    expect(uniqueIds(["f > a\ud800", "f > a\ufffd"])).toEqual(["f > a\ufffd", "f > a\ufffd [2]"]);
+  });
+});
+
+describe("toJson", () => {
+  it("never writes a lone surrogate, raw or escaped", () => {
+    const text = toJson({ id: "t \ud800 x", nested: ["\udc00"], ok: "\u{1F600}" });
+    expect(text).not.toMatch(/\\ud[89a-f]/i);
+    expect(JSON.parse(text)).toEqual({ id: "t \ufffd x", nested: ["\ufffd"], ok: "\u{1F600}" });
   });
 });

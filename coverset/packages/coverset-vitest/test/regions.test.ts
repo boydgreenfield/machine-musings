@@ -8,6 +8,7 @@ import { createProgram, functionRows, type FunctionRow } from "../src/functions.
 import { indexRegions, parseSource } from "../src/regions.js";
 
 const SAMPLE = fileURLToPath(new URL("./fixtures/sample.ts", import.meta.url));
+const OBJECTS = fileURLToPath(new URL("./fixtures/objects.ts", import.meta.url));
 const PATH = "pkg/sample.ts";
 
 function rows(): Map<string, FunctionRow> {
@@ -80,7 +81,7 @@ describe("descriptors", () => {
       zone: { kind: "literal", values: ["eu", "world"] },
       digit: { kind: "literal", values: [1, 2, 3] },
       flag: { kind: "literal", values: [true] },
-      color: { kind: "union", arms: [{ kind: "none" }, { kind: "enum", name: "pkg.sample.Color", members: ["Red", "Green"] }] },
+      color: { kind: "union", arms: [{ kind: "enum", name: "pkg.sample.Color", members: ["Red", "Green"] }, { kind: "none" }] },
       low: { kind: "literal", values: ["red"] },
       return: { kind: "none" },
     });
@@ -93,7 +94,7 @@ describe("descriptors", () => {
       pair: { kind: "tuple", elems: [{ kind: "float" }, { kind: "str" }] },
       rest: { kind: "tuple", elem: { kind: "str" } },
       rec: { kind: "dict", key: { kind: "str" }, value: { kind: "float" } },
-      map: { kind: "dict", key: { kind: "str" }, value: { kind: "object", name: "pkg.sample.Point" } },
+      map: { kind: "dict", key: { kind: "str" }, value: { kind: "dict", key: { kind: "str" } } },
       set: { kind: "set", elem: { kind: "float" } },
       it: { kind: "list", elem: { kind: "float" } },
       bytes: { kind: "bytes" },
@@ -104,7 +105,7 @@ describe("descriptors", () => {
 
   it("maps objects, enums, any and unannotated parameters", () => {
     expect(types("objects")).toEqual({
-      p: { kind: "object", name: "pkg.sample.Point" },
+      p: { kind: "dict", key: { kind: "str" } },
       m: { kind: "object", name: "pkg.sample.Money" },
       level: { kind: "enum", name: "pkg.sample.Level", members: ["Low", "High"] },
       a: { kind: "any" },
@@ -141,5 +142,55 @@ describe("descriptors", () => {
     expect(hash(before, "A")).toBe(hash(after, "A"));
     expect(hash(before, "<module>")).toBe(hash(after, "<module>"));
     expect(hash(before, "A.m")).not.toBe(hash(after, "A.m"));
+  });
+});
+
+describe("object-literal qualnames", () => {
+  it("keeps every key of nested object literals and sanitises quoted ones", () => {
+    const sf = parseSource(
+      "o.ts",
+      'export const api = {\n  get() { return 1 },\n  nested: { put(k: string) { return k }, "a.b c": { del: () => 0 } },\n};\n',
+    );
+    expect(indexRegions(sf).map((r) => r.qualname)).toEqual(["<module>", "api.get", "api.nested.put", "api.nested.a_b_c.del"]);
+  });
+});
+
+describe("object descriptors", () => {
+  const program = createProgram([OBJECTS], fileURLToPath(new URL("./fixtures/", import.meta.url)));
+  const sf = program.getSourceFile(OBJECTS)!;
+  const out = functionRows(sf, "pkg/objects.ts", program.getTypeChecker(), (f) => (f === OBJECTS ? "pkg/objects.ts" : undefined));
+  const types = (q: string) => out.find((r) => r.qualname === q)!.types!;
+  const DICT = { kind: "dict", key: { kind: "str" } };
+
+  it("describes interfaces, type literals and object aliases as what a plain object observes as", () => {
+    expect(types("maybeItem")).toEqual({
+      c: { kind: "union", arms: [DICT, { kind: "none" }] },
+      d: { kind: "union", arms: [{ kind: "object", name: "pkg.objects.Sq" }, { kind: "none" }] },
+      e: { kind: "union", arms: [DICT, { kind: "none" }] },
+      return: { kind: "float" },
+    });
+  });
+
+  it("keeps object for classes (library ones too) and Function for callables and constructors", () => {
+    expect(types("shapes")).toEqual({
+      ctor: { kind: "object", name: "Function" },
+      cb: { kind: "object", name: "Function" },
+      part: DICT,
+      methods: DICT,
+      when: { kind: "object", name: "Date" },
+      pending: { kind: "object", name: "Promise" },
+      bag: { kind: "dict", key: { kind: "str" }, value: { kind: "float" } },
+      return: { kind: "none" },
+    });
+  });
+
+  it("keeps union arms and literal values in written order, through aliases", () => {
+    expect(types("ordered")).toEqual({
+      zone: { kind: "literal", values: ["world", "eu", "domestic"] },
+      mixed: { kind: "union", arms: [{ kind: "float" }, { kind: "literal", values: ["auto"] }, { kind: "none" }] },
+      flags: { kind: "union", arms: [{ kind: "bool" }, { kind: "literal", values: ["x"] }] },
+      dir: { kind: "union", arms: [{ kind: "none" }, { kind: "enum", name: "pkg.objects.Dir", members: ["Up", "Down"] }] },
+      return: { kind: "literal", values: ["b", "a"] },
+    });
   });
 });

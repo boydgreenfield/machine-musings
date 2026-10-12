@@ -3,11 +3,17 @@
  * its number, the program behaves the same, and the recorder sees arguments, returns, callers and
  * receivers.
  */
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { instrument } from "../src/instrument.js";
+import { enumsOf, instrument } from "../src/instrument.js";
 import { Recorder } from "../src/recorder.js";
+import { parseSource } from "../src/regions.js";
 
 const SOURCE = `"use strict"
 export enum Currency { USD = "USD", EUR = "EUR" }
@@ -107,7 +113,7 @@ describe("instrument", () => {
 
   it("marks every added statement for Istanbul to ignore", () => {
     const added = result.code.match(/(?:const __cs\$\d+ = |; )?\/\* istanbul ignore next -- @preserve \*\//g) ?? [];
-    const statements = result.code.match(/globalThis\.__coverset__\.enter\(/g) ?? [];
+    const statements = result.code.match(/(?<!function )__cs\$E\(/g) ?? [];
     // Every enter call sits in an ignored statement except those of expression-bodied arrows.
     expect(added.length).toBeGreaterThan(0);
     expect(statements.length).toBe(17);
@@ -189,5 +195,87 @@ describe("instrument", () => {
       const hostile = new Proxy({}, { get: () => { throw new Error("boom"); }, getPrototypeOf: () => { throw new Error("boom"); } });
       expect(m.curry(hostile as unknown as number)).toBeTypeOf("function");
     });
+  });
+});
+
+describe("instrumented code without a recorder", () => {
+  afterEach(() => {
+    globalThis.__coverset__ = undefined;
+  });
+
+  it("runs unchanged where no setup file installed one (globalSetup, scripts)", async () => {
+    globalThis.__coverset__ = undefined;
+    const m = load(instrument(SOURCE, "/repo/src/cart.ts", "src/cart.ts")!.code);
+    expect(m.price(1250, m.Currency.EUR)).toBe("EUR12.50");
+    expect(new m.Cart("bob").add(2).size).toBe(1);
+    expect([...m.counter(2)]).toEqual([0, 1]);
+    expect(await m.later(" y ")).toBe("y");
+    expect(m.curry(1)(2)).toBe(3);
+  });
+
+  it("finds the recorder whatever the module calls globalThis", () => {
+    const source = [
+      "export function param(globalThis: number) { return globalThis + 1 }",
+      "export function local(x: number) { const globalThis = { y: x }; return globalThis.y * 2 }",
+      "",
+    ].join("\n");
+    const shadowedAtTop = "const globalThis = { n: 3 };\nexport function top(x: number) { return x + globalThis.n }\n";
+    const recorder = new Recorder();
+    recorder.setTest("t1");
+    globalThis.__coverset__ = recorder;
+    const a = load(instrument(source, "/repo/src/a.ts", "src/a.ts")!.code);
+    expect([a.param(1), a.local(2)]).toEqual([2, 4]);
+    const top = instrument(shadowedAtTop, "/repo/src/b.ts", "src/b.ts")!;
+    expect(top.code.split("\n").length).toBe(3);
+    expect(load(top.code).top(1)).toBe(4);
+    const seen = recorder.dump().funcs.map((f) => f.qualname).sort();
+    expect(seen).toEqual(["local", "param", "top"]);
+    expect(recorder.errors).toBe(0);
+  });
+
+  it("works before the module body ran (a function called through a circular import)", async () => {
+    // a.mjs imports b.mjs, whose body calls a's hoisted `f` before a's own body has run.
+    const dir = mkdtempSync(join(tmpdir(), "coverset-circular-"));
+    try {
+      const a = 'import { early } from "./b.mjs";\nexport function f(x: number): number { return x * 2 }\nexport const seen = early;\n';
+      const b = 'import { f } from "./a.mjs";\nexport const early = f(21);\n';
+      for (const [name, code] of [["a", a], ["b", b]] as const) {
+        const instrumented = instrument(code, `/repo/src/${name}.ts`, `src/${name}.ts`)?.code ?? code;
+        const js = ts.transpileModule(instrumented, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
+        writeFileSync(join(dir, `${name}.mjs`), js.outputText);
+      }
+      const recorder = new Recorder();
+      globalThis.__coverset__ = recorder;
+      const mod = (await import(pathToFileURL(join(dir, "a.mjs")).href)) as { seen: number };
+      expect(mod.seen).toBe(42);
+      expect(recorder.dump().funcs.map((f) => [f.qualname, f.calls])).toEqual([["f", 1]]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a hashbang first and a directive prologue a directive", () => {
+    const source = '#!/usr/bin/env node\n"use strict"\nexport function f(x: number) { return x }\n';
+    const out = instrument(source, "/repo/src/cli.ts", "src/cli.ts")!.code.split("\n");
+    expect(out[0]).toBe("#!/usr/bin/env node");
+    expect(out[1]!.startsWith('"use strict"; /* istanbul ignore next')).toBe(true);
+    const sf = parseSource("x.ts", out.join("\n"));
+    const first = sf.statements[0]!;
+    expect(ts.isExpressionStatement(first) && ts.isStringLiteral(first.expression)).toBe(true);
+    expect(out.length).toBe(source.split("\n").length);
+  });
+});
+
+describe("enumsOf", () => {
+  it("computes constant members as TypeScript does and leaves computed ones out", () => {
+    const sf = parseSource(
+      "e.ts",
+      'enum Flags { A = 1 << 0, B = 1 << 1, AB = A | B, C = "c".length, D }\n' +
+        'enum Names { X = "x", Y = X + "y", Z = `z`, W = Names.Y }\nenum Auto { P = -2, Q, R = ~Q }\n',
+    );
+    const table = enumsOf(sf);
+    expect(table.get("Flags")!.members).toEqual({ A: 1, B: 2, AB: 3 });
+    expect(table.get("Names")!.members).toEqual({ X: "x", Y: "xy", Z: "z", W: "xy" });
+    expect(table.get("Auto")!.members).toEqual({ P: -2, Q: -1, R: 0 });
   });
 });
