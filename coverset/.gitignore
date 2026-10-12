@@ -19,3 +19,4 @@ secrets/
 .pytest_cache
 .hypothesis
 .ruff_cache
+.coverset/

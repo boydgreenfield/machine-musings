@@ -5,7 +5,9 @@ invented (three files, eight functions) and the bundle in `bundle/` is what a Vi
 follows [`docs/neutral-bundle.md`](../../../docs/neutral-bundle.md) would write for twelve tests
 over it. It is written by `scripts/make_neutral_fixture.py` (deterministic: fixed timestamps,
 gzip without mtime, sorted rows), so `uv run python scripts/make_neutral_fixture.py` rewrites the
-same bytes and `--check` says whether the committed copy is stale.
+same bytes and `--check` says whether the committed copy is stale. A real reporter now exists:
+`packages/coverset-vitest` writes the same files from an actual Vitest run (see
+[`docs/typescript.md`](../../../docs/typescript.md) and `examples/ts-app`).
 
 | Path | What it is |
 |---|---|

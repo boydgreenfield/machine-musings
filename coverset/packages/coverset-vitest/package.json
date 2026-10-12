@@ -1,0 +1,49 @@
+{
+  "name": "coverset-vitest",
+  "version": "0.1.0",
+  "description": "A Vitest reporter that writes coverset's neutral bundle: per-test coverage, function regions with declared types, and argument shapes.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./setup": {
+      "types": "./dist/setup.d.ts",
+      "import": "./dist/setup.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest --run"
+  },
+  "dependencies": {
+    "@jridgewell/trace-mapping": "0.3.31",
+    "magic-string": "1.4.3",
+    "typescript": "6.0.3"
+  },
+  "peerDependencies": {
+    "vitest": "5.0.3",
+    "@vitest/coverage-istanbul": "5.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@vitest/coverage-istanbul": "5.0.3",
+    "vite": "8.3.4",
+    "vitest": "5.0.3"
+  }
+}

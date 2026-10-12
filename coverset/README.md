@@ -113,7 +113,7 @@ With `--compare BASE` (or `--compare-run RUN_ID` from the facts store) the repor
 
 ## One model for every language
 
-Everything downstream of a test run (the facts store, the input-class catalogue, the pages, the comment, the report) reads one language-neutral model, `coverset-model`, a package with no dependencies. Its on-disk form is the **neutral bundle** ([docs/neutral-bundle.md](docs/neutral-bundle.md)): `manifest.json`, then `tests`, `files`, `coverage`, `arcs`, `functions`, `shapes` and `links` as JSON lines, with shape keys from one value vocabulary (`int|neg`, `str|kind:email/multi-label-domain`, `list|elem:int|order:unsorted`) and declared types as small **type descriptors** (`{"kind": "union", "arms": [...]}`, `{"kind": "enum", "members": [...]}`) that any language can produce. `pytest-coverset --coverset-neutral` writes it for Python, `coverset bundle validate` checks a bundle against the specification and its JSON Schemas, `coverset bundle convert` turns a plugin bundle into one, and a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`, the shape a Vitest or Jest reporter would emit) validates, ingests into the facts store with no Python-specific code path, and renders in the report and the live pages, whose function page and PR cards build its input classes from the type descriptors stored at ingest (`tests/web/test_web_neutral.py`). The reporter itself is the part not written; [docs/extending.md](docs/extending.md) walks through it file by file.
+Everything downstream of a test run (the facts store, the input-class catalogue, the pages, the comment, the report) reads one language-neutral model, `coverset-model`, a package with no dependencies. Its on-disk form is the **neutral bundle** ([docs/neutral-bundle.md](docs/neutral-bundle.md)): `manifest.json`, then `tests`, `files`, `coverage`, `arcs`, `functions`, `shapes` and `links` as JSON lines, with shape keys from one value vocabulary (`int|neg`, `str|kind:email/multi-label-domain`, `list|elem:int|order:unsorted`) and declared types as small **type descriptors** (`{"kind": "union", "arms": [...]}`, `{"kind": "enum", "members": [...]}`) that any language can produce. `pytest-coverset --coverset-neutral` writes it for Python, `coverset bundle validate` checks a bundle against the specification and its JSON Schemas, `coverset bundle convert` turns a plugin bundle into one, and a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`, the shape a Vitest or Jest reporter would emit) validates, ingests into the facts store with no Python-specific code path, and renders in the report and the live pages, whose function page and PR cards build its input classes from the type descriptors stored at ingest (`tests/web/test_web_neutral.py`). `coverset-vitest` (`packages/coverset-vitest`) writes the same bundle from a real Vitest run: per-test lines from Istanbul's counters, regions and declared types from the TypeScript checker, and argument shapes from a small instrumentation plugin that changes no line or Istanbul count. `examples/ts-app`'s `npm test` produces one that validates with no problem, ingests, and shows `email:multi-label-domain` and `totalCents:negative` as never exercised (`tests/e2e/test_vitest_reporter.py`; [docs/typescript.md](docs/typescript.md)).
 
 ## Run it
 
@@ -130,6 +130,7 @@ uv run python scripts/check_readme.py     # the numbers above against docs/numbe
 uv run coverset report --run <run id>     # the static report of a run in the facts store (or of a .coverset directory)
 uv run coverset report --run <PR run id> --compare-run <baseline run id>   # the same plus a Changes page against a baseline
 uv run coverset bundle validate fixtures/bundles/neutral-ts/bundle   # the TypeScript fixture against the neutral bundle spec
+(cd examples/ts-app && npm install && npm test)   # a real Vitest run that writes a neutral bundle to .coverset/neutral
 ```
 
 `coverset demo` seeds a deterministic git repository (`data/demo.git`: six commits on `main` and two PR branches), runs the six baselines and both PRs, replays `fixtures/webhooks/pr_opened.json` through the webhook route, and serves the UI. PR #1 ("Support partial refunds") fails on `tests/test_refund.py::test_refund_partial`; PR #2 ("Allow signups from company subdomains") passes with gaps. The demo also builds PR #2's static report under `<data dir>/report` and prints its path. `--no-serve` stops after the runs. `COVERSET_DATA_DIR` moves everything the demo writes.
@@ -217,8 +218,10 @@ coverset/
     commands/       the coverset CLI
   packages/coverset-model/    the neutral bundle, shape keys and the input-class catalogue (no dependencies)
   packages/pytest-coverset/   the worker plugin and coverset-ci
+  packages/coverset-vitest/   the Vitest reporter (TypeScript) that writes the neutral bundle
   examples/demo-app/          the ledger package the demo runs
   examples/bench-suite/       the synthetic 1,200-test benchmark suite
+  examples/ts-app/            a TypeScript library and its Vitest suite, measured by coverset-vitest
   fixtures/                   signed webhook payloads, review fixtures, bundles (a synthetic TypeScript one included)
   scripts/                    screenshots, README check, benchmarks, fixtures, demo seeding
   docs/                       the pages below, numbers.json and the screenshots
@@ -242,4 +245,4 @@ coverset/
 - The bench suite is synthetic. Its `busy()` bodies calibrate under the tracer, so each test spends its drawn time whether or not coverage is on, and the fan-out numbers measure parallelism, not instrumentation overhead.
 - Inherited means labelled, not copied. Trivial, renamed and moved functions are labelled inherited in the report, but their facts are not reused from the prior run and every collected test still runs.
 - `verify.kind: runtime` invariants are accepted and validated but not executed; they are always reported `untested`.
-- No TypeScript reporter is written. The neutral bundle it would produce is specified, validated and exercised end to end with a synthetic TypeScript bundle; the mapping from TypeScript types and JavaScript values to the model is documented, not implemented.
+- The TypeScript reporter supports Vitest with the Istanbul provider only, not V8 coverage or Jest ([docs/extending.md](docs/extending.md) lists what a Jest port would change). Async functions and generators are never recorded as callers, concurrent tests share one current test, unannotated parameters have no type, and it costs about 0.4 s per run on the example (loading TypeScript and type-checking).

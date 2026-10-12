@@ -47,7 +47,7 @@ dev = [
 
 [tool.uv.workspace]
 members = ["packages/*"]
-exclude = ["examples/*"]
+exclude = ["examples/*", "packages/coverset-vitest"]
 
 [tool.uv.sources]
 pytest-coverset = { workspace = true }

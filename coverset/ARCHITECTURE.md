@@ -18,7 +18,8 @@ This page is the map. Each part has its own page:
 | [docs/modal.md](docs/modal.md) | the Modal executor: images, trusted snapshots, the warm pool, the reaper, cost guards |
 | [docs/ui.md](docs/ui.md) | the web UI: pages, the data-flow overlay, the test page, keys |
 | [docs/neutral-bundle.md](docs/neutral-bundle.md) | the language-neutral bundle any test runner can write: files, shape keys, type descriptors, limits |
-| [docs/report.md](docs/report.md) | `coverset report`, the static report of one run |
+| [docs/report.md](docs/report.md) | `coverset report`, the static report of one run, and its `--compare` mode |
+| [docs/typescript.md](docs/typescript.md) | `coverset-vitest`: the TypeScript reporter that writes the neutral bundle |
 
 Status words used throughout: **verified** means read in the committed code on branch `boyd/testing` and covered by a test; **designed, not built** means the plan describes it and no code exists.
 
@@ -65,7 +66,7 @@ flowchart LR
   end
 
   subgraph other["Any other test runner"]
-    TS["a neutral-bundle producer<br/>(Vitest reporter)"]
+    TS["coverset-vitest<br/>(Vitest reporter, TypeScript)"]
   end
 
   subgraph ex["Executor"]
@@ -204,7 +205,7 @@ Each seam is a `typing.Protocol`. The how-to is [docs/extending.md](docs/extendi
 | Modal Functions with memory snapshots as an executor | A second `Executor` implementation beside the Sandbox-based `ModalExecutor`. |
 | Daytona, E2B and Docker executors | `Executor` and `Worker` in `executors/base.py`, registered in `executors.get_executor`. |
 | GitLab and Bitbucket | `Forge` in `forge/base.py`, route names in `forge/registry.py`, and the `ForgeKind` literal in `db/models.py` (today `github`, `fake`, `local`). |
-| A TypeScript reporter | The bundle it must write is specified and validated ([docs/neutral-bundle.md](docs/neutral-bundle.md)); a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`) flows through ingest, the pages, the comment and the report; the reporter itself is the open piece ([docs/extending.md](docs/extending.md#adding-a-language)). |
+| A Jest reporter, and V8 coverage for Vitest | `packages/coverset-vitest` is a real Vitest reporter (Istanbul provider) that writes the neutral bundle ([docs/typescript.md](docs/typescript.md)); a Jest port would change the counter diffing and the reporter hooks ([docs/extending.md](docs/extending.md#adding-a-language)). |
 | Runtime invariant checks | `verify.kind: runtime` is accepted and reported `untested` by `analysis/invariants.evaluate`; the design uses the shape tracer's local `PY_START`/`PY_RETURN` events ([docs/invariants.md](docs/invariants.md#runtime-checks-designed-not-built)). |
 | LightGBM ranking stage | `analysis/scoring.score_tests` returns `ScoredTest`; `TestHistory` is where the extra features would come from. |
 | Result reuse and test skipping | The planner classifies `trivial`, `renamed` and `moved` changes and the patch report marks their rows inherited, but every collected test still runs. Skipping would sit in `planner._analyse` before sharding. |
