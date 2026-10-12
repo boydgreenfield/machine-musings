@@ -24,6 +24,8 @@ class DemoData:
     pr1_run: str
     pr2_run: str
     repo_id: int
+    main_run: str = ""
+    """The ``main`` baseline at PR #1's base commit (``main-6``)."""
 
 
 # -- HTML checks shared by the report tests -------------------------------------------------------

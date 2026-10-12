@@ -95,6 +95,10 @@ class ReportInput:
     """func_key → parameter (and ``return``) → type descriptor, from a neutral bundle."""
     notice: str | None = None
     """Why no source file was read (shown on every page), or None when sources were looked up."""
+    commit: str | None = None
+    """The commit the sources were read at (a facts-store run's head, from the repository's
+    mirror), or None when they came from the local tree (``--repo-root`` or the current directory).
+    ``--compare`` uses it to tell a base's own sources from borrowed ones."""
 
 
 class _Ids:

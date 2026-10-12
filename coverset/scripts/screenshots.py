@@ -8,9 +8,10 @@ Chromium through Playwright at 1440×900, device scale 1. Full-size PNGs land in
 (gitignored); the JPEGs are resized to 1200 px wide at quality 82, lowered stepwise until each is at
 most 250 KB. The recipe per page is in docs/ui.md ("Screenshots").
 
-The ``report`` group (``report.jpg``, ``report-source.jpg``) needs no server: it builds the static
-report of PR #2's run with ``coverset report --run`` into ``<data-dir>/report-shots`` and opens its
-pages from ``file://`` (docs/report.md).
+The ``report`` group (``report.jpg``, ``report-source.jpg``, ``report-changes.jpg``) needs no server:
+it builds the static report of PR #2's run with ``coverset report --run`` into
+``<data-dir>/report-shots`` and PR #1's run compared with its ``main`` baseline (``--compare-run``)
+into ``<data-dir>/report-changes-shots``, and opens their pages from ``file://`` (docs/report.md).
 
     uv run python scripts/screenshots.py                       # seed a temp demo, shoot everything
     uv run python scripts/screenshots.py --data-dir <dir>      # reuse <dir> when it holds a demo
@@ -52,8 +53,8 @@ QUALITY = 82
 MIN_QUALITY = 50
 MAX_BYTES = 250 * 1024
 READY = 'body[data-ready="1"]'
-SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test")
-REPORT_SHOT_NAMES = ("report", "report-source")
+SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test", "repo")
+REPORT_SHOT_NAMES = ("report", "report-source", "report-changes")
 GROUPS = {"report": REPORT_SHOT_NAMES}
 """``--only`` names that stand for several shots."""
 REPORT_LENS_TEST = "tests/test_windows.py::test_expires_at"
@@ -392,6 +393,22 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
             clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
         )
 
+    def repo(page: Any, path: Path) -> None:
+        # The repository overview (tiles, trend, changes, Gap thumbnail, largest gaps), down to
+        # just under its section; the PR and run lists below it are left out.
+        goto(page, f"{base}/repos/{rid}")
+        bottom = page.evaluate(
+            "() => { const s = document.querySelector('#overview');"
+            " const r = s ? s.getBoundingClientRect() : null;"
+            " return r ? r.bottom + window.scrollY : document.body.scrollHeight; }"
+        )
+        height = max(VIEWPORT["height"], int(bottom) + 12)
+        page.screenshot(
+            path=str(path),
+            full_page=True,
+            clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
+        )
+
     return {
         "pr": pr,
         "run-live": run_live,
@@ -401,6 +418,7 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
         "map": treemap,
         "comment": comment,
         "test": test_page,
+        "repo": repo,
     }
 
 
@@ -424,9 +442,40 @@ def build_report_dir(data_dir: Path, ids: DemoIds) -> Path:
     return out
 
 
-def take_report_shots(report: Path, schemes: list[str], only: set[str]) -> list[Path]:
-    """The report's index (totals, treemap, the top of the file table) and parse.py with the lens on
-    and line 18's tests open, from ``file://``."""
+def build_changes_dir(data_dir: Path, ids: DemoIds) -> Path:
+    """``coverset report --run <PR #1 run> --compare-run <the main baseline at its base>`` into
+    ``<data_dir>/report-changes-shots`` (rewritten each time)."""
+    con = sqlite3.connect(data_dir / "coverset.db")
+    try:
+        row = con.execute(
+            "SELECT b.id FROM runs r JOIN runs b ON b.repo_id = r.repo_id AND b.head_sha = r.base_sha "
+            "WHERE r.id = ? AND b.pr_id IS NULL ORDER BY b.created_at DESC LIMIT 1",
+            (ids.pr1_run,),
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise SystemExit(f"PR #1's run {ids.pr1_run} has no baseline run at its base commit")
+    out = data_dir / "report-changes-shots"
+    log(f"building the static report of PR #1's run against the main baseline {row[0]} into {out}")
+    result = subprocess.run(
+        [coverset_bin(), "report", "--run", ids.pr1_run, "--compare-run", str(row[0]), "--out", str(out)],
+        cwd=ROOT,
+        env=child_env(data_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"coverset report failed (exit {result.returncode}): {result.stderr[-2000:]}")
+    return out
+
+
+def take_report_shots(
+    report: Path | None, schemes: list[str], only: set[str], changes: Path | None = None
+) -> list[Path]:
+    """The report's index (totals, treemap, the top of the file table), parse.py with the lens on
+    and line 18's tests open, and the Changes page of PR #1 against main, from ``file://``."""
     from playwright.sync_api import sync_playwright
 
     SHOTS.mkdir(exist_ok=True)
@@ -441,15 +490,20 @@ def take_report_shots(report: Path, schemes: list[str], only: set[str]) -> list[
                 page = context.new_page()
                 page.set_default_timeout(30_000)
                 suffix = "" if scheme == "light" else "-dark"
-                if "report" in only:
+                if "report" in only and report is not None:
                     log(f"{scheme}: report")
                     target = SHOTS / f"report{suffix}.png"
                     report_index(page, report, target)
                     pngs.append(target)
-                if "report-source" in only:
+                if "report-source" in only and report is not None:
                     log(f"{scheme}: report-source")
                     target = SHOTS / f"report-source{suffix}.png"
                     report_source(page, report, target)
+                    pngs.append(target)
+                if "report-changes" in only and changes is not None:
+                    log(f"{scheme}: report-changes")
+                    target = SHOTS / f"report-changes{suffix}.png"
+                    report_changes(page, changes, target)
                     pngs.append(target)
                 context.close()
         finally:
@@ -519,6 +573,21 @@ def report_source(page: Any, report: Path, path: Path) -> None:
         page.set_viewport_size(VIEWPORT)
 
 
+def report_changes(page: Any, report: Path, path: Path) -> None:
+    """The Changes page from the top through its tests table (a full-page clip, at most 1600 px)."""
+    goto(page, (report / "changes.html").as_uri())
+    bottom = page.evaluate(
+        """() => {
+            const end = document.querySelector('#tests-changed') || document.querySelector('main');
+            return end.getBoundingClientRect().bottom + window.scrollY + 16;
+        }"""
+    )
+    height = min(1600, max(VIEWPORT["height"], int(bottom)))
+    page.screenshot(
+        path=str(path), full_page=True, clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height}
+    )
+
+
 # -- JPEGs ---------------------------------------------------------------------------------------------
 
 
@@ -552,7 +621,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--only",
         default=",".join([*SHOT_NAMES, "report"]),
-        help="comma-separated shot names (`report` stands for report and report-source)",
+        help="comma-separated shot names (`report` stands for report, report-source and report-changes)",
     )
     parser.add_argument("--scheme", choices=["light", "dark", "both"], default="both")
     parser.add_argument("--keep", action="store_true", help="keep the temporary data dir")
@@ -581,7 +650,9 @@ def main(argv: list[str] | None = None) -> int:
                 pngs += take_shots(base, ids, schemes, server_shots)
         report_shots = args.only & set(REPORT_SHOT_NAMES)
         if report_shots:
-            pngs += take_report_shots(build_report_dir(data_dir, ids), schemes, report_shots)
+            report = build_report_dir(data_dir, ids) if report_shots - {"report-changes"} else None
+            changes = build_changes_dir(data_dir, ids) if "report-changes" in report_shots else None
+            pngs += take_report_shots(report, schemes, report_shots, changes)
         for png in pngs:
             jpg, size, quality = to_jpeg(png)
             flag = "" if size <= MAX_BYTES else "  (over 250 KB at the lowest quality)"

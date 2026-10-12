@@ -9,6 +9,7 @@ root and never write a file outside ``--out``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -297,3 +298,75 @@ def test_out_dir_guards(tmp_path: Path) -> None:
     with pytest.raises(OutDirError):
         writer.text("sub/escape.html", "x")
     assert not (tmp_path / "escape.html").exists()
+
+
+# -- --compare: the Changes page and the "since base" marks carry the same hostile strings ----------
+
+GONE = f"tests/test_x.py::gone[{SCRIPT}{BIDI}]"
+REMOVED = f"src/removed{ATTR}{SCRIPT}.py"
+
+
+def hostile_base(repo: Path, outside: Path) -> HostileBundle:
+    """The hostile bundle as a base: every test passed, one more test (only in the base) ran line 8
+    of src/ok.py and a file that is gone now, with a function named like markup."""
+    now = hostile_bundle(repo, outside)
+    tests = tuple(
+        TestRow(t.nodeid, t.file, "passed", 0.001, None, None, None, None, None) for t in now.tests
+    ) + (TestRow(GONE, "tests/test_x.py", "failed", 0.5, "call", None, CLOSE + IMG, None, None),)
+    coverage = {k: dict(v) for k, v in now.coverage.items()}
+    coverage[GONE] = {"src/ok.py": (7, 8, 9), REMOVED: (1, 2)}
+    static = {**now.static, REMOVED: StaticFile(REMOVED, 2, (1, 2), (), ())}
+    gone_fn = {
+        "key": f"{SCRIPT}-gone",
+        "path": REMOVED,
+        "qualname": IMG + BIDI,
+        "def_line": 1,
+        "body_start": 2,
+        "end_line": 2,
+        "params": [ATTR],
+        "kind": "function",
+    }
+    return dataclasses.replace(
+        now, tests=tests, coverage=coverage, static=static, functions=(*now.functions, gone_fn)
+    )
+
+
+def test_the_changes_page_escapes_hostile_strings(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "ok.py").write_text(SOURCE, encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "abs_secret.py").write_text("ABS_SECRET = 1\n", encoding="utf-8")
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    now = input_from_bundle(
+        hostile_bundle(repo, outside), source=Path(f"now-{SCRIPT}"), kind="neutral", repo_root=repo
+    )  # type: ignore[arg-type]
+    base = input_from_bundle(hostile_base(repo, outside), source=Path(f"base-{IMG}{BIDI}"), kind="neutral")  # type: ignore[arg-type]
+    out = tmp_path / "out"
+    result = build_report(now, out, base=base)
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if not p.is_relative_to(out))
+    assert after == before, "the report wrote outside --out"
+    c = result.changes
+    assert c is not None and GONE in c.base_only
+    assert any(t.kind == "outcome" for t in c.tests) and any(t.kind == "removed" for t in c.tests)
+    assert any(f.status == "removed" and f.path == REMOVED for f in c.files)
+    pages = all_pages(out)
+    changes = pages["changes.html"]
+    assert "data-test-sets" in changes and 'data-test-change="removed"' in changes
+    for name, html in pages.items():
+        parser = parse_page(html)
+        for tag, attrs in parser.tags:
+            assert tag not in ("img", "iframe", "object", "embed", "base"), (name, tag)
+            assert not any(key.startswith("on") for key in attrs), (name, tag, attrs)
+            for key in ("href", "src", "action", "formaction", "xlink:href"):
+                value = (attrs.get(key) or "").strip().lower()
+                assert not value.startswith(("javascript:", "data:", "//")), (name, tag, attrs)
+        markup = DATA_BLOCK.sub("", html)
+        for needle in ("<script>alert", "<img", "</script><script>"):
+            assert needle not in markup, (name, needle)
+        assert not BIDI_CHARS.search(html), name
+        assert "ABS_SECRET" not in html, name
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in changes
+    assert "&lt;U+202E&gt;evil" in changes
+    assert 'data-file="src/removed&#34;onmouseover=&#34;alert(1)' in changes

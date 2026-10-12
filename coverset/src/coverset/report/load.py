@@ -434,6 +434,7 @@ async def load_run(
         meta=about,
         title=title or f"Coverage report · {repo_name} · {label}",
         origin=f"run {run_id} ({head_sha[:8]})",
+        commit=head_sha,
     )
 
 

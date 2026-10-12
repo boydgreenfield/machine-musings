@@ -80,6 +80,38 @@ pre.meta-dump { font-size: 0.78rem; background: var(--surface-2); border: 1px so
 .reach-names .chip { font-size: 0.78rem; }
 h1.nodeid { font-size: 1.25rem; font-family: var(--mono); font-weight: 600; overflow-wrap: anywhere; }
 
+/* -- --compare: the Changes page, the index tile, the "since base" gutter marks ---------------- */
+.changes-tile {
+  display: block; margin: 0 0 14px; padding: 10px 16px; border: 1px solid var(--rule-strong); border-left: 4px solid var(--ran);
+  border-radius: var(--radius); background: var(--surface); color: var(--ink); text-decoration: none; font-size: 0.95rem;
+}
+.changes-tile:hover { background: var(--surface-2); }
+.changes-tile strong { font-weight: 650; }
+.compare-notice { margin: 0 0 14px; padding: 8px 14px; border: 1px solid var(--rule-strong); border-left: 4px solid var(--part-edge); border-radius: 5px; background: var(--surface-2); font-size: 0.9rem; }
+.compare-notice p { margin: 0 0 4px; }
+.compare-notice summary { cursor: pointer; color: var(--ink-2); font-size: 0.86rem; }
+.compare-notes { margin: -6px 0 16px; padding-left: 20px; color: var(--ink-2); font-size: 0.88rem; }
+.delta-table { max-width: 640px; }
+.delta-table td.delta { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+.delta-table td.delta.moved { color: var(--ink); font-weight: 600; }
+.lines-table td, .fn-delta-table td, .tests-delta td { vertical-align: top; }
+.line-refs { max-width: 560px; font-size: 0.84rem; }
+.line-ref { font-family: var(--mono); font-size: 0.8rem; padding: 0 3px; border-radius: 3px; }
+a.line-ref.since-lost, span.line-ref.since-lost { color: var(--miss-ink); background: var(--miss-tint); }
+a.line-ref.since-gained, span.line-ref.since-gained { color: var(--ran-ink); background: var(--ran-tint); }
+.line-ref.not-rerun { color: var(--muted); background: var(--surface-3); }
+.class-delta .chip { font-size: 0.78rem; margin: 1px 0; }
+.class-delta .class-lost { color: var(--miss-ink); }
+.class-delta .class-gained { color: var(--ran-ink); }
+.class-delta .class-not-rerun { color: var(--muted); }
+.since-note { margin: -2px 0 12px; padding: 6px 12px; border-left: 3px solid var(--ran); background: var(--surface); border-radius: 4px; font-size: 0.9rem; }
+[data-since] { color: var(--ink-2); }
+.ln.since-lost .gd { color: var(--miss-ink); background: var(--miss-tint); }
+.ln.since-gained .gd { color: var(--ran-ink); background: var(--ran-tint); }
+.since-swatch { display: inline-block; width: 14px; text-align: center; font-weight: 700; margin-right: 4px; border-radius: 2px; }
+.since-swatch.since-lost { color: var(--miss-ink); background: var(--miss-tint); }
+.since-swatch.since-gained { color: var(--ran-ink); background: var(--ran-tint); }
+
 @media (max-width: 960px) {
   .search { flex-basis: 100%; order: 3; }
   .top { flex-wrap: wrap; height: auto; padding-top: 8px; padding-bottom: 8px; }

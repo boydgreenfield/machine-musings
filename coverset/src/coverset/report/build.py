@@ -17,6 +17,10 @@ Pages (all relative links, so the directory works from ``file://`` and from any 
     passed in.
 ``about.html``
     producer, tracer, caps and limits hit, the bundle's meta.
+``changes.html`` (with a base: ``--compare`` / ``--compare-run``)
+    what this run gained or lost against the base (:mod:`coverset.report.compare`): totals, lines
+    newly uncovered or covered per file, input classes lost or gained per function, tests added,
+    removed, with another outcome or slower; the file pages mark those lines in the gutter.
 
 Every value from the bundle is untrusted: it reaches markup only through Jinja autoescaping or the
 ``coverset.web.render`` helpers (inside :func:`~coverset.web.render.html.relative_hrefs`, so the
@@ -47,6 +51,7 @@ from coverset.analysis.shapes import NEVER_EXERCISED
 from coverset.facts.queries import TreeNode
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion
+from coverset.report.compare import SLOWER_FACTOR, SLOWER_MIN_S, Comparison, compare
 from coverset.report.facts import NO_RESULT, NOT_RUN, ReportInput, TestInfo
 from coverset.report.output import (
     PageNames,
@@ -79,6 +84,11 @@ MAX_LISTED = 200
 """A test page lists at most this many functions it ran, a function page at most this many covering
 tests (then a "+N more" line), so the report grows with tests + functions, not their product."""
 _FUNC_KEY = re.compile(r"^[0-9a-f]{16}$")
+MAX_LINE_LINKS = 120
+"""The Changes page links at most this many lines per file and kind (then "and N more")."""
+MAX_CHANGE_ROWS = 500
+"""The Changes page lists at most this many rows per table (then "+N more")."""
+_LINE_HEAD = re.compile(r'<div class="(ln[^"]*)" id="L(\d+)" data-line="\2"><span class="gd"></span>')
 OUTCOME_ORDER = ("failed", "error", "xpassed", "passed", "xfailed", "skipped", NO_RESULT, NOT_RUN)
 _OUTCOME_RANK = {name: i for i, name in enumerate(OUTCOME_ORDER)}
 
@@ -95,7 +105,9 @@ class BuildResult:
     out_dir: Path
     index: Path
     pages: dict[str, int]
-    """Page counts by kind (index, about, files, functions, tests)."""
+    """Page counts by kind (index, about, files, functions, tests, and changes with a base)."""
+    changes: Comparison | None = None
+    """The comparison with the base, when the report was built with one."""
 
 
 @dataclass(slots=True)
@@ -232,11 +244,14 @@ def stylesheet() -> str:
 # -- the build ------------------------------------------------------------------------------------
 
 
-def build_report(inp: ReportInput, out: Path) -> BuildResult:
+def build_report(inp: ReportInput, out: Path, *, base: ReportInput | None = None) -> BuildResult:
     """Write the report for ``inp`` into ``out`` (see :func:`~coverset.report.output.check_out_dir`).
 
-    The pages are written into a staging directory next to ``out`` that replaces it only when the
-    build succeeded: a failed build leaves the previous report untouched.
+    With ``base`` the report also compares this run against it: ``changes.html``, the index tile,
+    the "since base" gutter marks and the function pages' one-line summaries
+    (:func:`~coverset.report.compare.compare`). The pages are written into a staging directory next
+    to ``out`` that replaces it only when the build succeeded: a failed build leaves the previous
+    report untouched.
     """
     target = check_out_dir(out)
     staging = staging_dir(target)
@@ -245,12 +260,16 @@ def build_report(inp: ReportInput, out: Path) -> BuildResult:
         with relative_hrefs():
             builder = _Builder(inp, writer)
             builder.collect()
+            if base is not None:
+                builder.changes = compare(
+                    base, inp, now_views={fn.region.func_key: fn.view for fn in builder.functions}
+                )
             pages = builder.write_all()
         root = swap_in(staging, target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    return BuildResult(out_dir=root, index=root / "index.html", pages=pages)
+    return BuildResult(out_dir=root, index=root / "index.html", pages=pages, changes=builder.changes)
 
 
 def _rel(depth_of: str, target: str) -> str:
@@ -274,6 +293,7 @@ class _Builder:
         self.files: dict[str, FileEntry] = {}
         self.functions: list[FnEntry] = []
         self.tests: dict[str, TestEntry] = {}
+        self.changes: Comparison | None = None
 
     # -- collection -------------------------------------------------------------------------
 
@@ -336,6 +356,7 @@ class _Builder:
             title=self.inp.title,
             origin=self.inp.origin,
             notice=self.inp.notice,
+            changes=self.changes,
             link=lambda target: _rel(page, target),
             **context,
         )
@@ -370,13 +391,17 @@ class _Builder:
             self.function_page(fn)
         for entry in self.tests.values():
             self.test_page(entry)
-        return {
+        counts = {
             "index": 1,
             "about": 1,
             "files": len(self.files),
             "functions": len(self.functions),
             "tests": len(self.tests),
         }
+        if self.changes is not None:
+            self.changes_page(self.changes)
+            counts["changes"] = 1
+        return counts
 
     def search_index(self) -> str:
         items: list[list[str]] = []
@@ -662,6 +687,8 @@ class _Builder:
                 regions=regions,
                 tests_url=lambda n: f"#L{n}",
             )
+            if self.changes is not None and entry.path in self.changes.marks:
+                html = mark_since(html, *self.changes.marks[entry.path])
         tests = sorted(entry.tests.items())
         data = {
             "kind": "file",
@@ -688,6 +715,7 @@ class _Builder:
             ],
             missed_lines=_ranges(missed_lines),
             partial_lines=sorted(entry.facts.partial.items()),
+            since=self.changes.marks.get(entry.path) if self.changes is not None else None,
             data=self.data_block(data),
         )
 
@@ -791,7 +819,28 @@ class _Builder:
             outcomes=sorted(outcomes.items(), key=lambda kv: (outcome_rank(kv[0]), kv[0])),
             suggestion=hypothesis_stub(view),
             test_link=self.test_link,
+            since=self.changes.by_func.get(region.func_key) if self.changes is not None else None,
             data=self.data_block(data),
+        )
+
+    # -- the changes page -----------------------------------------------------------------------
+
+    def changes_page(self, changes: Comparison) -> None:
+        file_pages = {path: e.page for path, e in self.files.items()}
+        fn_pages = {fn.region.func_key: fn.page for fn in self.functions}
+        self.render(
+            "changes.html",
+            "changes.html",
+            kind="changes",
+            c=changes,
+            file_page=file_pages.get,
+            fn_page=lambda key: fn_pages.get(key) if key else None,
+            test_link=self.test_link,
+            max_lines=MAX_LINE_LINKS,
+            max_rows=MAX_CHANGE_ROWS,
+            slower_factor=SLOWER_FACTOR,
+            slower_min=SLOWER_MIN_S,
+            data=None,
         )
 
     # -- test pages ---------------------------------------------------------------------------
@@ -849,6 +898,27 @@ def _short(value: object, limit: int = 300) -> str:
         else json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
     )
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def mark_since(html: Markup, lost: frozenset[int], gained: frozenset[int]) -> Markup:
+    """The rendered source with the "since base" marks in its diff column: ``since-lost`` (ran in
+    the base, not now) and ``since-gained`` (ran now, not in the base). Only the renderer's own line
+    heads are rewritten, with constant markup."""
+
+    def mark(match: re.Match[str]) -> str:
+        line = int(match.group(2))
+        if line in lost:
+            cls, glyph, label = "since-lost", "▾", "newly uncovered since base"
+        elif line in gained:
+            cls, glyph, label = "since-gained", "▴", "newly covered since base"
+        else:
+            return match.group(0)
+        return (
+            f'<div class="{match.group(1)} {cls}" id="L{line}" data-line="{line}">'
+            f'<span class="gd" title="{label}" aria-label="{label}">{glyph}</span>'
+        )
+
+    return Markup(_LINE_HEAD.sub(mark, str(html)))
 
 
 def _ranges(lines: Iterable[int]) -> str:

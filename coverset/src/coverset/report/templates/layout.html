@@ -21,6 +21,8 @@
     <a href="{{ link('index.html') }}"{% if kind == 'index' %} aria-current="page"{% endif %}>Overview</a>
     <a href="{{ link('index.html') }}#files">Files</a>
     <a href="{{ link('index.html') }}#tests">Tests</a>
+    {% if changes %}<a href="{{ link('changes.html') }}"{% if kind == 'changes' %} aria-current="page"{% endif %}>Changes</a>
+    {% endif %}
     <a href="{{ link('about.html') }}"{% if kind == 'about' %} aria-current="page"{% endif %}>About</a>
   </nav>
   <div class="search" role="search">

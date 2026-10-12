@@ -16,6 +16,7 @@
   </p>
 </div>
 <p class="signature"><code>{{ signature }}</code>{% if not view.annotations or view.annotations.values()|select|list|length == 0 %} <span class="muted">· unannotated: expected classes come from the observed values only</span>{% endif %}</p>
+{% if since %}<p class="since-note" data-since><a href="{{ link('changes.html') }}">Since base</a>: {{ since.summary() }}</p>{% endif %}
 {% if cov.note %}<p class="sampling-note muted" data-sampling-note>{{ cov.note }}</p>{% endif %}
 <div class="detail-grid detail">
   <div>

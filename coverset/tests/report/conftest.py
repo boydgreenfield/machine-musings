@@ -96,6 +96,12 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> DemoData:
             return str(row[0])
 
         repo_id = int(con.execute("SELECT id FROM repos ORDER BY id LIMIT 1").fetchone()[0])
-        return DemoData(settings, pr_run(1), pr_run(2), repo_id)
+        pr1 = pr_run(1)
+        main = con.execute(
+            "SELECT b.id FROM runs r JOIN runs b ON b.repo_id = r.repo_id AND b.head_sha = r.base_sha "
+            "WHERE r.id = ? AND b.pr_id IS NULL ORDER BY b.created_at DESC LIMIT 1",
+            (pr1,),
+        ).fetchone()
+        return DemoData(settings, pr1, pr_run(2), repo_id, str(main[0]) if main else "")
     finally:
         con.close()

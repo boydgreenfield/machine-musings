@@ -6,6 +6,12 @@
   <h1>{{ title }}</h1>
   <p class="meta"><span>{{ origin }}</span><span>{{ totals.files|plural('file') }}</span><span>{{ totals.tests|plural('test') }}</span></p>
 </div>
+{% if changes %}
+<a class="changes-tile" href="{{ link('changes.html') }}" data-changes-tile>
+  <strong>Changes since base:</strong> <span data-lines-lost>{{ changes.lines_lost|plural('line') }} lost</span>, <span data-classes-lost>{{ changes.classes_lost|plural('class', 'classes') }} lost</span>, <span data-tests-changed>{{ changes.tests_changed|plural('test') }} changed</span>
+  <span class="muted">· base {{ changes.base_origin }}{% if changes.base_only %} · {{ changes.base_only|length|plural('test') }} of the base did not run here{% endif %}</span>
+</a>
+{% endif %}
 <div class="stats totals">
   <div class="stat" data-stat="statements"><div class="value">{{ totals.statements }}</div><div class="label">statements</div></div>
   <div class="stat" data-stat="run"><div class="value">{{ totals.run_pct|pct }}</div><div class="label">lines run · {{ totals.run }} of {{ totals.statements }}, {{ totals.missed }} never ran</div></div>

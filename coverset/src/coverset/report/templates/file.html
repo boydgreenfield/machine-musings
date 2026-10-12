@@ -12,6 +12,7 @@
   <div class="src-frame">
     <div class="src-bar">
       <span class="path">{{ entry.path }}</span>
+      {% if since %}<span data-since>since base: {{ since[0]|length }} lost, {{ since[1]|length }} gained · <a href="{{ link('changes.html') }}">changes</a></span>{% endif %}
       <span data-file-stats>{{ entry.statements }} statements · {{ entry.missed }} never ran · {{ entry.partial }} partial{% if entry.hollow %} · {{ entry.hollow }} input class{{ '' if entry.hollow == 1 else 'es' }} never exercised{% endif %} · {{ entry.tests|length|plural('test') }}</span>
       <span class="muted">{% if prev_page %}<a href="{{ link(prev_page) }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_page %}<a href="{{ link(next_page) }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
     </div>
@@ -31,6 +32,10 @@
       <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="14" height="14" class="lg-part"/></svg>took one branch only</li>
       <li><span class="chip">class <b>n</b></span> input class some test passed in (sampled calls)</li>
       <li><span class="chip chip-hollow">class <b>0</b></span> never exercised</li>
+      {% if changes %}
+      <li><span class="since-swatch since-lost" aria-hidden="true">▾</span>newly uncovered since base</li>
+      <li><span class="since-swatch since-gained" aria-hidden="true">▴</span>newly covered since base</li>
+      {% endif %}
     </ul>
     {% if html is not none %}
     {{ html }}
