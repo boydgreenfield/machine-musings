@@ -24,6 +24,8 @@ import stat
 import tempfile
 from pathlib import Path
 
+from coverset.web.render.html import mark_bidi  # noqa: F401  (re-exported for the report's callers)
+
 __all__ = [
     "MARKER",
     "OutDirError",
@@ -48,13 +50,6 @@ _BIDI = re.compile("[؜‎‏‪-‮⁦-⁩]")
 
 class OutDirError(Exception):
     """The output directory cannot be used (not ours, not a directory, or not writable)."""
-
-
-def mark_bidi(text: str) -> str:
-    """``text`` (plain, unescaped) with each bidirectional control character replaced by a visible
-    ``<U+202E>`` marker: the live pages pass untrusted strings (test ids, paths, labels) through this
-    before escaping, the same rule :func:`neutralize` applies to a whole report page."""
-    return _BIDI.sub(lambda m: f"<U+{ord(m.group()):04X}>", text)
 
 
 def neutralize(text: str) -> str:

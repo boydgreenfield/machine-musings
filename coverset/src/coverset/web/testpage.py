@@ -12,7 +12,7 @@ facts list the file; the plugin's collected markers are not persisted); the inva
 ``test_attempts`` of the run, the failure text from the run's ``test`` events (already redacted).
 History: the test's last :data:`HISTORY_RUNS` results, as squares. Every string from the bundle
 (test id, paths, names) shows its bidirectional controls as visible ``<U+202E>`` markers (the
-``visible`` template filter, :func:`~coverset.report.output.mark_bidi`). Data flow, from the run's facts
+``visible`` template filter, :func:`~coverset.web.render.html.mark_bidi`). Data flow, from the run's facts
 (:func:`~coverset.facts.queries.test_touched` and :func:`~coverset.facts.queries.test_shapes`):
 the functions it called with the lines it ran in each, the input classes it passed per parameter
 (strips: this test vs any test) and the flow SVG (:mod:`coverset.web.render.flow`).
@@ -35,12 +35,12 @@ from coverset.db.models import PullRequest, Run, RunEvent, TestAttempt, TestCase
 from coverset.facts import queries
 from coverset.lang.base import ShapeObs
 from coverset.orchestrator.history import nodeid_hash
-from coverset.report.output import mark_bidi
 from coverset.web.context import app_db
 from coverset.web.facts_view import ParamReach, RunFacts, param_reach, reached_classes, test_file
 from coverset.web.loaders import default_run, facts_for, invariant_rows, read_source, require_run, store
 from coverset.web.pages import get_repo, render_page
 from coverset.web.render.flow import FlowNode, TestCall, render_test_flow
+from coverset.web.render.html import mark_bidi
 from coverset.web.render.shapegrid import render_strip
 
 __all__ = ["bp", "line_ranges", "split_nodeid", "test_decorations", "test_label"]

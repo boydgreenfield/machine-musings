@@ -79,8 +79,14 @@ def parse_int(value: str | None, *, default: int | None = None, minimum: int = 0
     return number if number >= minimum else default
 
 
+MAX_DB_ID = 2**63 - 1
+"""The largest id SQLite can hold; anything above it is a 404, never a database error."""
+
+
 async def get_repo(rid: int) -> Repo:
     """The repo with id ``rid`` or 404."""
+    if rid > MAX_DB_ID:
+        raise NotFound(f"There is no repository with id {rid}.")
     async with app_db().session() as session:
         repo = await session.get(Repo, rid)
     if repo is None:

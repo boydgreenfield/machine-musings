@@ -21,6 +21,7 @@ from coverset.units import fmt_ms, fmt_secs
 
 __all__ = [
     "Markup",
+    "mark_bidi",
     "attr",
     "attrs",
     "breakable",
@@ -141,10 +142,21 @@ def join(parts: Iterable[Markup | str]) -> Markup:
     return Markup("").join(p if isinstance(p, Markup) else escape(p) for p in parts)
 
 
+_BIDI = re.compile("[؜‎‏‪-‮⁦-⁩]")
+
+
+def mark_bidi(text: object) -> str:
+    """``text`` (plain, unescaped) with each bidirectional control character replaced by a visible
+    ``<U+202E>`` marker, so a Trojan-Source string in a test id, a path or a label shows what it is
+    instead of reordering the line. Applied before escaping; the report applies the same rule to
+    whole pages."""
+    return _BIDI.sub(lambda m: f"<U+{ord(m.group()):04X}>", "" if text is None else str(text))
+
+
 _JOINTS = re.compile(r"(?<=::)|(?<=/)|(?<=\[)|(?<=_)|(?<=-)")
 
 
 def breakable(text: object) -> Markup:
     """Escaped ``text`` with ``<wbr>`` after ``::``, ``/``, ``[``, ``_`` and ``-``, so a long test
     id wraps at its natural joints instead of mid-word."""
-    return Markup("<wbr>").join(esc(part) for part in _JOINTS.split("" if text is None else str(text)))
+    return Markup("<wbr>").join(esc(part) for part in _JOINTS.split(mark_bidi(text)))

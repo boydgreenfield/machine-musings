@@ -32,7 +32,7 @@ from coverset.web.loaders import (
     require_run,
     run_counts,
 )
-from coverset.web.pages import get_repo, render_page
+from coverset.web.pages import MAX_DB_ID, get_repo, render_page
 from coverset.web.pr_view import analyse_diff
 from coverset.web.render.treemap import MODES, build_tree, render_legend, render_treemap
 from coverset.web.run_view import order_rows
@@ -136,6 +136,8 @@ def target_gaps(summary: dict[str, Any]) -> list[tuple[str, list[str]]]:
 @bp.get("/repos/<int:rid>/prs/<int:n>")
 async def pr_page(rid: int, n: int) -> Response:
     """The PR page: verdict band, needs-attention cards and collapsed detail sections."""
+    if n > MAX_DB_ID:
+        raise NotFound(f"There is no pull request #{n}.")
     repo_row, pr, run = await _pr(rid, n)
     if run is None:
         return await render_page("pr.html", repo=repo_row, pr=pr, run=None, summary={}, cards=[])
