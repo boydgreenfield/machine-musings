@@ -26,6 +26,8 @@ Medians of 5 runs on 2026-10-11 (the cold image build and the snapshot build are
 | **Coverage map, Gap mode.** Tile area is statements; the stronger a tile's colour, the more of its lines ran under tests that never tried whole kinds of input. Hatched tiles were never called. | **PR comment.** The one sticky comment coverset posts, as the fake forge recorded it: verdict, patch coverage, changed functions, invariants. |
 | ![The page of the refunds PR's failing test: identity, result, history and its data flow](docs/test.jpg) | ![The static report's overview: totals, the Gap treemap and the file table](docs/report.jpg) |
 | **Test page.** The refunds PR's failing test: its result and retry, the invariant it violates, its last runs, and its data flow from the test through `refund` into `allocate_cents` and each parameter. Every nodeid on the pages links here, and from here each file opens with the lines this test did not run dimmed. | **Local report.** The same facts as static pages from one `pytest` run, with no server: totals, the Gap treemap, the file table, a page per file, function and test. Built by `coverset report`; see below. |
+| ![The repository overview: tiles, trends over six baselines, changes since the previous baseline, the Gap map thumbnail and the largest gaps](docs/repo.jpg) | ![The static report's Changes page: PR #1 against the main baseline](docs/report-changes.jpg) |
+| **Repository overview.** The default branch over its last six baselines: statements, lines run, branches, functions called and input classes observed as tiles, a sparkline each for line % and input-class %, what changed since the previous baseline, a Gap-map thumbnail that opens the coverage map, and the functions with the most input classes no test passed in. | **Changes since a base.** `coverset report --compare`: PR #1 against the main baseline shows exactly its effect: three refund tests added, one failing, one new function, one input class gained, nothing lost. |
 
 Screenshots: demo data from <!-- n:demo_runs -->8<!-- /n --> local runs (`coverset demo --executor local`: six `main` commits and two PRs), taken on <!-- n:screenshot_date -->2026-10-11<!-- /n --> with `scripts/screenshots.py`. Dark versions are next to them as `docs/*-dark.jpg`. The AI review in them comes from fixtures.
 
@@ -99,14 +101,15 @@ Each of these functions is at 100% line and branch coverage on `main`. Each tabl
 `coverset report` writes one test run as a folder of static pages, the rich equivalent of `coverage html`: lines and branches, the tests behind every line, a data-flow lens that dims what one test did not run, a page per test with the input classes it passed in, and every function's shape grid with Hypothesis strategies for the classes no test passed in. No server and no database: open `index.html` from disk.
 
 ```sh
-pytest --coverset-out .coverset --coverset-source mypkg
+pytest --coverset                     # the bundle goes to .coverset/, sources from [tool.coverset] (or --coverset-out DIR --coverset-source PKG)
 coverset report .coverset --open      # from a git checkout that tracks the measured files; also --run <run id> from the facts store
+coverset report .coverset --compare ../before/.coverset   # plus a Changes page: what this run gained or lost against a base
 coverset report bundle.tar.gz --repo-root ~/src/myrepo   # a CI bundle or a neutral bundle: sources only with --repo-root
 ```
 
 ![parse.py in the static report with the data-flow lens on one test and line 18's tests open](docs/report-source.jpg)
 
-One run only: no history and no PR diff (the live pages have those). Keys, the lens and the trust model are in [docs/report.md](docs/report.md).
+With `--compare BASE` (or `--compare-run RUN_ID` from the facts store) the report also says what this run gained or lost against a base: a Changes page with the totals as base → now, lines newly uncovered or covered per file, input classes lost or gained per function, and tests added, removed, failing or slower, honest about runs that ran different test sets. One run (or one pair) only: no history and no PR diff, which the live pages have. Keys, the lens, the comparison rules and the trust model are in [docs/report.md](docs/report.md).
 
 ## One model for every language
 
@@ -125,10 +128,11 @@ uv run python scripts/screenshots.py      # the README screenshots (needs `uv ru
 uv run python scripts/bench_modal.py      # the Modal benchmarks behind docs/numbers.json (prints its cost estimate first)
 uv run python scripts/check_readme.py     # the numbers above against docs/numbers.json (--fix rewrites them)
 uv run coverset report --run <run id>     # the static report of a run in the facts store (or of a .coverset directory)
+uv run coverset report --run <PR run id> --compare-run <baseline run id>   # the same plus a Changes page against a baseline
 uv run coverset bundle validate fixtures/bundles/neutral-ts/bundle   # the TypeScript fixture against the neutral bundle spec
 ```
 
-`coverset demo` seeds a deterministic git repository (`data/demo.git`: six commits on `main` and two PR branches), runs the six baselines and both PRs, replays `fixtures/webhooks/pr_opened.json` through the webhook route, and serves the UI. PR #1 ("Support partial refunds") fails on `tests/test_refund.py::test_refund_partial`; PR #2 ("Allow signups from company subdomains") passes with gaps. `--no-serve` stops after the runs. `COVERSET_DATA_DIR` moves everything the demo writes.
+`coverset demo` seeds a deterministic git repository (`data/demo.git`: six commits on `main` and two PR branches), runs the six baselines and both PRs, replays `fixtures/webhooks/pr_opened.json` through the webhook route, and serves the UI. PR #1 ("Support partial refunds") fails on `tests/test_refund.py::test_refund_partial`; PR #2 ("Allow signups from company subdomains") passes with gaps. The demo also builds PR #2's static report under `<data dir>/report` and prints its path. `--no-serve` stops after the runs. `COVERSET_DATA_DIR` moves everything the demo writes.
 
 On Modal the demo builds the environment image (cached after the first build), runs every shard in a sandbox, and builds one trusted snapshot of `main` at the end of seeding. While it serves, the warm-pool maintainer keeps up to `COVERSET_POOL_SIZE` (4) idle sandboxes for the demo repository until `COVERSET_POOL_TTL_S` (600 s) after its last run, at about $0.03 per sandbox-hour; stopping the server drains the pool. `coverset modal reap --all` cleans up after an interrupted run.
 
@@ -144,6 +148,8 @@ On Modal the demo builds the environment image (cached after the first build), r
    python = "3.13"              # 3.12 or later
    invariants = "invariants.yaml"
    ```
+
+   Locally, `pytest --coverset` then `coverset report .coverset --open` gives you the pages for one run before any of the rest exists.
 
 2. Run `coverset serve` where GitHub can reach it, with an admin token (`COVERSET_ADMIN_TOKEN`) and `COVERSET_PUBLIC_URL`. Then either create and install the GitHub App from `/setup` (check runs, buttons, the sticky comment), or set `COVERSET_GITHUB_TOKEN` (at least 16 characters), `COVERSET_ALLOWED_OWNERS` and `COVERSET_GITHUB_WEBHOOK_SECRET` and add a repository webhook (a commit status and the sticky comment). App mode needs `COVERSET_ALLOWED_OWNERS` too. See [docs/github.md](docs/github.md).
 3. Pick the executor: `COVERSET_EXECUTOR=modal` after `modal setup`, with `COVERSET_MODAL_DAILY_BUDGET_USD` as the daily cap, `COVERSET_MAX_RUN_COST_USD` (1.00) as the per-run cap, also enforced while the run executes, and `COVERSET_MAX_IMAGE_BUILDS_PER_DAY` (20). An untrusted PR whose lockfile has no image yet waits for approval, and its environment is never built from direct URL or VCS references. The local executor runs webhook-triggered runs only with `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true` and never runs untrusted PRs. `coverset warm --repo <name>` builds the environment (and on Modal a trusted snapshot) ahead of the first PR.
