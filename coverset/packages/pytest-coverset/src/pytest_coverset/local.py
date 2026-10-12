@@ -4,10 +4,15 @@
 developer wants on a laptop: the bundle goes to ``<rootdir>/.coverset``, the measured packages come
 from ``[tool.coverset]`` in ``<rootdir>/pyproject.toml`` (``source``, else the packages found under
 ``source_root`` as the control plane infers them), the neutral export is on, and one summary line is
-printed at the end. Any explicit ``--coverset-*`` option still wins. The runner never uses the switch.
+printed at the end (the runner's JSON-line events are not written). Any explicit ``--coverset-*``
+option still wins. The runner never uses the switch. ``COVERSET`` is removed from the environment
+when pytest starts, with or without ``--coverset``, so the tests' subprocesses never inherit it.
 
-The output directory, local or not, must not be a symlink; when the plugin creates it, it puts a
-``.gitignore`` holding ``*`` inside, so a bundle is never committed by accident.
+The output directory, local or not, must not be a symlink, and no directory between the repository
+root (the git root, else the rootdir) and it may be one either, so a link committed to the
+repository cannot redirect the bundle; a directory outside the repository is checked by its own
+name only. When the plugin creates it, it puts a ``.gitignore`` holding ``*`` inside, so a bundle
+is never committed by accident.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import os
 import re
 import shlex
 import tomllib
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -128,14 +133,21 @@ def _infer_packages(rootdir: Path, source_root: str) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def prepare_out_dir(out_dir: Path) -> bool:
+def prepare_out_dir(out_dir: Path, root: Path | None = None) -> bool:
     """Create ``out_dir`` if needed; returns True when this call created it.
 
-    A symlink (even one to a directory) or a non-directory is refused with a usage error, so the
+    A symlink (even one to a directory) or a non-directory is refused with a usage error, and so is
+    an ``out_dir`` below ``root`` reached through a symlinked directory (``root/link/out``), so the
     bundle is never written through a link. A directory created here gets a ``.gitignore`` of ``*``.
     """
     if out_dir.is_symlink():
         raise pytest.UsageError(f"coverset output directory {out_dir} is a symlink: pass a real directory")
+    if root is not None:
+        link = _linked_component(out_dir, root)
+        if link is not None:
+            raise pytest.UsageError(
+                f"coverset output directory {out_dir} lies under the symlink {link}: pass a real directory"
+            )
     if out_dir.exists() and not out_dir.is_dir():
         raise pytest.UsageError(f"coverset output directory {out_dir} exists and is not a directory")
     created = False
@@ -150,6 +162,29 @@ def prepare_out_dir(out_dir: Path) -> bool:
     return created
 
 
+def _linked_component(path: Path, root: Path) -> Path | None:
+    """The first symlink among ``path``'s components below ``root``, else None.
+
+    ``path`` is absolute and taken as written: its shortest prefix that resolves to ``root`` is the
+    root (``/tmp/x`` matches a root of ``/private/tmp/x``), and each later component that lies below
+    it (``..`` steps back up) is checked. A ``path`` with no such prefix is outside ``root``: None.
+    """
+    top = os.path.realpath(root)
+    parts = path.parts
+    for start in range(1, len(parts) + 1):
+        if os.path.realpath(Path(*parts[:start])) == top:
+            break
+    else:
+        return None
+    current, depth = Path(*parts[:start]), 0
+    for part in parts[start:]:
+        current = current / part
+        depth += -1 if part == ".." else 1
+        if depth > 0 and current.is_symlink():
+            return current
+    return None
+
+
 def display_path(path: Path, cwd: str, root: str) -> str:
     """``path`` relative to ``cwd`` (``../.coverset`` from a subdirectory) when both lie inside
     ``root``, else absolute."""
@@ -159,13 +194,15 @@ def display_path(path: Path, cwd: str, root: str) -> str:
     return Path(os.path.relpath(full, here)).as_posix()
 
 
-def summary_line(out: str, tests: int, files: int, errors: int) -> str:
-    """The one line ``--coverset`` prints after the bundle is written."""
+def summary_line(out: str, tests: int, files: int, errors: int, warnings: Sequence[str] = ()) -> str:
+    """The one line ``--coverset`` prints after the bundle is written (``meta.warnings`` appended)."""
     quoted = shlex.quote(out)
     line = f"coverset: wrote {out} ({_plural(tests, 'test')}, {_plural(files, 'file')}); "
     line += f"`coverset report {quoted}` for the pages"
     if errors:
         line += f" ({_plural(errors, 'error')} in {out}/meta.json)"
+    for warning in warnings:
+        line += f"; warning: {warning}"
     return line
 
 

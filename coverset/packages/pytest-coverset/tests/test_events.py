@@ -141,12 +141,14 @@ def test_fail_sig_is_stable_across_messages(
     assert sigs[0] == sigs[1]
 
 
-def test_default_nonce(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_nonce_no_events(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Events are for the orchestrator, which always sets a nonce: without one nothing is written."""
     monkeypatch.delenv("COVERSET_EVENT_NONCE", raising=False)
     pytester.makepyfile(test_one="def test_one():\n    pass\n")
     pytester.runpytest_subprocess("--coverset-out", "out").assert_outcomes(passed=1)
     raw = (pytester.path / "stdout").read_text()
-    assert raw.count("\x1ecoverset - ") == 4
+    assert "\x1ecoverset" not in raw and '{"kind":' not in raw
+    assert (pytester.path / "out" / "bundle.tar.gz").is_file()
 
 
 def test_stop_file_ends_the_run_and_keeps_the_bundle(

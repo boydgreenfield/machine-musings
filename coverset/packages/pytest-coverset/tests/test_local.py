@@ -16,6 +16,7 @@ from support import coverage_rows, events, read_jsonl, read_shapes
 
 from pytest_coverset.local import (
     GITIGNORE_TEXT,
+    _linked_component,
     display_path,
     pop_switch,
     sources_from_pyproject,
@@ -144,7 +145,24 @@ def test_coverset_flag_uses_the_local_defaults(project: pytest.Pytester) -> None
     assert lines == [
         "coverset: wrote .coverset (24 tests, 4 files); `coverset report .coverset` for the pages"
     ]
-    assert [e["kind"] for e in events(project)][-1] == "done"
+    assert meta["warnings"] == []
+    assert not events(project)  # a local run writes no runner events, even with a nonce set
+
+
+@pytest.mark.parametrize("nonce", [True, False])
+def test_coverset_prints_one_line_and_no_events(
+    project: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, nonce: bool
+) -> None:
+    """``pytest --coverset`` shows the test run and one closing line: no JSON event lines."""
+    if not nonce:
+        monkeypatch.delenv("COVERSET_EVENT_NONCE")
+    project.runpytest_subprocess("--coverset").assert_outcomes(passed=24)
+    raw = (project.path / "stdout").read_text(encoding="utf-8")
+    assert '{"kind":' not in raw and "\x1ecoverset" not in raw
+    assert [line for line in raw.split("\n") if line.startswith("coverset: wrote")] == [
+        "coverset: wrote .coverset (24 tests, 4 files); `coverset report .coverset` for the pages"
+    ]
+    assert (project.path / ".coverset" / "bundle.tar.gz").is_file()
 
 
 def test_coverset_reads_tool_coverset_and_explicit_options_win(project: pytest.Pytester) -> None:
@@ -187,6 +205,51 @@ def test_coverset_environment_switch(project: pytest.Pytester, monkeypatch: pyte
     (project.path / ".coverset" / "bundle.tar.gz").unlink()
     project.runpytest_subprocess("tests").assert_outcomes(passed=24)
     assert not (project.path / ".coverset" / "bundle.tar.gz").exists()
+
+
+@pytest.mark.parametrize("flag", [(), ("--coverset",)], ids=["env", "env+flag"])
+def test_coverset_variable_never_reaches_subprocesses(
+    project: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, flag: tuple[str, ...]
+) -> None:
+    """``COVERSET=1`` is removed before the tests run, also when ``--coverset`` is passed as well."""
+    project.makepyfile(
+        test_child="""
+        import subprocess
+        import sys
+
+
+        def test_child():
+            code = "import os; print(repr(os.environ.get('COVERSET')))"
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+            assert out.stdout.strip() == "None"
+        """
+    )
+    monkeypatch.setenv("COVERSET", "1")
+    project.runpytest_subprocess("test_child.py", *flag).assert_outcomes(passed=1)
+    assert (project.path / ".coverset" / "bundle.tar.gz").is_file()
+
+
+def test_sources_that_measure_nothing_are_a_warning(project: pytest.Pytester) -> None:
+    """A misspelt ``[tool.coverset] source`` says so on the summary line and in ``meta.warnings``."""
+    pyproject = project.path / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text() + '\n[tool.coverset]\nsource = ["does_not_exist"]\n')
+    result = project.runpytest_subprocess("--coverset")
+    result.assert_outcomes(passed=24)
+    warning = (
+        "no file of the measured sources (does_not_exist) was found: check [tool.coverset] source or "
+        "--coverset-source"
+    )
+    assert [line for line in result.outlines if line.startswith("coverset: ")] == [
+        "coverset: wrote .coverset (24 tests, 0 files); `coverset report .coverset` for the pages; "
+        f"warning: {warning}"
+    ]
+    meta = json.loads((project.path / ".coverset" / "meta.json").read_text())
+    assert meta["warnings"] == [warning] and meta["errors"] == []
+
+    project.runpytest_subprocess("--coverset-out=out", "--coverset-source=fixturepkg").assert_outcomes(
+        passed=24
+    )
+    assert json.loads((project.path / "out" / "meta.json").read_text())["warnings"] == []
 
 
 def test_coverset_without_sources_is_a_clear_usage_error(project: pytest.Pytester) -> None:
@@ -249,6 +312,9 @@ def test_pop_switch_and_summary_helpers(tmp_path: Path) -> None:
         "coverset: wrote out dir (1 test, 1 file); `coverset report 'out dir'` for the pages "
         "(2 errors in out dir/meta.json)"
     )
+    assert summary_line("o", 0, 0, 0, ["w1", "w2"]) == (
+        "coverset: wrote o (0 tests, 0 files); `coverset report o` for the pages; warning: w1; warning: w2"
+    )
 
 
 # -- the output directory --------------------------------------------------------------------------
@@ -276,6 +342,45 @@ def test_a_symlinked_output_directory_is_refused(project: pytest.Pytester, targe
     result.stderr.fnmatch_lines(["*coverset output directory*link is a symlink*"])
     assert not real.exists() or list(real.iterdir()) == []
     assert not events(project)
+
+
+@pytest.mark.parametrize("out", ["link/out", "real/../link/out", "link/../out"])
+def test_an_output_directory_below_a_symlink_is_refused(project: pytest.Pytester, out: str) -> None:
+    """Every directory between the repository root and the output directory must be a real one."""
+    (project.path / "real").mkdir()
+    os.symlink(project.path / "real", project.path / "link")
+    result = project.runpytest_subprocess(f"--coverset-out={out}", "--coverset-source=fixturepkg")
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
+    result.stderr.fnmatch_lines(["*coverset output directory*lies under the symlink*link: pass a real*"])
+    assert list((project.path / "real").iterdir()) == [] and not (project.path / "out").exists()
+
+
+def test_linked_component_checks_only_below_the_root(tmp_path: Path) -> None:
+    root = tmp_path.resolve() / "repo"
+    (root / "a").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    os.symlink(root / "a", root / "la")
+    os.symlink(tmp_path / "elsewhere", tmp_path / "outside")
+    assert _linked_component(root / "a" / "b" / "out", root) is None
+    assert _linked_component(root / "la" / "out", root) == root / "la"
+    assert _linked_component(root / ".." / "outside" / "out", root) is None  # above the root
+    assert _linked_component(tmp_path / "outside" / "out", root) is None  # outside the repository
+    os.symlink(root, tmp_path / "repo-link")  # the root reached through a link above it is fine
+    assert _linked_component(tmp_path / "repo-link" / "a" / "out", root) is None
+    assert _linked_component(tmp_path / "repo-link" / "la" / "out", root) == tmp_path / "repo-link" / "la"
+
+
+def test_an_output_directory_outside_the_repository_may_sit_below_a_link(
+    project: pytest.Pytester, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    (elsewhere / "real").mkdir()
+    os.symlink(elsewhere / "real", elsewhere / "link")
+    out = elsewhere / "link" / "out"
+    project.runpytest_subprocess(f"--coverset-out={out}", "--coverset-source=fixturepkg").assert_outcomes(
+        passed=24
+    )
+    assert (elsewhere / "real" / "out" / "bundle.tar.gz").is_file()
 
 
 def test_a_file_as_output_directory_is_refused(project: pytest.Pytester) -> None:

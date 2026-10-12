@@ -2,17 +2,22 @@
 
 Each event is one line: ``"\\x1ecoverset <nonce> " + json + "\\n"``, written to ``sys.__stdout__`` and
 flushed. The JSON is ASCII-only (``\\u`` escapes), so any stdout encoding can carry it. The nonce comes
-from ``COVERSET_EVENT_NONCE`` (``-`` when unset) and is removed from ``os.environ`` when the session
-starts, before conftest files and tests are imported. It separates events from log text that merely
-looks like one; it is not a security boundary (test code shares the process and can still find it),
-so ``results.jsonl`` in the bundle stays the authoritative record and the runner reconciles streamed
+from ``COVERSET_EVENT_NONCE`` and is removed from ``os.environ`` when the session starts, before
+conftest files and tests are imported. It separates events from log text that merely looks like one;
+it is not a security boundary (test code shares the process and can still find it), so
+``results.jsonl`` in the bundle stays the authoritative record and the runner reconciles streamed
 rows against it. Event kinds: ``collected``, ``test``, ``heartbeat``, ``bundle_written``,
-``neutral_written`` (with ``--coverset-neutral``), ``done``. If pytest's terminal writer is mid-line (progress dots), a newline is written first so the
-prefix always starts a line.
+``neutral_written`` (with ``--coverset-neutral``), ``done``. If pytest's terminal writer is mid-line
+(progress dots), a newline is written first so the prefix always starts a line.
+
+Events are written only when the orchestrator set the nonce and the run is not a local one
+(``--coverset``/``COVERSET=1``): otherwise the session hands the writer :data:`DISCARD`, so a
+developer's terminal shows the test run and ``--coverset``'s one summary line, nothing else.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -40,6 +45,17 @@ def parse_event_line(line: str, nonce: str) -> dict[str, Any] | None:
     except ValueError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+class _Discard(io.TextIOBase):
+    """A text stream that drops everything (the session's event stream when no runner listens)."""
+
+    def write(self, s: str) -> int:
+        return len(s)
+
+
+DISCARD: TextIO = _Discard()  # type: ignore[assignment]
+"""Pass as ``stream`` to an :class:`EventWriter` whose events nobody reads."""
 
 
 class EventWriter:

@@ -1,10 +1,11 @@
 """pytest entry point of pytest-coverset.
 
 Installing the plugin changes nothing about a normal pytest run: it only registers the
-``invariant(id)`` marker. Instrumentation (per-test coverage, the shape tracer, JSON-line events and
-the facts bundle) switches on with ``--coverset-out DIR``, or with ``--coverset`` (``COVERSET=1``),
-which adds local defaults (:mod:`pytest_coverset.local`); priority ordering switches on with
-``--coverset-scores FILE``.
+``invariant(id)`` marker. Instrumentation (per-test coverage, the shape tracer and the facts bundle)
+switches on with ``--coverset-out DIR``, or with ``--coverset`` (``COVERSET=1``), which adds local
+defaults (:mod:`pytest_coverset.local`); priority ordering switches on with ``--coverset-scores FILE``.
+JSON-line events go to stdout only when the orchestrator set ``COVERSET_EVENT_NONCE`` and the run is
+not a local one (:mod:`pytest_coverset.events`).
 
 Every path the plugin writes is repository-relative (the git root, else the rootdir), whichever
 directory pytest runs in; ``meta.cwd`` and ``meta.rootdir`` say where the run happened, relative to
@@ -64,7 +65,7 @@ from pytest_coverset.bundle import (
     write_static_files,
 )
 from pytest_coverset.coverage_ctx import CoverageContext, ForeignTracerError
-from pytest_coverset.events import EventWriter
+from pytest_coverset.events import DISCARD, NONCE_ENV, EventWriter
 from pytest_coverset.local import (
     DEFAULT_OUT,
     display_path,
@@ -239,7 +240,7 @@ class CoversetSession:
         self.started = time.perf_counter()
         self.git_root = find_git_root(config.rootpath) or find_git_root(Path.cwd())
         self.repo_root = str(self.git_root or config.rootpath)
-        prepare_out_dir(options.out_dir)
+        prepare_out_dir(options.out_dir, Path(self.repo_root))
         self.start_cwd = os.getcwd()
         self.cwd_rel = rel_dir(self.start_cwd, self.repo_root)
         """The working directory relative to the repository root (``.``), None when outside it."""
@@ -254,7 +255,13 @@ class CoversetSession:
         self.coverage = CoverageContext(options.out_dir, options.sources)
         self.tracer: ShapeTracer | None = None
         self.full_trace: tuple[str, ...] = ()
-        self.events = EventWriter(mid_line=self._terminal_mid_line)
+        # Events are for the orchestrator, which always sets a nonce and never uses --coverset: a
+        # local run, or one without a nonce, discards them (the nonce leaves the environment anyway).
+        nonce = os.environ.pop(NONCE_ENV, None)
+        stream = None if nonce and not options.local else DISCARD
+        self.events = EventWriter(nonce=nonce or "-", stream=stream, mid_line=self._terminal_mid_line)
+        self.warnings: list[str] = []
+        """Advice for the developer (``meta.warnings``, and the summary line with ``--coverset``)."""
         self.results = ResultsLog(options.out_dir)
         self.collected: list[CollectedItem] = []
         self.collect_errors: list[dict[str, Any]] = []
@@ -460,6 +467,7 @@ class CoversetSession:
         for name, exc in write_static_files(out, self.collected, self.collect_errors, self.results.results):
             self._record_error(name, exc)
         self._note_tracer_loss()
+        self._attempt("warnings", self._note_unmeasured_sources)
         neutral = self.neutral
         meta = self._meta(exit_code, counts)
         # The Python bundle is complete (meta.json, then bundle.tar.gz) before the neutral export
@@ -495,20 +503,37 @@ class CoversetSession:
             return ""
         return f"{self.cwd_rel}/"
 
+    def _files_measured(self) -> int | None:
+        """Files in ``coverage.json`` that a reader keeps; None when it could not be read."""
+        if self.files_measured is not None:
+            return self.files_measured
+        try:  # the rewrite failed: count coverage.json's relative names instead
+            report = json.loads(self.coverage.json_file.read_text(encoding="utf-8"))
+            return sum(1 for name in report["files"] if not os.path.isabs(name))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _note_unmeasured_sources(self) -> None:
+        """Warn when ``--coverset-source``/``[tool.coverset] source`` named packages and no file of
+        theirs was measured (a misspelt or uninstalled package), instead of a silent "0 files"."""
+        if not self.options.sources or self._files_measured() != 0:
+            return
+        names = ", ".join(self.options.sources)
+        message = (
+            f"no file of the measured sources ({names}) was found: check [tool.coverset] source or "
+            "--coverset-source"
+        )
+        if message not in self.warnings:
+            self.warnings.append(message)
+
     def _print_summary(self) -> None:
         """``--coverset``'s one line: where the bundle went, how much it holds, how to read it."""
         reporter = self.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is None:
             return
         out = display_path(self.options.out_dir, self.start_cwd, self.repo_root)
-        files = self.files_measured
-        if files is None:  # the rewrite failed: count coverage.json's relative names instead
-            try:
-                report = json.loads(self.coverage.json_file.read_text(encoding="utf-8"))
-                files = sum(1 for name in report["files"] if not os.path.isabs(name))
-            except (OSError, ValueError, KeyError, TypeError):
-                files = 0
-        line = summary_line(out, len(self.results.results), files, len(self.errors))
+        files = self._files_measured() or 0
+        line = summary_line(out, len(self.results.results), files, len(self.errors), self.warnings)
         reporter.ensure_newline()
         reporter.write_line(line)
 
@@ -640,6 +665,7 @@ class CoversetSession:
             "counts": counts,
             "stop_requested": self.stop_requested,
             "errors": self.errors,
+            "warnings": self.warnings,
             "started_at": self.started_wall,
             "finished_at": time.time(),
             "timings": {
@@ -659,12 +685,14 @@ class CoversetSession:
 
 
 def _local(config: pytest.Config, namespace: Any) -> bool:
-    """``--coverset`` or ``COVERSET=1`` (the variable is read, and removed, once per config)."""
-    if getattr(namespace, "coverset", False):
-        return True
+    """``--coverset`` or ``COVERSET=1``.
+
+    The variable is read, and removed, once per config and before the flag is looked at, so the
+    tests' own subprocesses never inherit it, whether or not ``--coverset`` was passed as well.
+    """
     if ENV_SWITCH not in config.stash:
         config.stash[ENV_SWITCH] = pop_switch()
-    return config.stash[ENV_SWITCH]
+    return bool(getattr(namespace, "coverset", False)) or config.stash[ENV_SWITCH]
 
 
 def _wanted(config: pytest.Config, namespace: Any) -> bool:
