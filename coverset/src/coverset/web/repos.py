@@ -1,5 +1,10 @@
 """Repo-scoped pages: the repo overview, the PR page, the treemap, tests and invariants.
 
+The repo page opens with an overview of the default branch's baselines (tiles from the latest one,
+the trend of line % and input-class %, a Gap treemap thumbnail, what changed since the previous
+baseline and the largest gaps), read from the facts store; the dashboard's repository rows get the
+latest line % and input-class % with a sparkline through :func:`_dashboard_trends`.
+
 Routes: ``/repos/<rid>``, ``/repos/<rid>/prs/<n>`` (``/runs/<run_id>/coverage`` redirects there),
 ``/repos/<rid>/map?mode=gap|lines|inputs&path=&run=``, ``/repos/<rid>/tests`` with
 ``POST /repos/<rid>/tests/<test_id>/quarantine`` (admin, CSRF), and ``/repos/<rid>/invariants``.
@@ -9,20 +14,24 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
+from markupsafe import Markup
 from quart import Blueprint, Response, redirect, request, url_for
 from sqlalchemy import func, select
 from werkzeug.exceptions import Forbidden, NotFound
 
 from coverset.ai.review import SOURCE_LABELS
-from coverset.db.models import Invariant, InvariantResult, PullRequest, Run, TestCase, TestStats
+from coverset.db.models import Invariant, InvariantResult, PullRequest, Repo, Run, TestCase, TestStats
+from coverset.facts.queries import BaselinePoint, baseline_trend, class_changes, top_gaps
 from coverset.forge.comment import missing_counts
 from coverset.orchestrator.repos import mirror_path
 from coverset.orchestrator.verdict import summary_from_json
 from coverset.web.auth import is_admin
 from coverset.web.context import app_db, app_settings
 from coverset.web.detail import build_cards, card_detail
+from coverset.web.facts_view import run_facts
 from coverset.web.loaders import (
     default_run,
     facts_for,
@@ -31,15 +40,134 @@ from coverset.web.loaders import (
     pr_run,
     require_run,
     run_counts,
+    store,
 )
 from coverset.web.pages import MAX_DB_ID, get_repo, render_page
 from coverset.web.pr_view import analyse_diff
+from coverset.web.render.sparkline import SparkSeries, render_sparkline
 from coverset.web.render.treemap import MODES, build_tree, render_legend, render_treemap
 from coverset.web.run_view import order_rows
 
 bp = Blueprint("repos", __name__)
 
 HISTORY_RUNS = 12
+TOP_GAPS = 8
+THUMB_W, THUMB_H = 520, 220
+
+
+def trend_sparklines(points: list[BaselinePoint], *, width: int = 220, label: str = "") -> dict[str, Markup]:
+    """``lines`` (line %, solid) and ``inputs`` (input-class %, dashed) over ``points``: one
+    sparkline each, so each fits its own range (line % sits near 90 while input-class % sits
+    near 35, and on one shared axis both would flatten into lines)."""
+    names = [f"{p.head_sha[:8]} · {p.created_at:%Y-%m-%d %H:%M} UTC" for p in points]
+    lines = SparkSeries("lines run", tuple(p.line_pct for p in points))
+    inputs = SparkSeries("input classes", tuple(p.input_pct for p in points), dashed=True)
+    return {
+        "lines": render_sparkline([lines], points=names, width=width, label=label, noun="baseline"),
+        "inputs": render_sparkline([inputs], points=names, width=width, label=label, noun="baseline"),
+    }
+
+
+def trend_span(first: datetime, last: datetime, count: int) -> str:
+    """How the trend's baselines spread in time, after "N baselines": within two days the span
+    and the newest stamp ("over 3 min, newest 2026-10-12 01:50 UTC"), further apart the two dates
+    ("2026-10-01 → 2026-10-11"); one baseline is just its stamp."""
+    newest = f"{last:%Y-%m-%d %H:%M} UTC"
+    if count <= 1:
+        return newest
+    seconds = max(0.0, (last - first).total_seconds())
+    if seconds < 60:
+        return f"within a minute, newest {newest}"
+    if seconds < 3600:
+        return f"over {round(seconds / 60)} min, newest {newest}"
+    if seconds < 2 * 86400:
+        return f"over {round(seconds / 3600)} h, newest {newest}"
+    return f"{first:%Y-%m-%d} → {last:%Y-%m-%d}"
+
+
+def _overview_facts(rid: int, branch: str) -> dict[str, Any] | None:
+    """The facts behind the repo overview (blocking; run it in a thread), or None without a
+    finalized baseline of ``branch``."""
+    facts_store = store()
+    trend = baseline_trend(facts_store, rid, branch, HISTORY_RUNS)
+    if not trend:
+        return None
+    latest = trend[-1]
+    prior = trend[-2] if len(trend) > 1 else None
+    changes = class_changes(facts_store, rid, latest.run_id, prior.run_id) if prior else []
+    gaps = top_gaps(facts_store, rid, latest.run_id, TOP_GAPS)
+    nodes = run_facts(facts_store, rid, latest.run_id).treemap_nodes()
+    return {
+        "trend": trend,
+        "latest": latest,
+        "prior": prior,
+        "changes": changes,
+        "gaps": gaps,
+        "nodes": nodes,
+    }
+
+
+async def repo_overview(repo_row: Repo) -> dict[str, Any] | None:
+    """The repo page's overview section (see the module docstring), or None without a baseline."""
+    found = await asyncio.to_thread(_overview_facts, repo_row.id, repo_row.default_branch)
+    if found is None:
+        return None
+    latest: BaselinePoint = found["latest"]
+    rid, run_id = repo_row.id, latest.run_id
+    map_url = url_for("repos.map_page", rid=rid, run=run_id)
+
+    def dir_url(item: Any) -> str:
+        # Every tile opens the map: a directory or file zoomed in, a function at its file.
+        return url_for("repos.map_page", rid=rid, run=run_id, path=item.path)
+
+    def leaf_url(item: Any) -> str:
+        return url_for("repos.map_page", rid=rid, run=run_id, path=item.file)
+
+    thumb = render_treemap(
+        build_tree(found["nodes"]),
+        mode="gap",
+        width=THUMB_W,
+        height=THUMB_H,
+        leaf_url=leaf_url,
+        dir_url=dir_url,
+        label=f"Gap treemap of {repo_row.full_name} (thumbnail; each tile opens the coverage map)",
+    )
+    trend = found["trend"]
+    return {
+        **found,
+        "run_id": run_id,
+        "map_url": map_url,
+        "thumb": thumb,
+        "sparks": trend_sparklines(trend, label=f"{repo_row.default_branch} baselines"),
+        "legend": render_legend("gap"),
+        "first": trend[0],
+        "span": trend_span(trend[0].created_at, trend[-1].created_at, len(trend)),
+    }
+
+
+@bp.app_context_processor
+async def _dashboard_trends() -> dict[str, Any]:
+    """On the dashboard only: per repository, the latest baseline's line % and input-class % and
+    a sparkline of both over the last baselines (``repo_trends``, by repo id)."""
+    if request.endpoint != "dashboard.index":
+        return {}
+    async with app_db().session() as session:
+        repos = [(r.id, r.default_branch, r.full_name) for r in await session.scalars(select(Repo))]
+
+    def load() -> dict[int, dict[str, Any]]:
+        facts_store = store()
+        out: dict[int, dict[str, Any]] = {}
+        for rid, branch, name in repos:
+            trend = baseline_trend(facts_store, rid, branch, HISTORY_RUNS)
+            if trend:
+                out[rid] = {
+                    "latest": trend[-1],
+                    "count": len(trend),
+                    "sparks": trend_sparklines(trend, width=160, label=f"{name} {branch} baselines"),
+                }
+        return out
+
+    return {"repo_trends": await asyncio.to_thread(load)}
 
 
 @bp.get("/repos/<int:rid>")
@@ -66,8 +194,10 @@ async def repo(rid: int) -> Response:
         tests = await session.scalar(
             select(func.count()).select_from(TestCase).where(TestCase.repo_id == rid)
         )
+    overview = await repo_overview(repo_row)
     return await render_page(
         "repo.html",
+        overview=overview,
         repo=repo_row,
         prs=prs,
         latest=latest,

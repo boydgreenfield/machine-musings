@@ -11,14 +11,14 @@ that produce trusted markup).
 | Route | What it shows |
 |---|---|
 | `/` | Dashboard: repositories, live runs (queued, running, awaiting approval), the last 20 runs with verdict chips, and a few numbers (runs, tests, median time to the first test result and to the first failure). |
-| `/repos/<rid>` | Pull requests with their latest run, default-branch runs, links to the map, tests and invariants. |
+| `/repos/<rid>` | The overview of the default branch's baselines (see [Repository overview](#repository-overview)), then pull requests with their latest run, default-branch runs, links to the map, tests and invariants. |
 | `/repos/<rid>/prs/<n>` | The PR page (latest run for the PR head; `?run=` picks another run of the PR). `/runs/<run_id>/coverage` redirects here. |
 | `/repos/<rid>/prs/<n>/functions/<func_key>` | Fragment: one "Needs attention" card's expanded content (loaded when the card opens). |
 | `/runs/<run_id>` | Run page: timeline strip, shard Gantt chart, failures, "Why this order", every test. `?replay=1&speed=0.25` replays a stored run; `&freeze=<seconds>` stops the replay at that point of the run's own clock. |
 | `/runs/<run_id>/events` | The run page's SSE stream (HTML regions as named events). |
 | `/repos/<rid>/files/<path>` | Source view. `?run=` picks the run (default: the newest default-branch baseline), `?pr=<n>` uses the PR's latest run and marks changed lines, `?test=<test_id>` dims every line that test did not run (see [The test page](#the-test-page)). |
 | `/repos/<rid>/files/<path>/lines/<n>/tests` | Fragment: the tests that ran one line (the gutter popover). |
-| `/repos/<rid>/functions/<func_key>` | One function: shape grid, flow ribbon, source with coverage, covering tests, invariants on it, AI finding. |
+| `/repos/<rid>/functions/<func_key>` | One function: its history over the last baselines (see [Function history](#function-history)), shape grid, flow ribbon, source with coverage, covering tests, invariants on it, AI finding. |
 | `/repos/<rid>/functions/<func_key>/shapes` | Fragment: the shape grid; with `&cls=<param>:<class>` one cell's detail. |
 | `/repos/<rid>/map` | Treemap, `?mode=gap` (default) `\|lines\|inputs`, `?path=` zooms into a directory or file, `?run=`. A "largest gaps" table ranks called functions by gap, lists the functions no test called apart, and only counts what has nothing to compare (module-level code, functions that expect no input classes). |
 | `/repos/<rid>/tests` | Every test (each nodeid links to its test page): runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. |
@@ -149,6 +149,73 @@ default-branch baseline; each history square opens the page for its run.
   the same way; the PR comment strips them). The test and source pages do; the tests list, the run
   and PR pages still print test ids through the shared `nodeid` filter unmarked.
 
+### Repository overview
+
+The top section of `/repos/<rid>` (`web/repos.py` `repo_overview`, `templates/repo.html`), read
+from the facts store, never from the control database's totals. A *baseline* here is a finalized
+run of the default branch with no PR number (`runs_dim`); the overview uses the last 12, and the
+latest one is the run it describes (it links to its run page).
+
+* **Tiles** (the dashboard's stat style), from `baseline_trend`'s newest point: statements, lines
+  run % with "182 of 202", branches taken % with "31 of 38", functions called by a test / callables,
+  input classes observed / expected with the %, and tests (distinct node ids without `<import>`).
+* **Trend**: one sparkline per measure, lines run % (solid) and input-class % (dashed), with the
+  baseline count and how they spread ("6 baselines over 3 min, newest 2026-10-12 01:50 UTC" within
+  two days, "12 baselines 2026-10-01 → 2026-10-11" when further apart). Each sparkline fits its own range: line % sits near 90 and
+  input-class % near 35, and on one shared axis both would flatten. Under it, the change from the
+  previous baseline in percentage points and in classes observed and expected.
+* **Since the previous baseline** (`class_changes`): per function present in both baselines, the
+  classes **lost** (− in the miss colour, hollow dashed chips) and **gained** (+ in the ran colour,
+  filled chips), "expects 10 → 12 classes" when the expected count moved (then a "lost" class may
+  just have become expected), "lines no longer run" with the body lines that ran before and not
+  now (bodies whose hash did not change), and a note when a test of the function hit the sample
+  cap (a lost class may only have gone unsampled). Each function links to its function page. With
+  no change it says "No input class lost or gained and no body line newly uncovered since
+  `d0e6be8c`"; the first baseline says there is nothing to compare yet.
+* **Gap map**: the Gap-mode treemap of the latest baseline at 520 × 220 with its labels hidden and
+  the Gap legend under it; every tile links to the coverage map (a directory or file zoomed in, a
+  function's tile to its file), and the heading links to the whole map.
+* **Largest gaps** (`top_gaps`, top 8): called functions with the most input classes no test passed
+  in, with "16 of 18", the body's line % and up to six class names as hollow chips ("+N more").
+* Without a finalized baseline the section says so and the PR and run lists follow as before.
+
+The dashboard's repository table gains a "Latest baseline" column: a line % sparkline and an
+input-class % sparkline (160 px each, last value labelled) over the same baselines. The data comes
+from a context processor in `web/repos.py` that only runs for the dashboard's endpoint.
+
+**Sparklines** (`render/sparkline.py`): 160–240 × 36 px, one or two series on one axis (0–100,
+fitted to the data with at least 10 points of range), 2 px lines, the second series dashed with a
+hollow end dot, the last value of each labelled at the right in text ink (pushed apart when the two
+would collide), `None` values break the line (a lone value is a dot), an optional dotted reference
+rule with its own title and an optional tick under the current point. Every point has a
+full-height hover column whose `<title>` names the run and each series' value; the SVG is
+`role="img"` with an `aria-label` that summarises each series ("main baselines: lines run from 79%
+to 90.1% over 6 baselines"). Lines are Okabe-Ito blue (`--spark-1`, `#0072B2` / dark `#3D9AD6`);
+input classes are pink (`--spark-2`, `#D075AB` / dark `#C96FA4`), a pair that passes the dataviz
+palette validator in both modes, and the dash carries the distinction without colour.
+
+### Function history
+
+A "History" panel on the function page above the shape grid and source (`web/files.py`
+`function_history_view`, `templates/function.html`), from `function_history` over the default
+branch's last 12 baselines. When the page shows a run that is not one of them (a PR run), that run
+is appended as the last point (its square set a little apart) and labelled "this run (<branch>)".
+
+* The heading's aside repeats the selected run's numbers ("input classes 8 of 10 · lines 100%").
+* One sparkline with two series on one axis: body lines % (solid) and input-class % (dashed),
+  with a key, gaps where the function did not exist yet and a tick under the selected run.
+* One square per run in the test page's history style, oldest first: a **filled** square (ran
+  tint, blue edge) shows the number of classes observed that run, `–` (solid outline) means the
+  function existed but no input classes were recorded (no test passed it anything), and a
+  **dotted** square with `·` means the function is not in that run. Each title reads like "baseline
+  77e37dc6 · 2026-10-12 01:50 UTC · 8 of 10 input classes · lines 100% · 22 tests"; the selected
+  run is ringed and every square of a run that has the function links to the page for that run.
+* Under the strip, a class missing at the selected run that the nearest earlier run with the same
+  expected count observed reads "`email:idn` observed in run d0e6be8c (date), not since", naming
+  the newest earlier run that observed it (with the sample-cap caveat when the selected run hit
+  the cap). Only never-observed classes are stored, so runs expecting a different number of
+  classes are not compared.
+
 ## The data-flow overlay
 
 **Input classes** are named blocks of a parameter's input space (`email:multi-label-domain`,
@@ -271,6 +338,7 @@ or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 | `source.jpg` | `/repos/1/files/src/ledger/durations/parse.py?run=<PR 2 run>` | Chips under `def parse_duration`; then click `#L18 button.gt` and wait for `#line-tests-body .test-list` to show the tests popover. Shot at 1440×1000 and clipped just under the last test row that is fully visible in the popover (the popover scrolls inside a capped height, so its own bottom edge would cut a row in half): at 900 px the popover opens above line 18 and covers the chips. |
 | `map.jpg` | `/repos/1/map` | Gap mode is the default. Full-page shot clipped just above the "Largest gaps" table, so the whole treemap is in it. The pointer is parked at (1, 1) after every navigation: Playwright keeps it where the source shot's click left it, and a treemap tile under it would show its hover outline. |
 | `comment.jpg` | `/forge/outbox?method=upsert_pr_comment` | The rendered sticky comments. |
+| `repo.jpg` | `/repos/1` | The repository overview: tiles, the two trend sparklines over the six baselines, what changed since the previous baseline (`merge_intervals` gained `intervals:single`; the demo's sample cap can add a capped function), the Gap map thumbnail and the largest gaps. Full page clipped just under the overview section (`#overview`). |
 | `test.jpg` | `/repos/1/tests/by-nodeid?nodeid=tests/test_refund.py::test_refund_partial&run=<PR 1 run>` | Follows the 302 to `/repos/1/tests/<id>?run=<PR 1 run>`. Wait for `body[data-ready="1"]` and `#test-flow svg.flow-test`. PR #1's failing test: failed, `cents_conserved` violated, the data flow test → `refund` → `allocate_cents` and both functions' strips. Full page at 1440 wide (about 1330 px tall). |
 
 Times on pages are relative to `settings.now()`, so `COVERSET_FAKE_NOW=2026-10-11T14:00:00Z` pins

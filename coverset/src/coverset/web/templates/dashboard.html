@@ -24,7 +24,7 @@
 <section class="panel">
   <div class="panel-head"><h2>Repositories</h2></div>
   <table>
-    <thead><tr><th>Repository</th><th>Default branch</th><th class="num">Open PRs</th><th class="num">Runs</th><th>Views</th></tr></thead>
+    <thead><tr><th>Repository</th><th>Default branch</th><th class="num">Open PRs</th><th class="num">Runs</th><th>Latest baseline</th><th>Views</th></tr></thead>
     <tbody>
     {% for r in repos %}
       <tr>
@@ -32,6 +32,8 @@
         <td><code>{{ r.default_branch }}</code></td>
         <td class="num">{{ open_prs.get(r.id, 0) }}</td>
         <td class="num">{{ per_repo.get(r.id, 0) }}</td>
+        {% set tr = (repo_trends or {}).get(r.id) %}
+        <td class="dash-trend">{% if tr %}<span class="dash-pair"><span class="dash-name" title="statements run in the latest baseline">lines</span>{{ tr.sparks.lines }}</span><span class="dash-pair"><span class="dash-name" title="input classes observed ÷ expected in the latest baseline">input classes</span>{{ tr.sparks.inputs }}</span>{% else %}<span class="muted">no baseline yet</span>{% endif %}</td>
         <td><a href="{{ url_for('repos.map_page', rid=r.id) }}">map</a> · <a href="{{ url_for('repos.tests_page', rid=r.id) }}">tests</a> · <a href="{{ url_for('repos.invariants_page', rid=r.id) }}">invariants</a></td>
       </tr>
     {% endfor %}

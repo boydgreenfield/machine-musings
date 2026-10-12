@@ -592,3 +592,70 @@ svg.flow-test { display: block; width: 100%; max-width: 100%; height: auto; font
 .src-focus .ln.dim > .src, .src-focus .ln.dim > .gn, .src-focus .ln.dim > .gt, .src-focus .ln.dim > .brn, .src-focus .ln.dim > .sr { opacity: 0.38; }
 .src-focus .ln.dim.fn-head > .src { opacity: 0.7; }
 .focus-note { color: var(--ink); }
+
+/* -- sparklines, repository overview, function history ------------------------------------- */
+/* Two series on one axis: lines (solid, Okabe-Ito blue) and input classes (dashed, pink). The
+   pair passes dataviz validate_palette.js in both modes (light #0072b2/#d075ab, dark
+   #3d9ad6/#c96fa4); the dash and the hollow end dot carry identity without colour. */
+:root {
+  --spark-1: light-dark(#0072b2, #3d9ad6);
+  --spark-2: light-dark(#d075ab, #c96fa4);
+}
+svg.spark { display: block; overflow: visible; font-family: var(--font); flex: none; }
+.spark-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.spark-line.spark-s1 { stroke: var(--spark-1); }
+.spark-line.spark-s2 { stroke: var(--spark-2); stroke-dasharray: 4 3; stroke-linecap: butt; }
+.spark-dot.spark-s1, .spark-end.spark-s1 { fill: var(--spark-1); stroke: var(--surface); stroke-width: 1; }
+.spark-dot.spark-s2, .spark-end.spark-s2 { fill: var(--surface); stroke: var(--spark-2); stroke-width: 1.75; }
+.spark-val { font-size: 10px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+.spark-base { stroke: var(--rule); stroke-width: 1; }
+.spark-ref { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 1 2.5; }
+.spark-current { stroke: var(--focus); stroke-width: 2; }
+.spark-hit { fill: var(--ink); fill-opacity: 0; }
+.spark-hit:hover { fill-opacity: 0.07; }
+.spark-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.spark-key { display: inline-flex; gap: 12px; font-size: 0.8rem; color: var(--ink-2); }
+.spark-key-item { display: inline-flex; align-items: center; gap: 5px; }
+.spark-swatch { overflow: visible; }
+
+.overview .ov-tiles { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px; }
+.stat .of { font-size: 1rem; font-weight: 500; color: var(--ink-2); letter-spacing: 0; }
+.ov-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 520px); gap: 24px; align-items: start; }
+.ov-grid h3, .ov-sub { margin: 0 0 8px; }
+.ov-grid .ov-sub, .ov-sub { margin-top: 18px; }
+.ov-map .legend { margin-top: 8px; }
+.ov-delta { font-size: 0.85rem; margin: 6px 0 0; }
+.ov-thumb { max-width: 520px; }
+.ov-thumb .tm-label, .ov-thumb .tm-group-label { display: none; }
+.ov-changes { list-style: none; margin: 0; padding: 0; }
+.ov-changes li { padding: 5px 0; border-top: 1px solid var(--rule); line-height: 1.8; }
+.ov-changes .chip, .ov-classes .chip, .fn-lost .chip { font-family: var(--mono); font-size: 0.76rem; }
+.chg { margin-left: 6px; font-size: 0.72rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.chg-lost, .chg-lines { color: var(--miss-ink); }
+.chg-gained { color: var(--ran-ink); }
+.chg-lost::before, .chg-lines::before { content: "− "; }
+.chg-gained::before { content: "+ "; }
+.ov-gaps td { vertical-align: top; }
+.ov-classes { line-height: 1.9; }
+.ov-sparks { margin: 0; display: grid; gap: 6px; }
+.ov-sparks .spark-row { gap: 10px; }
+.ov-sparks dt { width: 92px; font-size: 0.85rem; color: var(--ink-2); }
+.ov-sparks dd { margin: 0; }
+.dash-trend { white-space: nowrap; }
+.dash-pair { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; vertical-align: middle; }
+.dash-name { font-size: 0.8rem; color: var(--ink-2); }
+
+.fn-history-body { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
+.fn-history .history-block.left { margin-top: 0; }
+.history.fn-hist li { width: 20px; height: 20px; font-size: 10.5px; }
+.history.fn-hist li > span[title] { display: grid; place-items: center; width: 100%; height: 100%; }
+.history .fh-some { background: var(--ran-tint); outline: 1.5px solid var(--ran); outline-offset: -1.5px; color: var(--ran-ink); }
+.history .fh-none { background: transparent; outline: 1.5px solid var(--rule-strong); outline-offset: -1.5px; }
+.history .fh-absent { background: transparent; outline: 1.5px dotted var(--rule-strong); outline-offset: -1.5px; color: var(--muted); }
+.history .fh-extra { margin-left: 8px; }
+.fn-lost { list-style: none; margin: 10px 0 0; padding: 0; }
+.fn-lost li { margin: 3px 0; }
+@media (max-width: 960px) {
+  .ov-grid { grid-template-columns: 1fr; }
+  .dash-trend { white-space: normal; }
+}

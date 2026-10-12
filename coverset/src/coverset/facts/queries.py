@@ -30,7 +30,11 @@ from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion, ShapeObs
 
 __all__ = [
     "MODULE_LEAF",
+    "BaselinePoint",
+    "ClassChange",
     "FuncInputCov",
+    "FunctionPoint",
+    "GapRow",
     "IngestRecord",
     "ParquetPriorRun",
     "PatchCoverage",
@@ -41,6 +45,9 @@ __all__ = [
     "TouchedFile",
     "TouchedFunction",
     "TreeNode",
+    "baseline_trend",
+    "class_changes",
+    "function_history",
     "function_input_cov",
     "ingest_record",
     "line_tests",
@@ -52,6 +59,7 @@ __all__ = [
     "test_shapes",
     "test_touched",
     "tests_covering",
+    "top_gaps",
     "treemap",
 ]
 
@@ -1126,3 +1134,491 @@ def ingest_record(store: FactsStore, repo_id: int, run_id: str) -> list[IngestRe
             )
         )
     return out
+
+
+# -- history and overview (the repo page's overview, the function page's history) ---------------
+
+
+@dataclass(frozen=True, slots=True)
+class BaselinePoint:
+    """Totals of one finalized default-branch run (one point of the repo page's trend).
+
+    Line totals come from ``file_cov``; ``functions_*`` and ``classes_*`` count callables
+    (``functions.kind`` function or method) joined to ``func_input_cov``; ``tests_total`` counts
+    the distinct node ids of ``tests_dim`` without ``<import>``.
+    """
+
+    run_id: str
+    created_at: datetime
+    head_sha: str
+    statements: int
+    lines_run: int
+    branches_taken: int
+    branches_possible: int
+    functions_called: int
+    functions_total: int
+    classes_expected: int
+    classes_observed: int
+    tests_total: int
+
+    @property
+    def line_pct(self) -> float | None:
+        """Statements run ÷ statements, in percent."""
+        return 100.0 * self.lines_run / self.statements if self.statements else None
+
+    @property
+    def branch_pct(self) -> float | None:
+        """Branch arcs taken ÷ possible, in percent."""
+        return 100.0 * self.branches_taken / self.branches_possible if self.branches_possible else None
+
+    @property
+    def input_pct(self) -> float | None:
+        """Input classes observed ÷ expected, in percent (None when nothing is expected)."""
+        return 100.0 * self.classes_observed / self.classes_expected if self.classes_expected else None
+
+
+_BASELINE_RUNS_SQL = """
+SELECT run_id FROM runs_dim
+WHERE branch = $branch AND pr_number IS NULL AND finalized_at IS NOT NULL
+ORDER BY created_at DESC, run_id DESC
+LIMIT $last_n
+"""
+
+_CALLABLES = f"kind IN {CALLABLE_KINDS!r}"
+
+_BASELINE_TREND_SQL = f"""
+WITH fc AS (
+    SELECT run_id, sum(statements)::BIGINT AS statements, sum(covered)::BIGINT AS lines_run,
+           sum(branches_covered)::BIGINT AS branches_taken, sum(branches)::BIGINT AS branches_possible
+    FROM file_cov GROUP BY run_id
+), fn AS (
+    SELECT DISTINCT run_id, func_key FROM functions WHERE {_CALLABLES}
+), fnc AS (
+    SELECT fn.run_id, count(*) AS functions_total,
+           count(*) FILTER (WHERE fic.tests_called > 0) AS functions_called,
+           coalesce(sum(fic.blocks_expected), 0)::BIGINT AS classes_expected,
+           coalesce(sum(fic.blocks_observed), 0)::BIGINT AS classes_observed
+    FROM fn LEFT JOIN func_input_cov fic USING (run_id, func_key)
+    GROUP BY fn.run_id
+), td AS (
+    SELECT run_id, count(DISTINCT test_id) FILTER (WHERE test_id <> 0) AS tests_total
+    FROM tests_dim GROUP BY run_id
+)
+SELECT r.run_id, r.created_at, r.head_sha,
+       coalesce(fc.statements, 0) AS statements, coalesce(fc.lines_run, 0) AS lines_run,
+       coalesce(fc.branches_taken, 0) AS branches_taken,
+       coalesce(fc.branches_possible, 0) AS branches_possible,
+       coalesce(fnc.functions_called, 0) AS functions_called,
+       coalesce(fnc.functions_total, 0) AS functions_total,
+       coalesce(fnc.classes_expected, 0) AS classes_expected,
+       coalesce(fnc.classes_observed, 0) AS classes_observed,
+       coalesce(td.tests_total, 0) AS tests_total
+FROM runs_dim r
+LEFT JOIN fc USING (run_id) LEFT JOIN fnc USING (run_id) LEFT JOIN td USING (run_id)
+ORDER BY r.created_at, r.run_id
+"""
+
+
+def _baseline_runs(store: FactsStore, repo_id: int, branch: str, last_n: int) -> list[str]:
+    """The ``last_n`` newest finalized runs of ``branch`` that belong to no PR (newest first)."""
+    rows = _query(
+        store,
+        _BASELINE_RUNS_SQL,
+        {"branch": branch, "last_n": max(0, last_n)},
+        repo_id=repo_id,
+        tables=("runs_dim",),
+    )
+    return [str(r) for r in rows.column("run_id").to_pylist()]
+
+
+def baseline_trend(store: FactsStore, repo_id: int, branch: str, last_n: int = 12) -> list[BaselinePoint]:
+    """The totals of the ``last_n`` newest baselines of ``branch``, oldest first.
+
+    A baseline is a run whose ``runs_dim.branch`` is ``branch``, with no PR number, that
+    ``finalize_run`` finished (``finalized_at`` set). The runs are picked from ``runs_dim`` first,
+    then only their ``file_cov``, ``functions``, ``func_input_cov`` and ``tests_dim`` are read.
+    """
+    runs = _baseline_runs(store, repo_id, branch, last_n)
+    if not runs:
+        return []
+    rows = _query(
+        store,
+        _BASELINE_TREND_SQL,
+        repo_id=repo_id,
+        run_ids=runs,
+        tables=("runs_dim", "file_cov", "functions", "func_input_cov", "tests_dim"),
+    ).to_pylist()
+    return [BaselinePoint(**{**row, "created_at": _utc(row["created_at"])}) for row in rows]
+
+
+_BODY_LINES_CTE = """
+fnf AS (
+    SELECT DISTINCT run_id, file_id FROM fn
+), st AS (
+    SELECT s.run_id, s.file_id, any_value(s.statements) AS statements, any_value(s.excluded) AS excluded
+    FROM file_static s JOIN fnf USING (run_id, file_id) GROUP BY s.run_id, s.file_id
+), stl AS (
+    SELECT run_id, file_id, unnest(statements) AS line, coalesce(excluded, []) AS excluded FROM st
+), hit AS (
+    SELECT tl.run_id, tl.file_id, tl.line, bool_or(tl.test_id <> 0) AS by_test
+    FROM test_lines tl JOIN fnf USING (run_id, file_id)
+    GROUP BY tl.run_id, tl.file_id, tl.line
+), body_lines AS (
+    -- the function page's body rule: statements in [body_start, end_line] minus excluded; a line
+    -- ran when a test ran it, or <import> did and it is not the def line (a one-line def)
+    SELECT fn.run_id, fn.func_key, stl.line,
+           coalesce(hit.line IS NOT NULL AND (hit.by_test OR stl.line <> fn.def_line), false) AS covered
+    FROM fn JOIN stl ON stl.run_id = fn.run_id AND stl.file_id = fn.file_id
+                    AND stl.line BETWEEN fn.body_start AND fn.end_line
+    LEFT JOIN hit ON hit.run_id = stl.run_id AND hit.file_id = stl.file_id AND hit.line = stl.line
+    WHERE NOT list_contains(stl.excluded, stl.line)
+), body AS (
+    SELECT run_id, func_key, count(*) AS statements, count(*) FILTER (WHERE covered) AS covered,
+           list(line ORDER BY line) AS lines,
+           coalesce(list(line ORDER BY line) FILTER (WHERE covered), []) AS covered_lines
+    FROM body_lines GROUP BY run_id, func_key
+)
+"""
+"""CTEs that turn ``fn(run_id, func_key, file_id, def_line, body_start, end_line)`` into
+``body(run_id, func_key, statements, covered, lines, covered_lines)`` by the function page's rule
+(``RunFacts.body_coverage``)."""
+
+
+def _missing_classes(value: str | None) -> tuple[str, ...]:
+    """The class names of a ``func_input_cov.missing_json`` value (``{param: [names]}``)."""
+    if not value:
+        return ()
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    names = {str(n) for names in data.values() if isinstance(names, list) for n in names}
+    return tuple(sorted(names))
+
+
+def _utc(moment: datetime) -> datetime:
+    """``moment`` in UTC (DuckDB hands ``TIMESTAMPTZ`` back in the session's local zone)."""
+    return moment.astimezone(UTC) if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+def _pct(part: int | None, whole: int | None) -> float | None:
+    return round(100.0 * (part or 0) / whole, 1) if whole else None
+
+
+@dataclass(frozen=True, slots=True)
+class FunctionPoint:
+    """One function in one baseline: input classes, body lines and callers.
+
+    ``present`` is false when the run's ``functions`` has no region with the key (the function did
+    not exist yet, or moved); ``expected`` and ``observed`` are None when the run computed no
+    input classes for it (never called, or no catalogue).
+    """
+
+    run_id: str
+    created_at: datetime
+    head_sha: str
+    present: bool
+    expected: int | None
+    observed: int | None
+    line_pct: float | None
+    tests_called: int
+    missing: tuple[str, ...]
+    tests_truncated: int = 0
+    """Tests that called the function but hit the tracer's sample cap (a missing class may then
+    only have gone unsampled)."""
+
+    @property
+    def input_pct(self) -> float | None:
+        """Observed ÷ expected input classes in percent (None when nothing is expected)."""
+        return 100.0 * (self.observed or 0) / self.expected if self.expected else None
+
+
+_FUNCTION_HISTORY_SQL = f"""
+WITH fn AS (
+    SELECT run_id, func_key, any_value(file_id) AS file_id, any_value(def_line) AS def_line,
+           any_value(body_start) AS body_start, any_value(end_line) AS end_line
+    FROM functions WHERE func_key = $func_key AND {_CALLABLES} GROUP BY run_id, func_key
+), {_BODY_LINES_CTE}
+SELECT r.run_id, r.created_at, r.head_sha, fn.func_key IS NOT NULL AS present,
+       fic.blocks_expected AS expected, fic.blocks_observed AS observed,
+       coalesce(fic.tests_called, 0) AS tests_called, coalesce(fic.tests_truncated, 0) AS tests_truncated,
+       fic.missing_json, body.statements, body.covered
+FROM runs_dim r
+LEFT JOIN fn USING (run_id)
+LEFT JOIN func_input_cov fic ON fic.run_id = r.run_id AND fic.func_key = $func_key
+LEFT JOIN body ON body.run_id = r.run_id AND body.func_key = $func_key
+ORDER BY r.created_at, r.run_id
+"""
+
+
+def function_history(
+    store: FactsStore, repo_id: int, func_key: str, branch: str, last_n: int = 12
+) -> list[FunctionPoint]:
+    """``func_key`` in each of the ``last_n`` newest baselines of ``branch``, oldest first.
+
+    Baselines are picked as in :func:`baseline_trend`; every baseline gets a point, with
+    ``present`` false where the run has no such function. ``line_pct`` follows the function
+    page's body rule (statements in ``[body_start, end_line]``; a one-line def needs a real test),
+    and ``missing`` lists the classes ``func_input_cov`` stored as never observed that run.
+    """
+    runs = _baseline_runs(store, repo_id, branch, last_n)
+    if not runs:
+        return []
+    rows = _query(
+        store,
+        _FUNCTION_HISTORY_SQL,
+        {"func_key": func_key},
+        repo_id=repo_id,
+        run_ids=runs,
+        tables=("runs_dim", "functions", "func_input_cov", "file_static", "test_lines"),
+    ).to_pylist()
+    return [
+        FunctionPoint(
+            run_id=row["run_id"],
+            created_at=_utc(row["created_at"]),
+            head_sha=row["head_sha"],
+            present=bool(row["present"]),
+            expected=row["expected"],
+            observed=row["observed"],
+            line_pct=_pct(row["covered"], row["statements"]),
+            tests_called=int(row["tests_called"]),
+            missing=_missing_classes(row["missing_json"]),
+            tests_truncated=int(row["tests_truncated"]),
+        )
+        for row in rows
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class ClassChange:
+    """How one function's input classes and body lines changed from a prior run to a run.
+
+    Only the never-observed classes are stored (``func_input_cov.missing_json``), so a class is
+    ``lost`` when it is missing now and was not missing then, and ``gained`` the other way round.
+    That reads exactly while the function expects the same classes in both runs; when the expected
+    count changed (``expected_changed``), a class can also have become expected or stopped being
+    expected. A function no test passes anything to any more loses every class it had, unnamed
+    (``lost_count`` counts them; ``gained_count`` likewise for a function newly called).
+    ``newly_uncovered`` holds the body's statements (this run's line numbers) that ran in the prior
+    run and not in this one, matched by offset from ``body_start``; it is only computed when the
+    body hash is unchanged (``body_changed`` false). ``sampled`` is true when either run hit the
+    tracer's sample cap for the function (``tests_truncated`` above 0): a class "lost" then may
+    only have gone unsampled.
+    """
+
+    func_key: str
+    prior_func_key: str
+    path: str
+    qualname: str
+    def_line: int
+    lost: tuple[str, ...]
+    gained: tuple[str, ...]
+    lost_count: int
+    gained_count: int
+    expected: int | None
+    prior_expected: int | None
+    observed: int | None
+    prior_observed: int | None
+    newly_uncovered: tuple[int, ...]
+    body_changed: bool
+    lines: tuple[int, int]
+    """(covered, statements) of the body in this run."""
+    prior_lines: tuple[int, int]
+    sampled: bool = False
+
+    @property
+    def expected_changed(self) -> bool:
+        """Whether the function expects a different number of classes than in the prior run."""
+        return (
+            self.expected is not None
+            and self.prior_expected is not None
+            and self.expected != self.prior_expected
+        )
+
+
+_CLASS_CHANGES_SQL = f"""
+WITH fn AS (
+    SELECT run_id, func_key, any_value(file_id) AS file_id, any_value(path) AS path,
+           any_value(qualname) AS qualname, any_value(ordinal) AS ordinal, any_value(def_line) AS def_line,
+           any_value(body_start) AS body_start, any_value(end_line) AS end_line,
+           any_value(body_hash) AS body_hash
+    FROM functions WHERE {_CALLABLES} GROUP BY run_id, func_key
+), {_BODY_LINES_CTE}, side AS (
+    SELECT fn.*, fic.blocks_expected, fic.blocks_observed, fic.missing_json,
+           coalesce(fic.tests_truncated, 0) AS tests_truncated,
+           coalesce(body.statements, 0) AS statements, coalesce(body.covered, 0) AS covered,
+           coalesce(body.lines, []) AS lines, coalesce(body.covered_lines, []) AS covered_lines
+    FROM fn
+    LEFT JOIN func_input_cov fic USING (run_id, func_key)
+    LEFT JOIN body USING (run_id, func_key)
+), cur AS (
+    SELECT * FROM side WHERE run_id = $run_id
+), pri AS (
+    SELECT * FROM side WHERE run_id = $prior_run_id
+), by_key AS (
+    SELECT c.func_key AS cur_key, p.func_key AS prior_key FROM cur c JOIN pri p USING (func_key)
+), by_name AS (
+    SELECT c.func_key AS cur_key, arg_min(p.func_key, p.ordinal) AS prior_key
+    FROM cur c JOIN pri p ON p.path = c.path AND p.qualname = c.qualname
+    WHERE c.func_key NOT IN (SELECT cur_key FROM by_key)
+      AND p.func_key NOT IN (SELECT prior_key FROM by_key)
+    GROUP BY c.func_key
+), pairs AS (
+    SELECT * FROM by_key UNION ALL SELECT * FROM by_name
+)
+SELECT c.func_key, p.func_key AS prior_key, c.path, c.qualname, c.def_line,
+       c.body_start, p.body_start AS prior_body_start, c.body_hash, p.body_hash AS prior_body_hash,
+       c.blocks_expected AS expected, p.blocks_expected AS prior_expected,
+       c.blocks_observed AS observed, p.blocks_observed AS prior_observed,
+       c.missing_json, p.missing_json AS prior_missing_json,
+       c.tests_truncated > 0 OR p.tests_truncated > 0 AS sampled,
+       c.statements, c.covered, c.lines, c.covered_lines,
+       p.statements AS prior_statements, p.covered AS prior_covered, p.covered_lines AS prior_covered_lines
+FROM pairs JOIN cur c ON c.func_key = pairs.cur_key JOIN pri p ON p.func_key = pairs.prior_key
+ORDER BY c.path, c.def_line, c.qualname
+"""
+
+
+def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: str) -> list[ClassChange]:
+    """Per function present in both runs, the input classes lost and gained and the body lines
+    newly uncovered from ``prior_run_id`` to ``run_id`` (only functions where something changed),
+    by path and def line.
+
+    Functions are matched by ``func_key``, else by ``(path, qualname)`` (the lowest prior ordinal)
+    among the functions the key left unmatched; new and deleted functions are not listed. See
+    :class:`ClassChange` for what "lost" can and cannot tell from the stored facts.
+    """
+    if run_id == prior_run_id:
+        return []
+    rows = _query(
+        store,
+        _CLASS_CHANGES_SQL,
+        {"run_id": run_id, "prior_run_id": prior_run_id},
+        repo_id=repo_id,
+        run_ids=[run_id, prior_run_id],
+        tables=("functions", "func_input_cov", "file_static", "test_lines"),
+    ).to_pylist()
+    out: list[ClassChange] = []
+    for row in rows:
+        missing, prior_missing = (
+            set(_missing_classes(row["missing_json"])),
+            set(_missing_classes(row["prior_missing_json"])),
+        )
+        expected, prior_expected = row["expected"], row["prior_expected"]
+        observed, prior_observed = row["observed"], row["prior_observed"]
+        lost: tuple[str, ...] = ()
+        gained: tuple[str, ...] = ()
+        lost_count = gained_count = 0
+        if expected is not None and prior_expected is not None:
+            lost, gained = tuple(sorted(missing - prior_missing)), tuple(sorted(prior_missing - missing))
+            lost_count, gained_count = len(lost), len(gained)
+        elif prior_expected is not None:
+            lost_count = int(prior_observed or 0)
+        elif expected is not None:
+            gained_count = int(observed or 0)
+        body_changed = row["body_hash"] != row["prior_body_hash"]
+        newly: tuple[int, ...] = ()
+        if not body_changed:
+            before = {line - row["prior_body_start"] for line in row["prior_covered_lines"] or ()}
+            now = set(row["covered_lines"] or ())
+            newly = tuple(
+                line for line in row["lines"] or () if line - row["body_start"] in before and line not in now
+            )
+        if not (lost_count or gained_count or newly):
+            continue
+        out.append(
+            ClassChange(
+                func_key=row["func_key"],
+                prior_func_key=row["prior_key"],
+                path=row["path"],
+                qualname=row["qualname"],
+                def_line=int(row["def_line"]),
+                lost=lost,
+                gained=gained,
+                lost_count=lost_count,
+                gained_count=gained_count,
+                expected=expected,
+                prior_expected=prior_expected,
+                observed=observed,
+                prior_observed=prior_observed,
+                newly_uncovered=newly,
+                body_changed=body_changed,
+                lines=(int(row["covered"]), int(row["statements"])),
+                prior_lines=(int(row["prior_covered"] or 0), int(row["prior_statements"] or 0)),
+                sampled=bool(row["sampled"]),
+            )
+        )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class GapRow:
+    """A called function with input classes no test passed in (the overview's "largest gaps")."""
+
+    func_key: str
+    path: str
+    qualname: str
+    def_line: int
+    expected: int
+    observed: int
+    tests_called: int
+    tests_truncated: int
+    line_pct: float | None
+    classes: tuple[str, ...]
+    """The never-observed class names."""
+
+    @property
+    def missing(self) -> int:
+        """Expected classes never observed."""
+        return self.expected - self.observed
+
+
+_TOP_GAPS_SQL = f"""
+WITH fn AS (
+    SELECT run_id, func_key, any_value(file_id) AS file_id, any_value(path) AS path,
+           any_value(qualname) AS qualname, any_value(def_line) AS def_line,
+           any_value(body_start) AS body_start, any_value(end_line) AS end_line
+    FROM functions WHERE {_CALLABLES} GROUP BY run_id, func_key
+), {_BODY_LINES_CTE}
+SELECT fn.func_key, fn.path, fn.qualname, fn.def_line,
+       fic.blocks_expected AS expected, fic.blocks_observed AS observed,
+       fic.tests_called, fic.tests_truncated, fic.missing_json, body.statements, body.covered
+FROM fn
+JOIN func_input_cov fic USING (run_id, func_key)
+LEFT JOIN body USING (run_id, func_key)
+WHERE fic.tests_called > 0 AND fic.blocks_expected > coalesce(fic.blocks_observed, 0)
+ORDER BY fic.blocks_expected - coalesce(fic.blocks_observed, 0) DESC, body.statements DESC NULLS LAST,
+         fn.path, fn.qualname
+LIMIT $limit
+"""
+
+
+def top_gaps(store: FactsStore, repo_id: int, run_id: str, limit: int = 10) -> list[GapRow]:
+    """The ``limit`` called functions (some test ran their body) with the most expected input
+    classes never observed in the run, most first (then larger bodies, then path and name), with
+    the body's line percentage (the function page's rule) and the missing class names."""
+    rows = _query(
+        store,
+        _TOP_GAPS_SQL,
+        {"limit": max(0, limit)},
+        repo_id=repo_id,
+        run_id=run_id,
+        tables=("functions", "func_input_cov", "file_static", "test_lines"),
+    ).to_pylist()
+    return [
+        GapRow(
+            func_key=row["func_key"],
+            path=row["path"],
+            qualname=row["qualname"],
+            def_line=int(row["def_line"]),
+            expected=int(row["expected"]),
+            observed=int(row["observed"] or 0),
+            tests_called=int(row["tests_called"]),
+            tests_truncated=int(row["tests_truncated"] or 0),
+            line_pct=_pct(row["covered"], row["statements"]),
+            classes=_missing_classes(row["missing_json"]),
+        )
+        for row in rows
+    ]

@@ -2,7 +2,8 @@
 
 Routes: ``/repos/<rid>/files/<path:path>?run=&pr=`` (source view), fragment
 ``/repos/<rid>/files/<path:path>/lines/<n>/tests?run=`` (covering tests of one line),
-``/repos/<rid>/functions/<func_key>?run=`` (function page) and fragment
+``/repos/<rid>/functions/<func_key>?run=`` (function page, with the function's history over the
+default branch's last baselines) and fragment
 ``/repos/<rid>/functions/<func_key>/shapes?run=[&cls=]`` (the grid, or one cell's detail).
 A path is served only when the run's facts list it; its text comes from the mirror at the run's
 head commit.
@@ -21,11 +22,11 @@ from sqlalchemy import select
 from werkzeug.exceptions import NotFound
 
 from coverset.db.models import PullRequest, Run, TestCase, TestResult
-from coverset.facts.queries import test_touched
+from coverset.facts.queries import function_history, test_touched
 from coverset.orchestrator.repos import mirror_path
 from coverset.web.context import app_db, app_settings
 from coverset.web.detail import function_detail
-from coverset.web.facts_view import FunctionView, RunFacts
+from coverset.web.facts_view import FunctionView, RunFacts, history_losses, run_point
 from coverset.web.loaders import (
     default_run,
     facts_for,
@@ -39,11 +40,14 @@ from coverset.web.pages import get_repo, parse_int, render_page
 from coverset.web.pr_view import analyse_diff
 from coverset.web.render.shapegrid import render_grid, render_inlay
 from coverset.web.render.source import RegionMark, render_source
+from coverset.web.render.sparkline import SparkSeries, render_spark_key, render_sparkline
 from coverset.web.run_view import order_rows
 
 bp = Blueprint("files", __name__)
 
 FUNC_KEY = re.compile(r"^[0-9a-f]{16}$")
+HISTORY_RUNS = 12
+"""Baselines in the function page's history strip."""
 CLASS_NAME = re.compile(r"^[^\x00-\x1f]{1,200}$")
 
 
@@ -259,9 +263,68 @@ async def function(rid: int, func_key: str) -> Response:
     detail = await function_detail(
         repo, run, facts, region, analysis=analysis, results=results, finding=findings.get(func_key)
     )
+    history = await function_history_view(repo, run, facts, region)
     return await render_page(
-        "function.html", repo=repo, run=run, region=region, detail=detail, invariants=invariants
+        "function.html",
+        repo=repo,
+        run=run,
+        region=region,
+        detail=detail,
+        invariants=invariants,
+        history=history,
     )
+
+
+async def function_history_view(repo: Any, run: Run, facts: RunFacts, region: Any) -> dict[str, Any]:
+    """The function page's history strip: the function in the default branch's last baselines
+    (plus the viewed run when it is not one of them, e.g. a PR run), a sparkline of line % and
+    input-class %, one square per run and the classes lost since the previous point."""
+    points = await asyncio.to_thread(
+        function_history, facts.store, repo.id, region.func_key, repo.default_branch, HISTORY_RUNS
+    )
+    extra = run.id not in {p.run_id for p in points}
+    if extra:
+        points = [*points, await asyncio.to_thread(run_point, facts, region, run.created_at, run.head_sha)]
+    index = next(i for i, p in enumerate(points) if p.run_id == run.id)
+
+    def name(i: int) -> str:
+        point = points[i]
+        where = f"this run ({run.branch or 'detached'})" if extra and i == len(points) - 1 else "baseline"
+        return f"{where} {point.head_sha[:8]} · {point.created_at:%Y-%m-%d %H:%M} UTC"
+
+    series = [
+        SparkSeries("lines", tuple(p.line_pct for p in points)),
+        SparkSeries("input classes", tuple(p.input_pct for p in points), dashed=True),
+    ]
+    spark = render_sparkline(
+        series,
+        points=[name(i) for i in range(len(points))],
+        width=240,
+        current=index,
+        label=f"{region.qualname} over the last runs",
+    )
+    squares = [
+        {
+            "point": point,
+            "label": name(i),
+            "current": i == index,
+            "extra": extra and i == len(points) - 1,
+            "url": url_for("files.function", rid=repo.id, func_key=region.func_key, run=point.run_id)
+            if point.present
+            else None,
+        }
+        for i, point in enumerate(points)
+    ]
+    return {
+        "points": points,
+        "baselines": len(points) - (1 if extra else 0),
+        "extra": extra,
+        "spark": spark,
+        "key": render_spark_key(series),
+        "squares": squares,
+        "losses": history_losses(points, index),
+        "current": points[index],
+    }
 
 
 @bp.get("/repos/<int:rid>/functions/<func_key>/shapes")

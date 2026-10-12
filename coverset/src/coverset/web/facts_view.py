@@ -38,7 +38,7 @@ from coverset.analysis.shapes import (
     function_catalogue_from_types,
 )
 from coverset.facts.dictionary import RepoDictionary
-from coverset.facts.queries import TreeNode, treemap
+from coverset.facts.queries import FunctionPoint, TreeNode, treemap
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.facts.store import FactsStore
 from coverset.lang.base import IMPORT_CONTEXT, FuncSampling, FunctionRegion, ShapeObs, StaticFile
@@ -47,7 +47,17 @@ from coverset.web.render.shapegrid import GridCell, GridModel, GridRow
 from coverset.web.render.source import LineFacts
 from coverset_model.types import DescriptorError, TypeDescriptor, from_json
 
-__all__ = ["FunctionView", "ParamReach", "RunFacts", "param_reach", "reached_classes", "run_facts"]
+__all__ = [
+    "FunctionView",
+    "LostClass",
+    "ParamReach",
+    "RunFacts",
+    "history_losses",
+    "param_reach",
+    "reached_classes",
+    "run_facts",
+    "run_point",
+]
 
 CACHE_SIZE = 24
 SPECIFIC_FAMILIES = frozenset(
@@ -671,4 +681,65 @@ def param_reach(view: FunctionView, reached: Mapping[str, frozenset[str]]) -> li
                 others_only=sum(1 for c in cells if c.observed and c.name not in mine),
             )
         )
+    return out
+
+
+# -- a function over the baselines (the function page's history strip) -----------------------------
+
+
+def run_point(facts: RunFacts, region: FunctionRegion, created_at: Any, head_sha: str) -> FunctionPoint:
+    """``region`` in ``facts``' run as a :class:`~coverset.facts.queries.FunctionPoint`, for a run
+    the baseline history does not hold (a PR run): the stored ``func_input_cov`` row and the body
+    line percentage by the same rule as :func:`~coverset.facts.queries.function_history`."""
+    row = facts.input_cov_rows.get(region.func_key) or {}
+    missing: dict[str, Any] = {}
+    try:
+        loaded = json.loads(row.get("missing_json") or "{}")
+        missing = loaded if isinstance(loaded, dict) else {}
+    except ValueError:
+        missing = {}
+    line_pct, _branch_pct = facts.body_coverage(region)
+    return FunctionPoint(
+        run_id=facts.run_id,
+        created_at=created_at,
+        head_sha=head_sha,
+        present=True,
+        expected=row.get("blocks_expected"),
+        observed=row.get("blocks_observed"),
+        line_pct=line_pct,
+        tests_called=int(row.get("tests_called") or 0),
+        missing=tuple(
+            sorted({str(n) for names in missing.values() if isinstance(names, list) for n in names})
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LostClass:
+    """An input class observed in an earlier point and missing at the selected one."""
+
+    name: str
+    last_seen: FunctionPoint
+    """The newest earlier point that observed it."""
+
+
+def history_losses(points: Sequence[FunctionPoint], index: int) -> list[LostClass]:
+    """Classes missing at ``points[index]`` that the nearest earlier point with input classes
+    observed (it expected the same number of classes and did not list them as missing), each with
+    the newest earlier point that observed it. Only never-observed classes are stored, so a point
+    that expects a different number of classes cannot say what it observed and is skipped."""
+    if not 0 <= index < len(points):
+        return []
+    here = points[index]
+    if here.expected is None:
+        return []
+    earlier = [p for p in points[:index] if p.present and p.expected == here.expected]
+    if not earlier:
+        return []
+    previous = earlier[-1]
+    lost = sorted(set(here.missing) - set(previous.missing))
+    out = []
+    for name in lost:
+        seen = next(p for p in reversed(earlier) if name not in p.missing)
+        out.append(LostClass(name, seen))
     return out
