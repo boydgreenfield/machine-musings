@@ -138,6 +138,29 @@ class SourceAccess:
         return f"{self.root} (only files git tracks there)" if self.tracked is not None else str(self.root)
 
 
+def git_toplevel(path: Path) -> Path | None:
+    """The top of the git work tree ``path`` is in, or None (not a work tree, or git cannot run).
+
+    Bundle paths are repository-relative, so sources are always resolved from the top of the work
+    tree, whichever directory inside it the report is built from or ``--repo-root`` names."""
+    from coverset.orchestrator.repos import git_env
+
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(path), "rev-parse", "--show-toplevel"],
+            env=git_env(),
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    top = proc.stdout.decode("utf-8", "surrogateescape").strip()
+    return Path(top).resolve() if top else None
+
+
 def tracked_files(root: Path) -> frozenset[str] | None:
     """The paths (relative to ``root``, POSIX) git tracks under ``root``, or None when ``root`` is not
     in a git work tree or git cannot be run. Git runs with the scrubbed environment of the mirrors
@@ -180,6 +203,7 @@ def source_access(
     """
     if repo_root is not None:
         root = Path(repo_root).resolve()
+        root = git_toplevel(root) or root
         return SourceAccess(root, tracked_files(root))
     if not is_plugin_dir(source, kind):
         return SourceAccess(
@@ -188,6 +212,7 @@ def source_access(
             "directory sources come from: pass --repo-root DIR to show them.",
         )
     here = (cwd or Path.cwd()).resolve()
+    here = git_toplevel(here) or here
     tracked = tracked_files(here)
     if tracked is None:
         return SourceAccess(

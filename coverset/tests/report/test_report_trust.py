@@ -359,3 +359,19 @@ def test_test_and_function_lists_are_capped(tmp_path: Path) -> None:
     covering = html.split("data-covering>", 1)[1].split("</ul>", 1)[0]
     assert covering.count("<li>") == MAX_LISTED
     assert "+7 more covering tests not listed" in html
+
+
+def test_a_subdirectory_of_the_repository_still_reads_the_tracked_files(
+    fixture_out: FixtureRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bundle paths are repository-relative, so building from a subdirectory of the work tree (or
+    naming one as --repo-root) reads from the top of the work tree."""
+    project = tmp_path / "project"
+    shutil.copytree(fixture_out.project, project, ignore=shutil.ignore_patterns("out", "__pycache__"))
+    _git_repo(project, CORE)
+    monkeypatch.chdir(project / "src")
+    inp = load_bundle(fixture_out.out)
+    assert inp.notice is None and inp.sources[CORE] is not None
+    assert str(project.resolve()) in inp.meta["repo_root"]
+    inp = load_bundle(fixture_out.out, repo_root=project / "src")
+    assert inp.notice is None and inp.sources[CORE] is not None
