@@ -244,6 +244,8 @@ def from_json(value: object, *, _depth: int = 0) -> TypeDescriptor:
     if kind == "object":
         return TypeDescriptor("object", name=name)
     members = items("members")
+    if not members:
+        raise DescriptorError("an enum needs at least one member")
     if not all(isinstance(m, str) and 0 < len(m) <= MAX_NAME_CHARS for m in members):
         raise DescriptorError("enum members are non-empty strings")
     return TypeDescriptor("enum", name=name, members=tuple(members))

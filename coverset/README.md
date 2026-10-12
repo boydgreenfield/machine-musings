@@ -109,7 +109,7 @@ One run only: no history and no PR diff (the live pages have those). Keys, the l
 
 ## One model for every language
 
-Everything downstream of a test run (the facts store, the input-class catalogue, the pages, the comment, the report) reads one language-neutral model, `coverset-model`, a package with no dependencies. Its on-disk form is the **neutral bundle** ([docs/neutral-bundle.md](docs/neutral-bundle.md)): `manifest.json`, then `tests`, `files`, `coverage`, `arcs`, `functions`, `shapes` and `links` as JSON lines, with shape keys from one value vocabulary (`int|neg`, `str|kind:email/multi-label-domain`, `list|elem:int|order:unsorted`) and declared types as small **type descriptors** (`{"kind": "union", "arms": [...]}`, `{"kind": "enum", "members": [...]}`) that any language can produce. `pytest-coverset --coverset-neutral` writes it for Python, `coverset bundle validate` checks a bundle against the specification and its JSON Schemas, `coverset bundle convert` turns a plugin bundle into one, and a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`, the shape a Vitest or Jest reporter would emit) validates, ingests into the facts store and renders in the pages and the report with no Python-specific code path. The reporter itself is the part not written; [docs/extending.md](docs/extending.md) walks through it file by file.
+Everything downstream of a test run (the facts store, the input-class catalogue, the pages, the comment, the report) reads one language-neutral model, `coverset-model`, a package with no dependencies. Its on-disk form is the **neutral bundle** ([docs/neutral-bundle.md](docs/neutral-bundle.md)): `manifest.json`, then `tests`, `files`, `coverage`, `arcs`, `functions`, `shapes` and `links` as JSON lines, with shape keys from one value vocabulary (`int|neg`, `str|kind:email/multi-label-domain`, `list|elem:int|order:unsorted`) and declared types as small **type descriptors** (`{"kind": "union", "arms": [...]}`, `{"kind": "enum", "members": [...]}`) that any language can produce. `pytest-coverset --coverset-neutral` writes it for Python, `coverset bundle validate` checks a bundle against the specification and its JSON Schemas, `coverset bundle convert` turns a plugin bundle into one, and a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`, the shape a Vitest or Jest reporter would emit) validates, ingests into the facts store with no Python-specific code path, and renders in the report and the live pages, whose function page and PR cards build its input classes from the type descriptors stored at ingest (`tests/web/test_web_neutral.py`). The reporter itself is the part not written; [docs/extending.md](docs/extending.md) walks through it file by file.
 
 ## Run it
 
@@ -201,7 +201,7 @@ coverset/
     analysis/       diff to functions, prior run, scoring, wave 1, sharding, input classes, invariants
     facts/          untrusted-bundle reading, Parquet ingest, DuckDB queries, retention
     executors/      the executor contract, LocalExecutor, ModalExecutor
-    lang/           the language-adapter contract and the Python adapter
+    lang/           the language-adapter contract, the Python adapter and NeutralAdapter (any language that ships a neutral bundle)
     ai/             review bundles, fake and Anthropic clients
     web/            pages, SSE, the /v1 API, templates, static files, SVG renderers
     report/         the static report (coverset report)

@@ -7,10 +7,12 @@ descriptors existed, so the input classes a Python function expects did not chan
   plus ``none``; ``Annotated[A, ...]`` → ``A``; a string (``"list[int]"``) is parsed, then read
   the same way.
 * ``int``, ``float``, ``str``, ``bool``, ``bytes`` and ``None`` → scalars.
-* ``list``/``List``/``Sequence``/``MutableSequence`` → ``list``; ``tuple``/``Tuple`` → ``tuple``
-  (``tuple[X, ...]`` variable-length, ``tuple[X, Y]`` fixed); ``set``/``Set``/``AbstractSet``/
-  ``MutableSet``/``Iterable``/``Collection``/``Iterator`` → ``set`` (unordered); ``frozenset``/
-  ``FrozenSet`` → ``frozenset``; ``dict``/``Dict``/``Mapping``/``MutableMapping`` → ``dict``.
+* ``list``/``List``/``Sequence``/``MutableSequence`` and the abstract ``Iterable`` and
+  ``Collection`` → ``list`` (what a caller usually passes, so the arm's class is one a list
+  satisfies); ``tuple``/``Tuple`` → ``tuple`` (``tuple[X, ...]`` variable-length, ``tuple[X, Y]``
+  fixed); ``set``/``Set``/``AbstractSet``/``MutableSet``/``Iterator`` → ``set`` (unordered);
+  ``frozenset``/``FrozenSet`` → ``frozenset``; ``dict``/``Dict``/``Mapping``/``MutableMapping`` →
+  ``dict``.
 * ``Literal[...]`` → the literal's constant values that are JSON scalars (a ``Literal`` with
   none left is an ``object`` named ``Literal``).
 * ``Any`` → ``any``; a name the ``enums`` resolver knows → ``enum`` with its members; any other
@@ -34,9 +36,9 @@ type EnumResolver = Mapping[str, Sequence[str]] | Callable[[str], Sequence[str] 
 MAX_ANNOTATION_CHARS: Final = 4096
 _MAX_DEPTH: Final = 24
 _SCALARS: Final = {"int": "int", "float": "float", "str": "str", "bool": "bool", "bytes": "bytes"}
-_LISTS: Final = frozenset({"list", "List", "Sequence", "MutableSequence"})
+_LISTS: Final = frozenset({"list", "List", "Sequence", "MutableSequence", "Iterable", "Collection"})
 _TUPLES: Final = frozenset({"tuple", "Tuple"})
-_SETS: Final = frozenset({"set", "Set", "AbstractSet", "MutableSet", "Iterable", "Collection", "Iterator"})
+_SETS: Final = frozenset({"set", "Set", "AbstractSet", "MutableSet", "Iterator"})
 _FROZENSETS: Final = frozenset({"frozenset", "FrozenSet"})
 _DICTS: Final = frozenset({"dict", "Dict", "Mapping", "MutableMapping"})
 _NOT_ENUMS: Final = frozenset(

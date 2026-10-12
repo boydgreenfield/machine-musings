@@ -10,6 +10,11 @@ written once per run as ``<table>.parquet``.
 whether this shard's ``test_lines`` hold the test's coverage (a test whose coverage another shard
 recorded first keeps that coverage, see :func:`coverset.facts.ingest.ingest_shard`).
 
+``functions.types_json`` is the declared types a neutral bundle shipped for the function, as the
+JSON object ``{param: descriptor | null}`` of ``functions.jsonl``'s ``types`` (``return`` included),
+or null when nothing was shipped (a Python run reads the annotations from the head source instead).
+Files written before the column existed read it as null.
+
 ``call_shapes.caller_key`` is the caller's ``func_key`` (``caller_kind = 'func'``, with the caller's
 path, qualname and first line alongside) or the calling test's nodeid (``caller_kind = 'test'``).
 
@@ -124,6 +129,7 @@ SCHEMAS: dict[str, pa.Schema] = {
             ("params_json", pa.string()),
             ("kind", pa.string()),
             ("language", pa.string()),
+            ("types_json", pa.string()),
         ]
     ),
     "runs_dim": pa.schema(

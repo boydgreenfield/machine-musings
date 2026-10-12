@@ -12,8 +12,14 @@ within a file's statements, function keys, shape-key grammar.
 :func:`check` validates a value against a schema without any dependency. It supports ``type``
 (including a list of types), ``enum``, ``const``, ``required``, ``properties``,
 ``additionalProperties`` (a boolean or a schema), ``items``, ``prefixItems``, ``minItems``/``maxItems``,
-``minLength``/``maxLength``, ``minimum``/``maximum``, ``pattern``, ``anyOf`` and local ``$ref``
-into ``$defs``.
+``minLength``/``maxLength``, ``minimum``/``maximum``, ``pattern``, ``anyOf``, local ``$ref``
+into ``$defs`` and the boolean schemas ``true`` and ``false``. It never recurses deeper than
+:data:`MAX_NESTING` levels into a value (deeper is one violation, not a ``RecursionError``).
+
+A type descriptor may nest at most ``coverset_model.types.MAX_DEPTH`` (32) levels below the root.
+JSON Schema has no depth keyword, so the schema unrolls the recursion: ``$defs/descriptor`` (the
+root) refers to ``descriptor_1`` for its children, and so on down to ``descriptor_32``, whose
+children are refused (``false``).
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-__all__ = ["SCHEMAS", "SchemaError", "check", "dump", "row_schema", "write_all"]
+__all__ = ["SCHEMAS", "SchemaError", "check", "dump", "iter_violations", "row_schema", "write_all"]
 
 FORMAT: Final = "coverset-neutral"
 VERSION: Final = 1
@@ -34,6 +40,14 @@ MAX_ID: Final = 512
 MAX_PATH: Final = 512
 MAX_NAME: Final = 512
 MAX_LINE: Final = 1_000_000
+MAX_NESTING: Final = 64
+"""Levels :func:`check` descends into a value before reporting it as nested too deep."""
+DESCRIPTOR_DEPTH: Final = 32
+"""Deepest level of a type descriptor (the root is level 0), as ``coverset_model.types.MAX_DEPTH``."""
+CREATED_AT_PATTERN: Final = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+"""ISO 8601 / RFC 3339 date-time: ``2026-10-11T19:04:05Z``, ``2026-10-11T19:04:05.123+02:00``."""
 
 _ID: Final = {"type": "string", "minLength": 1, "maxLength": MAX_ID}
 _PATH: Final = {"type": "string", "minLength": 1, "maxLength": MAX_PATH}
@@ -56,10 +70,14 @@ _FUNC: Final = {
 }
 _NUMBER_OR_NULL: Final = {"type": ["number", "null"]}
 
-_DESCRIPTOR: Final[dict[str, Any]] = {
-    "description": "A type descriptor (docs/neutral-bundle.md, 'Type descriptors').",
+_DESCRIPTOR_BODY: Final[dict[str, Any]] = {
+    "description": (
+        "The fields of every type descriptor (docs/neutral-bundle.md, 'Type descriptors'); "
+        "the descriptor_<n> definitions bound how deep children nest."
+    ),
     "type": "object",
     "required": ["kind"],
+    "anyOf": [{"properties": {"elem": False}}, {"properties": {"elems": False}}],
     "properties": {
         "kind": {
             "enum": [
@@ -81,20 +99,57 @@ _DESCRIPTOR: Final[dict[str, Any]] = {
                 "any",
             ]
         },  # fmt: skip
-        "elem": {"$ref": "#/$defs/descriptor"},
-        "elems": {"type": "array", "items": {"$ref": "#/$defs/descriptor"}, "maxItems": 256},
-        "key": {"$ref": "#/$defs/descriptor"},
-        "value": {"$ref": "#/$defs/descriptor"},
-        "arms": {"type": "array", "items": {"$ref": "#/$defs/descriptor"}, "minItems": 1, "maxItems": 256},
+        "elem": {"type": "object"},
+        "elems": {"type": "array", "maxItems": 256},
+        "key": {"type": "object"},
+        "value": {"type": "object"},
+        "arms": {"type": "array", "minItems": 1, "maxItems": 256},
         "values": {
             "type": "array",
             "items": {"type": ["string", "integer", "number", "boolean", "null"]},
             "maxItems": 256,
         },
         "name": _NAME,
-        "members": {"type": "array", "items": _NAME, "maxItems": 256},
+        "members": {"type": "array", "items": _NAME, "minItems": 1, "maxItems": 256},
     },
     "additionalProperties": False,
+}
+
+
+def _descriptor_level(level: int) -> dict[str, Any]:
+    """The descriptor at ``level`` (0 = root): the body, children one level down or none at the last."""
+    if level >= DESCRIPTOR_DEPTH:
+        child: Any = False
+        return {
+            "$ref": "#/$defs/descriptor_body",
+            "properties": {
+                "elem": child,
+                "elems": {"maxItems": 0},
+                "key": child,
+                "value": child,
+                "arms": child,
+            },
+        }
+    ref = {"$ref": f"#/$defs/descriptor_{level + 1}"}
+    return {
+        "$ref": "#/$defs/descriptor_body",
+        "properties": {
+            "elem": ref,
+            "elems": {"items": ref},
+            "key": ref,
+            "value": ref,
+            "arms": {"items": ref},
+        },
+    }
+
+
+_DESCRIPTOR_DEFS: Final[dict[str, Any]] = {
+    "descriptor": {
+        "description": "A type descriptor (docs/neutral-bundle.md, 'Type descriptors'), at most 32 levels deep.",
+        **_descriptor_level(0),
+    },
+    **{f"descriptor_{n}": _descriptor_level(n) for n in range(1, DESCRIPTOR_DEPTH + 1)},
+    "descriptor_body": _DESCRIPTOR_BODY,
 }
 
 
@@ -117,7 +172,7 @@ SCHEMAS: Final[dict[str, dict[str, Any]]] = {
             "required": ["format", "version", "language", "producer"],
             "properties": {
                 "format": {"const": FORMAT},
-                "version": {"type": "integer", "minimum": 1},
+                "version": {"const": VERSION},
                 "language": {"type": "string", "pattern": "^[a-z][a-z0-9_+-]{0,31}$"},
                 "producer": {
                     "type": "object",
@@ -128,7 +183,7 @@ SCHEMAS: Final[dict[str, dict[str, Any]]] = {
                     },
                     "additionalProperties": False,
                 },
-                "created_at": {"type": ["string", "null"], "maxLength": 64},
+                "created_at": {"type": ["string", "null"], "maxLength": 64, "pattern": CREATED_AT_PATTERN},
                 "shard": {"type": ["integer", "null"], "minimum": 0, "maximum": 1_000_000},
                 "meta": {"type": "object"},
             },
@@ -231,7 +286,7 @@ SCHEMAS: Final[dict[str, dict[str, Any]]] = {
             },
             "additionalProperties": False,
         },
-        **{"$defs": {"descriptor": _DESCRIPTOR}},
+        **{"$defs": _DESCRIPTOR_DEFS},
     ),
     "shapes": _schema(
         "shapes",
@@ -258,7 +313,7 @@ SCHEMAS: Final[dict[str, dict[str, Any]]] = {
                                 },
                             ]
                         },
-                        "samples": {"type": "integer", "minimum": 0},
+                        "samples": {"type": "integer", "minimum": 1},
                         "tests": {"type": "array", "items": _ID},
                         "truncated": {"type": "boolean"},
                         "example": {"type": ["string", "null"]},
@@ -320,11 +375,16 @@ def row_schema(stem: str, row: object) -> dict[str, Any]:
 def check(value: object, schema: Mapping[str, Any], *, limit: int = 20) -> list[Violation]:
     """The ways ``value`` fails ``schema`` (at most ``limit``); an empty list means valid."""
     found: list[Violation] = []
-    for violation in _check(value, schema, schema, ""):
+    for violation in iter_violations(value, schema):
         found.append(violation)
         if len(found) >= limit:
             break
     return found
+
+
+def iter_violations(value: object, schema: Mapping[str, Any]) -> Iterator[Violation]:
+    """The ways ``value`` fails ``schema``, lazily: stop iterating to stop checking."""
+    return _check(value, schema, schema, "")
 
 
 _JSON_TYPES: Final = {
@@ -355,12 +415,22 @@ def _same(a: object, b: object) -> bool:
     return type(a) is type(b) and a == b if isinstance(a, bool) or isinstance(b, bool) else a == b
 
 
-def _check(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any], at: str) -> Iterator[Violation]:
+def _check(
+    value: Any, schema: Mapping[str, Any] | bool, root: Mapping[str, Any], at: str, depth: int = 0
+) -> Iterator[Violation]:
+    if schema is True:
+        return
+    if schema is False:
+        yield Violation(at or "/", "not allowed here", "false")
+        return
+    if depth > MAX_NESTING:
+        yield Violation(at or "/", f"nested deeper than {MAX_NESTING} levels", "depth")
+        return
     unknown = set(schema) - _SUPPORTED
     if unknown:
         raise SchemaError(f"unsupported schema keywords: {sorted(unknown)}")
     if "$ref" in schema:
-        yield from _check(value, _resolve(root, schema["$ref"]), root, at)
+        yield from _check(value, _resolve(root, schema["$ref"]), root, at, depth)
     where = at or "/"
     if "type" in schema:
         types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
@@ -372,7 +442,7 @@ def _check(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any], at: s
     if "enum" in schema and not any(_same(value, option) for option in schema["enum"]):
         options = ", ".join(json.dumps(o) for o in schema["enum"])
         yield Violation(where, f"must be one of {options}", "enum")
-    if "anyOf" in schema and not any(_valid(value, s, root, at) for s in schema["anyOf"]):
+    if "anyOf" in schema and not any(_valid(value, s, root, at, depth) for s in schema["anyOf"]):
         yield Violation(where, "matches none of the allowed forms", "anyOf")
     if isinstance(value, str):
         if "minLength" in schema and len(value) < schema["minLength"]:
@@ -397,10 +467,10 @@ def _check(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any], at: s
             yield Violation(where, f"more than {schema['maxItems']} items", "maxItems")
         prefix = schema.get("prefixItems", ())
         for index, (item, item_schema) in enumerate(zip(value, prefix, strict=False)):
-            yield from _check(item, item_schema, root, f"{at}/{index}")
+            yield from _check(item, item_schema, root, f"{at}/{index}", depth + 1)
         if "items" in schema:
             for index, item in enumerate(value[len(prefix) :], start=len(prefix)):
-                yield from _check(item, schema["items"], root, f"{at}/{index}")
+                yield from _check(item, schema["items"], root, f"{at}/{index}", depth + 1)
     if isinstance(value, dict):
         for name in schema.get("required", ()):
             if name not in value:
@@ -409,15 +479,17 @@ def _check(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any], at: s
         extra = schema.get("additionalProperties", True)
         for name, item in value.items():
             if name in properties:
-                yield from _check(item, properties[name], root, f"{at}/{name}")
+                yield from _check(item, properties[name], root, f"{at}/{name}", depth + 1)
             elif extra is False:
                 yield Violation(f"{at}/{name}", "unknown field", "additionalProperties")
             elif isinstance(extra, Mapping):
-                yield from _check(item, extra, root, f"{at}/{name}")
+                yield from _check(item, extra, root, f"{at}/{name}", depth + 1)
 
 
-def _valid(value: Any, schema: Mapping[str, Any], root: Mapping[str, Any], at: str) -> bool:
-    return next(_check(value, schema, root, at), None) is None
+def _valid(
+    value: Any, schema: Mapping[str, Any] | bool, root: Mapping[str, Any], at: str, depth: int
+) -> bool:
+    return next(_check(value, schema, root, at, depth), None) is None
 
 
 def dump(stem: str) -> str:

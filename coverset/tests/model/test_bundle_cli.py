@@ -109,3 +109,44 @@ def test_convert_refuses_an_unreadable_bundle(runner: CliRunner, tmp_path: Path)
     (tmp_path / "empty").mkdir()
     result = runner.invoke(cli, ["bundle", "convert", str(tmp_path / "empty"), "--to", str(tmp_path / "out")])
     assert result.exit_code == 1 and "cannot read" in result.output
+
+
+@pytest.mark.security
+def test_convert_keeps_a_neutral_bundles_language_and_never_writes_through_a_link(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep me")
+    (out / "manifest.json").symlink_to(outside)
+    (out / "links.jsonl").write_text('{"test": "x", "invariant": "STALE"}\n')
+    result = runner.invoke(
+        cli,
+        [
+            "bundle",
+            "convert",
+            str(NEUTRAL_TS / "bundle.tar.gz"),
+            "--to",
+            str(out),
+            "--source-root",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert outside.read_text() == "keep me" and not (out / "manifest.json").is_symlink()
+    assert not (out / "links.jsonl").exists()
+    converted = read_bundle(out)
+    original = read_bundle(NEUTRAL_TS / "bundle.tar.gz")
+    assert converted.meta["bundle"]["language"] == "typescript"
+    assert converted.meta["bundle"]["producer"]["name"] == "coverset-bundle-convert"
+    assert converted.meta["converted_from"] == {
+        "format": "coverset-neutral",
+        "language": "typescript",
+        "producer": {"name": "vitest-coverset-fixture", "version": "0.0.1"},
+    }
+    assert converted.meta["bundle"]["created_at"] == "2026-10-11T12:00:00Z"
+    assert converted.functions == original.functions and converted.types == original.types
+    python = runner.invoke(cli, ["bundle", "convert", str(MINIMAL / "bundle"), "--to", str(tmp_path / "py")])
+    assert python.exit_code == 0, python.output
+    assert read_bundle(tmp_path / "py").meta["converted_from"]["format"] == "pytest-coverset"

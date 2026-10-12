@@ -44,8 +44,10 @@ from coverset.lang.base import (
     FuncTriple,
     NeutralBundle,
     ShapeObs,
+    TypeDescriptor,
     func_key,
 )
+from coverset_model.types import to_json
 
 __all__ = [
     "Catalogue",
@@ -342,10 +344,26 @@ def _shapes(bundle: NeutralBundle, ids: RepoDictionary) -> pa.Table:
     return pa.table({"shape_id": [ids.shape_id(k) for k in keys], "shape_key": keys})
 
 
+def _types_json(declared: Mapping[str, TypeDescriptor | None] | None) -> str | None:
+    """A function's shipped descriptors as ``functions.types_json`` (None when nothing was shipped)."""
+    if declared is None:
+        return None
+    return json.dumps(
+        {param: to_json(d) if d is not None else None for param, d in declared.items()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _functions_table(
-    ctx: RunContext, functions: Sequence[FunctionRegion], ids: RepoDictionary, language: str
+    ctx: RunContext,
+    functions: Sequence[FunctionRegion],
+    ids: RepoDictionary,
+    language: str,
+    types: Mapping[FuncTriple, Mapping[str, TypeDescriptor | None]] | None = None,
 ) -> pa.Table:
     ordered = sorted(functions, key=lambda r: (r.path, r.def_line, r.qualname, r.ordinal))
+    types = types or {}
     return pa.table(
         {
             "commit_sha": [ctx.head_sha] * len(ordered),
@@ -362,6 +380,7 @@ def _functions_table(
             "params_json": [json.dumps(list(r.params)) for r in ordered],
             "kind": [r.kind for r in ordered],
             "language": [language] * len(ordered),
+            "types_json": [_types_json(types.get(r.triple)) for r in ordered],
         }
     )
 
@@ -471,11 +490,14 @@ def ingest_shard(
     *,
     language: str = "python",
     bundle_sha256: str | None = None,
+    types: Mapping[FuncTriple, Mapping[str, TypeDescriptor | None]] | None = None,
 ) -> IngestResult:
     """Write one shard bundle's facts as one unit, replacing any earlier bundle for the same shard.
 
     ``functions`` are the head commit's function regions (from the language adapter); when given
-    they are written as the run's ``functions`` table and used to key shape observations. The
+    they are written as the run's ``functions`` table and used to key shape observations;
+    ``types`` (the declared types a neutral bundle shipped, by function triple) are stored with
+    them as ``types_json`` so the pages build the same classes as ``finalize_run``. The
     bundle's identity is ``bundle_sha256``, else ``meta['convert']['bundle_sha256']`` from
     :func:`~coverset.facts.convert.read_python_bundle`, else a digest of the bundle's content.
 
@@ -492,7 +514,7 @@ def ingest_shard(
         attempt = _next_attempt(store, ctx, shard_id)
         try:
             _validate(bundle)
-            prepared = _prepare(store, ctx, bundle, shard_id, functions, language)
+            prepared = _prepare(store, ctx, bundle, shard_id, functions, language, types)
         except BundleError as exc:
             _append_log(store, ctx, shard_id, attempt, sha, "failed", {"error": str(exc)}, None, None)
             _unfinalize(store, ctx)
@@ -534,6 +556,7 @@ def _prepare(
     shard_id: int,
     functions: Sequence[FunctionRegion],
     language: str,
+    types: Mapping[FuncTriple, Mapping[str, TypeDescriptor | None]] | None = None,
 ) -> tuple[dict[str, pa.Table], _FuncResolver, set[str], int]:
     """Assign ids and build every (conformed) table of the shard, plus the run's ``functions``."""
     results = {row.nodeid: row.file for row in bundle.tests}
@@ -561,7 +584,7 @@ def _prepare(
     index = _LineIndex(bundle, ids, skip)
     tables = _shard_rows(ctx, shard_id, bundle, ids, resolver, index, test_files, skip)
     if functions:
-        tables["functions"] = _functions_table(ctx, functions, ids, language)
+        tables["functions"] = _functions_table(ctx, functions, ids, language, types)
     return _conform_all(tables), resolver, skip, int(index.line.size)
 
 

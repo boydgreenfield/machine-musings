@@ -30,10 +30,27 @@ bundle = read_bundle("out/neutral")  # BundleRejected on a hard limit
 print(len(bundle.tests), bundle.meta["convert"]["dropped"])
 ```
 
-The reader treats the bundle as hostile: sizes, gzip ratios, line lengths, row counts, path
-rules and id lengths are capped (`Limits`), rows that break the schema are dropped and counted,
-lines that are not statements of their file are dropped. `coverset bundle validate PATH` prints the
-same problems from the command line.
+The reader treats the bundle as hostile. `Limits` caps, and refuses the bundle beyond:
+
+| Field | Default | What |
+|---|---|---|
+| `max_bundle_bytes` | 200 MiB | the known files of a directory, or the archive |
+| `gzip_ratio`, `gzip_floor_bytes`, `gzip_max_bytes` | 10, 16 MiB, 500 MiB | each gzip stream (archive, `.jsonl.gz`) expands to at most 10 × its size, never below 16 MiB nor above 500 MiB |
+| `max_members` | 256 | archive members (flat, regular files only) |
+| `max_manifest_bytes` | 1 MiB | `manifest.json` |
+| `max_coverage_rows`, `max_rows` | 2,000,000, 200,000 | lines of `coverage.jsonl`, lines of every other file (blank and malformed lines count) |
+| `max_seconds` | 120 s | wall-clock time of one `read_bundle` or `validate` |
+| `max_tests`, `max_paths`, `max_shape_keys`, `max_functions` | 50,000, 50,000, 20,000, 200,000 | distinct test ids, paths, shape keys, function regions |
+| `max_coverage_cells` | 4,000,000 | distinct (test, file, line) cells, about 8 bytes each once read |
+
+and drops (or clips), counting each in `meta["convert"]["dropped"]`: a line over
+`max_json_line_bytes` (1 MiB), a row that breaks its schema (the check stops at the first
+violation and never descends more than 64 levels, so a descriptor 500 levels deep costs one row),
+unsafe paths, ids over `max_nodeid_chars` (512), lines that are not statements of their file,
+examples over `max_repr_chars` (200) and messages over `max_longrepr_chars` (8 KiB). The numbers
+and what they were measured against are in `docs/neutral-bundle.md` ("Reading a bundle") and
+`docs/security.md` (B14). `coverset bundle validate PATH` prints the same problems from the command
+line.
 
 ## Writing one
 
@@ -53,7 +70,9 @@ write_bundle(
 ```
 
 `write_bundle` writes `conform(bundle)`: what the format keeps of an in-memory bundle, so
-`read_bundle(write_bundle(b)) == conform(b)` apart from the reader's own `meta` keys.
+`read_bundle(write_bundle(b)) == conform(b)` apart from the reader's own `meta` keys. Every bundle
+file an earlier write left in the directory (the other variant, `links.jsonl`, an optional file
+with no rows now) is removed, and each file is created afresh, never written through a symlink.
 
 ## Input classes from declared types
 

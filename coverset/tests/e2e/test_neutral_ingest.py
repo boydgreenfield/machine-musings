@@ -11,6 +11,8 @@ if anything calls them.
 
 from __future__ import annotations
 
+import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,7 +24,7 @@ from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang import read_any_bundle
 from coverset.lang.neutral import NeutralAdapter
-from coverset.orchestrator.bundles import IngestJob, ingest_one
+from coverset.orchestrator.bundles import IngestJob, ingest_one, job_regions
 from coverset_model.catalogue import NEVER_EXERCISED, function_catalogue_from_types
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "bundles" / "neutral-ts"
@@ -32,8 +34,12 @@ HEAD = frozenset({PRICING, STRINGS, RATES, P, S, R})
 REPO, RUN = 7, "ts-run-1"
 
 
-@pytest.fixture(scope="module")
-def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type-arg]
+def ingest_ts_fixture(facts: Path) -> dict:  # type: ignore[type-arg]
+    """Ingest the TypeScript fixture as shard 0 of ``RUN`` into the facts store at ``facts``.
+
+    Shared with ``tests/web/test_web_neutral.py``. Returns the store, the bundle, the ingest
+    outcome and the finalize result; the Python reader and adapter fail if anything calls them.
+    """
     mp = pytest.MonkeyPatch()
 
     def no_python(*args: object, **kwargs: object) -> None:
@@ -42,7 +48,6 @@ def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[
     mp.setattr("coverset.facts.convert.read_python_bundle", no_python)
     mp.setattr("coverset.lang.python.PythonAdapter.read_bundle", no_python)
     mp.setattr("coverset.lang.python.PythonAdapter.index_functions", no_python)
-    facts = tmp_path_factory.mktemp("facts")
     ctx = RunContext(
         REPO, RUN, "d" * 40, "e" * 40, "feature/ts", 12, datetime(2026, 10, 11, 12, tzinfo=UTC), None
     )
@@ -71,6 +76,11 @@ def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[
     return {"store": store, "bundle": bundle, "outcome": outcome, "finalized": result}
 
 
+@pytest.fixture(scope="module")
+def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type-arg]
+    return ingest_ts_fixture(tmp_path_factory.mktemp("facts"))
+
+
 def _region(ingested: dict, qualname: str):  # type: ignore[type-arg]  # noqa: ANN202
     return next(r for r in ingested["bundle"].functions if r.qualname == qualname)
 
@@ -84,6 +94,11 @@ def test_the_shard_is_ingested_with_shipped_regions(ingested: dict) -> None:  # 
     assert {(f["qualname"], f["language"]) for f in functions} >= {
         ("rateFor", "typescript"),
         ("Cart.addItem", "typescript"),
+    }
+    rate = next(f for f in functions if f["qualname"] == "rateFor")
+    assert json.loads(rate["types_json"])["zone"] == {
+        "kind": "literal",
+        "values": ["domestic", "eu", "world"],
     }
     summary = queries.run_summary(store, REPO, RUN)
     assert summary is not None
@@ -167,3 +182,46 @@ def test_the_sample_cap_count(ingested: dict) -> None:  # type: ignore[type-arg]
     assert cov.missing_reason == "not observed in 2048 sampled calls (1 test hit the sample cap)"
     assert {"zone:'domestic'", "zone:'world'", "weightsGrams:zero-element"} <= {c.name for c in cov.missing}
     assert "zone:'eu'" in cov.observed
+
+
+def _job(facts: Path, **overrides: object) -> IngestJob:
+    ctx = RunContext(
+        REPO, "ts-run-2", "d" * 40, "e" * 40, "feature/ts", 12, datetime(2026, 10, 11, 12, tzinfo=UTC), None
+    )
+    fields: dict = {  # type: ignore[type-arg]
+        "facts_dir": str(facts),
+        "ctx": ctx,
+        "shard_id": 0,
+        "tarball": str(FIXTURE / "bundle.tar.gz"),
+        "limits": BundleLimits(),
+        "source_root": str(FIXTURE / "repo"),
+        "head_paths": HEAD,
+        "functions": (),
+        **overrides,
+    }
+    return IngestJob(**fields)
+
+
+@pytest.mark.security
+def test_a_python_job_takes_nothing_language_specific_from_the_bundle(tmp_path: Path) -> None:
+    # The manifest says typescript and functions.jsonl ships regions and types; the job is Python.
+    outcome = ingest_one(_job(tmp_path, language="python"))
+    assert outcome.ok, outcome.error
+    store = FactsStore(tmp_path)
+    assert store.read_table(REPO, "ts-run-2", "functions").num_rows == 0
+    bundle = read_any_bundle(FIXTURE / "bundle.tar.gz", head_paths=HEAD)
+    rate = _region({"bundle": bundle}, "rateFor")
+    kept, types = job_regions(_job(tmp_path, language="python", functions=(rate,)), bundle)
+    assert kept == [rate] and types == {}
+    kept, types = job_regions(_job(tmp_path, language="typescript", functions=(rate,)), bundle)
+    assert [r for r in kept if r.path == RATES] == [rate] and rate.triple not in types  # the index wins
+    assert set(types) == {r.triple for r in kept if r.path != RATES} & set(bundle.types) != set()
+
+
+def test_a_slow_read_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def slow(job: IngestJob, bundle_dir: Path) -> None:
+        time.sleep(2)
+
+    monkeypatch.setattr("coverset.orchestrator.bundles.read_job_bundle", slow)
+    outcome = ingest_one(_job(tmp_path, language="typescript", read_timeout_s=0.2))
+    assert not outcome.ok and "longer than 0.2 s" in (outcome.error or "")

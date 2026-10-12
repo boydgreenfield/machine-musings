@@ -56,8 +56,10 @@ class BundleLimits:
     The remaining caps bound what a small bundle can expand into once decoded: line numbers above
     ``max_line_number`` are dropped, and more than ``max_coverage_cells`` distinct (test, file,
     line) cells, ``max_tests`` distinct nodeids, ``max_paths`` distinct paths or
-    ``max_shape_keys`` distinct shape keys reject the bundle. The defaults leave room for the
-    plan's sizing (10k tests x ~2k lines per run) in a single shard.
+    ``max_shape_keys`` distinct shape keys reject the bundle. ``max_coverage_cells`` (4,000,000)
+    keeps one shard's ingest near 300 MB of memory (read plus the ``test_lines`` arrays, measured
+    in ``docs/security.md`` B14); the plan's sizing (10k tests x ~2k lines per run, 20M cells) fits
+    when the run has at least five shards (``scripts/bench_facts.py`` uses eight, 2.5M cells each).
     """
 
     max_bundle_bytes: int = 200 * MIB
@@ -70,7 +72,7 @@ class BundleLimits:
     max_longrepr_chars: int = 8 * 1024
     max_members: int = 256
     max_line_number: int = 1_000_000
-    max_coverage_cells: int = 25_000_000
+    max_coverage_cells: int = 4_000_000
     max_tests: int = 50_000
     max_paths: int = 50_000
     max_shape_keys: int = 20_000

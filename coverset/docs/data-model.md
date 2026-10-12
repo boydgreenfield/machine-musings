@@ -130,12 +130,14 @@ Run tables (one file per run):
 
 | Table | Columns | Notes |
 |---|---|---|
-| `functions` | `commit_sha`, `func_key`, `file_id`, `path`, `qualname`, `ordinal`, `def_line`, `body_start`, `end_line`, `body_hash`, `sig_hash`, `params_json`, `kind` (`function`, `method`, `class`, `module`), `language` | the head commit's regions, indexed once per run |
+| `functions` | `commit_sha`, `func_key`, `file_id`, `path`, `qualname`, `ordinal`, `def_line`, `body_start`, `end_line`, `body_hash`, `sig_hash`, `params_json`, `kind` (`function`, `method`, `class`, `module`), `language`, `types_json` | the head commit's regions, indexed once per run. `language` is the ingest job's (never a bundle manifest's). `types_json` is the declared types a neutral bundle shipped for a region it supplied (`{"param": descriptor or null, ..., "return": ...}`, the `types` of `functions.jsonl`), else null; the pages build a function's input classes from it, so they count what `finalize_run` stored in `func_input_cov` |
 | `runs_dim` | `head_sha`, `base_sha`, `branch`, `pr_number`, `created_at`, `scoring_basis_run_id`, `expected_shards`, `ingested_shards`, `coverage_complete`, `finalized_at` | mirrored from the control database so facts SQL never attaches SQLite |
 | `file_cov` | `file_id`, `path`, `statements`, `covered`, `branches`, `branches_covered`, `partial_branches`, `percent` | `percent = 100 × (covered + branches_covered) / (statements + branches)` |
 | `func_input_cov` | `func_key`, `tests_called`, `tests_sampled`, `tests_truncated`, `blocks_expected`, `blocks_observed`, `missing_json` | input-class coverage per function; the class columns stay null without a catalogue. `tests_truncated` is counted over the whole run with `analysis/shapes.cap_hits`, the definition the verdict and the UI use: 0 when no shard capped the function, else the tests that called it (lines in its body) but were never sampled, at least 1 |
 
 Line numbers are `int32`. coverage.py arcs use negative numbers for code-object entry and exit, so arc columns allow them.
+
+**Schema changes.** Facts files carry no version number: `facts/schema.py` is the one current schema, and `FactsStore.read_table` conforms every file to it on read (a column a file lacks reads as nulls) while the DuckDB views read with `union_by_name`. A new nullable column therefore needs no migration. `functions.types_json` was added this way (2026-10-11): runs ingested before it read null there, and their pages fall back to parsing the head source, as before.
 
 ### Function regions and `func_key`
 
@@ -278,7 +280,8 @@ pytest-coverset bundle for `facts/convert.read_python_bundle`. Both readers take
 `BundleLimits` (the neutral reader copies every field with a matching name into
 `coverset_model.io.Limits`) and the head tree as the path allow-list. The neutral reader refuses a
 bundle over the size, gzip-ratio, member, distinct-id, path, shape-key, function or cell limits,
-an unknown version or a missing required file (a `BundleError`, so the shard is recorded as failed
+an unknown version, a missing required file, a file with more lines than its row cap or a read past
+its wall-clock budget (a `BundleError`, so the shard is recorded as failed
 and the run's coverage is partial, as for Python); it drops and counts every row that breaks the
 schema or the rules the schema cannot say (unsafe paths, repeated ids, lines that are not
 statements, function keys and line ranges, shape keys outside the grammar) under
@@ -289,9 +292,10 @@ statements, function keys and line ranges, shape keys outside the grammar) under
 input-class coverage per function) needs regions for every measured file. The language adapter
 indexes the head commit's sources where it can (`PythonAdapter.index_functions`, the planner's
 `_index_head`); for every path it did not index (another language, or a file the adapter cannot
-parse) the ingest takes the regions the bundle shipped in `functions.jsonl`
-(`orchestrator/bundles.ingest_one` through `lang/neutral.merge_regions`: per path, the adapter's
-regions win). `NeutralAdapter`, built from a bundle, serves those shipped regions to anything that
+parse) the ingest of a non-Python job takes the regions the bundle shipped in `functions.jsonl`,
+with their declared types (`orchestrator/bundles.job_regions` through `lang/neutral.merge_regions`:
+per path, the adapter's regions win). A Python job takes nothing language-specific from a bundle:
+its regions are the planner's index alone and its `language` is `python`, whatever the manifest says. `NeutralAdapter`, built from a bundle, serves those shipped regions to anything that
 asks it (`index_functions`, `changed_functions` by comparing the base and head bundles' regions and
 hashes), and its `shape_catalogue` reads the shipped type descriptors, so the static facts
 (`files.jsonl`), the regions and the declared types of a TypeScript run all come from its bundle.

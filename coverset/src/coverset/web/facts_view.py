@@ -6,9 +6,12 @@ is read once. Everything here is synchronous (call it through ``asyncio.to_threa
 store only through :class:`~coverset.facts.store.FactsStore` (``read_table``), never by globbing.
 
 Input classes come from :class:`~coverset.analysis.shapes.Catalogue` over the run's own
-``call_shapes`` (the same observations the verdict used), built by
-:func:`~coverset.analysis.shapes.function_catalogue` from the head commit's source of the
-function's file, exactly as the verdict builds it.
+``call_shapes`` (the same observations the verdict used). The declared types come from the
+descriptors stored with the function at ingest (``functions.types_json``, what a neutral bundle
+shipped) through :func:`~coverset_model.catalogue.function_catalogue_from_types` whenever the row
+has them or the run's language is not Python, so a TypeScript function's page and cards count the
+classes ``finalize_run`` stored; otherwise :func:`~coverset.analysis.shapes.function_catalogue`
+reads them from the head commit's Python source, exactly as the verdict does.
 """
 
 from __future__ import annotations
@@ -27,10 +30,12 @@ import numpy as np
 from coverset.analysis.functions import index_functions_detailed
 from coverset.analysis.shapes import (
     Catalogue,
+    FunctionCatalogue,
     FunctionInputCov,
     InputClass,
     ParamInfo,
     function_catalogue,
+    function_catalogue_from_types,
 )
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.queries import TreeNode, treemap
@@ -40,6 +45,7 @@ from coverset.lang.base import IMPORT_CONTEXT, FuncSampling, FunctionRegion, Sha
 from coverset.web.render.ribbon import Flow
 from coverset.web.render.shapegrid import GridCell, GridModel, GridRow
 from coverset.web.render.source import LineFacts
+from coverset_model.types import DescriptorError, TypeDescriptor, from_json
 
 __all__ = ["FunctionView", "ParamReach", "RunFacts", "param_reach", "reached_classes", "run_facts"]
 
@@ -360,10 +366,56 @@ class RunFacts:
         return bool((tests[a:b] == 0).any())
 
     @cached_property
+    def _function_rows(self) -> list[dict[str, Any]]:
+        return self._read("functions").to_pylist()
+
+    @cached_property
+    def language(self) -> str:
+        """The language of the run's functions (``python`` when the table names none)."""
+        found = {row["language"] for row in self._function_rows if row["language"]}
+        return found.pop() if len(found) == 1 else "python"
+
+    @cached_property
+    def declared_types(self) -> dict[str, dict[str, TypeDescriptor | None]]:
+        """The descriptors stored at ingest (``functions.types_json``) by func_key.
+
+        A value that does not parse as a descriptor reads as no declared type for that parameter.
+        """
+        out: dict[str, dict[str, TypeDescriptor | None]] = {}
+        for row in self._function_rows:
+            raw = row.get("types_json")
+            if not raw:
+                continue
+            try:
+                decoded = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(decoded, dict):
+                continue
+            found: dict[str, TypeDescriptor | None] = {}
+            for param, value in decoded.items():
+                try:
+                    found[str(param)] = from_json(value) if value is not None else None
+                except DescriptorError:
+                    found[str(param)] = None
+            out[row["func_key"]] = found
+        return out
+
+    def catalogue_for(self, region: FunctionRegion, source: str | None) -> FunctionCatalogue:
+        """The catalogue ``finalize_run`` used for ``region``: the stored descriptors when the row has
+        them or the run is not Python, else the annotations of the head ``source``."""
+        declared = self.declared_types.get(region.func_key)
+        if declared is not None or self.language != "python":
+            return function_catalogue_from_types(region, declared)
+        return function_catalogue(
+            region, source, indexed=_indexed(region.path, source) if source is not None else None
+        )
+
+    @cached_property
     def regions(self) -> list[FunctionRegion]:
         """Every region of the head commit (functions, methods, classes, modules)."""
         out = []
-        for row in self._read("functions").to_pylist():
+        for row in self._function_rows:
             out.append(
                 FunctionRegion(
                     func_key=row["func_key"],
@@ -478,12 +530,13 @@ class RunFacts:
     def function_view(self, region: FunctionRegion, source: str | None) -> FunctionView:
         """Input-class coverage, per-class samples and the return row of ``region``.
 
-        The catalogue comes from :func:`~coverset.analysis.shapes.function_catalogue`, the helper
-        the verdict uses too, so a card counts the classes the sticky comment counts.
+        The catalogue is :meth:`catalogue_for`'s: the descriptors stored at ingest for a function
+        that shipped them (any non-Python run), else
+        :func:`~coverset.analysis.shapes.function_catalogue` over the head source, the helper the
+        verdict uses too, so a card counts the classes the stored ``func_input_cov`` and the sticky
+        comment count.
         """
-        found = function_catalogue(
-            region, source, indexed=_indexed(region.path, source) if source is not None else None
-        )
+        found = self.catalogue_for(region, source)
         catalogue, annotations, returns = found.catalogue, found.annotations, found.returns
         observations = self.observations(region.func_key)
         sampling = self.sampling(region)

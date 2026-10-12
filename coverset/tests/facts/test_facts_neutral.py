@@ -60,7 +60,7 @@ def test_read_any_bundle_applies_limits_and_the_head_tree(tmp_path: Path) -> Non
     with pytest.raises(BundleError):
         read_any_bundle(tmp_path / "missing")
     limits = model_limits(BundleLimits(max_tests=7, max_line_number=99))
-    assert (limits.max_tests, limits.max_line_number, limits.max_functions) == (7, 99, 500_000)
+    assert (limits.max_tests, limits.max_line_number, limits.max_functions) == (7, 99, 200_000)
 
 
 def test_the_neutral_adapter() -> None:

@@ -75,3 +75,56 @@ def test_dump_and_write_all(tmp_path) -> None:
     for stem in SCHEMAS:
         assert json.loads((tmp_path / f"{stem}.schema.json").read_text()) == SCHEMAS[stem]
         assert dump(stem).endswith("}\n")
+
+
+def _descriptor(depth: int) -> dict:
+    found: dict = {"kind": "int"}
+    for _ in range(depth):
+        found = {"kind": "list", "elem": found}
+    return found
+
+
+@pytest.mark.parametrize(
+    ("stem", "row", "expected"),
+    [
+        ("manifest", {"version": 2}, ("/version", "const")),
+        ("manifest", {"created_at": "yesterday"}, ("/created_at", "pattern")),
+        ("functions", {"types": {"a": {"kind": "enum", "name": "E", "members": []}}}, ("/types/a", "anyOf")),
+        (
+            "functions",
+            {"types": {"a": {"kind": "tuple", "elem": {"kind": "int"}, "elems": [{"kind": "int"}]}}},
+            ("/types/a", "anyOf"),
+        ),
+        ("functions", {"types": {"a": _descriptor(33)}}, ("/types/a", "anyOf")),
+        ("shapes", {"kind": "obs", "samples": 0}, ("/samples", "minimum")),
+    ],
+)
+def test_schema_gaps_are_closed(stem: str, row: dict, expected: tuple[str, str]) -> None:
+    assert expected in [(v.path, v.keyword) for v in check(row, row_schema(stem, row), limit=50)]
+
+
+def test_the_schema_bounds_descriptor_depth_like_the_reader() -> None:
+    from coverset_model.types import MAX_DEPTH, DescriptorError, from_json
+
+    deepest = {"types": {"a": _descriptor(MAX_DEPTH)}}
+    assert [v for v in check(deepest, SCHEMAS["functions"], limit=50) if v.path.startswith("/types")] == []
+    from_json(_descriptor(MAX_DEPTH))
+    with pytest.raises(DescriptorError):
+        from_json(_descriptor(MAX_DEPTH + 1))
+    good = {"created_at": "2026-10-11T19:04:05.123+02:00"}
+    assert [v for v in check(good, SCHEMAS["manifest"]) if v.path == "/created_at"] == []
+
+
+def test_a_deep_value_is_one_violation_not_a_recursion_error() -> None:
+    schema = {
+        "$defs": {"n": {"type": "object", "additionalProperties": {"$ref": "#/$defs/n"}}},
+        "$ref": "#/$defs/n",
+    }
+    deep: dict = {}
+    cursor = deep
+    for _ in range(5000):
+        cursor["x"] = {}
+        cursor = cursor["x"]
+    found = check(deep, schema)
+    assert [v.keyword for v in found] == ["depth"]
+    assert check({"x": {"x": {}}}, schema) == []

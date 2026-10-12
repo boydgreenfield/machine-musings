@@ -100,3 +100,40 @@ def test_describe() -> None:
     assert describe(T.dict_of(STR)) == "dict[str, Any]"
     assert describe(T.literal("a", 1)) == "Literal['a', 1]"
     assert describe(T.enum("pkg.Role", ("A",))) == "pkg.Role"
+
+
+def test_literal_values_match_the_python_repr_and_the_json_form() -> None:
+    for example in ("'eu'", '"eu"'):
+        cov = function_input_cov(
+            REGION, [_obs("zone", "str|ascii|len:2-10", example)], None, annotations=TYPES
+        )
+        assert "zone:'eu'" in cov.observed, example
+        assert "zone:'domestic'" in {c.name for c in cov.missing}
+    flags = {"flag": T.literal(True, None), "zone": T.literal("domestic", "eu")}
+    region = FunctionRegion(
+        func_key("src/f.ts", "f", 0), "src/f.ts", "f", 0, 1, 2, 3, "b", "s", ("flag",), "function"
+    )
+    observations = [
+        ShapeObs(region.triple, "flag", "bool|true", "t::a", 1, ("t::a",), False, "true", "t::a"),
+        ShapeObs(region.triple, "flag", "NoneType", "t::a", 1, ("t::a",), False, "null", "t::a"),
+    ]
+    cov = function_input_cov(region, observations, None, annotations=flags)
+    assert {"flag:True", "flag:None"} <= set(cov.observed)
+
+
+def test_enum_members_match_whole_tokens_only() -> None:
+    types = {"role": T.enum("Role", ("admin", "admin_ro"))}
+    region = FunctionRegion(
+        func_key("src/r.py", "g", 0), "src/r.py", "g", 0, 1, 2, 3, "b", "s", ("role",), "function"
+    )
+
+    def obs(example: str) -> ShapeObs:
+        return ShapeObs(region.triple, "role", "object", "t::a", 1, ("t::a",), False, example, "t::a")
+
+    cov = function_input_cov(region, [obs("<Role.admin_ro: 2>")], None, annotations=types)
+    assert "role:Role.admin_ro" in cov.observed
+    assert "role:Role.admin" in {c.name for c in cov.missing}
+    cov = function_input_cov(region, [obs("<pkg.Role.admin: 1>")], None, annotations=types)
+    assert "role:Role.admin" in cov.observed and "role:Role.admin_ro" not in cov.observed
+    cov = function_input_cov(region, [obs("<XRole.admin: 1>")], None, annotations=types)
+    assert not {c.name for c in cov.expected} & {"role:Role.admin", "role:Role.admin_ro"}

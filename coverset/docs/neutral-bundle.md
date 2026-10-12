@@ -49,10 +49,12 @@ untrusted input; see [Reading a bundle](#reading-a-bundle) for the limits reader
  "meta": {"tracer": "CTracer", "tool_id": 4, "python": "3.13.0"}}
 ```
 
-`format` and `version` are checked first; `version` is an integer and any version other than 1
-is refused. `language` is a lowercase identifier (`python`, `typescript`, `javascript`, ...;
+`format` and `version` are checked first; `version` is the integer 1 (the schema says `const 1`)
+and any other value is refused. `language` is a lowercase identifier (`python`, `typescript`, `javascript`, ...;
 `^[a-z][a-z0-9_+-]{0,31}$`), `producer` names the writer (`name` up to 128 characters, `version`
-up to 64). `created_at` is an ISO 8601 timestamp or `null`. `shard` is the shard index when the
+up to 64). `created_at` is an ISO 8601 date-time (`2026-10-11T19:04:05Z`, optional fractional seconds,
+`Z` or a `+HH:MM`/`-HH:MM` offset) or `null`; any other text breaks the schema, and a manifest
+that breaks the schema refuses the bundle. `shard` is the shard index when the
 run was split, else `null`. `meta` is free-form producer detail that becomes the in-memory
 bundle's `meta` (the Python plugin puts its tracer, tool id, warnings and caps there); the keys
 `bundle` and `convert` are the reader's own (below) and are never written. `manifest.json` is at
@@ -162,13 +164,18 @@ omitted, and names that are not parameters are ignored. The path should be liste
 concrete class of `self`/`this`), `*args` or `**kwargs`. `caller` is either `[path, qualname,
 line]` for an in-repo caller or `{"test": id}` when the test called the function directly.
 `samples` counts calls that produced this shape through this caller; `tests` lists the tests
-during which it was seen; `example` is a redacted, shortened value repr (at most 200 characters)
-and `example_test` the test it came from. A `sampling` row per traced function gives the total
+during which it was seen, at least 1; `example` is a redacted, shortened value repr (at most 200
+characters) and `example_test` the test it came from. The repr is the producer's own (`'eu'`,
+`<Role.admin: 1>` from Python; `"eu"` or `Currency.EUR` from a TypeScript reporter): readers match
+a literal value against both its Python repr and its JSON form, and an enum member `Name.member`
+only as a whole token, so `<Role.admin_ro: 2>` shows `Role.admin_ro`, never `Role.admin`. A `sampling` row per traced function gives the total
 calls, the tests that were sampled, whether sampling stopped early (`truncated`) and which cap
 stopped it (`sample`, `full` or `null`). A non-null `cap` needs `truncated: true`; `truncated: true`
-with `cap: null` means the producer did not say which cap (a converted pytest-coverset bundle).
-`obs` rows need `kind`, `func`, `param`, `shape`, `caller`, `samples` and `tests`; `truncated`
-defaults to `false`, `example` and `example_test` to `null`. Examples are cut at 200 characters.
+with `cap: null` means the producer does not record which cap stopped it (pytest-coverset does, and
+`coverset bundle convert` keeps it).
+`obs` rows need `kind`, `func`, `param`, `shape`, `caller`, `samples` (at least 1) and `tests`;
+`truncated` defaults to `false`, `example` and `example_test` to `null`. Examples are cut at 200
+characters.
 
 ### `links.jsonl`
 
@@ -210,21 +217,29 @@ descriptor is a small JSON tree, the same for every language:
 |---|---|
 | `{"kind": "int"}`, `"float"`, `"str"`, `"bool"`, `"bytes"`, `"none"` | a scalar type |
 | `{"kind": "list", "elem": D}`, `{"kind": "set", "elem": D}`, `{"kind": "frozenset", "elem": D}` | collections; `elem` is omitted when the declaration names no element type (bare `list`) |
-| `{"kind": "tuple", "elems": [D, ...]}`, `{"kind": "tuple", "elem": D}` | a fixed-size tuple, or a variable-length one (`tuple[int, ...]`); neither field for a bare tuple |
+| `{"kind": "tuple", "elems": [D, ...]}`, `{"kind": "tuple", "elem": D}` | a fixed-size tuple, or a variable-length one (`tuple[int, ...]`); never both fields; neither for a bare tuple |
 | `{"kind": "dict", "key": D, "value": D}` | mappings (either field may be omitted) |
 | `{"kind": "union", "arms": [D, ...]}` | any of the arms (`Optional[X]` is a union with `none`) |
 | `{"kind": "literal", "values": [v, ...]}` | one of the listed JSON scalars |
-| `{"kind": "enum", "name": "Role", "members": ["admin", "member"]}` | a closed enumeration |
+| `{"kind": "enum", "name": "Role", "members": ["admin", "member"]}` | a closed enumeration (at least one member) |
 | `{"kind": "object", "name": "ledger.util.money.Money"}` | a class or interface |
 | `{"kind": "any"}` | unknown (an unannotated parameter is `null`, not `any`) |
 
-Descriptors carry no other fields, nest at most 32 levels, and hold at most 256 arms, elements,
-values or members per node; names are 1 to 512 characters.
+Descriptors carry no other fields, nest at most 32 levels below the root (the schema unrolls the
+recursion into `descriptor`, `descriptor_1` ... `descriptor_32` to say so), and hold at most 256
+arms, elements, values or members per node; names are 1 to 512 characters. A `functions.jsonl` row
+whose descriptor nests deeper breaks the schema and is dropped whole (`functions.schema`), however
+deep it goes: the validator stops descending at 64 levels instead of recursing, so a descriptor
+500 levels deep costs one dropped row, not the bundle. A descriptor the schema accepts but that is
+still wrong (a `values` field on a `list`) loses only that parameter's type (`functions.descriptor`).
 
 `coverset_model.python_types.descriptor(annotation_text, enums=...)` converts a Python
 annotation to a descriptor (`int | None` → union of `int` and `none`; `Literal["a", "b"]` →
-literal; `Sequence[int]` → list; `Iterable[int]` → set; `Mapping[K, V]` → dict; an Enum subclass
-resolved from the sources → enum). A TypeScript reporter does the same from the
+literal; `Mapping[K, V]` → dict; an Enum subclass resolved from the sources → enum). The three
+abstract sequence names map to `list`, the class an argument usually satisfies: `Sequence[int]`,
+`Iterable[int]` and `Collection[int]` are each `{"kind": "list", "elem": {"kind": "int"}}`, so
+`Iterable[int] | None` expects the arms `list` and `none`, both of which a test can pass (`set`,
+`AbstractSet`, `MutableSet` and `Iterator` stay `set`). A TypeScript reporter does the same from the
 TypeScript type (`number` → `float` unless the declared values are integral, `string` → `str`,
 `T | undefined` → union with `none`, string-literal unions → literal, `enum` → enum, interfaces
 and classes → object). `docs/input-classes.md` lists which classes each descriptor expects.
@@ -238,7 +253,10 @@ problem (file, row, field, message) without building anything and never raises;
 reproducibly. The Python adapter's own on-disk bundle (`coverage.sqlite`, `coverage.json`,
 `shapes.jsonl.gz`, `results.jsonl`, ...) is converted to the same `NeutralBundle` by
 `coverset.facts.convert.read_python_bundle`; `coverset bundle convert PATH --to DIR` writes it as
-neutral files, and a later `pytest-coverset` writes them directly (`--coverset-neutral`).
+neutral files, and a later `pytest-coverset` writes them directly (`--coverset-neutral`). Given a
+neutral bundle, `convert` rewrites it in canonical form and keeps its `language`; either way the
+output's `producer` is the converter (or pytest-coverset for a plugin bundle) and
+`meta.converted_from` records the source's `format`, `language` and `producer`.
 `coverset.lang.read_any_bundle(path)` reads either: a bundle whose `manifest.json` says
 `coverset-neutral` is read by the neutral reader whatever its language, anything else by the
 Python converter; the orchestrator's ingest uses it.
@@ -252,10 +270,23 @@ coverset) when:
 | any gzip stream (the archive, each `.jsonl.gz`) | 10 × its compressed size, at least 16 MiB, at most 500 MiB |
 | archive members | 256, flat names, regular files only |
 | `manifest.json` | 1 MiB; `format`, `version` and the schema must hold |
+| lines per file (`max_rows`, `max_coverage_rows`; blank, oversized and malformed lines count) | 2,000,000 in `coverage.jsonl`, 200,000 in every other file |
+| wall-clock time of one read (`max_seconds`) | 120 s |
 | distinct test ids, paths, shape keys | 50,000, 50,000, 20,000 |
-| function regions | 500,000 |
-| (test, file, line) coverage cells | 25,000,000 |
+| function regions | 200,000 |
+| (test, file, line) coverage cells | 4,000,000 |
 | a required file is missing, a file is a symlink or device, both `.jsonl` and `.jsonl.gz` exist | refused |
+
+The row caps are ten times what the plan's scale needs: `scripts/bench_facts.py`'s run (10,000
+tests × 2,000 lines over 2,000 files, each test touching about 20 files) is 200,000 coverage rows
+for the whole run and 20,000 function regions, and its 1,000,000 `call_shapes` rows over 30 runs
+are about 33,000 shape rows per run; the demo's whole run is 139 coverage rows, 62 functions and
+332 shape rows. The cell cap keeps one shard's ingest near 300 MB of memory (read plus the facts
+tables; `docs/security.md` B14 has the measurement); the plan's 20 million cells per run fit in
+five shards or more (`bench_facts.py` uses eight, 2.5 million each). The file is read as a stream
+(only the current line is in memory), every line costs at most one schema violation (the check
+stops at the first), and the coverage lines kept are sorted tuples sharing one int object per line
+number, about 8 bytes per cell.
 
 Everything else is per row: a row that breaks its schema, names an unsafe path, reuses a test id
 or the reserved `<import>` id, has a line longer than 1 MiB, invalid UTF-8, a lone surrogate or a

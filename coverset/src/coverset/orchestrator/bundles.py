@@ -7,10 +7,14 @@ with ``Worker.get_file`` before the worker is released, size-checked, written un
 allow-list by :func:`~coverset.lang.read_any_bundle` (the manifest picks the reader: a neutral
 bundle of any language through ``coverset_model.io``, else the pytest-coverset converter), or by a
 job's own adapter when it names one, and a one-shard ingest
-(:func:`~coverset.facts.ingest.ingest_shard`). The function regions written for the run are the
-planner's index of the head sources, and for every path the adapter could not index, the regions
-the bundle shipped in ``functions.jsonl`` (:func:`~coverset.lang.neutral.merge_regions`). A bundle that breaks a limit is logged with
-:func:`~coverset.facts.ingest.record_shard_failure` and the run's coverage is then partial.
+(:func:`~coverset.facts.ingest.ingest_shard`). The job's language is the authority, never the
+bundle's manifest: for a ``python`` job the regions written for the run are the planner's index of
+the head sources only, and the run's ``language`` is ``python``; for any other job they are that
+index plus, for every path it could not index, the regions (and declared types) the bundle shipped
+in ``functions.jsonl`` (:func:`~coverset.lang.neutral.merge_regions`). Extraction and conversion run
+under a wall-clock limit (``IngestJob.read_timeout_s``) on top of the neutral reader's own budget.
+A bundle that breaks a limit is logged with :func:`~coverset.facts.ingest.record_shard_failure` and
+the run's coverage is then partial.
 
 Conversion is CPU-bound (seconds for a large shard), so :class:`IngestPool` runs different shards
 in parallel, in worker processes by default; ingest itself serialises on the facts run lock. A worker
@@ -29,8 +33,11 @@ import contextlib
 import logging
 import os
 import shutil
+import signal
 import tempfile
-from collections.abc import Sequence
+import threading
+import time
+from collections.abc import Iterator, Sequence
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import Executor as FuturesExecutor
 from dataclasses import dataclass, field
@@ -53,20 +60,27 @@ from coverset.lang.base import (
     StaticFile,
     TestRow,
 )
-from coverset.lang.neutral import adapter_language, merge_regions
+from coverset.lang.neutral import merge_regions
 
 __all__ = [
+    "READ_TIMEOUT_S",
     "IngestJob",
+    "IngestTimeout",
     "IngestOutcome",
     "IngestPool",
     "bundle_limits",
     "ingest_one",
+    "job_regions",
     "shared_ingest_pool",
 ]
 
 type PoolMode = Literal["process", "thread"]
 
 log = logging.getLogger(__name__)
+
+READ_TIMEOUT_S = 180.0
+"""Default wall-clock limit of one shard's extraction plus conversion (the neutral reader's own
+budget, ``coverset_model.io.Limits.max_seconds``, is 120 s, so it reports first)."""
 
 
 def bundle_limits(settings: Settings) -> BundleLimits:
@@ -97,6 +111,39 @@ class IngestJob:
     pool); None means :func:`~coverset.lang.read_any_bundle`, which picks the reader by the
     bundle's manifest. It must accept the keyword arguments ``limits``, ``source_root`` and
     ``head_paths``."""
+    read_timeout_s: float = READ_TIMEOUT_S
+    """Wall-clock limit of extraction plus conversion; past it the shard fails (enforced with
+    ``SIGALRM`` where the job runs on a process's main thread, as in the process pool)."""
+
+
+class IngestTimeout(Exception):
+    """Reading a bundle took longer than the job's ``read_timeout_s``."""
+
+
+@contextlib.contextmanager
+def _deadline(seconds: float) -> Iterator[None]:
+    """Raise :class:`IngestTimeout` in this thread after ``seconds`` (main thread only, else no-op)."""
+    usable = (
+        seconds > 0 and hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread()
+    )
+    if not usable:
+        yield
+        return
+
+    def expired(signum: int, frame: object) -> None:
+        raise IngestTimeout(f"reading the bundle took longer than {seconds:g} s")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    started = time.monotonic()
+    outer, interval = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if outer > 0:  # someone else's timer (a test runner's timeout) keeps running
+            left = max(outer - (time.monotonic() - started), 0.001)
+            signal.setitimer(signal.ITIMER_REAL, left, interval)
 
 
 def adapter_for(job: IngestJob) -> LanguageAdapter:
@@ -139,13 +186,16 @@ def ingest_one(job: IngestJob) -> IngestOutcome:
     store = FactsStore(Path(job.facts_dir))
     workdir = Path(tempfile.mkdtemp(prefix=f"coverset-ingest-{job.shard_id}-"))
     try:
-        extract_bundle(Path(job.tarball), workdir / "bundle", job.limits)
-        bundle = read_job_bundle(job, workdir / "bundle")
-        functions = merge_regions(job.functions, bundle.functions)
-        language = adapter_language(bundle) or job.language
-        result = ingest_shard(store, job.ctx, bundle, job.shard_id, functions, language=language)
+        with _deadline(job.read_timeout_s):
+            extract_bundle(Path(job.tarball), workdir / "bundle", job.limits)
+            bundle = read_job_bundle(job, workdir / "bundle")
+        functions, types = job_regions(job, bundle)
+        result = ingest_shard(
+            store, job.ctx, bundle, job.shard_id, functions, language=job.language, types=types
+        )
     except Exception as exc:  # a bundle (or its ingest) failed: the run's coverage becomes partial
-        reason = str(exc)[:500] if isinstance(exc, BundleError) else f"{type(exc).__name__}: {exc}"[:500]
+        known = isinstance(exc, BundleError | IngestTimeout)
+        reason = str(exc)[:500] if known else f"{type(exc).__name__}: {exc}"[:500]
         with contextlib.suppress(Exception):  # the failure record itself is best effort
             record_shard_failure(store, job.ctx, job.shard_id, reason=reason)
         return IngestOutcome(shard_id=job.shard_id, ok=False, error=reason)
@@ -173,6 +223,20 @@ def ingest_one(job: IngestJob) -> IngestOutcome:
             if k in meta
         },
     )
+
+
+def job_regions(job: IngestJob, bundle: NeutralBundle) -> tuple[list[FunctionRegion], dict[FuncTriple, Any]]:
+    """The run's function regions and the shipped declared types to store with them.
+
+    A ``python`` job keeps the planner's index of the head sources and nothing the bundle shipped
+    (the sources are the reference, and a bundle is untrusted); any other job adds, for each path
+    the index lacks, the bundle's regions and their declared types.
+    """
+    if job.language == "python":
+        return list(job.functions), {}
+    functions = merge_regions(job.functions, bundle.functions)
+    shipped = {r.triple for r in functions} - {r.triple for r in job.functions}
+    return functions, {triple: found for triple, found in bundle.types.items() if triple in shipped}
 
 
 class IngestPool:

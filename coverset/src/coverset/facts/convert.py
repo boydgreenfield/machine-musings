@@ -374,9 +374,8 @@ class _Reader:
         if len(data) > _MAX_SOURCE_BYTES:
             return fallback
         self.measured_lengths.add(path)
-        return min(
-            data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0), self.limits.max_line_number
-        )
+        # Lines as Python numbers them: ``\n``, ``\r\n`` and a lone ``\r`` each end one.
+        return min(len(data.splitlines()), self.limits.max_line_number)
 
     # -- results / collect / durations -----------------------------------------------------
 

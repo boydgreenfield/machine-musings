@@ -18,20 +18,32 @@ An executor builds environments and hands out workers; a worker is one isolated 
 ```python
 class Executor(Protocol):
     name: str
+
     async def ensure_env(self, spec: EnvSpec) -> EnvRef: ...
     async def ensure_snapshot(self, env: EnvRef, repo: str, sha: str) -> SnapshotRef | None: ...
-    async def acquire(self, base: EnvRef | SnapshotRef, n: int, resources: Resources,
-                      ttl_s: int, labels: Mapping[str, str]) -> list[Worker]: ...
+    async def acquire(
+        self, base: EnvRef | SnapshotRef, n: int, resources: Resources, ttl_s: int, labels: Mapping[str, str]
+    ) -> list[Worker]: ...
     def capabilities(self) -> Capabilities: ...
     def cost_usd(self, resources: Resources, seconds: float) -> float: ...
     async def close(self) -> None: ...
 
+
 class Worker(Protocol):
     id: str
     root: str
+
     def path(self, rel: str) -> str: ...
-    async def run(self, cmd: list[str], *, cwd: str, env: Mapping[str, str], timeout_s: float,
-                  on_line: LineCallback | None = None, stdout_cap: int) -> RunResult: ...
+    async def run(
+        self,
+        cmd: list[str],
+        *,
+        cwd: str,
+        env: Mapping[str, str],
+        timeout_s: float,
+        on_line: LineCallback | None = None,
+        stdout_cap: int,
+    ) -> RunResult: ...
     async def put_tree(self, tar_bytes: bytes, dest: str) -> None: ...
     async def get_file(self, path: str) -> bytes: ...
     async def write_file(self, path: str, data: bytes) -> None: ...
@@ -90,13 +102,28 @@ A forge verifies and parses webhooks, hands out short-lived mirror credentials, 
 ```python
 class Forge(Protocol):
     name: str
+
     def verify_webhook(self, headers: Mapping[str, str], raw_body: bytes) -> bool: ...
     def parse_event(self, headers: Mapping[str, str], raw_body: bytes) -> ForgeEvent: ...
-    async def fetch_mirror_credentials(self, installation_id: int | None, repo: RepoRef) -> MirrorCredentials: ...
-    async def create_check(self, repo, head_sha, name, *, external_id, details_url,
-                           status="queued", conclusion=None, output=None, actions=()) -> int: ...
-    async def update_check(self, repo, check_id, *, status=None, conclusion=None,
-                           output=None, actions=None, details_url=None) -> None: ...
+    async def fetch_mirror_credentials(
+        self, installation_id: int | None, repo: RepoRef
+    ) -> MirrorCredentials: ...
+    async def create_check(
+        self,
+        repo,
+        head_sha,
+        name,
+        *,
+        external_id,
+        details_url,
+        status="queued",
+        conclusion=None,
+        output=None,
+        actions=(),
+    ) -> int: ...
+    async def update_check(
+        self, repo, check_id, *, status=None, conclusion=None, output=None, actions=None, details_url=None
+    ) -> None: ...
     async def set_commit_status(self, repo, sha, state, *, context, description, target_url) -> None: ...
     async def upsert_pr_comment(self, repo, pr_number, marker, body, prior_id) -> int: ...
     async def hide_comment(self, repo, comment_id) -> None: ...
@@ -151,7 +178,7 @@ A new language does not need coverset to run its tests. The repository's own tes
 2. **Check it** with `coverset bundle validate PATH` (every problem with file, row, field and message; exit 1 when there is any) and `coverset bundle info PATH` (rows per file, and what the reader would drop or clip). `fixtures/bundles/neutral-ts/` is a complete, valid TypeScript example, written by `scripts/make_neutral_fixture.py`.
 3. **Register the language name** with the neutral adapter: `coverset.lang.neutral.register_language("go")` (`typescript` and `javascript` are registered already). `coverset.lang.adapter_for_language(name)` then returns a `NeutralAdapter`, and `coverset.lang.read_any_bundle` reads the bundle whatever its language, because the manifest says `coverset-neutral`.
 
-`NeutralAdapter` implements the `LanguageAdapter` protocol (`coverset/lang/base.py`) from the bundle alone: `read_bundle` is `coverset_model.io.read_bundle` under the untrusted-bundle limits, `index_functions` returns the shipped regions of a path, `changed_functions` compares the shipped regions of the base and head runs by qualname, ordinal and hashes (without base regions, every head region the diff touches is `modified`), and `shape_catalogue` reads the shipped type descriptors. `env_spec` and `test_command` raise `NotRunnableError`: coverset does not build the environment or start the runner for these languages, so the anticipatory scheduling of [docs/orchestrator.md](orchestrator.md) (first-test latency, likeliest failures first, sharding) stays Python-only; ingest, facts, pages and reports do not. Per path, the run's function regions are the adapter's own index of the head sources when it has one, else the regions the bundle shipped ([docs/data-model.md](data-model.md#the-neutralbundle-contract)).
+`NeutralAdapter` implements the `LanguageAdapter` protocol (`coverset/lang/base.py`) from the bundle alone: `read_bundle` is `coverset_model.io.read_bundle` under the untrusted-bundle limits, `index_functions` returns the shipped regions of a path, `changed_functions` compares the shipped regions of the base and head runs by qualname, ordinal and hashes (without base regions, every head region the diff touches is `modified`), and `shape_catalogue` reads the shipped type descriptors. `env_spec` and `test_command` raise `NotRunnableError`: coverset does not build the environment or start the runner for these languages, so the anticipatory scheduling of [docs/orchestrator.md](orchestrator.md) (first-test latency, likeliest failures first, sharding) stays Python-only; ingest, facts, pages and reports do not. Per path, the run's function regions are the adapter's own index of the head sources when it has one, else the regions the bundle shipped ([docs/data-model.md](data-model.md#the-neutralbundle-contract)); a job whose language is `python` never takes shipped regions or types, whatever the bundle's manifest says.
 
 ### The TypeScript walk-through
 
@@ -185,7 +212,7 @@ A Vitest or Jest reporter (`vitest-coverset`, say) writes the files like this:
 | a class instance | `obj:<module>.<ClassName>` | none (`dataclass`/`pydantic` are Python-only) |
 | a function | `obj:<module>.Function` | none |
 
-**Types to descriptors.** From the checker's declared type of each parameter: `number` → `float` (or `int` when the reporter knows the values are integral, e.g. a branded `Int` type), `bigint` → `int`, `string` → `str`, `boolean` → `bool`, `null`/`undefined`/`void` → `none`, `T | undefined` and optional parameters → a union with `none`, `T[]`/`Array<T>`/`ReadonlyArray<T>` → `list`, `[A, B]` → a fixed `tuple`, `Set<T>` → `set`, `Map<K, V>` and `Record<K, V>` → `dict`, string or number literal unions → `literal`, an `enum` → `enum` with its member names, classes and interfaces → `object`, `any`/`unknown` → `any`, an unannotated parameter → `null`. An enum value is recorded with an example that names the member (`Currency.EUR`) so its members become expected classes.
+**Types to descriptors.** From the checker's declared type of each parameter: `number` → `float` (or `int` when the reporter knows the values are integral, e.g. a branded `Int` type), `bigint` → `int`, `string` → `str`, `boolean` → `bool`, `null`/`undefined`/`void` → `none`, `T | undefined` and optional parameters → a union with `none`, `T[]`/`Array<T>`/`ReadonlyArray<T>` → `list`, `[A, B]` → a fixed `tuple`, `Set<T>` → `set`, `Map<K, V>` and `Record<K, V>` → `dict`, string or number literal unions → `literal`, an `enum` → `enum` with its member names, classes and interfaces → `object`, `any`/`unknown` → `any`, an unannotated parameter → `null`. `Iterable<T>` and `ReadonlyArray<T>` → `list`, as Python's `Sequence`, `Iterable` and `Collection` are. An enum value is recorded with an example that names the member as a whole token (`Currency.EUR`) so its members become expected classes; a literal value's example may be its JSON form (`"eu"`) or a Python-style repr (`'eu'`), both match. The descriptors are stored with the run's functions at ingest (`functions.types_json`), so the function page and the PR page's cards show the classes that `func_input_cov` counted.
 
 ## Adding a review client
 
@@ -194,6 +221,7 @@ A reviewer receives a redacted bundle of facts about the changed functions and r
 ```python
 class ReviewClient(Protocol):
     name: str
+
     def review(self, bundle: ReviewBundle) -> ReviewOutcome: ...
 ```
 

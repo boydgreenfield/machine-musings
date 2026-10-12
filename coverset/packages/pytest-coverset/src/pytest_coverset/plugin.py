@@ -58,7 +58,7 @@ from pytest_coverset.bundle import (
 )
 from pytest_coverset.coverage_ctx import CoverageContext, ForeignTracerError
 from pytest_coverset.events import EventWriter
-from pytest_coverset.neutral import NeutralWriter, env_enabled, shard_from_env
+from pytest_coverset.neutral import NeutralWriter, env_enabled, remove_previous, shard_from_env
 from pytest_coverset.ordering import PriorityOrdering, load_scores
 from pytest_coverset.outcomes import exception_name, fold_reports, truncate_utf8
 from pytest_coverset.paths import find_git_root, norm_path
@@ -408,9 +408,37 @@ class CoversetSession:
         counts = self.results.counts(len(self.collected))
         for name, exc in write_static_files(out, self.collected, self.collect_errors, self.results.results):
             self._record_error(name, exc)
+        self._note_tracer_loss()
         neutral = self.neutral
+        meta = self._meta(exit_code, counts)
+        # The Python bundle is complete (meta.json, then bundle.tar.gz) before the neutral export
+        # starts, so an interrupt during the export never costs it; meta.json is rewritten with
+        # the export's outcome afterwards.
+        self._attempt("meta", lambda: write_json(out / META_FILE, meta))
+        try:
+            path, digest, size = make_tarball(out)
+        except Exception as exc:
+            self._record_error("tarball", exc)
+        else:
+            self._emit("bundle_written", path=str(path), sha256=digest, bytes=size)
         if neutral is not None:
-            self._attempt(
+            self._export_neutral(neutral, meta)
+        else:
+            self._attempt("neutral cleanup", lambda: remove_previous(out))
+        self._emit("done", exit_code=exit_code, counts=counts)
+
+    def _export_neutral(self, neutral: NeutralWriter, meta: dict[str, Any]) -> None:
+        """Write the neutral files, manifest and archive; record the outcome in ``meta.json``.
+
+        ``meta.neutral.status`` is ``written`` (``neutral_written`` emitted), ``failed`` (the errors
+        are in ``meta.errors`` under ``neutral ...``; no manifest is written over incomplete data
+        files and no archive or event is produced) or ``interrupted`` (the export was cut short,
+        e.g. Ctrl-C; the interrupt is re-raised after ``meta.json`` is rewritten).
+        """
+        out = self.options.out_dir
+        outcome: dict[str, Any] = {"requested": True, "status": "failed"}
+        try:
+            data_ok = self._attempt(
                 "neutral",
                 lambda: neutral.write_data(
                     self.collected,
@@ -420,39 +448,36 @@ class CoversetSession:
                     out / SHAPES_FILE,
                 ),
             )
-        self._note_tracer_loss()
-        meta = self._meta(exit_code, counts)
-        if neutral is not None:
-            self._attempt(
+            manifest_meta = {**meta, "neutral": {"requested": True, **neutral.outcome()}}
+            manifest_ok = data_ok and self._attempt(
                 "neutral manifest",
-                lambda: neutral.write_manifest(meta, version=__version__, shard=self.shard),
+                lambda: neutral.write_manifest(manifest_meta, version=__version__, shard=self.shard),
             )
-        self._attempt("meta", lambda: write_json(out / META_FILE, meta))
-        try:
-            path, digest, size = make_tarball(out)
-        except Exception as exc:
-            self._record_error("tarball", exc)
-        else:
-            self._emit("bundle_written", path=str(path), sha256=digest, bytes=size)
-        if neutral is not None:
-            self._write_neutral_tarball(neutral)
-        self._emit("done", exit_code=exit_code, counts=counts)
-
-    def _write_neutral_tarball(self, neutral: NeutralWriter) -> None:
-        try:
-            path, digest, size = neutral.pack()
-        except Exception as exc:
-            self._record_error("neutral tarball", exc)
-            return
-        self._emit(
-            "neutral_written",
-            path=str(path),
-            sha256=digest,
-            bytes=size,
-            seconds=round(neutral.seconds, 6),
-            rows=dict(neutral.rows),
-            dropped=dict(sorted(neutral.stats.items())),
-        )
+            packed: tuple[Path, str, int] | None = None
+            if manifest_ok:
+                try:
+                    packed = neutral.pack()
+                except Exception as exc:
+                    self._record_error("neutral tarball", exc)
+            outcome.update(neutral.outcome())
+            if packed is not None:
+                path, digest, size = packed
+                outcome.update(status="written", path=str(path), sha256=digest, bytes=size)
+                self._emit(
+                    "neutral_written",
+                    path=str(path),
+                    sha256=digest,
+                    bytes=size,
+                    seconds=outcome["seconds"],
+                    rows=outcome["rows"],
+                    dropped=outcome["dropped"],
+                )
+        except BaseException:
+            outcome.update(neutral.outcome(), status="interrupted")
+            raise
+        finally:
+            meta["neutral"] = outcome
+            self._attempt("meta", lambda: write_json(out / META_FILE, meta))
 
     def abort(self, exit_code: int, label: str, exc: BaseException) -> None:
         """Finalise after pytest gave up before the session ran (a conftest failed to import, ...).
@@ -479,11 +504,14 @@ class CoversetSession:
         if message not in self.errors:
             self.errors.append(message)
 
-    def _attempt(self, label: str, action: Callable[[], object]) -> None:
+    def _attempt(self, label: str, action: Callable[[], object]) -> bool:
+        """Run ``action``; an exception is recorded under ``label``. Returns whether it succeeded."""
         try:
             action()
         except Exception as exc:
             self._record_error(label, exc)
+            return False
+        return True
 
     def _meta(self, exit_code: int, counts: dict[str, int]) -> dict[str, Any]:
         tracer = self.tracer
@@ -515,7 +543,9 @@ class CoversetSession:
             "shape_samples": self.options.shape_samples,
             "shape_settle": self.options.shape_settle,
             "full_trace_cap": self.options.full_trace_cap,
-            "neutral": self.options.neutral,
+            "neutral": {"requested": True, "status": "pending"}
+            if self.options.neutral
+            else {"requested": False},
             "functions_traced": tracer.functions_traced if tracer is not None else 0,
             "functions_truncated": tracer.functions_truncated if tracer is not None else 0,
             "tracer_errors": tracer.tracer_errors if tracer is not None else 0,

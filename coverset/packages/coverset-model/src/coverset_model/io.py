@@ -6,8 +6,9 @@ ran next to the reporter that wrote it. The reader therefore
 
 * refuses (raises :class:`BundleRejected`) a bundle over the size limits, a gzip stream that
   expands beyond its ratio cap, an archive with links, devices, nested paths or too many members,
-  an unknown ``format`` or ``version``, a missing required file, or more distinct tests, paths,
-  shape keys, functions or coverage cells than :class:`Limits` allows;
+  an unknown ``format`` or ``version``, a missing required file, a file with more lines than its
+  row cap, a read that outlasts the wall-clock budget, or more distinct tests, paths, shape keys,
+  functions or coverage cells than :class:`Limits` allows;
 * drops, and counts in ``meta["convert"]["dropped"]``, every row that breaks the schema
   (:mod:`coverset_model.schema`) or the rules the schema cannot express: unsafe paths, a test id
   used twice, a reserved id, lines that are not statements of their file, a function whose key or
@@ -31,6 +32,7 @@ import os
 import re
 import stat
 import tarfile
+import time
 import zlib
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
@@ -101,6 +103,11 @@ class Limits:
     so a caller can pass the same numbers to the Python and the neutral reader.
     ``gzip_cap`` bounds every gzip stream (the archive and each ``.jsonl.gz``) at ``gzip_ratio``
     times its compressed size, but never below ``gzip_floor_bytes`` nor above ``gzip_max_bytes``.
+
+    Work is bounded as well as bytes: a file with more lines than :meth:`rows_cap` allows (blank,
+    oversized and malformed lines count), or a read that takes longer than ``max_seconds`` of
+    wall-clock time, refuses the bundle. The defaults and the sizes they are measured against
+    are in ``docs/security.md`` (B14) and the package README.
     """
 
     max_bundle_bytes: int = 200 * MIB
@@ -115,13 +122,24 @@ class Limits:
     max_longrepr_chars: int = 8 * 1024
     max_members: int = 256
     max_line_number: int = 1_000_000
-    max_coverage_cells: int = 25_000_000
+    max_coverage_cells: int = 4_000_000
+    """Distinct (test, file, line) cells kept from ``coverage.jsonl`` (about 8 bytes each once read)."""
     max_tests: int = 50_000
     max_paths: int = 50_000
     max_shape_keys: int = 20_000
-    max_functions: int = 500_000
+    max_functions: int = 200_000
+    max_rows: int = 200_000
+    """Lines per file (every file but ``coverage.jsonl``); more refuses the bundle."""
+    max_coverage_rows: int = 2_000_000
+    """Lines of ``coverage.jsonl`` (one per (test, file) pair); more refuses the bundle."""
+    max_seconds: float = 120.0
+    """Wall-clock budget of one :func:`read_bundle` (or :func:`validate`); past it the bundle is refused."""
     max_problems: int = 1000
     """:func:`validate` lists at most this many problems, then one line counting the rest."""
+
+    def rows_cap(self, stem: str) -> int:
+        """How many lines the file ``stem`` (``coverage``, ``tests``, ...) may have."""
+        return self.max_coverage_rows if stem == "coverage" else self.max_rows
 
     def gzip_cap(self, compressed_bytes: int) -> int:
         """Maximum decompressed bytes allowed for a gzip stream of ``compressed_bytes``."""
@@ -214,6 +232,17 @@ class _Source:
         assert self._root is not None
         return _open_regular(self._root / name)
 
+    def size(self, name: str, fh: IO[bytes]) -> int:
+        """Bytes of the opened member ``name`` (``fstat`` for a file on disk)."""
+        if self._data is not None:
+            return len(self._data[name])
+        return os.fstat(fh.fileno()).st_size
+
+    def release(self, name: str) -> None:
+        """Forget an archive member's bytes once its file has been read."""
+        if self._data is not None:
+            self._data.pop(name, None)
+
 
 def _known_names() -> list[str]:
     return [MANIFEST, *(f"{stem}{ext}" for stem in STEMS for ext in (".jsonl", ".jsonl.gz"))]
@@ -253,6 +282,37 @@ class _CappedReader:
         return self._account(self._inner.readline(size))
 
 
+class _HashingReader:
+    """Reads at most ``size`` bytes of ``inner``, feeding every byte read to ``digest``."""
+
+    def __init__(self, inner: IO[bytes], digest: Any, size: int) -> None:
+        self._inner = inner
+        self._digest = digest
+        self._left = size
+
+    def _take(self, data: bytes) -> bytes:
+        self._left -= len(data)
+        self._digest.update(data)
+        return data
+
+    def read(self, size: int = -1) -> bytes:
+        if self._left <= 0:
+            return b""
+        size = self._left if size is None or size < 0 else min(size, self._left)
+        return self._take(self._inner.read(size))
+
+    def readline(self, size: int = -1) -> bytes:
+        if self._left <= 0:
+            return b""
+        size = self._left if size is None or size < 0 else min(size, self._left)
+        return self._take(self._inner.readline(size))
+
+    def drain(self) -> None:
+        """Hash whatever was not read (bytes after a gzip stream's end)."""
+        while self.read(_COPY_CHUNK):
+            pass
+
+
 class _Capped(Exception):
     def __init__(self, cap: int) -> None:
         super().__init__(cap)
@@ -285,7 +345,7 @@ class _Scan:
     tests: dict[str, TestRow] = field(default_factory=dict)
     durations: dict[str, float] = field(default_factory=dict)
     links: dict[str, set[str]] = field(default_factory=dict)
-    coverage: dict[str, dict[str, set[int]]] = field(default_factory=dict)
+    coverage: dict[str, dict[str, tuple[int, ...]]] = field(default_factory=dict)
     run_arcs: dict[str, set[tuple[int, int]]] = field(default_factory=dict)
     functions: dict[tuple[str, str, int], FunctionRegion] = field(default_factory=dict)
     types: dict[FuncTriple, FrozenMap[str, TypeDescriptor | None]] = field(default_factory=dict)
@@ -295,6 +355,23 @@ class _Scan:
     seen_paths: set[str] = field(default_factory=set)
     seen_keys: set[str] = field(default_factory=set)
     cells: int = 0
+    ints: dict[int, int] = field(default_factory=dict)
+    """One int object per distinct line number, shared by every coverage tuple."""
+    deadline: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.deadline = time.monotonic() + self.limits.max_seconds
+
+    def check_clock(self, file: str) -> None:
+        if time.monotonic() > self.deadline:
+            self.report(
+                file,
+                None,
+                None,
+                f"reading took longer than {self.limits.max_seconds:g} s (the wall-clock budget)",
+                "limit",
+                fatal=True,
+            )
 
     # -- reporting ----------------------------------------------------------------------------
 
@@ -366,15 +443,18 @@ class _Scan:
         return value[: limit - 1] + "…"
 
     def schema_ok(self, file: str, stem: str, row_no: int, row: dict[str, Any]) -> bool:
-        violations = schemas.check(row, schemas.row_schema(stem, row))
-        ok = True
-        for v in violations:
-            if v.keyword == "additionalProperties":
-                self.report(file, row_no, v.path.lstrip("/"), "unknown field (ignored)", "unknown_field")
-            else:
-                ok = False
+        """Whether ``row`` fits its schema; the first real violation drops it and ends the check."""
+        try:
+            for v in schemas.iter_violations(row, schemas.row_schema(stem, row)):
+                if v.keyword == "additionalProperties":
+                    self.report(file, row_no, v.path.lstrip("/"), "unknown field (ignored)", "unknown_field")
+                    continue
                 self.report(file, row_no, v.path.lstrip("/") or None, v.message, "schema")
-        return ok
+                return False
+        except RecursionError:
+            self.report(file, row_no, None, "nested too deep to check", "schema")
+            return False
+        return True
 
 
 def _stem(file: str) -> str:
@@ -573,41 +653,56 @@ def _rows(source: _Source, scan: _Scan, stem: str) -> Iterator[tuple[str, int, d
         return
     scan.files_read[stem] = name
     limits = scan.limits
-    size = source.members[name]
+    max_rows = limits.rows_cap(stem)
     scan.rows.setdefault(stem, 0)
-    with source.open(name) as fh:
-        raw = fh.read()
-    scan.digest.update(f"{name}\0{len(raw)}\0".encode())
-    scan.digest.update(raw)
-    stream: Any = io.BytesIO(raw)
-    if name.endswith(".gz"):
-        stream = _CappedReader(gzip.GzipFile(fileobj=stream, mode="rb"), limits.gzip_cap(size))
+    scan.check_clock(name)
     row_no = 0
+    fh = source.open(name)
     try:
-        while True:
-            line = stream.readline(limits.max_json_line_bytes + 1)
-            if not line:
-                return
-            row_no += 1
-            if len(line) > limits.max_json_line_bytes:
-                scan.report(
-                    name, row_no, None, f"line longer than {limits.max_json_line_bytes} bytes", "oversized"
-                )
-                while line and not line.endswith(b"\n"):
-                    line = stream.readline(limits.max_json_line_bytes + 1)
-                continue
-            if not line.strip():
-                continue
-            scan.rows[stem] += 1
-            value, error = _decode(line)
-            if error is not None or not isinstance(value, dict):
-                scan.report(name, row_no, None, error or "not a JSON object", "json")
-                continue
-            yield name, row_no, value
+        with fh:
+            size = source.size(name, fh)
+            scan.digest.update(f"{name}\0{size}\0".encode())
+            hashed = _HashingReader(fh, scan.digest, size)
+            stream: Any = hashed
+            if name.endswith(".gz"):
+                stream = _CappedReader(gzip.GzipFile(fileobj=hashed, mode="rb"), limits.gzip_cap(size))
+            while True:
+                line = stream.readline(limits.max_json_line_bytes + 1)
+                if not line:
+                    break
+                row_no += 1
+                if row_no > max_rows:
+                    scan.report(name, row_no, None, f"more than {max_rows} lines", "limit", fatal=True)
+                if not row_no & 1023:
+                    scan.check_clock(name)
+                if len(line) > limits.max_json_line_bytes:
+                    scan.report(
+                        name,
+                        row_no,
+                        None,
+                        f"line longer than {limits.max_json_line_bytes} bytes",
+                        "oversized",
+                    )
+                    while line and not line.endswith(b"\n"):
+                        line = stream.readline(limits.max_json_line_bytes + 1)
+                        scan.check_clock(name)
+                    continue
+                if not line.strip():
+                    continue
+                scan.rows[stem] += 1
+                value, error = _decode(line)
+                if error is not None or not isinstance(value, dict):
+                    scan.report(name, row_no, None, error or "not a JSON object", "json")
+                    continue
+                yield name, row_no, value
+            hashed.drain()
     except _Capped as capped:
         scan.report(name, None, None, f"expands beyond {capped.cap} bytes", "limit", fatal=True)
     except (OSError, EOFError, zlib.error) as exc:
-        scan.report(name, row_no or None, None, f"corrupt gzip stream: {exc}"[:200], "corrupt", fatal=True)
+        what = "corrupt gzip stream" if name.endswith(".gz") else "read error"
+        scan.report(name, row_no or None, None, f"{what}: {exc}"[:200], "corrupt", fatal=True)
+    finally:
+        source.release(name)
 
 
 def _read_files(source: _Source, scan: _Scan) -> None:
@@ -709,7 +804,7 @@ def _read_coverage(source: _Source, scan: _Scan) -> None:
         if path is None:
             continue
         scan.test_id(name, n, "test", test_id)
-        lines = set(row["lines"])
+        lines = set(row["lines"])  # one row's lines only; what is kept is a sorted tuple
         statements = scan.statement_sets.get(path)
         if statements is None:
             scan.report(name, n, "file", f"{path!r} is not in files.jsonl", "unknown_file")
@@ -726,13 +821,17 @@ def _read_coverage(source: _Source, scan: _Scan) -> None:
                 )
                 lines &= statements
         by_path = scan.coverage.setdefault(test_id, {})
-        if path in by_path:
+        before = by_path.get(path)
+        if before is not None:
             scan.report(name, n, None, f"({test_id[:60]!r}, {path!r}) is listed twice (merged)", "duplicate")
-            lines -= by_path[path]
-            by_path[path] |= lines
-        else:
-            by_path[path] = lines
-        scan.cells += len(lines)
+            lines -= set(before)
+            if not lines:
+                continue
+            lines |= set(before)
+        added = len(lines) - (len(before) if before is not None else 0)
+        ints = scan.ints
+        by_path[path] = tuple([ints.setdefault(line, line) for line in sorted(lines)])
+        scan.cells += added
         if scan.cells > limits.max_coverage_cells:
             scan.report(
                 name, n, None, f"more than {limits.max_coverage_cells} coverage cells", "limit", fatal=True
@@ -1020,7 +1119,7 @@ def _build(scan: _Scan) -> NeutralBundle:
         "head_checked": scan.allowed_paths is not None,
     }
     coverage = {
-        test: {path: tuple(sorted(lines)) for path, lines in by_path.items() if lines}
+        test: {path: lines for path, lines in by_path.items() if lines}
         for test, by_path in scan.coverage.items()
     }
     return NeutralBundle(
@@ -1238,17 +1337,17 @@ def write_bundle(
     ``meta``; anything not given comes from ``bundle.meta["bundle"]`` (a bundle that was read from
     disk), else ``language="python"``, this package as producer, and ``created_at``/``shard`` null.
     ``meta`` defaults to ``bundle.meta`` without the reader's own keys. ``compress`` writes
-    ``.jsonl.gz`` files (gzip with no timestamp, so the bytes are reproducible). Files of the other
-    variant left from an earlier write are removed. Optional files are written only when they
-    have rows.
+    ``.jsonl.gz`` files (gzip with no timestamp, so the bytes are reproducible). Every bundle file
+    left in ``directory`` from an earlier write (the other variant, an optional file with no rows
+    now, ``links.jsonl``, which this writer never produces) is removed. Each file is created
+    afresh after its old name is unlinked, never through a symlink (``O_EXCL | O_NOFOLLOW``).
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     data = conform(bundle, limits=limits)
     head = _manifest_for(bundle, manifest)
-    (directory / MANIFEST).write_bytes(
-        (json.dumps(head, ensure_ascii=False, indent=1, allow_nan=False) + "\n").encode("utf-8")
-    )
+    with _create(directory / MANIFEST) as fh:
+        fh.write((json.dumps(head, ensure_ascii=False, indent=1, allow_nan=False) + "\n").encode("utf-8"))
     files: dict[str, Iterator[dict[str, Any]] | list[dict[str, Any]]] = {
         "tests": _test_rows(data),
         "files": [
@@ -1270,34 +1369,47 @@ def write_bundle(
         "functions": _function_rows(data),
         "shapes": _shape_rows(data),
     }
+    for stem in STEMS:
+        for stale in (directory / f"{stem}.jsonl", directory / f"{stem}.jsonl.gz"):
+            stale.unlink(missing_ok=True)
     for stem, rows in files.items():
         blob = b"".join(_json_line(row) for row in rows)
-        plain, packed = directory / f"{stem}.jsonl", directory / f"{stem}.jsonl.gz"
-        for stale in (plain, packed):
-            stale.unlink(missing_ok=True)
         if not blob and stem in OPTIONAL_FILES:
             continue
         if compress:
-            with open(packed, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            with (
+                _create(directory / f"{stem}.jsonl.gz") as raw,
+                gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz,
+            ):
                 gz.write(blob)
         else:
-            plain.write_bytes(blob)
+            with _create(directory / f"{stem}.jsonl") as raw:
+                raw.write(blob)
     return directory
+
+
+def _create(path: Path) -> IO[bytes]:
+    """A new regular file at ``path`` (an old file or link there is unlinked first, never followed)."""
+    path.unlink(missing_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    return os.fdopen(os.open(path, flags, 0o644), "wb")
 
 
 def pack(directory: Path | str, archive: Path | str) -> Path:
     """Pack a bundle directory's known files into a flat, reproducible ``tar.gz`` at ``archive``."""
     directory, archive = Path(directory), Path(archive)
     with (
-        open(archive, "wb") as raw,
+        _create(archive) as raw,
         gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz,
         tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar,
     ):
         for name in _known_names():
             path = directory / name
-            if not path.is_file() or path.is_symlink():
+            try:
+                with _open_regular(path) as fh:
+                    data = fh.read()
+            except OSError:  # absent, a link or not a regular file: not packed
                 continue
-            data = path.read_bytes()
             info = tarfile.TarInfo(name)
             info.size, info.mode, info.mtime = len(data), 0o644, 0
             tar.addfile(info, io.BytesIO(data))

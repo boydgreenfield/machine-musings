@@ -43,10 +43,14 @@ def run_neutral(project: pytest.Pytester, *args: str, out: str = "out") -> Path:
 
 def test_off_by_default(project: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COVERSET_NEUTRAL", raising=False)
+    stale = project.path / "out" / "neutral"
+    stale.mkdir(parents=True)
+    (stale / "tests.jsonl").write_text("{}\n")
+    (stale.parent / "neutral.tar.gz").write_bytes(b"an archive from an earlier run")
     out = run_neutral(project)
     assert not (out / "neutral").exists() and not (out / "neutral.tar.gz").exists()
     assert "neutral_written" not in [e["kind"] for e in events(project)]
-    assert json.loads((out / "meta.json").read_text())["neutral"] is False
+    assert json.loads((out / "meta.json").read_text())["neutral"] == {"requested": False}
 
 
 def test_writes_every_file_the_manifest_and_the_archive(project: pytest.Pytester) -> None:
@@ -61,7 +65,11 @@ def test_writes_every_file_the_manifest_and_the_archive(project: pytest.Pytester
     assert manifest["producer"] == {"name": "pytest-coverset", "version": __version__}
     assert manifest["shard"] is None
     assert len(manifest["created_at"]) == 20 and manifest["created_at"].endswith("Z")
-    assert manifest["meta"] == meta and meta["neutral"] is True
+    outcome = meta.pop("neutral")
+    assert outcome["status"] == "written" and outcome["requested"] is True
+    assert {k: v for k, v in manifest["meta"].items() if k != "neutral"} == meta
+    assert manifest["meta"]["neutral"]["rows"] == outcome["rows"]
+    assert outcome["dropped"] == manifest["meta"]["neutral"]["dropped"]
 
     kinds = [e["kind"] for e in events(project)]
     assert kinds[-3:] == ["bundle_written", "neutral_written", "done"]
@@ -70,6 +78,8 @@ def test_writes_every_file_the_manifest_and_the_archive(project: pytest.Pytester
     assert written["path"] == str(archive) and written["bytes"] == archive.stat().st_size
     assert written["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
     assert written["rows"]["tests.jsonl.gz"] == 24 and written["seconds"] >= 0
+    assert (outcome["sha256"], outcome["bytes"]) == (written["sha256"], written["bytes"])
+    assert written["dropped"] == outcome["dropped"] and written["rows"] == outcome["rows"]
     with tarfile.open(archive) as tar:
         assert sorted(tar.getnames()) == sorted(MEMBERS)
         for member in tar.getmembers():
@@ -164,7 +174,7 @@ def test_environment_switch_and_shard(project: pytest.Pytester, monkeypatch: pyt
     monkeypatch.setenv("COVERSET_SHARD", "3")
     out = run_neutral(project)
     manifest = json.loads((out / "neutral" / "manifest.json").read_text())
-    assert manifest["shard"] == 3 and manifest["meta"]["neutral"] is True
+    assert manifest["shard"] == 3 and manifest["meta"]["neutral"]["requested"] is True
 
 
 def test_the_export_changes_nothing_else(project: pytest.Pytester) -> None:
@@ -242,7 +252,9 @@ def test_early_exits_still_write_the_neutral_bundle(
     neutral = pytester.path / "out" / "neutral"
     assert sorted(p.name for p in neutral.iterdir()) == sorted(MEMBERS)
     manifest = json.loads((neutral / "manifest.json").read_text())
-    assert manifest["meta"] == json.loads((pytester.path / "out" / "meta.json").read_text())
+    meta = json.loads((pytester.path / "out" / "meta.json").read_text())
+    assert meta.pop("neutral")["status"] == "written"
+    assert {k: v for k, v in manifest["meta"].items() if k != "neutral"} == meta
     assert manifest["meta"]["exit_code"] == 4
     for name in DATA_FILES:
         read_rows(neutral / name)  # every file is well-formed, even when empty

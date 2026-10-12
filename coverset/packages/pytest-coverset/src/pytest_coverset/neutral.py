@@ -1,41 +1,57 @@
 """The language-neutral bundle (``docs/neutral-bundle.md`` in coverset), written next to the Python one.
 
 With ``--coverset-neutral`` (or ``COVERSET_NEUTRAL=1``) the session writes ``<out>/neutral/`` and
-``<out>/neutral.tar.gz`` (the same files, flat) after the Python bundle files exist. Everything is
+``<out>/neutral.tar.gz`` (the same files, flat) after the Python bundle (``meta.json`` and
+``bundle.tar.gz`` included) is complete, so an interrupt during the export never costs the primary
+bundle; ``meta.json`` is then rewritten with the export's outcome in ``meta.neutral``. Everything is
 derived from files already on disk or rows already recorded, so the export cannot change coverage,
-shapes or results:
+shapes or results. File names in ``coverage.json`` and ``coverage.sqlite`` are read as the control
+plane's converter reads them: relative names relative to the git root, absolute names (files
+outside the directory pytest ran in) dropped and counted, so both readings of one run agree.
 
 * ``tests.jsonl.gz``: every collected test (``outcome`` null when it never ran) merged with its
   final result; results for tests that were not collected are appended.
 * ``files.jsonl.gz`` and ``arcs.jsonl.gz``: ``coverage.json``'s statements (executed ∪ missing),
   excluded lines, possible branch arcs (executed ∪ missing) and executed arcs per file.
-  ``n_lines`` is the source file's line count (the largest line mentioned when it is unreadable).
+  ``n_lines`` is the source file's line count as Python counts lines (``\n``, ``\r\n`` or a lone
+  ``\r`` ends one; the largest line mentioned when the file is unreadable).
 * ``coverage.jsonl.gz``: per (context, file), from ``coverage.sqlite`` through coverage.py's public
   :class:`coverage.CoverageData` API (``contexts_by_lineno`` to find the pairs,
   ``set_query_context`` + ``arcs``/``lines`` per pair). Raw tracer lines are mapped to the first line
   of their statement, exactly as the control plane's ``read_python_bundle`` does, and only
   statement lines are kept; the ``''`` context is ``<import>``. Rows carry the pair's ``arcs`` when
-  the data has arcs.
+  the data has arcs. A file the data measured but ``coverage.json`` does not list (coverage.py
+  could not report it, say its source vanished) keeps its raw executed lines and gets no
+  ``files.jsonl`` row: readers keep such lines and report the file, as the converter does.
 * ``functions.jsonl.gz``: :func:`pytest_coverset.regions.index_functions` over every measured
-  ``.py`` file (no ``types``).
+  ``.py`` file (no ``types``), each decoded as CPython decodes it (a UTF-8 BOM or a PEP 263 coding
+  cookie); a file that cannot be read or indexed is skipped and counted, never the whole file.
 * ``shapes.jsonl.gz``: the header-indexed rows of ``shapes.jsonl.gz`` as self-contained ``obs``
   and ``sampling`` rows. Observations made at import time (caller ``<import>``) are left out, as
   the control plane's Python reader leaves them out.
 * ``links.jsonl``: the invariant links.
 
-``manifest.json`` is written last, with ``meta`` the same mapping as ``meta.json``.
+Test ids longer than 512 characters (the format's limit) are left out of every file and counted,
+so a reader never drops a whole row for one of them. Stale files of either variant
+(``tests.jsonl`` next to ``tests.jsonl.gz``) are removed before writing. ``manifest.json`` is
+written after the data files, with ``meta`` the same mapping as ``meta.json`` except ``neutral``,
+which there says how the data files came out (``rows``, ``dropped``) rather than the archive's.
 """
 
 from __future__ import annotations
 
 import bisect
+import contextlib
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
+import stat
 import tarfile
 import time
+import tokenize
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -46,7 +62,6 @@ import coverage
 
 from pytest_coverset.bundle import CollectedItem
 from pytest_coverset.outcomes import TestResult
-from pytest_coverset.paths import norm_path
 from pytest_coverset.regions import index_functions
 
 FORMAT = "coverset-neutral"
@@ -69,8 +84,10 @@ IMPORT_CONTEXT = "<import>"
 NEUTRAL_ENV = "COVERSET_NEUTRAL"
 SHARD_ENV = "COVERSET_SHARD"
 MAX_REPR_CHARS = 200
+MAX_ID_CHARS = 512
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_LINE = 1_000_000
+STEMS = ("tests", "files", "coverage", "arcs", "functions", "shapes", "links")
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _SHARD = re.compile(r"[0-9]{1,7}")
 
@@ -120,6 +137,55 @@ def _write_rows(path: Path, rows: Iterable[Mapping[str, Any]]) -> int:
         tmp.unlink(missing_ok=True)
         raise
     return count
+
+
+def line_count(data: bytes) -> int:
+    """Lines of a source file as Python numbers them (``\n``, ``\r\n`` and a lone ``\r`` end one)."""
+    return min(len(data.splitlines()), MAX_LINE)
+
+
+def decode_source(data: bytes) -> str:
+    """Python source bytes as text, decoded as CPython does (a PEP 263 cookie or a UTF-8 BOM).
+
+    The control plane's ``planner._text``: an unknown or failing declared encoding falls back to
+    UTF-8 with replacement characters, so line numbers stay right.
+    """
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    except SyntaxError:
+        encoding = "utf-8"
+    try:
+        return data.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        return data.decode("utf-8", errors="replace")
+
+
+def _long_id(value: object) -> bool:
+    return isinstance(value, str) and len(value) > MAX_ID_CHARS
+
+
+def stale_names() -> list[str]:
+    """Every name a neutral directory may hold: the manifest and both variants of each file."""
+    return [MANIFEST_FILE, *(f"{stem}{ext}" for stem in STEMS for ext in (".jsonl", ".jsonl.gz"))]
+
+
+def remove_previous(out_dir: Path) -> None:
+    """Remove a neutral bundle an earlier run left in ``out_dir`` (a run without the flag).
+
+    Only the known names are removed (the archive, then the directory's files and the directory
+    if that empties it); a directory where the archive should be is left alone.
+    """
+    archive = out_dir / NEUTRAL_TARBALL
+    if archive.is_symlink() or archive.is_file():
+        archive.unlink()
+    directory = out_dir / NEUTRAL_DIR
+    if directory.is_dir() and not directory.is_symlink():
+        for name in stale_names():
+            member = directory / name
+            if member.is_symlink() or member.is_file():
+                member.unlink()
+        with contextlib.suppress(OSError):  # not empty: something else lives there
+            directory.rmdir()
 
 
 def _clip(value: object, limit: int) -> str | None:
@@ -208,8 +274,26 @@ class NeutralWriter:
         return self.out_dir / NEUTRAL_DIR
 
     def rel(self, raw: str) -> str | None:
-        """``raw`` (absolute or relative to :attr:`cwd`) as a repo-root-relative POSIX path."""
-        return norm_path(os.path.join(self.cwd, raw), self.repo_root)
+        """A ``coverage.json``/``coverage.sqlite`` file name as the control plane's converter reads it.
+
+        A relative name is taken relative to the git root (coverage.py writes names relative to
+        the directory pytest ran in, which is the git root in CI); an absolute name, a name with
+        empty, ``.`` or ``..`` segments, a backslash or a control character is not a path the
+        converter accepts, so it is None (the caller counts it).
+        """
+        if not raw or os.path.isabs(raw) or "\\" in raw or not raw.isprintable():
+            return None
+        if any(part in ("", ".", "..") for part in raw.split("/")):
+            return None
+        return raw
+
+    def outcome(self) -> dict[str, Any]:
+        """``rows``, ``dropped`` and ``seconds`` so far (the ``meta.neutral`` counters)."""
+        return {
+            "rows": dict(self.rows),
+            "dropped": dict(sorted(self.stats.items())),
+            "seconds": round(self.seconds, 6),
+        }
 
     # -- data files ----------------------------------------------------------------------------
 
@@ -223,16 +307,32 @@ class NeutralWriter:
     ) -> None:
         """Write every data file (not the manifest); a failure in one file does not stop the others.
 
-        Raises the first failure after attempting all of them.
+        First removes what an earlier export left: ``<out>/neutral.tar.gz``, the manifest and both
+        variants of every file (a stale ``tests.jsonl`` next to a new ``tests.jsonl.gz`` would make
+        the directory ambiguous). Raises the first failure after attempting everything.
         """
         started = time.perf_counter()
+        failures: list[BaseException] = []
+
+        def remove(path: Path) -> None:
+            try:
+                if path.is_symlink() or path.exists():
+                    path.unlink()
+            except OSError as exc:  # a directory in its place: recorded, the export is failed
+                failures.append(exc)
+                self.stats["stale_files_not_removed"] += 1
+
+        remove(self.out_dir / NEUTRAL_TARBALL)
         target = self.directory
-        target.mkdir(parents=True, exist_ok=True)
-        for name in (*MEMBERS, NEUTRAL_TARBALL):
-            (target / name).unlink(missing_ok=True)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.seconds += time.perf_counter() - started
+            raise exc
+        for name in (MANIFEST_FILE, NEUTRAL_TARBALL):
+            remove(target / name)
         items = list(collected)
         static = self._static(coverage_json)
-        failures: list[BaseException] = []
         writers = (
             (TESTS_FILE, lambda: self._test_rows(items, results)),
             (FILES_FILE, lambda: (s.row() for s in static.values())),
@@ -247,15 +347,27 @@ class NeutralWriter:
             (SHAPES_FILE, lambda: self._shape_rows(shapes_file)),
             (
                 LINKS_FILE,
-                lambda: ({"test": i.nodeid, "invariant": inv} for i in items for inv in i.invariant_ids),
+                lambda: (
+                    {"test": i.nodeid, "invariant": inv}
+                    for i in items
+                    if not _long_id(i.nodeid)
+                    for inv in i.invariant_ids
+                ),
             ),
         )
         for name, rows in writers:
+            stem = name.split(".", 1)[0]
             try:
+                for variant in (f"{stem}.jsonl", f"{stem}.jsonl.gz"):
+                    path = target / variant
+                    if path.is_symlink() or path.exists():
+                        path.unlink()  # a directory raises: this file fails, the others go on
                 self.rows[name] = _write_rows(target / name, rows())
             except Exception as exc:
                 failures.append(exc)
-                (target / name).unlink(missing_ok=True)
+                self.stats[f"{name}_failed"] += 1
+                with contextlib.suppress(OSError):
+                    (target / name).unlink(missing_ok=True)
         self.seconds += time.perf_counter() - started
         if failures:
             raise failures[0]
@@ -271,9 +383,15 @@ class NeutralWriter:
             if item.nodeid in seen:
                 continue
             seen.add(item.nodeid)
+            if _long_id(item.nodeid):
+                self.stats["tests_long_ids"] += 1
+                continue
             yield _test_row(item.nodeid, item.file, item.line, item, final.get(item.nodeid))
         for nodeid, result in final.items():
             if nodeid not in seen:
+                if _long_id(nodeid):
+                    self.stats["tests_long_ids"] += 1
+                    continue
                 yield _test_row(nodeid, result.file, None, None, result)
 
     def _static(self, coverage_json: Path) -> dict[str, _Static]:
@@ -313,7 +431,7 @@ class NeutralWriter:
         return found
 
     def _n_lines(self, path: str, fallback: int) -> int:
-        """Line count of the source file (``\\n``-separated, a final unterminated line counts)."""
+        """Line count of the source file (:func:`line_count`), else ``fallback``."""
         try:
             with open(os.path.join(self.repo_root, path), "rb") as fh:
                 data = fh.read(MAX_SOURCE_BYTES + 1)
@@ -321,7 +439,7 @@ class NeutralWriter:
             return fallback
         if len(data) > MAX_SOURCE_BYTES:
             return fallback
-        return min(data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0), MAX_LINE)
+        return line_count(data)
 
     def _coverage_rows(self, sqlite_path: Path, static: dict[str, _Static]) -> Iterator[dict[str, Any]]:
         """Rows per (context, file): ``<import>`` first, then contexts and paths sorted."""
@@ -331,13 +449,15 @@ class NeutralWriter:
         data = coverage.CoverageData(basename=str(sqlite_path), suffix=False, no_disk=False)
         data.read()  # marks the data as used: a CoverageData never read would erase the file
         has_arcs = data.has_arcs()
-        names: dict[str, _Static] = {}
+        names: dict[str, tuple[str, _Static | None]] = {}
         for raw in data.measured_files():
             path = self.rel(raw)
-            if path is None or path not in static:
-                self.stats["coverage_files_not_in_files"] += 1
-            else:
-                names[raw] = static[path]
+            if path is None:
+                self.stats["coverage_files_not_relative"] += 1
+                continue
+            if path not in static:
+                self.stats["coverage_files_not_in_files"] += 1  # kept: raw lines, no files row
+            names[raw] = (path, static.get(path))
         pairs: dict[str, dict[str, set[int]]] = defaultdict(dict)
         data.set_query_contexts(None)
         for raw in names:
@@ -346,23 +466,29 @@ class NeutralWriter:
                     pairs[context].setdefault(raw, set()).add(line)
         try:
             for context in sorted(pairs, key=lambda c: (c != "", c)):
+                if _long_id(context):
+                    self.stats["coverage_long_test_ids"] += 1
+                    continue
                 if has_arcs:
                     data.set_query_context(context)
-                for raw in sorted(pairs[context], key=lambda r: names[r].path):
-                    facts = names[raw]
+                for raw in sorted(pairs[context], key=lambda r: names[r][0]):
+                    path, facts = names[raw]
                     arcs: list[tuple[int, int]] = []
                     if has_arcs:
                         arcs = sorted(set(data.arcs(raw) or ()))
                         raw_lines: Iterable[int] = {n for arc in arcs for n in arc if n > 0}
                     else:
                         raw_lines = pairs[context][raw]
-                    lines = facts.first_lines(raw_lines)
+                    if facts is not None:
+                        lines = facts.first_lines(raw_lines)
+                    else:
+                        lines = sorted({n for n in raw_lines if 0 < n <= MAX_LINE})
                     if not lines:
                         self.stats["coverage_rows_without_statements"] += 1
                         continue
                     row: dict[str, Any] = {
                         "test": context or IMPORT_CONTEXT,
-                        "file": facts.path,
+                        "file": path,
                         "lines": lines,
                     }
                     if has_arcs:
@@ -372,15 +498,25 @@ class NeutralWriter:
             data.set_query_contexts(None)
 
     def _function_rows(self, static: dict[str, _Static]) -> Iterator[dict[str, Any]]:
+        """Regions of every measured ``.py`` file; one file that fails is skipped, not all of them."""
         for path in sorted(static):
             if not path.endswith(".py"):
                 continue
             try:
-                source = Path(self.repo_root, path).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+                with open(os.path.join(self.repo_root, path), "rb") as fh:
+                    data = fh.read(MAX_SOURCE_BYTES + 1)
+            except OSError:
                 self.stats["functions_unreadable_sources"] += 1
                 continue
-            for region in index_functions(path, source):
+            if len(data) > MAX_SOURCE_BYTES:
+                self.stats["functions_unreadable_sources"] += 1
+                continue
+            try:
+                regions = index_functions(path, decode_source(data))
+            except (RecursionError, MemoryError, ValueError):  # nested too deep for the AST walk
+                self.stats["functions_unindexable_sources"] += 1
+                continue
+            for region in regions:
                 yield region.as_row()
 
     def _shape_rows(self, shapes_file: Path) -> Iterator[dict[str, Any]]:
@@ -393,6 +529,9 @@ class NeutralWriter:
                 self.stats["shapes_bad_header"] += 1
                 return
             table = _ShapeTable.of(header)
+            self.stats["shapes_long_test_ids"] += table.long_ids
+            if not self.stats["shapes_long_test_ids"]:
+                del self.stats["shapes_long_test_ids"]
             for text in fh:
                 row = json.loads(text)
                 kind = row.get("kind")
@@ -423,6 +562,8 @@ class NeutralWriter:
         }
         path = self.directory / MANIFEST_FILE
         tmp = path.with_name(path.name + ".tmp")
+        if not stat.S_ISDIR(os.lstat(self.directory).st_mode):
+            raise NotADirectoryError(f"{self.directory} is not a directory")
         try:
             tmp.write_bytes(_line(manifest))
             os.replace(tmp, path)
@@ -498,6 +639,8 @@ class _ShapeTable:
     shapes: list[str | None]
     tests: list[str | None]
     callers: list[list[Any] | dict[str, str] | None]
+    long_ids: int = 0
+    """Test ids of the header longer than :data:`MAX_ID_CHARS`, left out of every row."""
 
     @classmethod
     def of(cls, header: dict[str, Any]) -> _ShapeTable:
@@ -505,11 +648,13 @@ class _ShapeTable:
             value = header.get(key)
             return value if isinstance(value, list) else []
 
+        tests = lst("tests")
         return cls(
             funcs=[_triple(f) for f in lst("funcs")],
             shapes=[s if isinstance(s, str) and s else None for s in lst("shapes")],
-            tests=[t if isinstance(t, str) and t else None for t in lst("tests")],
+            tests=[t if isinstance(t, str) and t and not _long_id(t) else None for t in tests],
             callers=[_caller(c) for c in lst("callers")],
+            long_ids=sum(1 for t in tests if _long_id(t)),
         )
 
     def _tests(self, indexes: object) -> list[str] | None:
@@ -526,7 +671,7 @@ class _ShapeTable:
         param = row.get("p")
         if func is None or shape is None or caller is None or tests is None:
             return None
-        if type(samples) is not int or samples < 0 or not isinstance(param, str) or not param:
+        if type(samples) is not int or samples < 1 or not isinstance(param, str) or not param:
             return None
         ext = row.get("ext")
         return {
@@ -578,7 +723,7 @@ def _caller(value: object) -> list[Any] | dict[str, str] | None:
         nodeid = value.get("nodeid")
         # An import-time call (a decorator applied while the module loads) has the caller
         # ``<import>``: not a test id, and the control plane's Python reader drops it too.
-        ok = isinstance(nodeid, str) and nodeid and nodeid != IMPORT_CONTEXT
+        ok = isinstance(nodeid, str) and nodeid and nodeid != IMPORT_CONTEXT and not _long_id(nodeid)
         return {"test": nodeid} if ok else None
     if value.get("kind") == "func":
         return _triple([value.get("path"), value.get("qualname"), value.get("line")])

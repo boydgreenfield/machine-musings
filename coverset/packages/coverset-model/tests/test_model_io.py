@@ -271,3 +271,54 @@ def test_inspect_counts_rows(written: Path) -> None:
 @pytest.mark.security
 def test_safe_rel_path(value: object, ok: bool) -> None:
     assert (safe_rel_path(value) is not None) is ok
+
+
+@pytest.mark.security
+def test_row_caps_and_the_wall_clock_budget_are_fatal(written: Path) -> None:
+    with (written / "shapes.jsonl").open("a") as fh:
+        fh.write("{}\n" * 50)
+    problems = validate(written, limits=Limits(max_rows=40))
+    assert problems[-1].fatal and problems[-1].file == "shapes.jsonl"
+    assert "more than 40 lines" in problems[-1].message
+    with pytest.raises(BundleRejected, match="more than 2 lines"):
+        read_bundle(written, limits=Limits(max_coverage_rows=2))
+    assert Limits().rows_cap("coverage") == 2_000_000 and Limits().rows_cap("tests") == 200_000
+    with pytest.raises(BundleRejected, match="wall-clock budget"):
+        read_bundle(written, limits=Limits(max_seconds=-1))
+    # A row is checked up to its first schema violation: one problem per bad row, not one per field.
+    bundle = read_bundle(written)
+    assert bundle.meta["convert"]["dropped"]["shapes.schema"] == 50
+    assert sum(p.code == "schema" for p in validate(written)) == 50
+
+
+@pytest.mark.security
+def test_a_deep_descriptor_drops_its_row_not_the_bundle(written: Path) -> None:
+    deep: dict = {"kind": "int"}
+    for _ in range(500):
+        deep = {"kind": "list", "elem": deep}
+    rewrite_jsonl(written / "functions.jsonl", lambda rows: [{**rows[0], "types": {"a": deep}}, *rows[1:]])
+    bundle = read_bundle(written)
+    assert bundle.meta["convert"]["dropped"]["functions.schema"] == 1
+    assert len(bundle.functions) == len(conform(small_bundle()).functions) - 1
+
+
+def test_coverage_lines_are_shared_sorted_tuples(written: Path) -> None:
+    bundle = read_bundle(written)
+    tuples = [lines for by_path in bundle.coverage.values() for lines in by_path.values()]
+    assert tuples and all(isinstance(t, tuple) and list(t) == sorted(set(t)) for t in tuples)
+    first = {line: line for t in tuples for line in t}
+    assert all(line is first[line] for t in tuples for line in t)
+
+
+def test_write_bundle_removes_stale_files_and_never_follows_links(written: Path, tmp_path: Path) -> None:
+    bundle = read_bundle(written)
+    (written / "links.jsonl").write_text(json.dumps({"test": T1, "invariant": "FORGED"}) + "\n")
+    (written / "arcs.jsonl.gz").write_bytes(gzip.compress(b""))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep me")
+    (written / "manifest.json").unlink()
+    (written / "manifest.json").symlink_to(outside)
+    write_bundle(bundle, written, manifest=MANIFEST)
+    assert not (written / "links.jsonl").exists() and not (written / "arcs.jsonl.gz").exists()
+    assert outside.read_text() == "keep me" and not (written / "manifest.json").is_symlink()
+    assert all("FORGED" not in c.invariant_ids for c in read_bundle(written).collected)

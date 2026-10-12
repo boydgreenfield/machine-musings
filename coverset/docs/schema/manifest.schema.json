@@ -14,8 +14,7 @@
       "const": "coverset-neutral"
     },
     "version": {
-      "type": "integer",
-      "minimum": 1
+      "const": 1
     },
     "language": {
       "type": "string",
@@ -46,7 +45,8 @@
         "string",
         "null"
       ],
-      "maxLength": 64
+      "maxLength": 64,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
     },
     "shard": {
       "type": [

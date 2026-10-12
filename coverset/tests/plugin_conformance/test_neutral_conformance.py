@@ -1,15 +1,17 @@
 """pytest-coverset's ``--coverset-neutral`` bundle against the reader, the validator and the converter.
 
-For a run of the plugin's fixture project and of a project with every outcome (failures, errors,
-skips, xfail/xpass and tests a stop file kept from running):
+For a run of the plugin's fixture project, of a project with every outcome (failures, errors,
+skips, xfail/xpass and tests a stop file kept from running), and of a git repository whose tests
+pytest runs from a subdirectory:
 
 * ``coverset_model.io.validate`` finds no problem in ``<out>/neutral`` nor in ``neutral.tar.gz``;
 * ``coverset_model.io.read_bundle(<out>/neutral)`` equals ``read_python_bundle(<out>)`` (the
   control plane's reading of the Python bundle from the same run) dataclass by dataclass: tests,
-  collected items, durations, static files, run arcs, coverage, shapes, sampling and ``meta``.
-  Two documented differences are applied to the converter's side: coverage keeps only statement
-  lines (the neutral format drops the rest, ``docs/neutral-bundle.md``), and sampling rows carry no
-  ``cap`` (both readers carry the plugin's cap);
+  collected items, durations, static files, run arcs, coverage, shapes, sampling and ``meta``
+  (``meta.neutral`` aside: ``meta.json`` holds the export's final outcome, the manifest the data
+  files' counters). One documented difference is applied to the converter's side: coverage keeps
+  only statement lines (the neutral format drops the rest, ``docs/neutral-bundle.md``). Sampling
+  rows need no adjustment: both readers carry the plugin's ``cap``;
 * the shipped function regions equal the control plane's index of the measured sources;
 * the archive reads back exactly as the directory.
 """
@@ -133,7 +135,7 @@ def mixed_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _converter_view(python: NeutralBundle) -> NeutralBundle:
-    """The converter's bundle with the two documented differences applied (module docstring)."""
+    """The converter's bundle with the documented difference applied (module docstring)."""
     coverage: dict[str, dict[str, tuple[int, ...]]] = {}
     for test, by_path in python.coverage.items():
         kept = {
@@ -150,10 +152,10 @@ def _sorted(rows: Any, key: Any = repr) -> list[Any]:
     return sorted(rows, key=key)
 
 
-def assert_equivalent(project: Path) -> tuple[NeutralBundle, NeutralBundle]:
+def assert_equivalent(project: Path, *, functions: bool = True) -> tuple[NeutralBundle, NeutralBundle]:
     out = project / "out"
     neutral = model_io.read_bundle(out / "neutral")
-    python = _converter_view(read_python_bundle(out, source_root=project))
+    python = _converter_view(read_python_bundle(out, source_root=project if functions else None))
 
     assert _sorted(neutral.tests) == _sorted(python.tests)
     assert _sorted(neutral.collected) == _sorted(python.collected)
@@ -165,9 +167,15 @@ def assert_equivalent(project: Path) -> tuple[NeutralBundle, NeutralBundle]:
     assert _sorted(neutral.sampling) == _sorted(python.sampling)
     assert all(s.cap is None or s.truncated for s in neutral.sampling)
     plain_meta = {k: v for k, v in neutral.meta.items() if k not in model_io.READER_META_KEYS}
-    assert plain_meta == json.loads((out / "meta.json").read_text())
+    meta = json.loads((out / "meta.json").read_text())
+    outcome, shipped = meta.pop("neutral"), plain_meta.pop("neutral")
+    assert plain_meta == meta
+    assert outcome["status"] == "written"
+    assert (shipped["rows"], shipped["dropped"]) == (outcome["rows"], outcome["dropped"])
     assert neutral.meta["convert"]["dropped"] == {}
 
+    if not functions:
+        return neutral, python
     expected = [
         region
         for path in sorted(neutral.static)
@@ -176,6 +184,27 @@ def assert_equivalent(project: Path) -> tuple[NeutralBundle, NeutralBundle]:
     assert _sorted(neutral.functions) == _sorted(expected)
     assert dict(neutral.types) == {}
     return neutral, python
+
+
+@pytest.fixture(scope="module")
+def subdir_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A git repository whose tests pytest runs from ``app/`` (rootdir ``app``, git root above)."""
+    project = tmp_path_factory.mktemp("conformance") / "subdir"
+    app = project / "app"
+    (app / "subpkg").mkdir(parents=True)
+    (project / ".git").mkdir()  # find_git_root only looks for the directory
+    (app / "subpkg" / "__init__.py").write_text("")
+    (app / "subpkg" / "mod.py").write_text(MIXED_MODULE)
+    (app / "tests").mkdir()
+    (app / "tests" / "test_sub.py").write_text(
+        "from subpkg.mod import classify\n\n\ndef test_pos():\n    assert classify(3) == 'pos'\n"
+    )
+    (app / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\npythonpath = ["."]\ntestpaths = ["tests"]\n'
+    )
+    proc = run_pytest(app, "--coverset-out=out", "--coverset-source=subpkg", "--coverset-neutral")
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return app
 
 
 def test_fixture_project_validates(fixture_run: Path) -> None:
@@ -216,7 +245,17 @@ def test_every_outcome_reads_like_the_python_bundle(mixed_run: Path) -> None:
     assert neutral.meta["bundle"]["shard"] == 2
 
 
-@pytest.mark.parametrize("run", ["fixture_run", "mixed_run"])
+def test_a_subdirectory_run_reads_like_the_python_bundle(subdir_run: Path) -> None:
+    """coverage.py names files relative to the directory pytest ran in; the converter reads those
+    names as git-root-relative, and so does the neutral export, so the two readings agree."""
+    out = subdir_run / "out"
+    assert model_io.validate(out / "neutral") == []
+    neutral, python = assert_equivalent(subdir_run, functions=False)
+    assert set(neutral.static) == set(python.static) == {"subpkg/__init__.py", "subpkg/mod.py"}
+    assert neutral.tests[0].file == "app/tests/test_sub.py"  # results are git-root-relative
+
+
+@pytest.mark.parametrize("run", ["fixture_run", "mixed_run", "subdir_run"])
 def test_archive_reads_back_as_the_directory(run: str, request: pytest.FixtureRequest) -> None:
     out = request.getfixturevalue(run) / "out"
     from_dir = model_io.read_bundle(out / "neutral")

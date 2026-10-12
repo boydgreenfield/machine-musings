@@ -12,8 +12,10 @@ unchanged and adds what only Python needs:
 * :func:`enum_index`: the ``Enum`` classes defined in the sources, read with the AST, used to turn
   an annotation naming one into an ``enum`` descriptor;
 * :func:`function_catalogue`: the :class:`FunctionCatalogue` of one function from its own head
-  source, which the verdict, the PR page's cards, the function page and ``coverset invariants
-  scan`` share so they count the same classes.
+  Python source, which the verdict, the PR page's cards, the function page and ``coverset
+  invariants scan`` share so they count the same classes. A function whose declared types were
+  shipped as descriptors (any non-Python run) is served by :func:`function_catalogue_from_types`
+  over the descriptors stored at ingest instead (``RunFacts.catalogue_for`` in the web layer).
 
 See ``docs/input-classes.md`` for the rules.
 """
@@ -79,8 +81,8 @@ def function_catalogue(
     """The catalogue for one function, built the same way wherever its classes are shown.
 
     The verdict (the changed-function rows and the sticky comment's "N input classes never
-    exercised"), the PR page's cards and the function page all call this, so they count the same
-    classes: the parameter annotations come from the function's own head ``source`` (matched by
+    exercised"), the PR page's cards and the function page all call this for a Python function, so
+    they count the same classes: the parameter annotations come from the function's own head ``source`` (matched by
     ``func_key``, else by qualname and ``def_line``) and become descriptors with the ``Enum``
     classes defined in that same file (:func:`enum_index`) resolved. ``indexed`` is
     ``index_functions_detailed(region.path, source)`` when the caller has it cached. The result

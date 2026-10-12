@@ -7,7 +7,10 @@
 * ``coverset bundle convert PATH --to DIR`` writes a pytest-coverset bundle (``--coverset-out``
   directory or ``bundle.tar.gz``) as neutral files, through ``read_python_bundle`` and
   ``coverset_model.io.write_bundle``; with ``--source-root`` it also ships the function regions and
-  their declared types, read from the sources.
+  their declared types, read from the (Python) sources. A neutral bundle given as PATH is
+  rewritten in canonical form and keeps its language; the source's format, language and producer
+  are recorded in the manifest's ``meta.converted_from``. Output files are created afresh, never
+  written through a symlink left in DIR.
 
 PATH is a bundle directory or ``tar.gz``. Nothing here touches the database or the facts store.
 """
@@ -133,30 +136,61 @@ def convert_command(
 ) -> None:
     """Write the pytest-coverset bundle at PATH as a neutral bundle in DIR."""
     import dataclasses
+    import re
 
     from coverset.facts.untrusted import BundleError
     from coverset.lang import read_any_bundle
     from coverset_model import __version__
-    from coverset_model.io import validate, write_bundle
+    from coverset_model.io import READER_META_KEYS, validate, write_bundle
+    from coverset_model.schema import CREATED_AT_PATTERN
 
     try:
         bundle = read_any_bundle(path, source_root=source_root)
     except BundleError as exc:
         raise click.ClickException(f"cannot read {path}: {exc}") from exc
     meta = bundle.meta if isinstance(bundle.meta, dict) else {}
-    if source_root is not None:
-        bundle = dataclasses.replace(bundle, **_regions_and_types(bundle, source_root))
-    producer = {"name": "pytest-coverset", "version": str(meta.get("plugin_version") or "unknown")}
-    if not meta.get("plugin_version"):
+    recorded = meta.get("bundle") if isinstance(meta.get("bundle"), dict) else None
+    if recorded is not None:  # a neutral bundle: keep what it says it is
+        language = str(recorded.get("language") or "python")
+        source_producer = recorded.get("producer") or {}
+        created_at = recorded.get("created_at")
         producer = {"name": "coverset-bundle-convert", "version": __version__}
+        source_format = "coverset-neutral"
+    else:
+        language = "python"
+        created_at = meta.get("finished_at")
+        source_producer = {"name": "pytest-coverset", "version": str(meta.get("plugin_version") or "unknown")}
+        producer = source_producer if meta.get("plugin_version") else {}
+        producer = producer or {"name": "coverset-bundle-convert", "version": __version__}
+        source_format = "pytest-coverset"
+    if not (isinstance(created_at, str) and re.match(CREATED_AT_PATTERN, created_at)):
+        created_at = None
+    if source_root is not None:
+        if language == "python":
+            bundle = dataclasses.replace(bundle, **_regions_and_types(bundle, source_root))
+        else:
+            click.echo(
+                f"--source-root ignored: a {language} bundle ships its own regions and types", err=True
+            )
     write_bundle(
         bundle,
         out,
         manifest={
-            "language": "python",
+            "language": language,
             "producer": producer,
-            "created_at": meta.get("finished_at") if isinstance(meta.get("finished_at"), str) else None,
-            "shard": shard,
+            "created_at": created_at,
+            "shard": shard if shard is not None else (recorded or {}).get("shard"),
+            "meta": {
+                **{k: v for k, v in meta.items() if k not in READER_META_KEYS},
+                "converted_from": {
+                    "format": source_format,
+                    "language": language,
+                    "producer": {
+                        "name": str(source_producer.get("name")),
+                        "version": str(source_producer.get("version")),
+                    },
+                },
+            },
         },
         compress=compress,
     )

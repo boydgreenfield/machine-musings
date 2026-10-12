@@ -15,6 +15,10 @@ a function is observed ÷ expected classes over its parameters (each-choice cove
   literal value, each enum member (when some observed example of the parameter names a member, so
   members are distinguishable), both ``bool`` values and the ``none`` of an optional
   (:func:`~coverset_model.types.expected_families`).
+* Literal and enum classes are observed through an observation's ``example``, the producer's repr
+  of the value: a literal value matches its Python repr (``'eu'``, ``True``, ``None``) or its JSON
+  form (``"eu"``, ``true``, ``null``); an enum member ``Role.admin`` matches only as a whole token
+  (``<Role.admin: 1>`` and ``Role.admin`` do, ``<Role.admin_ro: 2>`` does not).
 * Unannotated parameters are never reported at 100%: when everything expected was observed, the
   percentage is None and the note says "unannotated: observed {...}".
 
@@ -40,6 +44,8 @@ rendered from the same facts are byte-identical whatever order the observations 
 
 from __future__ import annotations
 
+import json
+import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -468,7 +474,7 @@ class Catalogue:
             # parameter names a member (``<Color.RED: 1>``). The shipped Python tracer records reprs
             # of exact builtins only, so without such an example every member would read as never
             # exercised even when the tests pass it.
-            elif any(f"{arm.name}." in (obs.example or "") for _, obs in state.shapes):
+            elif any(_names_member_of(arm.name, obs.example) for _, obs in state.shapes):
                 add("enum", "enum", *arm.classes)
         return _dedupe(rows)
 
@@ -477,16 +483,46 @@ class Catalogue:
         if obs.example is None:
             return []
         hits: list[tuple[str, str]] = []
+        forms = _literal_forms(obs.example)
         for arm in state.facts.arm_classes:
             if arm.family == "literal":
-                hits += [("literal", cls) for cls in arm.classes if cls == obs.example]
+                hits += [("literal", cls) for cls in arm.classes if cls in forms]
             else:
-                hits += [("enum", cls) for cls in arm.classes if cls in obs.example]
+                hits += [("enum", cls) for cls in arm.classes if _token(cls).search(obs.example)]
         return hits
 
     def _input_class(self, param: str, cls: str, family: str, state: _ParamState) -> InputClass:
         description, hint = _class_text(cls, family, state)
         return InputClass(f"{param}:{cls}", family, description, hint)
+
+
+_TOKENS: dict[str, re.Pattern[str]] = {}
+
+
+def _token(text: str) -> re.Pattern[str]:
+    """``text`` as a whole token: not preceded or followed by an identifier character."""
+    found = _TOKENS.get(text)
+    if found is None:
+        found = _TOKENS.setdefault(text, re.compile(rf"(?<![\w]){re.escape(text)}(?![\w])"))
+    return found
+
+
+def _names_member_of(enum: str, example: str | None) -> bool:
+    """Whether ``example`` names some member of the enum ``enum`` (``Color.`` followed by a name)."""
+    return example is not None and re.search(rf"(?<![\w]){re.escape(enum)}\.\w", example) is not None
+
+
+def _literal_forms(example: str) -> frozenset[str]:
+    """The literal class names ``example`` can stand for: itself (a Python repr) and, when it is a
+    JSON scalar (``"eu"``, ``true``, ``null``), the Python repr of that value."""
+    forms = {example}
+    try:
+        value = json.loads(example)
+    except (ValueError, RecursionError):
+        return frozenset(forms)
+    if value is None or isinstance(value, str | int | float | bool):
+        forms.add(repr(value))
+    return frozenset(forms)
 
 
 def function_input_cov(
