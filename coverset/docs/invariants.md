@@ -86,9 +86,9 @@ pytest-coverset registers the marker, so `--strict-markers` accepts it without c
 ```python
 import pytest
 
+
 @pytest.mark.invariant("cents_conserved")
-def test_refund_partial():
-    ...
+def test_refund_partial(): ...
 ```
 
 `@pytest.mark.invariant(id="cents_conserved")` works too. A test may carry several markers; class and module markers apply to every test inside. The plugin writes each test's ids to `collect.json` (`invariant_ids`) and to `invariant_links.jsonl` ([docs/instrumentation.md](instrumentation.md#the-bundle)).

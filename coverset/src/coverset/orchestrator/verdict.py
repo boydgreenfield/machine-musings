@@ -50,7 +50,13 @@ from coverset.analysis.invariants import (
     spec_hash,
 )
 from coverset.analysis.patch import PatchReport, patch_report
-from coverset.analysis.shapes import NEVER_EXERCISED, Catalogue, FunctionInputCov, function_catalogue
+from coverset.analysis.shapes import (
+    NEVER_EXERCISED,
+    Catalogue,
+    FunctionInputCov,
+    function_catalogue,
+    function_catalogue_from_types,
+)
 from coverset.analysis.sharding import UNKNOWN_DURATION_S
 from coverset.config import Settings
 from coverset.db.models import Invariant as InvariantModel
@@ -261,6 +267,9 @@ def _input_coverage(
         for obs in outcome.shapes:
             by_triple[obs.func].append(obs)
     sampling = merge_sampling([s for o in outcomes for s in o.sampling])
+    declared: dict[tuple[str, str, int], Any] = {}
+    for outcome in outcomes:
+        declared.update(outcome.types)
     covs: dict[str, FunctionInputCov] = {}
     observations: dict[str, list[ShapeObs]] = {}
     for key, region in interest.items():
@@ -273,7 +282,12 @@ def _input_coverage(
                 tests_called = called(region)
             except Exception as exc:  # facts unreadable: the count falls back to its floor
                 log.warning("cannot read the callers of %s: %s", region.qualname, exc)
-        found = function_catalogue(region, sources.get(region.path))
+        # A bundle that ships declared types (a TypeScript run) decides the classes the same way the
+        # pages do; a Python run reads its annotations from the head sources.
+        if region.triple in declared:
+            found = function_catalogue_from_types(region, declared[region.triple])
+        else:
+            found = function_catalogue(region, sources.get(region.path))
         covs[key] = found.input_cov(region, observations[key], row, tests_called=tests_called)
     return covs, observations
 

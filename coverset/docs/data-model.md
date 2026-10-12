@@ -231,7 +231,7 @@ the newest completed default-branch baseline, as on the UI pages; required for `
 | `uv run coverset facts explain --repo coverset-demo/ledger --run <run_id>` | the run row, the timeline in seconds, shards, the ingest log per attempt with tracer notes and dropped records, `coverage_complete`, sample caps hit, bundle sizes and the run it was scored against |
 | `uv run coverset facts test tests/test_refund.py::test_refund_partial --run <run_id>` | the result, the files and functions the test ran with their body lines, what it passed in per parameter, its outcomes in the last runs |
 | `uv run coverset facts line src/ledger/billing/refund.py:12 --run <run_id>` | the function the line belongs to and the tests that ran it, in run order (rank), with outcomes |
-| `uv run coverset facts export --repo coverset-demo/ledger --run <run_id> --to /tmp/run-facts` | every table as `<table>.jsonl`, a `tables.json` index (rows, columns, source files) and the repo's `dictionary.json`; facts hold no secrets (example values are redacted by the tracer and failure text is not in facts) |
+| `uv run coverset facts export --repo coverset-demo/ledger --run <run_id> --to /tmp/run-facts` | every table as `<table>.jsonl`, a `tables.json` index (rows, columns, source files) and the repo's `dictionary.json`; facts hold no secrets (example values are redacted by the tracer and failure text is not in facts). `--to` must be new, empty or a previous export (it carries a `.coverset-export` marker); `--force` overrides that, and files are always created fresh, never through a symlink |
 
 ## Retention and gc
 

@@ -100,7 +100,8 @@ Each of these functions is at 100% line and branch coverage on `main`. Each tabl
 
 ```sh
 pytest --coverset-out .coverset --coverset-source mypkg
-coverset report .coverset --open      # also: a CI bundle.tar.gz, a neutral bundle, or --run <run id> from the facts store
+coverset report .coverset --open      # from a git checkout that tracks the measured files; also --run <run id> from the facts store
+coverset report bundle.tar.gz --repo-root ~/src/myrepo   # a CI bundle or a neutral bundle: sources only with --repo-root
 ```
 
 ![parse.py in the static report with the data-flow lens on one test and line 18's tests open](docs/report-source.jpg)

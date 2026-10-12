@@ -179,6 +179,8 @@ class IngestOutcome:
     shapes: tuple[ShapeObs, ...] = ()
     sampling: tuple[FuncSampling, ...] = ()
     meta: dict[str, Any] = field(default_factory=dict)
+    types: dict[tuple[str, str, int], Any] = field(default_factory=dict)
+    """Declared types the bundle shipped for the regions it owns (non-Python jobs only), by triple."""
 
 
 def ingest_one(job: IngestJob) -> IngestOutcome:
@@ -217,6 +219,7 @@ def ingest_one(job: IngestJob) -> IngestOutcome:
         union_lines={p: frozenset(lines) for p, lines in union.items()},
         shapes=tuple(o for o in bundle.shapes if o.func in job.keep_funcs),
         sampling=tuple(s for s in bundle.sampling if s.func in job.keep_funcs),
+        types={triple: dict(found) for triple, found in types.items()},
         meta={
             k: meta[k]
             for k in ("exit_code", "counts", "stop_requested", "tracer", "tracer_lost_at", "convert")

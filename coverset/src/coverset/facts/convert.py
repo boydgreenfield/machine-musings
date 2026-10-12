@@ -789,6 +789,8 @@ def _caller(value: object, reader: _Reader) -> FuncTriple | str | None:
     if not isinstance(value, dict):
         return None
     if value.get("kind") == "test":
+        if value.get("nodeid") == IMPORT_CONTEXT:
+            return None  # a decorator applied at import time: expected, not a bad nodeid
         return reader.nodeid(value.get("nodeid"))
     if value.get("kind") == "func":
         return _func_triple([value.get("path"), value.get("qualname"), value.get("line")], reader)
