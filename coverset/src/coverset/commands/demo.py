@@ -42,8 +42,11 @@ def seed_demo_command(out: Path | None) -> None:
 @click.option("--executor", type=click.Choice(["local", "modal"]), default="local", show_default=True)
 @click.option("--port", type=click.IntRange(1, 65535), default=8000, show_default=True)
 @click.option("--no-serve", is_flag=True, help="Seed and run the demo, replay the webhook, then exit.")
+@click.option(
+    "--no-report", is_flag=True, help="Skip building the static report of PR #2 under <data dir>/report."
+)
 @click.option("-v", "--verbose", is_flag=True, help="Print every test result of every run.")
-def demo_command(executor: str, port: int, no_serve: bool, verbose: bool) -> None:
+def demo_command(executor: str, port: int, no_serve: bool, no_report: bool, verbose: bool) -> None:
     """Seed the demo repo, run its history and both PRs, replay the pr_opened webhook, then serve."""
     if executor == "modal":
         try:
@@ -60,10 +63,12 @@ def demo_command(executor: str, port: int, no_serve: bool, verbose: bool) -> Non
         overrides["github_webhook_secret"] = secrets.token_hex(24)
     settings = load(**overrides)
     printer = StreamPrinter(verbose=verbose, quiet=not verbose)
-    run_async(lambda: _demo(settings, executor, serve=not no_serve, printer=printer))
+    run_async(lambda: _demo(settings, executor, serve=not no_serve, report=not no_report, printer=printer))
 
 
-async def _demo(settings: Settings, executor: str, *, serve: bool, printer: StreamPrinter) -> None:
+async def _demo(
+    settings: Settings, executor: str, *, serve: bool, report: bool = True, printer: StreamPrinter
+) -> None:
     from coverset.app import create_app
     from coverset.demo.flow import format_table, run_demo
     from coverset.demo.seed import PR_OPENED_FIXTURE
@@ -91,6 +96,8 @@ async def _demo(settings: Settings, executor: str, *, serve: bool, printer: Stre
         await ctx.close()
     click.echo("")
     click.echo(format_table(result.runs))
+    if report:
+        await _static_report(settings, result.runs)
     app = create_app(settings)
     install_run_queue(app)
     if not serve:
@@ -135,3 +142,26 @@ async def _serve_with_replay(app: Any, settings: Settings, *, replay: bool) -> N
         if dispatcher.started:
             await _replay(app, settings)
     await server
+
+
+async def _static_report(settings: Settings, runs: list[Any]) -> None:
+    """Build the static report of PR #2's run under ``<data dir>/report`` (never fails the demo)."""
+    import asyncio
+
+    from coverset.report import build_report
+    from coverset.report.load import load_run
+
+    run_id = next((r.run_id for r in runs if r.name == "pr-2"), None)
+    if run_id is None:
+        return
+    out = settings.data_dir / "report"
+    try:
+        inp = await load_run(settings, run_id, None, title="coverset demo · PR #2")
+        built = await asyncio.to_thread(build_report, inp, out)
+    except Exception as exc:  # the report is a convenience; the runs above are the demo
+        click.echo(f"static report not built: {exc}", err=True)
+        return
+    pages = getattr(built, "pages", None)
+    total = sum(pages.values()) if isinstance(pages, dict) else None
+    note = f" ({total} pages)" if total is not None else ""
+    click.echo(f"static report of PR #2{note}: {out / 'index.html'}")
