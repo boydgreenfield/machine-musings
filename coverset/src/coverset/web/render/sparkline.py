@@ -23,6 +23,7 @@ Every text that reaches the markup goes through :func:`~coverset.web.render.html
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -89,7 +90,19 @@ def _domain(values: Sequence[float], reference: float | None) -> tuple[float, fl
 
 
 def _clean(value: float | None) -> float | None:
-    return value if value is not None and math.isfinite(value) else None
+    """A finite value clamped to [0, 100] (percentages), else None (a gap)."""
+    if value is None or not math.isfinite(value):
+        return None
+    return min(100.0, max(0.0, float(value)))
+
+
+_C0 = re.compile(r"[\x00-\x1f]")
+
+
+def _text(value: object) -> str:
+    """Label text without C0 control characters (not allowed in XML 1.0, so they would make the
+    inline SVG not well-formed); tabs and line breaks become spaces."""
+    return _C0.sub(lambda m: " " if m.group() in "\t\n\r" else "", str(value))
 
 
 def _summary(series: Sequence[SparkSeries], count: int, noun: str) -> str:
@@ -129,6 +142,10 @@ def render_sparkline(
     height = max(24, int(height))
     plot_l, plot_r = PAD_X, width - LABEL_W
     plot_t, plot_b = PAD_Y, height - PAD_Y
+    series = [SparkSeries(_text(s.name), s.values, s.dashed) for s in series]
+    points = [_text(p) for p in points]
+    label, reference_label, noun = _text(label), _text(reference_label), _text(noun)
+    reference = _clean(reference)
     values = [[_clean(v) for v in s.values] for s in series]
     lo, hi = _domain([v for vs in values for v in vs if v is not None], reference)
 
@@ -136,6 +153,7 @@ def render_sparkline(
         return plot_r if count <= 1 else plot_l + (plot_r - plot_l) * i / (count - 1)
 
     def y_at(v: float) -> float:
+        v = min(hi, max(lo, v))
         return plot_b - (plot_b - plot_t) * (v - lo) / (hi - lo)
 
     aria = _summary(series, count, noun)
@@ -218,6 +236,6 @@ def render_spark_key(series: Sequence[SparkSeries]) -> Markup:
         items.append(
             '<span class="spark-key-item"><svg class="spark-swatch" viewBox="0 0 18 8" width="18" height="8"'
             f' aria-hidden="true"><line class="spark-line {cls}" x1="1" x2="17" y1="4" y2="4"/></svg>'
-            f"{esc(name)}</span>"
+            f"{esc(_text(name))}</span>"
         )
     return Markup(f'<span class="spark-key">{"".join(items)}</span>')

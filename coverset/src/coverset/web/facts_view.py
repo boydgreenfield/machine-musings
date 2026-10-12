@@ -711,29 +711,42 @@ def run_point(facts: RunFacts, region: FunctionRegion, created_at: Any, head_sha
         missing=tuple(
             sorted({str(n) for names in missing.values() if isinstance(names, list) for n in names})
         ),
+        tests_truncated=int(row.get("tests_truncated") or 0),
+        sig_hash=region.sig_hash or None,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class LostClass:
-    """An input class observed in an earlier point and missing at the selected one."""
+    """An input class missing at the selected point that a comparable earlier point did not miss."""
 
     name: str
     last_seen: FunctionPoint
-    """The newest earlier point that observed it."""
+    """The newest comparable earlier point that did not list it as missing."""
+
+
+def _comparable(a: FunctionPoint, b: FunctionPoint) -> bool:
+    """Whether the stored gaps of two points can be compared by name: the same expected class
+    count and, when both are known, the same signature digest."""
+    if not (a.present and b.present) or a.expected is None or a.expected != b.expected:
+        return False
+    return not (a.sig_hash and b.sig_hash and a.sig_hash != b.sig_hash)
 
 
 def history_losses(points: Sequence[FunctionPoint], index: int) -> list[LostClass]:
-    """Classes missing at ``points[index]`` that the nearest earlier point with input classes
-    observed (it expected the same number of classes and did not list them as missing), each with
-    the newest earlier point that observed it. Only never-observed classes are stored, so a point
-    that expects a different number of classes cannot say what it observed and is skipped."""
+    """Classes missing at ``points[index]`` that the nearest comparable earlier point did not list
+    as missing, each with the newest comparable earlier point that did not.
+
+    Only never-observed classes are stored, so this is inferred from the stored gaps: a point is
+    comparable only when it expects the same number of classes with the same signature digest
+    (``sig_hash``); others are skipped. Even then the expected set may differ at the same count,
+    which is why the page says "missing now, not missing in" rather than "observed"."""
     if not 0 <= index < len(points):
         return []
     here = points[index]
-    if here.expected is None:
+    if here.expected is None or not here.present:
         return []
-    earlier = [p for p in points[:index] if p.present and p.expected == here.expected]
+    earlier = [p for p in points[:index] if _comparable(p, here)]
     if not earlier:
         return []
     previous = earlier[-1]

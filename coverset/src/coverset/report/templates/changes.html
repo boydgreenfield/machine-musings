@@ -17,6 +17,11 @@
   <h1>Changes since base</h1>
   <p class="meta"><span>base: {{ c.base_origin }}</span><span>now: {{ c.now_origin }}</span></p>
 </div>
+{% if c.warnings %}
+<div class="compare-notice compare-warning" role="note" data-warnings>
+  {% for note in c.warnings %}<p><strong>Check the base.</strong> {{ note }}</p>{% endfor %}
+</div>
+{% endif %}
 {% if c.base_only %}
 <div class="compare-notice" role="note" data-test-sets>
   <p><strong>Different test sets.</strong> {{ c.base_only|length|plural('test') }} that ran in the base did not run in this run{% if c.now_only %}, and {{ c.now_only|plural('test') }} ran here that did not run in the base{% endif %}. Only what both runs could have run is counted as lost: a line, input class or covering test whose base tests all are among the missing ones is listed as <em>not re-run</em>.</p>
@@ -26,10 +31,10 @@
 </div>
 {% endif %}
 <div class="stats totals compare-stats">
-  <div class="stat" data-stat="lines-lost"><div class="value">{{ c.lines_lost }}</div><div class="label">lines newly uncovered{% if c.lines_not_rerun %} · {{ c.lines_not_rerun }} more not re-run{% endif %}</div></div>
-  <div class="stat" data-stat="lines-gained"><div class="value">{{ c.lines_gained }}</div><div class="label">lines newly covered</div></div>
-  <div class="stat" data-stat="classes-lost"><div class="value">{{ c.classes_lost }}</div><div class="label">input classes lost · {{ c.classes_gained }} gained</div></div>
-  <div class="stat" data-stat="tests-changed"><div class="value">{{ c.tests_changed }}</div><div class="label">tests added, removed or with another outcome{% if c.tests_of('slower') %} · {{ c.tests_of('slower')|length }} slower{% endif %}</div></div>
+  <div class="stat" data-stat="lines-lost"><div class="value">{{ c.lines_lost }}</div><div class="label">{{ 'line' if c.lines_lost == 1 else 'lines' }} newly uncovered{% if c.lines_not_rerun %} · {{ c.lines_not_rerun }} more not re-run{% endif %}</div></div>
+  <div class="stat" data-stat="lines-gained"><div class="value">{{ c.lines_gained }}</div><div class="label">{{ 'line' if c.lines_gained == 1 else 'lines' }} newly covered</div></div>
+  <div class="stat" data-stat="classes-lost"><div class="value">{{ c.classes_lost }}</div><div class="label">input {{ 'class' if c.classes_lost == 1 else 'classes' }} lost · {{ c.classes_gained }} gained</div></div>
+  <div class="stat" data-stat="tests-changed"><div class="value">{{ c.tests_changed }}</div><div class="label">{{ 'test' if c.tests_changed == 1 else 'tests' }} added, removed or with another outcome{% if c.tests_of('slower') %} · {{ c.tests_of('slower')|length }} slower{% endif %}</div></div>
 </div>
 {% if c.notes %}
 <ul class="compare-notes" data-notes>{% for note in c.notes %}<li>{{ note }}</li>{% endfor %}</ul>
@@ -79,7 +84,7 @@
         <td class="line-refs">
           {% if f.lost %}<div><span class="muted small">newly uncovered</span> {{ line_links(page, f.lost, 'since-lost') }}</div>{% endif %}
           {% if f.gained %}<div><span class="muted small">newly covered</span> {{ line_links(page, f.gained, 'since-gained') }}</div>{% endif %}
-          {% if f.not_rerun %}<div><span class="muted small">not re-run (their base tests did not run here)</span> {{ line_links(page if f.status == 'same' else none, f.not_rerun, 'not-rerun') }}</div>{% endif %}
+          {% if f.not_rerun %}<div><span class="muted small">not re-run (their base tests did not run here)</span> {{ line_links(page, f.not_rerun, 'not-rerun') }}</div>{% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -127,29 +132,30 @@
 </section>
 
 <section class="panel" id="tests-changed">
-  <div class="panel-head"><h2>Tests</h2><span class="aside">added, removed, another outcome, or slower (more than {{ '%g'|format(slower_factor) }}× and {{ (slower_min * 1000)|int }} ms)</span></div>
+  <div class="panel-head"><h2>Tests</h2><span class="aside">added, removed, another outcome, or slower (more than {{ '%g'|format(slower_factor) }}× and {{ (slower_min * 1000)|int }} ms); not selected ones are listed, not counted</span></div>
   {% set changed = c.tests_of('outcome') %}
   {% set added = c.tests_of('added') %}
   {% set removed = c.tests_of('removed') %}
+  {% set unselected = c.tests_of('not selected') %}
   {% set slower = c.tests_of('slower') %}
-  {% if changed or added or removed or slower %}
+  {% if changed or added or removed or unselected or slower %}
   <div class="table-scroll">
   <table class="tests-delta">
     <thead><tr><th>Change</th><th>Test</th><th>Outcome</th><th class="num">Duration</th></tr></thead>
     <tbody>
-    {% for t in (changed + added + removed + slower)[:max_rows] %}
+    {% for t in (changed + added + removed + slower + unselected)[:max_rows] %}
       {% set href = test_link(t.nodeid) %}
       <tr data-test-change="{{ t.kind }}" data-nodeid="{{ t.nodeid }}">
-        <td>{% if t.kind == 'outcome' %}outcome changed{% elif t.kind == 'slower' %}slower{% else %}{{ t.kind }}{% endif %}</td>
+        <td>{% if t.kind == 'outcome' %}outcome changed{% elif t.kind == 'slower' %}slower{% elif t.kind == 'not selected' %}<span title="not in this run's collection, though its file has tests here: deselected (-k) or deleted from the file">not selected</span>{% elif t.kind == 'removed' %}<span title="no test of its file is in this run: the file was removed, or not selected">removed</span>{% else %}{{ t.kind }}{% endif %}</td>
         <td>{{ test_ref(t.nodeid, link(href) if href else none) }}</td>
-        <td>{% if t.kind == 'added' %}{{ outcome(t.now_outcome) }}{% elif t.kind == 'removed' %}{{ outcome(t.base_outcome) }} <span class="muted">in the base</span>{% else %}{{ outcome(t.base_outcome) }} → {{ outcome(t.now_outcome) }}{% endif %}</td>
+        <td>{% if t.kind == 'added' %}{{ outcome(t.now_outcome) }}{% elif t.kind in ('removed', 'not selected') %}{{ outcome(t.base_outcome) }} <span class="muted">in the base</span>{% else %}{{ outcome(t.base_outcome) }} → {{ outcome(t.now_outcome) }}{% endif %}</td>
         <td class="num">{% if t.kind in ('outcome', 'slower') %}{{ t.base_s|duration }} → {{ t.now_s|duration }}{% elif t.kind == 'added' %}{{ t.now_s|duration }}{% else %}{{ t.base_s|duration }}{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
-  {{ more(changed + added + removed + slower) }}
+  {{ more(changed + added + removed + slower + unselected) }}
   {% else %}<p class="empty">The same tests ran with the same outcomes, none much slower.</p>{% endif %}
 </section>
 {% endblock %}

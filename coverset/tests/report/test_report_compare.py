@@ -55,7 +55,7 @@ def shape(r: FunctionRegion, key: str, test: str) -> ShapeObs:
 
 def bundle(
     static: dict[str, tuple[int, ...]],
-    tests: list[tuple[str, str, float]],
+    tests: list[tuple[str, str, float]] | list[tuple[str, str, float, str]],
     coverage: dict[str, dict[str, tuple[int, ...]]],
     functions: tuple[FunctionRegion, ...],
     shapes: tuple[ShapeObs, ...] = (),
@@ -63,7 +63,10 @@ def bundle(
     return NeutralBundle(
         meta={},
         collected=(),
-        tests=tuple(TestRow(n, "t.ts", oc, d, None, None, None, None, None) for n, oc, d in tests),
+        tests=tuple(
+            TestRow(t[0], t[3] if len(t) > 3 else "t.ts", t[1], t[2], None, None, None, None, None)  # type: ignore[misc]
+            for t in tests
+        ),
         coverage=coverage,
         static={p: StaticFile(p, max(s), s, (), ()) for p, s in static.items()},
         run_arcs={},
@@ -95,7 +98,7 @@ def base_bundle() -> NeutralBundle:
             ("t::keep", "passed", 0.1),
             ("t::fast", "passed", 0.01),
             ("t::flip", "passed", 0.02),
-            ("t::gone", "passed", 0.02),
+            ("t::gone", "passed", 0.02, "gone.ts"),  # its file has no test in this run
         ],
         {
             "<import>": {SAME: (1, 2, 5, 8), MOVED: (1, 2, 5), OLD: (1,)},
@@ -456,3 +459,206 @@ def test_demo_cli_compare_run(demo: DemoData, tmp_path: Path, monkeypatch: pytes
     assert missing.exit_code == 1 and "cannot read the base run" in missing.output
     data = json.dumps(result.output)
     assert "Traceback" not in data
+
+
+# -- review fixes: tests not selected, mismatched bases, own regions, classes of uncalled functions --
+
+
+def test_a_deselected_test_is_not_selected_and_not_counted(tmp_path: Path) -> None:
+    """A base test missing from this run while its file still has tests here was deselected (``-k``)
+    or deleted from the file: listed as "not selected", never counted as a change."""
+    base = bundle(
+        {SAME: (1, 2)},
+        [("t::a", "passed", 0.1), ("t::b", "passed", 0.1), ("u::c", "passed", 0.1, "u.ts")],
+        {"t::a": {SAME: (1,)}, "t::b": {SAME: (2,)}, "u::c": {SAME: (2,)}},
+        (),
+    )
+    now = bundle({SAME: (1, 2)}, [("t::a", "passed", 0.1)], {"t::a": {SAME: (1, 2)}}, ())
+    c = compare(as_input(base, "b"), as_input(now, "n"))
+    assert {(t.kind, t.nodeid) for t in c.tests} == {("not selected", "t::b"), ("removed", "u::c")}
+    assert c.tests_changed == 1
+    out = tmp_path / "out"
+    build_report(as_input(now, "n"), out, base=as_input(base, "b"))
+    changes = (out / "changes.html").read_text(encoding="utf-8")
+    assert '<tr data-test-change="not selected" data-nodeid="t::b">' in changes
+    assert ">not selected</span>" in changes
+
+
+def test_a_base_of_another_repository_is_flagged() -> None:
+    other = bundle({"lib/x.py": (1,)}, [("x::t", "passed", 0.1, "x.py")], {"x::t": {"lib/x.py": (1,)}}, ())
+    c = compare(as_input(other, "b"), as_input(base_bundle(), "n"))
+    assert len(c.warnings) == 1 and "share no file path and no test id" in c.warnings[0]
+    assert "compared anyway" in c.warnings[0]
+    assert not compare(as_input(base_bundle(), "b"), as_input(now_bundle(), "n")).warnings
+
+
+def test_a_store_base_of_another_repository_is_flagged(pair: tuple[ReportInput, ReportInput]) -> None:
+    import dataclasses
+
+    base, now = pair
+    stored = dataclasses.replace(
+        base, commit="0" * 40, meta={**base.meta, "run": {"repository": "acme/elsewhere"}}
+    )
+    c = compare(stored, now)
+    assert any("acme/elsewhere" in w and "'elsewhere'" in w for w in c.warnings)
+
+
+def _py_project(root: Path, text: str, tests: str) -> None:
+    (root / "pkg").mkdir(parents=True, exist_ok=True)
+    (root / "pkg" / "mod.py").write_text(text, encoding="utf-8")
+    (root / "test_mod.py").write_text(tests, encoding="utf-8")
+
+
+def _neutral_rows(project: Path) -> tuple[FunctionRegion, ...]:
+    from coverset.analysis.functions import index_functions
+
+    return tuple(index_functions("pkg/mod.py", (project / "pkg" / "mod.py").read_text(encoding="utf-8")))
+
+
+def test_a_python_base_uses_its_shipped_rows_over_the_local_text(tmp_path: Path) -> None:
+    """M1: a ``--coverset-out`` base indexes its functions from its ``neutral/`` rows, not from the
+    local text (this run's), so a changed file is still compared on unchanged bodies, and the
+    base's own totals count its called functions."""
+    import dataclasses
+
+    from coverset.report.load import input_from_bundle
+
+    base_text = "def add(a: int, b: int) -> int:\n    if a < 0:\n        return -1\n    return a + b\n"
+    now_text = "X = 1\nY = 2\nZ = 3\n" + base_text
+    old, new = tmp_path / "old", tmp_path / "new"
+    _py_project(old, base_text, "")
+    _py_project(new, now_text, "")
+    base_rows = _neutral_rows(old)
+    common = {"meta": {}, "collected": (), "run_arcs": {}, "sampling": (), "durations": {}, "types": {}}
+    rows = (TestRow("t.py::neg", "t.py", "passed", 0.1, None, None, None, None, None),)
+    add_b = base_rows[-1]
+    base = NeutralBundle(
+        tests=rows,
+        coverage={"<import>": {"pkg/mod.py": (1,)}, "t.py::neg": {"pkg/mod.py": (2, 3)}},
+        static={"pkg/mod.py": StaticFile("pkg/mod.py", 4, (1, 2, 3, 4), (), ())},
+        shapes=(
+            ShapeObs(add_b.triple, "a", "int|neg", "t.py::neg", 1, ("t.py::neg",), False, "-1", "t.py::neg"),
+        ),
+        functions=base_rows,
+        **common,  # type: ignore[arg-type]
+    )
+    add_n = next(r for r in _neutral_rows(new) if r.qualname == "add")
+    now = NeutralBundle(
+        tests=rows,
+        coverage={"<import>": {"pkg/mod.py": (1, 2, 3, 4)}, "t.py::neg": {"pkg/mod.py": (5, 7)}},
+        static={"pkg/mod.py": StaticFile("pkg/mod.py", 7, (1, 2, 3, 4, 5, 6, 7), (), ())},
+        shapes=(
+            ShapeObs(add_n.triple, "a", "int|pos", "t.py::neg", 1, ("t.py::neg",), False, "1", "t.py::neg"),
+        ),
+        functions=(),
+        **common,  # type: ignore[arg-type]
+    )
+    n = input_from_bundle(now, source=tmp_path / "n", kind="python", repo_root=new)
+    # without its rows the base borrows this run's text: nothing in the changed file can be matched
+    borrowed = input_from_bundle(
+        dataclasses.replace(base, functions=()), source=tmp_path / "b", kind="python", repo_root=new
+    )
+    c0 = compare(borrowed, n)
+    assert c0.lines_lost == 0 and any("could not be matched" in note for note in c0.notes)
+    # with them (load_base passes prefer_shipped), the body is unchanged and line 6 (base 3) is lost
+    b = input_from_bundle(base, source=tmp_path / "b", kind="python", repo_root=new, prefer_shipped=True)
+    assert b.own_regions == frozenset({"pkg/mod.py"})
+    c = compare(b, n)
+    add = next(f for f in c.functions if f.qualname == "add")
+    assert add.status == "body unchanged" and add.lost_lines == (6,)
+    assert add.classes_lost == ("a:negative",)
+    assert c.lines_lost == 1 and c.classes_lost == 1
+    assert {r.key: r for r in c.totals}["called"].text == "1 → 1 (±0)"
+
+
+def test_load_base_reads_the_neutral_copy(fixture_out: FixtureRun) -> None:
+    from coverset.report.facts import bundle_regions
+    from coverset.report.load import load_base, load_bundle, read_bundle_path
+
+    assert (fixture_out.out / "neutral" / "manifest.json").is_file()
+    plain = load_bundle(fixture_out.out, repo_root=fixture_out.project)
+    base = load_base(fixture_out.out, repo_root=fixture_out.project)
+    assert not plain.own_regions  # SOURCE itself is indexed from the local text, as before
+    shipped = bundle_regions(read_bundle_path(fixture_out.out / "neutral")[0])
+    assert base.own_regions == {r.path for r in shipped} & set(base.facts.statics)
+    triple = lambda r: (r.path, r.qualname, r.ordinal, r.def_line, r.end_line)  # noqa: E731
+    assert {triple(r) for r in base.facts.regions} == {
+        triple(r) for r in shipped if r.path in base.facts.statics
+    }
+
+
+def test_an_uncalled_function_loses_its_classes(tmp_path: Path) -> None:
+    """M2: a function no test calls any more reports the classes it was passed as lost (or not
+    re-run), never as "no longer expected"; with shapes off in this run, classes are not compared."""
+    base = bundle(
+        {SAME: tuple(range(1, 5))},
+        [("t::keep", "passed", 0.1), ("t::gone", "passed", 0.1, "gone.ts")],
+        {"<import>": {SAME: (1,)}, "t::keep": {SAME: (3,)}, "t::gone": {SAME: (4,)}},
+        (F,),
+        (shape(F, "int|pos", "t::keep"), shape(F, "int|zero", "t::gone")),
+    )
+    now = bundle({SAME: tuple(range(1, 5))}, [("t::keep", "passed", 0.1)], {"<import>": {SAME: (1,)}}, (F,))
+    c = compare(as_input(base, "b"), as_input(now, "n"))
+    f = next(x for x in c.functions if x.qualname == "f")
+    assert f.uncovered and f.classes_lost == ("n:positive",) and f.classes_not_rerun == ("n:zero",)
+    assert not f.classes_dropped
+    off = dataclasses_replace_meta(as_input(now, "n"), {"shapes": "off"})
+    c2 = compare(as_input(base, "b"), off)
+    f2 = next(x for x in c2.functions if x.qualname == "f")
+    assert not (f2.classes_lost or f2.classes_not_rerun or f2.classes_dropped or f2.classes_gained)
+    assert any("Input classes are not compared" in note for note in c2.notes)
+
+
+def test_a_class_is_dropped_only_when_the_declared_types_changed() -> None:
+    import dataclasses
+
+    cov = {"t::k": {SAME: (3,)}}
+    now = bundle({SAME: (1, 2, 3)}, [("t::k", "passed", 0.1)], cov, (F,), (shape(F, "int|pos", "t::k"),))
+    for declared, key, dropped in (({"kind": "bool"}, "bool|true", True), (INT, "int|neg", False)):
+        base = dataclasses.replace(
+            bundle({SAME: (1, 2, 3)}, [("t::k", "passed", 0.1)], cov, (F,), (shape(F, key, "t::k"),)),
+            types={F.triple: {"n": declared}},
+        )
+        f = next(x for x in compare(as_input(base, "b"), as_input(now, "n")).functions if x.qualname == "f")
+        missing = set(f.classes_lost) | set(f.classes_dropped)
+        if dropped:  # declared bool then, int now: the bool class is no longer expected
+            assert missing and set(f.classes_dropped) == missing, f
+        else:  # the same declared types: a class missing now is lost, never dropped
+            assert f.classes_lost == ("n:negative",) and not f.classes_dropped
+
+
+def dataclasses_replace_meta(inp: ReportInput, meta: dict[str, object]) -> ReportInput:
+    import dataclasses
+
+    return dataclasses.replace(inp, meta={**inp.meta, "meta": meta})
+
+
+def test_not_rerun_lines_of_a_changed_file_link_to_this_runs_lines(tmp_path: Path) -> None:
+    """In a changed file, not-re-run lines are already in this run's numbering: they link too."""
+    f0, f1 = region(MOVED, "p", 1, 3, "P"), region(MOVED, "p", 3, 5, "P")
+    base = bundle(
+        {MOVED: (1, 2, 3)},
+        [("t::keep", "passed", 0.1), ("t::gone", "passed", 0.1, "gone.ts")],
+        {"<import>": {MOVED: (1,)}, "t::gone": {MOVED: (2, 3)}},
+        (f0,),
+    )
+    now = bundle(
+        {MOVED: (1, 2, 3, 4, 5)}, [("t::keep", "passed", 0.1)], {"<import>": {MOVED: (1, 2, 3)}}, (f1,)
+    )
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / MOVED).write_text("".join(f"line_{i}();\n" for i in range(1, 6)), encoding="utf-8")
+    out = tmp_path / "out"
+    result = build_report(as_input(now, "n", repo), out, base=as_input(base, "b"))
+    assert result.changes is not None
+    moved = next(f for f in result.changes.files if f.path == MOVED)
+    assert moved.status == "changed" and moved.not_rerun == (4, 5)
+    changes = (out / "changes.html").read_text(encoding="utf-8")
+    assert f'<a class="line-ref not-rerun" href="files/{MOVED}.html#L4">4</a>' in changes
+
+
+def test_cli_summary_counts_are_pluralised() -> None:
+    from coverset.commands.report import _plural
+
+    assert _plural(1, "line") == "1 line" and _plural(2, "line") == "2 lines"
+    assert _plural(1, "class", "classes") == "1 class" and _plural(0, "class", "classes") == "0 classes"

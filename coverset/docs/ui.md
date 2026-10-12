@@ -165,16 +165,26 @@ latest one is the run it describes (it links to its run page).
   input-class % near 35, and on one shared axis both would flatten. Under it, the change from the
   previous baseline in percentage points and in classes observed and expected.
 * **Since the previous baseline** (`class_changes`): per function present in both baselines, the
-  classes **lost** (− in the miss colour, hollow dashed chips) and **gained** (+ in the ran colour,
-  filled chips), "expects 10 → 12 classes" when the expected count moved (then a "lost" class may
-  just have become expected), "lines no longer run" with the body lines that ran before and not
-  now (bodies whose hash did not change), and a note when a test of the function hit the sample
-  cap (a lost class may only have gone unsampled). Each function links to its function page. With
-  no change it says "No input class lost or gained and no body line newly uncovered since
-  `d0e6be8c`"; the first baseline says there is nothing to compare yet.
+  classes **missing now** (− in the miss colour, hollow dashed chips) and **no longer missing** (+
+  in the ran colour, filled chips), followed by a muted "vs `d0e6be8c`, inferred from the stored
+  gaps": only never-observed classes are stored, so a chip's title says "missing in X, not missing
+  in Y", never "observed". Classes are named only when the function's signature digest
+  (`sig_hash`) and expected class count are the same in both baselines; otherwise the row says
+  "expects 10 → 12 classes: classes not compared" (or "its signature changed: classes not
+  compared") and names none. A function no test passes anything to any more reads "lost N classes
+  (no test passes it anything now)". Then "lines no longer run" with the body lines that ran before
+  and not now (bodies whose hash did not change), and a note when a test of the function hit the
+  sample cap in the latest baseline (a missing class may only have gone unsampled). Each function
+  links to its function page. With no change it says "No input class lost or gained and no body
+  line newly uncovered since `d0e6be8c`"; the first baseline says there is nothing to compare yet.
+  The line under the trend gives the change in points, or "n/a" where either baseline has no
+  percentage.
 * **Gap map**: the Gap-mode treemap of the latest baseline at 520 × 220 with its labels hidden and
   the Gap legend under it; every tile links to the coverage map (a directory or file zoomed in, a
-  function's tile to its file), and the heading links to the whole map.
+  function's tile to its file), and the heading links to the whole map. Tiles that would be smaller
+  than 64 px² are merged per file ("12 small functions") or per directory ("40 small files") into
+  one tile of the same area, coloured by their statement-weighted numbers, so a large repository
+  ships a few dozen tiles instead of tens of thousands (the demo's tiles are all far larger).
 * **Largest gaps** (`top_gaps`, top 8): called functions with the most input classes no test passed
   in, with "16 of 18", the body's line % and up to six class names as hollow chips ("+N more").
 * Without a finalized baseline the section says so and the PR and run lists follow as before.
@@ -198,10 +208,14 @@ palette validator in both modes, and the dash carries the distinction without co
 
 A "History" panel on the function page above the shape grid and source (`web/files.py`
 `function_history_view`, `templates/function.html`), from `function_history` over the default
-branch's last 12 baselines. When the page shows a run that is not one of them (a PR run), that run
-is appended as the last point (its square set a little apart) and labelled "this run (<branch>)".
+branch's last 12 baselines up to the run the page shows (created at or before it), so viewing any
+run, an old baseline outside the newest 12 included, shows the runs that led to it and it last,
+never later ones. When that run is not a baseline (a PR run), it is appended as the last point (its
+square set a little apart) and labelled "this run (<branch>)". Classes and modules have no panel
+(their history would only say "not in this run").
 
-* The heading's aside repeats the selected run's numbers ("input classes 8 of 10 · lines 100%").
+* The heading's aside repeats the selected run's numbers and the window ("input classes 8 of 10 ·
+  lines 100% · 6 baselines of `main` up to this one", or "... before this run, and this run").
 * One sparkline with two series on one axis: body lines % (solid) and input-class % (dashed),
   with a key, gaps where the function did not exist yet and a tick under the selected run.
 * One square per run in the test page's history style, oldest first: a **filled** square (ran
@@ -210,11 +224,12 @@ is appended as the last point (its square set a little apart) and labelled "this
   **dotted** square with `·` means the function is not in that run. Each title reads like "baseline
   77e37dc6 · 2026-10-12 01:50 UTC · 8 of 10 input classes · lines 100% · 22 tests"; the selected
   run is ringed and every square of a run that has the function links to the page for that run.
-* Under the strip, a class missing at the selected run that the nearest earlier run with the same
-  expected count observed reads "`email:idn` observed in run d0e6be8c (date), not since", naming
-  the newest earlier run that observed it (with the sample-cap caveat when the selected run hit
-  the cap). Only never-observed classes are stored, so runs expecting a different number of
-  classes are not compared.
+* Under the strip, a class missing at the selected run that the nearest comparable earlier run did
+  not miss reads "`email:idn` missing now, not missing in run d0e6be8c (date)", naming the newest
+  comparable earlier run that did not miss it (with the sample-cap caveat when the selected run hit
+  the cap, a PR run's included), and a muted line says it is inferred from the stored gaps. Only
+  never-observed classes are stored, so only runs with the same expected class count and signature
+  digest are comparable; the others are skipped.
 
 ## The data-flow overlay
 
@@ -334,7 +349,7 @@ or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 | `pr.jpg` (hero) | `/repos/1/prs/2` | PASS with gaps; the first card (the changed `check_if_new_user_signup_allowed`) is open. `/repos/1/prs/1` is the red, fast story. |
 | `run-live.jpg` | `/runs/<PR 1 run>?replay=1&speed=0.25&freeze=<F>` with **F = timeline.verdict + 0.1** | F is the run's `timeline.verdict` in seconds from `timeline.webhook_received` (else `timeline.queued`), plus 0.1, rounded to 2 decimals (the demo's PR 1 lands near 1.1). Wait for `[data-replay="frozen"]` (attached; about 5 s at ¼ speed): FAIL posted, the first-failure rule across the lanes, the failing test pinned in "Why this order", lanes partly filled, queued tests hollow. |
 | `why-order.jpg` | `/runs/<PR 1 run>` | Clip to `#why-order` (the panel with its heading); the failing test is pinned "ran 1st; file order would have run it 66th · tied at 8.0 with 2 others; …" and one muted row sums up the tests with no risk signal. |
-| `shapes.jpg` | `/repos/1/functions/<validate_email func_key>?run=<PR 2 run>` | Shape grid (two hollow email classes) and flow ribbon. The func_key is in the card links on `/repos/1/prs/2` (`/prs/2/functions/<key>`). |
+| `shapes.jpg` | `/repos/1/functions/<validate_email func_key>?run=<PR 2 run>` | The History panel on top (six baselines and the PR run as the last square), then the shape grid (two hollow email classes) and flow ribbon; the Hypothesis box is below the fold. The func_key is in the card links on `/repos/1/prs/2` (`/prs/2/functions/<key>`). |
 | `source.jpg` | `/repos/1/files/src/ledger/durations/parse.py?run=<PR 2 run>` | Chips under `def parse_duration`; then click `#L18 button.gt` and wait for `#line-tests-body .test-list` to show the tests popover. Shot at 1440×1000 and clipped just under the last test row that is fully visible in the popover (the popover scrolls inside a capped height, so its own bottom edge would cut a row in half): at 900 px the popover opens above line 18 and covers the chips. |
 | `map.jpg` | `/repos/1/map` | Gap mode is the default. Full-page shot clipped just above the "Largest gaps" table, so the whole treemap is in it. The pointer is parked at (1, 1) after every navigation: Playwright keeps it where the source shot's click left it, and a treemap tile under it would show its hover outline. |
 | `comment.jpg` | `/forge/outbox?method=upsert_pr_comment` | The rendered sticky comments. |

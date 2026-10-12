@@ -119,3 +119,4 @@ a.line-ref.since-gained, span.line-ref.since-gained { color: var(--ran-ink); bac
 @media print {
   .search, .lens-bar { display: none !important; }
 }
+.compare-warning { border-left-color: var(--fail); }

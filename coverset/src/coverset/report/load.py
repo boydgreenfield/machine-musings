@@ -33,17 +33,19 @@ from coverset.report.facts import (
     BundleFacts,
     ReportInput,
     TestInfo,
+    borrowed_signatures,
     bundle_regions,
     bundle_types,
     catalogue_from_descriptors,
     decode_source,
     read_sources,
-    regions_for,
+    regions_with_owners,
 )
 
 __all__ = [
     "SourceAccess",
     "input_from_bundle",
+    "load_base",
     "load_bundle",
     "load_run",
     "neutral_reader",
@@ -249,6 +251,46 @@ def load_bundle(source: Path, *, repo_root: Path | None = None, title: str | Non
     return input_from_bundle(bundle, source=Path(source), kind=kind, access=access, title=title)
 
 
+NEUTRAL_SUBDIR = "neutral"
+"""Where ``pytest --coverset`` writes the neutral copy of a ``--coverset-out`` bundle."""
+
+
+def load_base(source: Path, *, repo_root: Path | None = None, title: str | None = "base") -> ReportInput:
+    """A ``--compare`` base: as :func:`load_bundle`, except that its function index is its own
+    wherever the base ships one. A ``--coverset-out`` directory carries the neutral copy
+    ``neutral/`` (with the ``functions`` rows the plugin indexed from the tested text), and a
+    neutral bundle carries its own rows; either wins over indexing the local text, which is this
+    run's and no longer the base's. A base without shipped rows (a ``bundle.tar.gz``) is indexed
+    from the local text as before, and :mod:`coverset.report.compare` uses those regions only
+    where the file is unchanged."""
+    import dataclasses
+
+    source = Path(source)
+    bundle, kind = read_bundle_path(source)
+    if not bundle_regions(bundle) and is_plugin_dir(source, kind):
+        shipped = _neutral_copy(source)
+        if shipped is not None and bundle_regions(shipped):
+            bundle = dataclasses.replace(
+                bundle, functions=shipped.functions, types=bundle.types or shipped.types
+            )
+    access = source_access(source, kind, bundle.static, repo_root)
+    return input_from_bundle(
+        bundle, source=source, kind=kind, access=access, title=title, prefer_shipped=True
+    )
+
+
+def _neutral_copy(source: Path) -> NeutralBundle | None:
+    """The neutral copy a ``--coverset-out`` directory carries, or None (absent or unreadable)."""
+    root = source / NEUTRAL_SUBDIR
+    if root.is_symlink() or not (root / MANIFEST).is_file():
+        return None
+    try:
+        bundle, kind = _read_dir(root)
+    except (BundleError, OSError, ValueError, KeyError):
+        return None
+    return bundle if kind == "neutral" else None
+
+
 def input_from_bundle(
     bundle: NeutralBundle,
     *,
@@ -257,10 +299,13 @@ def input_from_bundle(
     repo_root: Path | None = None,
     access: SourceAccess | None = None,
     title: str | None = None,
+    prefer_shipped: bool = False,
 ) -> ReportInput:
     """A report input from an in-memory bundle (``bundle.functions`` and ``bundle.types`` are used
     when the neutral model carries them). Sources are read as ``access`` says; without it, under
     ``repo_root`` (git-tracked files only when it is a git work tree), and with neither, not at all.
+    With ``prefer_shipped`` (a ``--compare`` base) the shipped ``functions`` rows win over indexing
+    the local text (see :func:`load_base`).
     """
     meta = dict(bundle.meta) if isinstance(bundle.meta, dict) else {}
     if access is None:
@@ -274,7 +319,7 @@ def input_from_bundle(
         sources = read_sources(access.root, paths, tracked=access.tracked)
     else:
         sources = dict.fromkeys(paths)
-    regions = regions_for(paths, sources, bundle)
+    regions, own = regions_with_owners(paths, sources, bundle, prefer_shipped=prefer_shipped)
     types = bundle_types(bundle, regions)
     # Declared types shipped in the bundle win over whatever the source parser would read: a
     # TypeScript file has no Python annotations, and a converted Python bundle's descriptors
@@ -282,6 +327,11 @@ def input_from_bundle(
     catalogues = {
         r.func_key: catalogue_from_descriptors(r, types[r.func_key]) for r in regions if r.func_key in types
     }
+    if prefer_shipped:
+        # A base's own regions over a local text that may be another commit's: the local
+        # annotations are read only for a function whose signature there is the same.
+        for key, found in borrowed_signatures(regions, sources, own).items():
+            catalogues.setdefault(key, found)
     facts = BundleFacts(bundle, regions, catalogues=catalogues)
     coverage = {
         nodeid: {path: frozenset(lines) for path, lines in by_path.items()}
@@ -294,6 +344,7 @@ def input_from_bundle(
         "source": str(source),
         "bundle_kind": kind,
         "repo_root": access.describe(),
+        "root": str(access.root) if access.root is not None else None,
         "sources": f"{read} of {len(paths)} measured files read"
         + (f"; {untracked} not tracked by git there, so not read" if untracked else ""),
         "regions_from_bundle": bool(bundle_regions(bundle)),
@@ -310,6 +361,7 @@ def input_from_bundle(
         origin=f"bundle {source.name}",
         types=types,
         notice=access.notice,
+        own_regions=own,
     )
 
 

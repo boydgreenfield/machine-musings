@@ -40,8 +40,9 @@ __all__ = ["report_command"]
     type=click.Path(path_type=Path, file_okay=False, exists=True),
     default=None,
     help="Read source files from here: only plain relative paths that resolve inside it, and only "
-    "files git tracks there when it is a git work tree. Without it, a --coverset-out directory reads "
-    "the git-tracked files of the current directory (when that is a git work tree), and an archive "
+    "files git tracks there when it is a git work tree (when it tracks none of the bundle's paths "
+    "but the top of its work tree does, from that top). Without it, a --coverset-out directory reads "
+    "the git-tracked files of the current directory's work tree (when that is one), and an archive "
     "or a neutral bundle reads no source. The bundle never chooses. Not with --run.",
 )
 @click.option(
@@ -54,8 +55,10 @@ __all__ = ["report_command"]
     type=click.Path(path_type=Path),
     default=None,
     help="Compare with this base (any source the report accepts: a --coverset-out directory, a "
-    "bundle.tar.gz, a neutral bundle) and add a Changes page. Only its facts are needed; its sources "
-    "are read under the same rules as SOURCE's and never shown.",
+    "bundle.tar.gz, a neutral bundle) and add a Changes page. Only its facts are needed: its function "
+    "index comes from the rows it ships (a --coverset-out directory's neutral/ copy, a neutral "
+    "bundle's own) where it has them; its sources are read under the same rules as SOURCE's and "
+    "never shown.",
 )
 @click.option(
     "--compare-run",
@@ -129,10 +132,13 @@ def report_command(
     if result.changes is not None:
         c = result.changes
         click.echo(
-            f"changes since base: {c.lines_lost} lines lost, {c.classes_lost} classes lost, "
-            f"{c.tests_changed} tests changed (changes.html)",
+            f"changes since base: {_plural(c.lines_lost, 'line')} lost, "
+            f"{_plural(c.classes_lost, 'class', 'classes')} lost, "
+            f"{_plural(c.tests_changed, 'test')} changed (changes.html)",
             err=True,
         )
+        for note in c.warnings:
+            click.echo(f"warning: {note}", err=True)
     click.echo(str(result.index))
     if open_browser:
         webbrowser.open(result.index.as_uri())
@@ -143,11 +149,15 @@ def _load_base(base: Path, repo_root: Path | None) -> ReportInput:
     import sqlite3
 
     from coverset.facts.untrusted import BundleError
-    from coverset.report.load import load_bundle
+    from coverset.report.load import load_base
 
     if not base.exists():
         raise click.ClickException(f"the base {base} does not exist")
     try:
-        return load_bundle(base, repo_root=repo_root, title="base")
+        return load_base(base, repo_root=repo_root, title="base")
     except (BundleError, OSError, ValueError, KeyError, sqlite3.Error) as exc:
         raise click.ClickException(f"cannot read the base {base}: {exc}") from None
+
+
+def _plural(count: int, word: str, many: str | None = None) -> str:
+    return f"{count} {word if count == 1 else (many or word + 's')}"

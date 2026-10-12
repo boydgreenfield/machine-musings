@@ -237,3 +237,83 @@ def test_top_gaps_rank_called_functions_by_classes_never_passed_in(demo_facts: D
         assert gap.line_pct is not None and 0 <= gap.line_pct <= 100
     assert [g.func_key for g in top_gaps(store, rid, run, limit=3)] == [g.func_key for g in gaps[:3]]
     assert top_gaps(store, rid, run, limit=0) == []
+
+
+# -- review fixes: the window anchored at a run, candidate runs, comparable gaps -------------------
+
+
+def _edit(store: FactsStore, rid: int, run: str, table: str, fn) -> None:  # type: ignore[no-untyped-def]
+    import pyarrow as pa
+
+    for path in store.table_files(rid, run, table):
+        t = pq.read_table(path)
+        pq.write_table(pa.Table.from_pylist(fn(t.to_pylist()), schema=t.schema), path)
+
+
+def test_function_history_is_anchored_at_a_run(demo_facts: DemoFacts) -> None:
+    store, rid = demo_facts.store, demo_facts.repo_id
+    trend = baseline_trend(store, rid, "main")
+    key = next(
+        r["func_key"]
+        for r in store.read_table(rid, demo_facts.baselines[0], "functions").to_pylist()
+        if r["kind"] in CALLABLE_KINDS
+    )
+    third = trend[2]
+    points = function_history(store, rid, key, "main", until=third.created_at)
+    assert [p.run_id for p in points] == [p.run_id for p in trend[:3]]
+    # a window of 2 ending at the third baseline: the two before it and it, never a later one
+    assert [p.run_id for p in function_history(store, rid, key, "main", 2, until=third.created_at)] == [
+        trend[1].run_id,
+        trend[2].run_id,
+    ]
+    assert all(p.sig_hash for p in points if p.present)
+
+
+def test_baseline_runs_from_candidates(demo_facts: DemoFacts) -> None:
+    from coverset.facts.queries import _baseline_runs, baseline_candidate_limit
+
+    store, rid = demo_facts.store, demo_facts.repo_id
+    full = _baseline_runs(store, rid, "main", 12)
+    newest_first = list(reversed(demo_facts.baselines))
+    assert _baseline_runs(store, rid, "main", 12, candidates=newest_first) == full
+    # the database says the branch has no run outside a PR: nothing is scanned
+    assert _baseline_runs(store, rid, "main", 12, candidates=[]) == []
+    # a short list is trusted when it yields a baseline (PR runs among the candidates are skipped)
+    assert _baseline_runs(store, rid, "main", 12, candidates=[newest_first[0], demo_facts.pr1_run]) == [
+        newest_first[0]
+    ]
+    # candidates the store does not hold: every run is scanned
+    assert _baseline_runs(store, rid, "main", 12, candidates=["run_unknown"]) == full
+    # a full list that yields too few: every run is scanned
+    filler = [f"run_x{i}" for i in range(baseline_candidate_limit(12))]
+    assert _baseline_runs(store, rid, "main", 12, candidates=filler) == full
+    assert baseline_trend(store, rid, "main", candidates=newest_first) == baseline_trend(store, rid, "main")
+
+
+def test_class_changes_name_classes_only_for_the_same_signature(
+    demo_facts: DemoFacts, tmp_path: Path
+) -> None:
+    """A changed ``sig_hash`` (or expected count) means the stored gaps cannot be compared by name:
+    the change is listed as uncompared, with no class called lost or gained. The sample-cap flag
+    is this run's, not the prior run's."""
+    shutil.copytree(demo_facts.store.root, tmp_path / "facts")
+    store = FactsStore(tmp_path / "facts")
+    rid, (main5, main6) = demo_facts.repo_id, demo_facts.baselines[-2:]
+
+    def resign(rows: list[dict]) -> list[dict]:  # type: ignore[type-arg]
+        for row in rows:
+            if row["qualname"] == "merge_intervals":
+                row["sig_hash"] = "0" * 16
+        return rows
+
+    def cap_prior(rows: list[dict]) -> list[dict]:  # type: ignore[type-arg]
+        for row in rows:
+            row["tests_truncated"] = 3
+        return rows
+
+    _edit(store, rid, main6, "functions", resign)
+    _edit(store, rid, main5, "func_input_cov", cap_prior)
+    change = next(c for c in class_changes(store, rid, main6, main5) if c.qualname == "merge_intervals")
+    assert change.sig_changed and change.uncompared
+    assert (change.lost, change.gained, change.lost_count, change.gained_count) == ((), (), 0, 0)
+    assert not change.sampled  # only the prior run hit the cap

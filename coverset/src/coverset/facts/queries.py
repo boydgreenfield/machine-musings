@@ -45,6 +45,7 @@ __all__ = [
     "TouchedFile",
     "TouchedFunction",
     "TreeNode",
+    "baseline_candidate_limit",
     "baseline_trend",
     "class_changes",
     "function_history",
@@ -1180,6 +1181,7 @@ class BaselinePoint:
 _BASELINE_RUNS_SQL = """
 SELECT run_id FROM runs_dim
 WHERE branch = $branch AND pr_number IS NULL AND finalized_at IS NOT NULL
+  AND ($until::TIMESTAMPTZ IS NULL OR created_at <= $until::TIMESTAMPTZ)
 ORDER BY created_at DESC, run_id DESC
 LIMIT $last_n
 """
@@ -1219,26 +1221,74 @@ ORDER BY r.created_at, r.run_id
 """
 
 
-def _baseline_runs(store: FactsStore, repo_id: int, branch: str, last_n: int) -> list[str]:
-    """The ``last_n`` newest finalized runs of ``branch`` that belong to no PR (newest first)."""
-    rows = _query(
-        store,
-        _BASELINE_RUNS_SQL,
-        {"branch": branch, "last_n": max(0, last_n)},
-        repo_id=repo_id,
-        tables=("runs_dim",),
-    )
-    return [str(r) for r in rows.column("run_id").to_pylist()]
+def baseline_candidate_limit(last_n: int) -> int:
+    """How many of the newest no-PR runs of a branch (from the database's ``runs``) a caller passes
+    as ``candidates``: enough that some failed or unfinished runs among them still leave ``last_n``
+    baselines."""
+    return 4 * max(0, last_n) + 8
 
 
-def baseline_trend(store: FactsStore, repo_id: int, branch: str, last_n: int = 12) -> list[BaselinePoint]:
+def _baseline_runs(
+    store: FactsStore,
+    repo_id: int,
+    branch: str,
+    last_n: int,
+    *,
+    until: datetime | None = None,
+    candidates: Sequence[str] | None = None,
+) -> list[str]:
+    """The ``last_n`` newest finalized runs of ``branch`` that belong to no PR (newest first),
+    created at or before ``until`` when given.
+
+    Scanning every run's ``runs_dim`` costs a file per run, PR runs included (0.4 s at 2,000 runs),
+    so a caller that knows the newest no-PR runs of the branch (the database's ``runs``, up to
+    :func:`baseline_candidate_limit`) passes them as ``candidates`` and only those are read. The
+    list is trusted when it is empty (the branch has no run outside a PR) or yields ``last_n``
+    baselines, or when it is shorter than the limit (the database has no older ones) and yields at
+    least one; otherwise (every candidate unfinished, or a store that holds runs the database does
+    not) every run is scanned.
+    """
+    params = {"branch": branch, "last_n": max(0, last_n), "until": until}
+
+    def scan(run_ids: Sequence[str] | None) -> list[str]:
+        if run_ids is not None and not run_ids:
+            return []
+        rows = _query(
+            store,
+            _BASELINE_RUNS_SQL,
+            params,
+            repo_id=repo_id,
+            run_ids=run_ids,
+            tables=("runs_dim",),
+        )
+        return [str(r) for r in rows.column("run_id").to_pylist()]
+
+    if candidates is not None:
+        picked = list(dict.fromkeys(candidates))
+        if not picked:
+            return []
+        found = scan(picked)
+        if len(found) >= last_n or (found and len(picked) < baseline_candidate_limit(last_n)):
+            return found
+    return scan(None)
+
+
+def baseline_trend(
+    store: FactsStore,
+    repo_id: int,
+    branch: str,
+    last_n: int = 12,
+    *,
+    candidates: Sequence[str] | None = None,
+) -> list[BaselinePoint]:
     """The totals of the ``last_n`` newest baselines of ``branch``, oldest first.
 
     A baseline is a run whose ``runs_dim.branch`` is ``branch``, with no PR number, that
-    ``finalize_run`` finished (``finalized_at`` set). The runs are picked from ``runs_dim`` first,
-    then only their ``file_cov``, ``functions``, ``func_input_cov`` and ``tests_dim`` are read.
+    ``finalize_run`` finished (``finalized_at`` set). The runs are picked from ``runs_dim`` first
+    (only the ``candidates`` runs' when given, see :func:`_baseline_runs`), then only their
+    ``file_cov``, ``functions``, ``func_input_cov`` and ``tests_dim`` are read.
     """
-    runs = _baseline_runs(store, repo_id, branch, last_n)
+    runs = _baseline_runs(store, repo_id, branch, last_n, candidates=candidates)
     if not runs:
         return []
     rows = _query(
@@ -1328,6 +1378,9 @@ class FunctionPoint:
     tests_truncated: int = 0
     """Tests that called the function but hit the tracer's sample cap (a missing class may then
     only have gone unsampled)."""
+    sig_hash: str | None = None
+    """The function's signature digest that run (arguments, annotations): the stored gaps of two
+    points are compared only when it and the expected class count are the same."""
 
     @property
     def input_pct(self) -> float | None:
@@ -1338,10 +1391,11 @@ class FunctionPoint:
 _FUNCTION_HISTORY_SQL = f"""
 WITH fn AS (
     SELECT run_id, func_key, any_value(file_id) AS file_id, any_value(def_line) AS def_line,
-           any_value(body_start) AS body_start, any_value(end_line) AS end_line
+           any_value(body_start) AS body_start, any_value(end_line) AS end_line,
+           any_value(sig_hash) AS sig_hash
     FROM functions WHERE func_key = $func_key AND {_CALLABLES} GROUP BY run_id, func_key
 ), {_BODY_LINES_CTE}
-SELECT r.run_id, r.created_at, r.head_sha, fn.func_key IS NOT NULL AS present,
+SELECT r.run_id, r.created_at, r.head_sha, fn.func_key IS NOT NULL AS present, fn.sig_hash,
        fic.blocks_expected AS expected, fic.blocks_observed AS observed,
        coalesce(fic.tests_called, 0) AS tests_called, coalesce(fic.tests_truncated, 0) AS tests_truncated,
        fic.missing_json, body.statements, body.covered
@@ -1354,16 +1408,24 @@ ORDER BY r.created_at, r.run_id
 
 
 def function_history(
-    store: FactsStore, repo_id: int, func_key: str, branch: str, last_n: int = 12
+    store: FactsStore,
+    repo_id: int,
+    func_key: str,
+    branch: str,
+    last_n: int = 12,
+    *,
+    until: datetime | None = None,
+    candidates: Sequence[str] | None = None,
 ) -> list[FunctionPoint]:
-    """``func_key`` in each of the ``last_n`` newest baselines of ``branch``, oldest first.
+    """``func_key`` in each of the ``last_n`` newest baselines of ``branch`` (created at or before
+    ``until`` when given: the page anchors the window at the run it shows), oldest first.
 
     Baselines are picked as in :func:`baseline_trend`; every baseline gets a point, with
     ``present`` false where the run has no such function. ``line_pct`` follows the function
     page's body rule (statements in ``[body_start, end_line]``; a one-line def needs a real test),
     and ``missing`` lists the classes ``func_input_cov`` stored as never observed that run.
     """
-    runs = _baseline_runs(store, repo_id, branch, last_n)
+    runs = _baseline_runs(store, repo_id, branch, last_n, until=until, candidates=candidates)
     if not runs:
         return []
     rows = _query(
@@ -1386,6 +1448,7 @@ def function_history(
             tests_called=int(row["tests_called"]),
             missing=_missing_classes(row["missing_json"]),
             tests_truncated=int(row["tests_truncated"]),
+            sig_hash=row["sig_hash"],
         )
         for row in rows
     ]
@@ -1395,17 +1458,20 @@ def function_history(
 class ClassChange:
     """How one function's input classes and body lines changed from a prior run to a run.
 
-    Only the never-observed classes are stored (``func_input_cov.missing_json``), so a class is
-    ``lost`` when it is missing now and was not missing then, and ``gained`` the other way round.
-    That reads exactly while the function expects the same classes in both runs; when the expected
-    count changed (``expected_changed``), a class can also have become expected or stopped being
-    expected. A function no test passes anything to any more loses every class it had, unnamed
-    (``lost_count`` counts them; ``gained_count`` likewise for a function newly called).
-    ``newly_uncovered`` holds the body's statements (this run's line numbers) that ran in the prior
-    run and not in this one, matched by offset from ``body_start``; it is only computed when the
-    body hash is unchanged (``body_changed`` false). ``sampled`` is true when either run hit the
-    tracer's sample cap for the function (``tests_truncated`` above 0): a class "lost" then may
-    only have gone unsampled.
+    Only the never-observed classes are stored (``func_input_cov.missing_json``), not the expected
+    ones, so "lost" is inferred: a class is ``lost`` when it is missing now and was not missing
+    then, and ``gained`` the other way round, and that is only said when the function's signature
+    (``sig_hash``: arguments and annotations) and its expected class count are the same in both
+    runs. Even then the expected set can differ at the same count (a class that became expected
+    while another stopped), so the pages word it as "missing now, not missing then". When the
+    signature or the count changed (``expected_changed``, ``sig_changed``), no class is named and
+    ``uncompared`` tells that the stored gaps differ. A function no test passes anything to any
+    more loses every class it had, unnamed (``lost_count`` counts them; ``gained_count`` likewise
+    for a function newly called). ``newly_uncovered`` holds the body's statements (this run's line
+    numbers) that ran in the prior run and not in this one, matched by offset from
+    ``body_start``; it is only computed when the body hash is unchanged (``body_changed`` false).
+    ``sampled`` is true when this run hit the tracer's sample cap for the function
+    (``tests_truncated`` above 0): a class missing now then may only have gone unsampled.
     """
 
     func_key: str
@@ -1427,6 +1493,11 @@ class ClassChange:
     """(covered, statements) of the body in this run."""
     prior_lines: tuple[int, int]
     sampled: bool = False
+    sig_changed: bool = False
+    """The signature digest differs between the two runs (the declared types may have changed)."""
+    uncompared: bool = False
+    """The stored gaps differ, but the signature or the expected count changed, so no class is
+    named lost or gained."""
 
     @property
     def expected_changed(self) -> bool:
@@ -1443,7 +1514,7 @@ WITH fn AS (
     SELECT run_id, func_key, any_value(file_id) AS file_id, any_value(path) AS path,
            any_value(qualname) AS qualname, any_value(ordinal) AS ordinal, any_value(def_line) AS def_line,
            any_value(body_start) AS body_start, any_value(end_line) AS end_line,
-           any_value(body_hash) AS body_hash
+           any_value(body_hash) AS body_hash, any_value(sig_hash) AS sig_hash
     FROM functions WHERE {_CALLABLES} GROUP BY run_id, func_key
 ), {_BODY_LINES_CTE}, side AS (
     SELECT fn.*, fic.blocks_expected, fic.blocks_observed, fic.missing_json,
@@ -1470,10 +1541,11 @@ WITH fn AS (
 )
 SELECT c.func_key, p.func_key AS prior_key, c.path, c.qualname, c.def_line,
        c.body_start, p.body_start AS prior_body_start, c.body_hash, p.body_hash AS prior_body_hash,
+       c.sig_hash, p.sig_hash AS prior_sig_hash,
        c.blocks_expected AS expected, p.blocks_expected AS prior_expected,
        c.blocks_observed AS observed, p.blocks_observed AS prior_observed,
        c.missing_json, p.missing_json AS prior_missing_json,
-       c.tests_truncated > 0 OR p.tests_truncated > 0 AS sampled,
+       c.tests_truncated > 0 AS sampled,
        c.statements, c.covered, c.lines, c.covered_lines,
        p.statements AS prior_statements, p.covered AS prior_covered, p.covered_lines AS prior_covered_lines
 FROM pairs JOIN cur c ON c.func_key = pairs.cur_key JOIN pri p ON p.func_key = pairs.prior_key
@@ -1511,9 +1583,16 @@ def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: st
         lost: tuple[str, ...] = ()
         gained: tuple[str, ...] = ()
         lost_count = gained_count = 0
+        sig_changed = bool(
+            row["sig_hash"] and row["prior_sig_hash"] and row["sig_hash"] != row["prior_sig_hash"]
+        )
+        uncompared = False
         if expected is not None and prior_expected is not None:
-            lost, gained = tuple(sorted(missing - prior_missing)), tuple(sorted(prior_missing - missing))
-            lost_count, gained_count = len(lost), len(gained)
+            if expected == prior_expected and not sig_changed:
+                lost, gained = tuple(sorted(missing - prior_missing)), tuple(sorted(prior_missing - missing))
+                lost_count, gained_count = len(lost), len(gained)
+            else:
+                uncompared = missing != prior_missing
         elif prior_expected is not None:
             lost_count = int(prior_observed or 0)
         elif expected is not None:
@@ -1526,7 +1605,7 @@ def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: st
             newly = tuple(
                 line for line in row["lines"] or () if line - row["body_start"] in before and line not in now
             )
-        if not (lost_count or gained_count or newly):
+        if not (lost_count or gained_count or newly or uncompared):
             continue
         out.append(
             ClassChange(
@@ -1548,6 +1627,8 @@ def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: st
                 lines=(int(row["covered"]), int(row["statements"])),
                 prior_lines=(int(row["prior_covered"] or 0), int(row["prior_statements"] or 0)),
                 sampled=bool(row["sampled"]),
+                sig_changed=sig_changed,
+                uncompared=uncompared,
             )
         )
     return out

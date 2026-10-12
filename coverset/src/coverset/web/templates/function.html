@@ -19,7 +19,7 @@
 {% set cur = history.current %}
 <section class="panel fn-history" id="history" aria-labelledby="history-h">
   <div class="panel-head"><h2 id="history-h">History</h2>
-    <span class="aside">input classes {% if cur.expected is not none %}{{ cur.observed or 0 }} of {{ cur.expected }}{% else %}n/a{% endif %} · lines {{ cur.line_pct|pct }} · last {{ history.baselines|plural('baseline') }} of <code>{{ repo.default_branch }}</code>{% if history.extra %} and this run{% endif %}</span>
+    <span class="aside">input classes {% if cur.expected is not none %}{{ cur.observed or 0 }} of {{ cur.expected }}{% else %}n/a{% endif %} · lines {{ cur.line_pct|pct }} · {{ history.baselines|plural('baseline') }} of <code>{{ repo.default_branch }}</code> {% if history.extra %}before this run, and this run{% else %}up to this one{% endif %}</span>
   </div>
   <div class="fn-history-body">
     <div class="spark-row" data-points="{{ history.points|length }}">{{ history.spark }}{{ history.key }}</div>
@@ -35,9 +35,10 @@
   {% if history.losses %}
   <ul class="fn-lost">
     {% for lost in history.losses %}
-    <li><span class="chip chip-hollow">{{ lost.name }}</span> observed in run <a href="{{ url_for('files.function', rid=repo.id, func_key=region.func_key, run=lost.last_seen.run_id) }}"><code>{{ lost.last_seen.head_sha|sha }}</code></a> ({{ lost.last_seen.created_at|stamp }}), not since{% if cur.tests_truncated %} <span class="muted">· {{ cur.tests_truncated|plural('test') }} hit the sample cap here, so it may only have gone unsampled</span>{% endif %}</li>
+    <li><span class="chip chip-hollow">{{ lost.name }}</span> missing now, not missing in run <a href="{{ url_for('files.function', rid=repo.id, func_key=region.func_key, run=lost.last_seen.run_id) }}"><code>{{ lost.last_seen.head_sha|sha }}</code></a> ({{ lost.last_seen.created_at|stamp }}){% if cur.tests_truncated %} <span class="muted">· {{ cur.tests_truncated|plural('test') }} hit the sample cap here, so it may only have gone unsampled</span>{% endif %}</li>
     {% endfor %}
   </ul>
+  <p class="muted small fn-lost-note" data-inferred>Inferred from the stored gaps (only never-observed classes are stored), against earlier runs with the same signature and expected class count.</p>
   {% endif %}
 </section>
 {% endif %}

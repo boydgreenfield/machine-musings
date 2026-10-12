@@ -13,6 +13,7 @@ Routes: ``/repos/<rid>``, ``/repos/<rid>/prs/<n>`` (``/runs/<run_id>/coverage`` 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -24,7 +25,13 @@ from werkzeug.exceptions import Forbidden, NotFound
 
 from coverset.ai.review import SOURCE_LABELS
 from coverset.db.models import Invariant, InvariantResult, PullRequest, Repo, Run, TestCase, TestStats
-from coverset.facts.queries import BaselinePoint, baseline_trend, class_changes, top_gaps
+from coverset.facts.queries import (
+    BaselinePoint,
+    baseline_candidate_limit,
+    baseline_trend,
+    class_changes,
+    top_gaps,
+)
 from coverset.forge.comment import missing_counts
 from coverset.orchestrator.repos import mirror_path
 from coverset.orchestrator.verdict import summary_from_json
@@ -45,7 +52,15 @@ from coverset.web.loaders import (
 from coverset.web.pages import MAX_DB_ID, get_repo, render_page
 from coverset.web.pr_view import analyse_diff
 from coverset.web.render.sparkline import SparkSeries, render_sparkline
-from coverset.web.render.treemap import MODES, build_tree, render_legend, render_treemap
+from coverset.web.render.treemap import (
+    MODES,
+    Rect,
+    TreeItem,
+    build_tree,
+    layout,
+    render_legend,
+    render_treemap,
+)
 from coverset.web.run_view import order_rows
 
 bp = Blueprint("repos", __name__)
@@ -85,11 +100,91 @@ def trend_span(first: datetime, last: datetime, count: int) -> str:
     return f"{first:%Y-%m-%d} → {last:%Y-%m-%d}"
 
 
-def _overview_facts(rid: int, branch: str) -> dict[str, Any] | None:
+async def baseline_candidates(
+    rid: int, branch: str, last_n: int, *, until: datetime | None = None
+) -> list[str]:
+    """The newest runs of ``branch`` with no PR (at or before ``until``), from the database, newest
+    first: the only runs whose ``runs_dim`` the baseline queries then read (see
+    :func:`coverset.facts.queries.baseline_candidate_limit`)."""
+    query = select(Run.id).where(Run.repo_id == rid, Run.pr_id.is_(None), Run.branch == branch)
+    if until is not None:
+        query = query.where(Run.created_at <= until)
+    query = query.order_by(Run.created_at.desc(), Run.id.desc()).limit(baseline_candidate_limit(last_n))
+    async with app_db().session() as session:
+        return list(await session.scalars(query))
+
+
+THUMB_MIN_TILE = 64.0
+"""Tiles of the overview's thumbnail smaller than this (px², about 8 × 8) are merged."""
+
+
+def thumbnail_tree(
+    tree: TreeItem, width: float, height: float, *, min_area: float = THUMB_MIN_TILE
+) -> TreeItem:
+    """``tree`` for a thumbnail: under each directory or file, the file and function tiles that
+    would be drawn smaller than ``min_area`` px² are merged into one tile of the same total size
+    (statements and lines run summed, input-class share weighted by statements) that opens the map
+    at that directory or file. The proportions and colours stay, the demo's tiles (all far larger)
+    are untouched, and a large repository (24,000 functions of 3 px² each at bench scale) ships a
+    few dozen tiles instead of tens of thousands."""
+    leaves = layout(tree, Rect(0.0, 0.0, width, height))
+    area = {id(leaf.item): leaf.rect.area for leaf in leaves}
+
+    def prune(item: TreeItem) -> TreeItem:
+        if not item.children:
+            return item
+        keep: list[TreeItem] = []
+        tiny: list[TreeItem] = []
+        for child in item.children:
+            if child.kind != "dir" and area.get(id(child), 0.0) < min_area:
+                tiny.append(child)
+            else:
+                keep.append(prune(child))
+        if len(tiny) > 1:
+            keep.append(_merged(item, tiny))
+        else:
+            keep.extend(prune(c) for c in tiny)
+        return dataclasses.replace(item, children=keep)
+
+    return prune(tree)
+
+
+def _leaves(item: TreeItem) -> list[TreeItem]:
+    if not item.children:
+        return [item]
+    return [leaf for child in item.children for leaf in _leaves(child)]
+
+
+def _merged(parent: TreeItem, items: list[TreeItem]) -> TreeItem:
+    """One leaf standing for ``items`` (functions of a file, or files of a directory)."""
+    weighed = [
+        (leaf.input_cov, leaf.statements)
+        for item in items
+        for leaf in _leaves(item)
+        if leaf.input_cov is not None
+    ]
+    weight = sum(w for _, w in weighed)
+    input_cov = None
+    if weighed:
+        input_cov = sum(v * w for v, w in weighed) / weight if weight else weighed[0][0]
+    noun = "files" if all(i.kind == "file" for i in items) else "functions"
+    name = f"{len(items)} small {noun}"
+    return TreeItem(
+        name=name,
+        path=f"{parent.path}::{name}",
+        kind="function",
+        statements=sum(i.statements for i in items),
+        covered=sum(i.covered for i in items),
+        input_cov=input_cov,
+        file=parent.path if noun == "files" else (items[0].file or parent.path),
+    )
+
+
+def _overview_facts(rid: int, branch: str, candidates: list[str] | None = None) -> dict[str, Any] | None:
     """The facts behind the repo overview (blocking; run it in a thread), or None without a
     finalized baseline of ``branch``."""
     facts_store = store()
-    trend = baseline_trend(facts_store, rid, branch, HISTORY_RUNS)
+    trend = baseline_trend(facts_store, rid, branch, HISTORY_RUNS, candidates=candidates)
     if not trend:
         return None
     latest = trend[-1]
@@ -109,7 +204,8 @@ def _overview_facts(rid: int, branch: str) -> dict[str, Any] | None:
 
 async def repo_overview(repo_row: Repo) -> dict[str, Any] | None:
     """The repo page's overview section (see the module docstring), or None without a baseline."""
-    found = await asyncio.to_thread(_overview_facts, repo_row.id, repo_row.default_branch)
+    candidates = await baseline_candidates(repo_row.id, repo_row.default_branch, HISTORY_RUNS)
+    found = await asyncio.to_thread(_overview_facts, repo_row.id, repo_row.default_branch, candidates)
     if found is None:
         return None
     latest: BaselinePoint = found["latest"]
@@ -124,7 +220,7 @@ async def repo_overview(repo_row: Repo) -> dict[str, Any] | None:
         return url_for("repos.map_page", rid=rid, run=run_id, path=item.file)
 
     thumb = render_treemap(
-        build_tree(found["nodes"]),
+        thumbnail_tree(build_tree(found["nodes"]), THUMB_W, THUMB_H),
         mode="gap",
         width=THUMB_W,
         height=THUMB_H,
@@ -153,12 +249,13 @@ async def _dashboard_trends() -> dict[str, Any]:
         return {}
     async with app_db().session() as session:
         repos = [(r.id, r.default_branch, r.full_name) for r in await session.scalars(select(Repo))]
+    candidates = {rid: await baseline_candidates(rid, branch, HISTORY_RUNS) for rid, branch, _ in repos}
 
     def load() -> dict[int, dict[str, Any]]:
         facts_store = store()
         out: dict[int, dict[str, Any]] = {}
         for rid, branch, name in repos:
-            trend = baseline_trend(facts_store, rid, branch, HISTORY_RUNS)
+            trend = baseline_trend(facts_store, rid, branch, HISTORY_RUNS, candidates=candidates[rid])
             if trend:
                 out[rid] = {
                     "latest": trend[-1],

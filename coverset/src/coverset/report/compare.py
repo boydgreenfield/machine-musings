@@ -20,12 +20,18 @@ The rules (``docs/report.md``, "What the Changes page compares"):
   ("body changed": statements ran of its body, base and now). Module-level code of a changed file
   is not compared line by line;
 * a base's function index is its own when it came from the facts store, from the bundle's shipped
-  ``functions`` rows, or from sources read at the base's head. A base bundle whose Python regions were
-  indexed from the *local* tree borrows the current text: those regions are used only for files
-  that are unchanged by the statement rule, never for "body unchanged" claims;
+  ``functions`` rows (a ``--coverset-out`` directory's ``neutral/`` copy, a neutral bundle's own;
+  :func:`~coverset.report.load.load_base` prefers them over the local text), or from sources read
+  at the base's head (``ReportInput.own_regions``, ``ReportInput.commit``). A base bundle whose Python
+  regions were indexed from the *local* tree borrows the current text: those regions are used only
+  for files that are unchanged by the statement rule, never for "body unchanged" claims, and the
+  base's function totals leave such changed files out;
 * a line, input class or covering test counts as **lost** only when some test (or import time) that
   ran it in the base ran in this run too; otherwise it is "not re-run" (the two runs ran different
-  test sets), reported apart and never counted as lost.
+  test sets), reported apart and never counted as lost. An input class is "no longer expected"
+  only when the function's declared types changed and this run's catalogue no longer has it; a
+  function no test calls any more keeps its classes (lost, or not re-run). When either run recorded
+  no input shapes (``--coverset-shapes off``), classes are not compared at all.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
 
 from coverset.facts.schema import CALLABLE_KINDS
@@ -160,15 +167,24 @@ class Side:
         self._line_tests.update(found)
 
     def own_regions(self, path: str) -> bool:
-        """Whether this side's function index of ``path`` is its own (not indexed from a local text
-        that may be another commit's)."""
-        if self.inp.commit is not None:
+        """Whether this side's function index of ``path`` is its own (read at its own commit, or the
+        bundle's shipped rows), not indexed from a local text that may be another commit's."""
+        if self.inp.commit is not None or path in self.inp.own_regions:
             return True
         return not (path.endswith(".py") and self.inp.sources.get(path) is not None)
 
+    @property
+    def shapes_recorded(self) -> bool:
+        """False when the run recorded no input shapes at all (``--coverset-shapes off``)."""
+        meta = self.inp.meta.get("meta")
+        return not (isinstance(meta, Mapping) and meta.get("shapes") == "off")
 
-def side_totals(side: Side) -> dict[str, Any]:
-    """The index's totals of one side (the same rules as the index of its own report)."""
+
+def side_totals(side: Side, skip: Iterable[str] = ()) -> dict[str, Any]:
+    """The index's totals of one side (the same rules as the index of its own report). Function
+    and input-class totals leave out the functions of ``skip`` (files whose function index this
+    side borrowed from a text that is no longer its own)."""
+    skipped = frozenset(skip)
     statements = run = missed = branches = taken = partial = 0
     for path, lf in side.lines.items():
         stm = lf.statements - lf.excluded
@@ -180,7 +196,7 @@ def side_totals(side: Side) -> dict[str, Any]:
         arcs = side.inp.facts.run_arcs.get(path, frozenset())
         branches += len(static.arcs_possible)
         taken += sum(1 for arc in static.arcs_possible if arc in arcs)
-    fns = list(side.functions.values())
+    fns = [fn for fn in side.functions.values() if fn.region.path not in skipped]
     observed = sum(fn.view.cov.observed_expected for fn in fns if fn.view.observations)
     expected = sum(len(fn.view.cov.expected) for fn in fns if fn.view.observations)
     return {
@@ -336,7 +352,9 @@ class TestDelta:
 
     nodeid: str
     kind: str
-    """``added``, ``removed``, ``outcome`` or ``slower``."""
+    """``added``, ``removed`` (no test of its file is in this run), ``not selected`` (its file has
+    tests in this run, so it was deselected, e.g. with ``-k``, or deleted from the file),
+    ``outcome`` or ``slower``."""
     base_outcome: str | None = None
     now_outcome: str | None = None
     base_s: float | None = None
@@ -358,6 +376,8 @@ class Comparison:
     now_only: int
     """How many tests ran now and not in the base."""
     notes: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    """Signs that the base is not an earlier run of the same repository (shown first, and by the CLI)."""
     marks: dict[str, tuple[frozenset[int], frozenset[int]]] = field(default_factory=dict)
     """path → (newly uncovered, newly covered) lines, this run's numbering."""
     by_func: dict[str, FnDelta] = field(default_factory=dict)
@@ -385,7 +405,8 @@ class Comparison:
 
     @property
     def tests_changed(self) -> int:
-        """Tests added, removed or with another outcome (slower tests are listed, not counted)."""
+        """Tests added, removed or with another outcome (slower and not-selected tests are listed,
+        not counted)."""
         return sum(1 for t in self.tests if t.kind in ("added", "removed", "outcome"))
 
     def tests_of(self, kind: str) -> list[TestDelta]:
@@ -408,7 +429,6 @@ def compare(
     func_key, so they are not computed twice)."""
     b = Side(base)
     n = Side(now, now_views)
-    totals = _total_rows(side_totals(b), side_totals(n))
     notes: list[str] = []
     files: list[FileDelta] = []
     fn_lines: dict[FnKey, tuple[tuple[int, ...], tuple[int, ...]]] = {}
@@ -450,6 +470,8 @@ def compare(
             _compare_changed(b, n, path, delta, fn_lines, body_status)
         files.append(delta)
     files.sort(key=lambda f: (-len(f.lost), -len(f.not_rerun), f.status not in ("added", "removed"), f.path))
+    borrowed = sorted(p for p in changed_paths if not b.own_regions(p))
+    classes = b.shapes_recorded and n.shapes_recorded
 
     functions: list[FnDelta] = []
     unknown_paths: set[str] = set()
@@ -475,7 +497,9 @@ def compare(
             )
             continue
         assert bf is not None and nf is not None
-        functions.append(_both(b, n, key, bf, nf, path in changed_paths, fn_lines, body_status))
+        functions.append(
+            _both(b, n, key, bf, nf, path in changed_paths, fn_lines, body_status, classes=classes)
+        )
     functions = [f for f in functions if f.interesting]
     functions.sort(
         key=lambda f: (
@@ -486,6 +510,10 @@ def compare(
         )
     )
 
+    # Function and input-class totals count only files whose functions both sides index as their
+    # own, so a delta never comes from one side having no (trustworthy) index of a file.
+    unindexed = set(borrowed) | unknown_paths
+    totals = _total_rows(side_totals(b, skip=unindexed), side_totals(n, skip=unindexed))
     tests = _tests(b, n)
     base_only = sorted(b.ran - n.ran)
     now_only = len(n.ran - b.ran)
@@ -500,11 +528,25 @@ def compare(
             "function index for them (its sources were not read, or the base's were read from the local "
             "tree, which no longer matches the base's statements)."
         )
-    if base.commit is None and base.sources and any(v is not None for v in base.sources.values()):
+    if unindexed:
         notes.append(
-            "The base's sources were read from the local tree, not from the base's own commit: its "
-            "function boundaries are trusted only for files whose statements did not change."
+            f"The function and input-class totals leave out {_plural(len(unindexed), 'file')} on both "
+            "sides, as one side has no function index of its own for them."
         )
+    if borrowed:
+        notes.append(
+            f"The base's function index of {_plural(len(borrowed), 'changed file')} was read from the "
+            "local tree, not from the base's own commit or rows it ships (a bundle.tar.gz carries "
+            "none): its function boundaries are trusted only for files whose statements did not "
+            "change."
+        )
+    if not classes:
+        which = " and ".join(side for side, s in (("the base", b), ("this run", n)) if not s.shapes_recorded)
+        notes.append(
+            f"Input classes are not compared: {which} recorded no input shapes "
+            "(--coverset-shapes off), so no class can be called lost or gained."
+        )
+    warnings = _mismatch(base, now, b, n)
 
     marks: dict[str, tuple[frozenset[int], frozenset[int]]] = {}
     for f in files:
@@ -521,6 +563,7 @@ def compare(
         base_only=base_only,
         now_only=now_only,
         notes=notes,
+        warnings=warnings,
         marks=marks,
         by_func=by_func,
     )
@@ -624,6 +667,8 @@ def _both(
     file_changed: bool,
     fn_lines: Mapping[FnKey, tuple[tuple[int, ...], tuple[int, ...]]],
     body_status: Mapping[FnKey, str],
+    *,
+    classes: bool = True,
 ) -> FnDelta:
     path = key[0]
     if file_changed:
@@ -637,14 +682,20 @@ def _both(
     lost: list[str] = []
     gone: list[str] = []
     dropped: list[str] = []
-    expected_now = nf.expected
-    for name in sorted(bf.observed - nf.observed):
-        if name not in expected_now:
-            dropped.append(name)
-            continue
-        passed_in = set(bf.view.cov.tests.get(name, ()))
-        (lost if (not passed_in or passed_in & n.ran) else gone).append(name)
-    gained = tuple(sorted(nf.observed - bf.observed))
+    gained: tuple[str, ...] = ()
+    if classes:
+        missing = sorted(bf.observed - nf.observed)
+        # A class is "no longer expected" only when the declared types changed and this run's
+        # catalogue does not have it; otherwise (a function no test calls any more included) it is
+        # lost, or not re-run when none of the tests that passed it in ran here.
+        expected_now = _expected_now(b, bf, n, nf) if missing else None
+        for name in missing:
+            if expected_now is not None and name not in expected_now:
+                dropped.append(name)
+                continue
+            passed_in = set(bf.view.cov.tests.get(name, ()))
+            (lost if (not passed_in or passed_in & n.ran) else gone).append(name)
+        gained = tuple(sorted(nf.observed - bf.observed))
     uncovered = uncovered_not_rerun = False
     if bf.tests and not nf.tests:
         if set(bf.tests) & n.ran:
@@ -672,8 +723,67 @@ def _both(
     )
 
 
+def _catalogue(side: Side, fn: FnSide) -> Any:
+    region = fn.region
+    return side.inp.facts.catalogue_for(region, side.inp.sources.get(region.path))
+
+
+def _declared(found: Any) -> Any:
+    """What a catalogue's classes are declared from (parameters only, not the return type)."""
+    if found.types is not None:
+        return {k: v for k, v in found.types.items() if k != "return"}
+    return dict(found.annotations)
+
+
+def _expected_now(b: Side, bf: FnSide, n: Side, nf: FnSide) -> frozenset[str] | None:
+    """The classes this run's catalogue expects of the function, when its declared types differ
+    from the base's (None when they are the same: then no class can have stopped being expected).
+    Computed from the declared types alone when no test passed the function anything now."""
+    now_cat = _catalogue(n, nf)
+    if _declared(_catalogue(b, bf)) == _declared(now_cat):
+        return None
+    if nf.view.observations:
+        return nf.expected
+    cov = now_cat.input_cov(nf.region, (), None)
+    return frozenset(c.name for c in cov.expected)
+
+
+def _mismatch(base: ReportInput, now: ReportInput, b: Side, n: Side) -> list[str]:
+    """Signs that the base is not an earlier run of the same repository and language."""
+    out: list[str] = []
+    paths = set(b.statics) | {t.file for t in b.tests.values()}
+    now_paths = set(n.statics) | {t.file for t in n.tests.values()}
+    if (
+        (paths or b.tests)
+        and (now_paths or n.tests)
+        and not (paths & now_paths)
+        and not (set(b.tests) & set(n.tests))
+    ):
+        out.append(
+            "The base and this run share no file path and no test id: the base looks like a run of "
+            "another repository or language. It was compared anyway, as given: every file and test "
+            "counts as added or removed."
+        )
+    for store_side, local_side in ((base, now), (now, base)):
+        run = store_side.meta.get("run")
+        repository = run.get("repository") if isinstance(run, Mapping) else None
+        root = local_side.meta.get("root") if local_side.commit is None else None
+        if not repository or not root:
+            continue
+        name = str(repository).rsplit("/", 1)[-1]
+        if PurePosixPath(str(root).replace("\\", "/")).name != name:
+            which = "the base" if store_side is base else "this run"
+            out.append(
+                f"{which.capitalize()} is a run of {repository} from the facts store, but the other "
+                f"side's sources were read from {root}, whose name is not {name!r}: check that both "
+                "are the same repository. The two runs were compared anyway, by path and test id."
+            )
+    return out
+
+
 def _tests(b: Side, n: Side) -> list[TestDelta]:
     out: list[TestDelta] = []
+    now_files = {t.file for t in n.tests.values()}
     for nodeid in sorted(set(b.tests) | set(n.tests)):
         bt = b.tests.get(nodeid)
         nt = n.tests.get(nodeid)
@@ -681,7 +791,10 @@ def _tests(b: Side, n: Side) -> list[TestDelta]:
             out.append(TestDelta(nodeid, "added", now_outcome=nt.outcome or NOT_RUN, now_s=nt.duration_s))
             continue
         if nt is None and bt is not None:
-            out.append(TestDelta(nodeid, "removed", base_outcome=bt.outcome or NOT_RUN, base_s=bt.duration_s))
+            # Not in this run's collection: when its file still has tests here, it was deselected
+            # (``-k``) or deleted from the file, and is not counted as a change.
+            kind = "not selected" if bt.file in now_files else "removed"
+            out.append(TestDelta(nodeid, kind, base_outcome=bt.outcome or NOT_RUN, base_s=bt.duration_s))
             continue
         assert bt is not None and nt is not None
         before, after = bt.outcome or NOT_RUN, nt.outcome or NOT_RUN

@@ -99,6 +99,9 @@ class ReportInput:
     """The commit the sources were read at (a facts-store run's head, from the repository's
     mirror), or None when they came from the local tree (``--repo-root`` or the current directory).
     ``--compare`` uses it to tell a base's own sources from borrowed ones."""
+    own_regions: frozenset[str] = frozenset()
+    """Paths whose function index is the bundle's own (its shipped ``functions`` rows), whatever
+    local text was read for them: ``--compare`` trusts these boundaries in a changed file."""
 
 
 class _Ids:
@@ -237,6 +240,11 @@ class BundleFacts(RunFacts):
         if found is None:
             return super().function_view(region, source)
         return view_with_catalogue(self, region, found)
+
+    def catalogue_for(self, region: FunctionRegion, source: str | None) -> FunctionCatalogue:
+        """The catalogue :meth:`function_view` uses: the shipped descriptors, else the source's."""
+        found = self._catalogues.get(region.func_key)
+        return found if found is not None else super().catalogue_for(region, source)
 
 
 def view_with_catalogue(facts: RunFacts, region: FunctionRegion, found: FunctionCatalogue) -> FunctionView:
@@ -463,11 +471,29 @@ def regions_for(
 ) -> list[FunctionRegion]:
     """Every region of the measured files: indexed from the source when there is one, else the
     bundle's own ``functions`` rows for that path (neutral bundles)."""
+    return regions_with_owners(paths, sources, bundle)[0]
+
+
+def regions_with_owners(
+    paths: Iterable[str],
+    sources: Mapping[str, str | None],
+    bundle: NeutralBundle | None = None,
+    *,
+    prefer_shipped: bool = False,
+) -> tuple[list[FunctionRegion], frozenset[str]]:
+    """:func:`regions_for`, plus the paths whose regions are the bundle's own ``functions`` rows
+    (not indexed from a local text that may be another commit's). With ``prefer_shipped`` (a
+    ``--compare`` base) a path's shipped rows win over indexing its local text."""
     shipped: dict[str, list[FunctionRegion]] = defaultdict(list)
     for region in bundle_regions(bundle):
         shipped[region.path].append(region)
     out: list[FunctionRegion] = []
+    own: set[str] = set()
     for path in sorted(set(paths)):
+        if prefer_shipped and shipped.get(path):
+            out.extend(shipped[path])
+            own.add(path)
+            continue
         text = sources.get(path)
         if text is not None and path.endswith(".py"):
             try:
@@ -475,7 +501,33 @@ def regions_for(
                 continue
             except (SyntaxError, ValueError, RecursionError):
                 pass
-        out.extend(shipped.get(path, ()))
+        if shipped.get(path):
+            out.extend(shipped[path])
+            own.add(path)
+    return out, frozenset(own)
+
+
+def borrowed_signatures(
+    regions: Iterable[FunctionRegion], sources: Mapping[str, str | None], own: frozenset[str]
+) -> dict[str, FunctionCatalogue]:
+    """For shipped Python regions whose local text is another commit's: the functions whose
+    signature there differs (``sig_hash``) or is missing, each with a catalogue of no declared
+    types, so the local annotations are never read for them (their classes then come from the
+    observations alone)."""
+    out: dict[str, FunctionCatalogue] = {}
+    local: dict[str, dict[str, FunctionRegion]] = {}
+    for region in regions:
+        text = sources.get(region.path)
+        if region.path not in own or text is None or not region.path.endswith(".py"):
+            continue
+        if region.path not in local:
+            try:
+                local[region.path] = {r.func_key: r for r in index_functions(region.path, text)}
+            except (SyntaxError, ValueError, RecursionError):
+                local[region.path] = {}
+        found = local[region.path].get(region.func_key)
+        if found is None or found.sig_hash != region.sig_hash:
+            out[region.func_key] = FunctionCatalogue(Catalogue(), {}, None)
     return out
 
 

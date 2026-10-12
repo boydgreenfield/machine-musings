@@ -39,8 +39,8 @@
       </dl>
       <h3 class="ov-sub">Since the previous baseline</h3>
       {% if ov.prior %}
-      {% set dl = (p.line_pct or 0) - (ov.prior.line_pct or 0) %}{% set di = (p.input_pct or 0) - (ov.prior.input_pct or 0) %}
-      <p class="muted ov-delta">from <code>{{ ov.prior.head_sha|sha }}</code>: lines run {{ '%+.1f'|format(dl) }} pts · input classes {{ '%+.1f'|format(di) }} pts ({{ '%+d'|format(p.classes_observed - ov.prior.classes_observed) }} observed, {{ '%+d'|format(p.classes_expected - ov.prior.classes_expected) }} expected) · tests {{ '%+d'|format(p.tests_total - ov.prior.tests_total) }}</p>
+      {% macro pts(now, then) %}{% if now is none or then is none %}n/a{% else %}{{ '%+.1f'|format(now - then) }} pts{% endif %}{% endmacro %}
+      <p class="muted ov-delta">from <code>{{ ov.prior.head_sha|sha }}</code>: lines run {{ pts(p.line_pct, ov.prior.line_pct) }} · input classes {{ pts(p.input_pct, ov.prior.input_pct) }} ({{ '%+d'|format(p.classes_observed - ov.prior.classes_observed) }} observed, {{ '%+d'|format(p.classes_expected - ov.prior.classes_expected) }} expected) · tests {{ '%+d'|format(p.tests_total - ov.prior.tests_total) }}</p>
       {% endif %}
       {% if not ov.prior %}
       <p class="empty" data-changes="none">This is the first baseline: nothing to compare yet.</p>
@@ -51,9 +51,10 @@
         {% for c in ov.changes %}
         <li>
           <a href="{{ url_for('files.function', rid=repo.id, func_key=c.func_key, run=ov.run_id) }}"><code>{{ c.qualname }}</code></a> <span class="muted">{{ c.path }}</span>
-          {% if c.lost %}<span class="delta delta-lost">lost</span> {% for name in c.lost %}<span class="chip chip-hollow" title="{{ name }}: observed in {{ ov.prior.head_sha|sha }}, not in {{ p.head_sha|sha }}">{{ name }}</span> {% endfor %}{% elif c.lost_count %}<span class="delta delta-lost">lost</span> {{ c.lost_count|plural('class', 'classes') }} (no test passes it anything now){% endif %}
-          {% if c.gained %}<span class="delta delta-gained">gained</span> {% for name in c.gained %}<span class="chip" title="{{ name }}: first observed in {{ p.head_sha|sha }}">{{ name }}</span> {% endfor %}{% elif c.gained_count %}<span class="delta delta-gained">gained</span> {{ c.gained_count|plural('class', 'classes') }} (newly called){% endif %}
-          {% if c.expected_changed %}<span class="muted">· expects {{ c.prior_expected }} → {{ c.expected }} classes</span>{% endif %}
+          {% if c.lost %}<span class="delta delta-lost">missing now</span> {% for name in c.lost %}<span class="chip chip-hollow" title="{{ name }}: missing in {{ p.head_sha|sha }}, not missing in {{ ov.prior.head_sha|sha }} (inferred from the stored gaps)">{{ name }}</span> {% endfor %}{% elif c.lost_count %}<span class="delta delta-lost">lost</span> {{ c.lost_count|plural('class', 'classes') }} (no test passes it anything now){% endif %}
+          {% if c.gained %}<span class="delta delta-gained">no longer missing</span> {% for name in c.gained %}<span class="chip" title="{{ name }}: not missing in {{ p.head_sha|sha }}, missing in {{ ov.prior.head_sha|sha }} (inferred from the stored gaps)">{{ name }}</span> {% endfor %}{% elif c.gained_count %}<span class="delta delta-gained">gained</span> {{ c.gained_count|plural('class', 'classes') }} (newly called){% endif %}
+          {% if c.lost or c.gained %}<span class="muted small" data-inferred>· vs {{ ov.prior.head_sha|sha }}, inferred from the stored gaps</span>{% endif %}
+          {% if c.expected_changed or c.uncompared %}<span class="muted" data-uncompared>· {% if c.expected_changed %}expects {{ c.prior_expected }} → {{ c.expected }} classes{% else %}its signature changed{% endif %}: classes not compared</span>{% endif %}
           {% if c.sampled and c.lost_count %}<span class="muted" data-sampled="1">· tests hit the sample cap: a lost class may only have gone unsampled</span>{% endif %}
           {% if c.newly_uncovered %}<span class="delta delta-lines">lines no longer run</span> {{ c.newly_uncovered|join(', ') }}{% endif %}
         </li>

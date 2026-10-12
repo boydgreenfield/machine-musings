@@ -19,8 +19,9 @@ coverset report .coverset                 # writes .coverset/report/, prints .co
 coverset report .coverset --open          # and opens it in the browser
 ```
 
-Without `--repo-root`, a `--coverset-out` directory reads its sources from the current directory, and
-only when that is a git work tree that tracks the measured files (see
+Without `--repo-root`, a `--coverset-out` directory reads its sources from the git work tree the
+current directory is in (from its top, so any subdirectory works), and only when it tracks the
+measured files (see
 [what it trusts](#how-it-is-built-and-what-it-trusts)); elsewhere, pass `--repo-root`.
 
 From a CI bundle (the `bundle.tar.gz` a shard uploads, or a neutral bundle directory or archive
@@ -42,8 +43,8 @@ coverset report --run run_01M4P5Q4AJ0HJVV6MTJW890P24 [--repo coverset-demo/ledge
 | `SOURCE` | a `--coverset-out` directory, a `bundle.tar.gz`, or a neutral bundle directory or `tar.gz` |
 | `--run RUN_ID` | build from this run in the facts store instead (with `--repo NAME` to check which repository it belongs to) |
 | `--out DIR` | where to write; default `SOURCE/report` for a directory source, else `./coverset-report` |
-| `--repo-root PATH` | read source files from here (only the files git tracks there when it is a git work tree); default: for a `--coverset-out` directory the git-tracked files of the current directory when it is a git work tree, for an archive or a neutral bundle no source at all. Not with `--run` (an error) |
-| `--compare BASE` | compare with this base and add a **Changes** page ([below](#comparing-with-a-base)); BASE is any source the report accepts (a `--coverset-out` directory, a `bundle.tar.gz`, a neutral bundle) |
+| `--repo-root PATH` | read source files under this directory, as given: when it is a git work tree only the files git tracks there, by the bundle's repository-relative paths; only when git tracks none of the bundle's paths under it but the top of its work tree does (a subdirectory was named) are they read from that top instead. Default: for a `--coverset-out` directory the git-tracked files of the work tree the current directory is in (from its top), for an archive or a neutral bundle no source at all. Not with `--run` (an error) |
+| `--compare BASE` | compare with this base and add a **Changes** page ([below](#comparing-with-a-base)); BASE is any source the report accepts (a `--coverset-out` directory, a `bundle.tar.gz`, a neutral bundle); its functions come from the rows it ships where it has them ([whose function index](#what-the-changes-page-compares)) |
 | `--compare-run RUN_ID` | compare with this run in the facts store instead (with `SOURCE` or `--run`; with `--repo` it must belong to that repository too) |
 | `--title TEXT` | the title on every page |
 | `--open` | open `index.html` in the browser when done |
@@ -97,10 +98,19 @@ product; the per-line test lists in the pages' data blocks stay complete.
 ## Comparing with a base
 
 ```sh
-coverset report .coverset --compare main-run/.coverset          # this run against a bundle
+coverset report .coverset --compare ../before/.coverset         # this run against an earlier one
 coverset report --run run_PR --compare-run run_MAIN --out pr-vs-main
 coverset report bundle.tar.gz --repo-root . --compare-run run_MAIN   # mixing is allowed
 ```
+
+The local workflow: run the tests with `pytest --coverset --coverset-out ../before/.coverset` (or
+keep the `.coverset` of an earlier run), change the code, run them again into `.coverset`, then
+compare. That works across edits of the same files because `--coverset` (and `--coverset-neutral`)
+also writes the neutral copy `<dir>/neutral/`, whose `functions` rows were indexed from the text the
+base's tests ran against: the base's functions are read from there, not from today's files. A plain
+`--coverset-out` directory without that copy, or a `bundle.tar.gz`, has no such rows; then the
+functions of every file whose statements changed cannot be matched (the page says so) and only its
+unchanged files are compared function by function.
 
 ![The Changes page of the demo's PR #1 against the main baseline at its base commit](report-changes.jpg)
 
@@ -111,14 +121,17 @@ file the lines newly uncovered and newly covered, linking to the line, files add
 sorted by lines lost; per function the input classes lost and gained (by name), functions newly
 without a covering test, functions new and removed; and the tests added, removed, with another
 outcome (passed → failed, ...) or slower (more than 2× and 100 ms longer), linking to their pages.
-The command prints `changes since base: n lines lost, m classes lost, k tests changed` on stderr.
-"Tests changed" counts added, removed and other-outcome tests; slower ones are listed, not counted.
+The command prints `changes since base: 1 line lost, 2 classes lost, 3 tests changed` on stderr
+(singular where the count is 1), then a `warning:` line for each sign that the base is not an
+earlier run of the same repository (below). "Tests changed" counts added, removed and other-outcome
+tests; slower ones and tests that were not selected are listed, not counted.
 
-Only the base's facts are needed. Its sources are read under the same rules as `SOURCE`'s (with the
-same `--repo-root`, or from the facts store's mirror at the base's head) and only to index its
-Python functions and read their annotations; they are never shown. The pages show the current
-sources. A base that is missing or cannot be read is an error naming the base, before anything is
-written.
+Only the base's facts are needed. Its function index comes from the rows it ships where it has
+them; its sources are read under the same rules as `SOURCE`'s (with the same `--repo-root`, or from
+the facts store's mirror at the base's head) only to index the functions of files it ships no rows
+for and to read Python annotations (and those only for a function whose signature digest there is
+the base's own); they are never shown. The pages show the current sources. A base that is missing
+or cannot be read is an error naming the base, before anything is written.
 
 ### What the Changes page compares
 
@@ -137,22 +150,39 @@ written.
   lines in this run's numbering. A function whose body changed is compared by counts ("body changed":
   body statements that ran, base → now). Module-level code of a changed file and new functions are
   not compared line by line; the page says how many statements were left out.
-* **Whose function index.** A facts-store base's regions are its own (stored at ingest from its head),
-  and so are the regions a neutral bundle ships. A Python bundle base indexed from the *local* tree
-  borrows the current text: its regions are used only for files whose statements did not change, and
-  never for a "body unchanged" claim; the functions of such a changed file are reported as not
-  matchable, with a note.
+* **Whose function index.** A base's regions are its own when they come from the facts store (stored
+  at ingest from its head) or from `functions` rows the base ships: a `--coverset-out` directory's
+  neutral copy `<dir>/neutral/` (written by `--coverset` and `--coverset-neutral`) or a neutral
+  bundle's own rows. For a base those rows win over indexing the local text, also when the base
+  shares `--repo-root` with `SOURCE`. Only a base that ships no rows (a `bundle.tar.gz`, a
+  `--coverset-out` directory written without the neutral copy) is indexed from the *local* tree,
+  which is this run's text: those regions are used only for files whose statements did not change
+  and never for a "body unchanged" claim; the functions of such a changed file are reported as not
+  matchable, with a note, and the function and input-class totals leave those files out on both
+  sides (so a delta never comes from one side having no index of a file).
 * **Input classes.** Each side's catalogue is read the way its own report reads it (shipped
-  descriptors win, else the source annotations). A class is *lost* when it was observed in the base,
-  is still expected, and is not observed now; *gained* the other way round; a class observed in the
-  base that is no longer expected (the declared types changed) is listed as "no longer expected",
-  not lost. When this run hit the shape tracer's sample cap, the lost class's title says "not
+  descriptors win, else the source annotations). A class is *lost* when it was observed in the base
+  and is not observed now, and some test that passed it in ran here (else it is *not re-run*);
+  *gained* the other way round. This holds for a function no test calls any more too: its classes
+  are lost (or not re-run), never "no longer expected". A class is listed as "no longer expected"
+  only when the function's declared types changed and this run's catalogue does not have it (from
+  this run's observations, or from the declared types alone when nothing was passed in). When
+  either run recorded no input shapes (`--coverset-shapes off`), classes are not compared at all and
+  a note says so. When this run hit the shape tracer's sample cap, the lost class's title says "not
   observed in N sampled calls" rather than "never exercised".
 * **Different test sets.** When some tests that ran in the base did not run in this run (removed, or
   not selected: a PR run of a subset against a full baseline), the page says so at the top and lists
   them. A line, input class or covering test of the base whose base tests (or import time) all are
   among them is listed as **not re-run**, never as lost, and gets no gutter mark; only what both runs
-  could have run counts as lost. A test "ran" when its outcome is anything but "not run".
+  could have run counts as lost. Not-re-run lines link to the line in both unchanged and changed
+  files (the latter in this run's numbering). A test "ran" when its outcome is anything but "not
+  run". In the Tests table a base test missing from this run is **not selected** when its file still
+  has tests here (deselected with `-k`, or deleted from the file; not counted as a change) and
+  **removed** when no test of its file is here (counted).
+* **A base of another repository.** When the two runs share no file path and no test id, or a
+  facts-store run of one repository is compared with sources read from a directory of another name,
+  the page opens with a "Check the base" notice (and the CLI prints a `warning:`), and the two runs
+  are compared anyway, by path and test id: every file and test then counts as added or removed.
 * **Covering tests.** A function is *newly without a covering test* when some test ran its body in the
   base, none does now, and some of those base tests ran now.
 * **Marks.** A file page marks newly uncovered lines `▾` and newly covered lines `▴` in the diff
@@ -221,10 +251,13 @@ source text itself):
   `src/b.ts`); a hashed name that is taken is re-salted; every write is checked to resolve inside the
   output directory;
 * the bundle never chooses which local files are read: its `git_root`, `rootdir` and `repo_root`
-  are ignored. With `--repo-root`, sources are read under it, and when it is a git work tree only the
-  files git tracks there (both the path and the file a symlink resolves to); without it, a
-  `--coverset-out` directory reads the git-tracked files of the current directory when that is a git
-  work tree tracking at least one measured file, and an archive or a neutral bundle reads nothing.
+  are ignored. With `--repo-root`, sources are read under it as given, and when it is a git work
+  tree only the files git tracks there (both the path and the file a symlink resolves to); only when
+  git tracks none of the bundle's paths under it while the top of its work tree does (a
+  subdirectory was named; bundle paths are repository-relative) are they read from that top. Without
+  it, a `--coverset-out` directory reads the git-tracked files of the work tree the current directory
+  is in (from its top) when that tracks at least one measured file, and an archive or a neutral
+  bundle reads nothing.
   Every read is a plain relative path, symlinks resolved and required to stay inside, a regular file
   up to 4 MiB opened without blocking (a FIFO is skipped), decoded as UTF-8 with its byte-order mark
   dropped (a Python file's coding cookie is honoured). Git runs with no user or system config and
@@ -252,6 +285,12 @@ page.
 * The search covers file paths, function names and test ids, not file contents.
 * `--run` reads the run's sources from the repository's mirror; when the mirror is gone the files
   are "source not available". `--repo-root` does not go with `--run`.
+* `--compare` against a base that ships no `functions` rows (a `bundle.tar.gz`, a `--coverset-out`
+  directory without its `neutral/` copy) cannot match the functions of a file whose statements
+  changed; a facts-store base or a `--coverset` base can. Python annotations of a base are read from
+  the local text, so a base function whose signature changed since gets classes from its
+  observations alone. A test missing from this run whose file still has tests is "not selected"
+  even when it was deleted from the file: the two cannot be told apart from the bundles.
 
 ## Screenshots
 

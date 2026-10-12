@@ -349,11 +349,11 @@ def test_the_changes_page_escapes_hostile_strings(tmp_path: Path) -> None:
     assert after == before, "the report wrote outside --out"
     c = result.changes
     assert c is not None and GONE in c.base_only
-    assert any(t.kind == "outcome" for t in c.tests) and any(t.kind == "removed" for t in c.tests)
+    assert any(t.kind == "outcome" for t in c.tests) and any(t.kind == "not selected" for t in c.tests)
     assert any(f.status == "removed" and f.path == REMOVED for f in c.files)
     pages = all_pages(out)
     changes = pages["changes.html"]
-    assert "data-test-sets" in changes and 'data-test-change="removed"' in changes
+    assert "data-test-sets" in changes and 'data-test-change="not selected"' in changes
     for name, html in pages.items():
         parser = parse_page(html)
         for tag, attrs in parser.tags:

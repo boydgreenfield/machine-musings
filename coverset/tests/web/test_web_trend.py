@@ -118,11 +118,11 @@ async def test_repo_overview_class_changes_since_the_previous_baseline(client: C
 async def test_repo_overview_empty_states(
     client: Client, demo: Demo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(repos, "class_changes", lambda *args: [])
+    monkeypatch.setattr(repos, "class_changes", lambda *args, **kwargs: [])
     page = await (await client.get(f"/repos/{demo.repo_id}")).get_data(as_text=True)
     assert "No input class lost or gained and no body line newly uncovered since" in page
     assert 'data-changes="none"' in page
-    monkeypatch.setattr(repos, "baseline_trend", lambda *args: [])
+    monkeypatch.setattr(repos, "baseline_trend", lambda *args, **kwargs: [])
     page = await (await client.get(f"/repos/{demo.repo_id}")).get_data(as_text=True)
     assert "No finished baseline of <code>main</code> yet." in page
     assert 'class="ov-thumb"' not in page
@@ -203,14 +203,14 @@ async def test_function_history_of_a_pr_run_appends_that_run(client: Client, dem
 async def test_function_history_names_a_lost_class(
     client: Client, demo: Demo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the previous baseline observed ``email:idn`` and the newest did not, the strip says
-    which run last observed it."""
+    """When the previous baseline did not miss ``email:idn`` and the newest does, the strip names
+    that run, worded as inferred from the stored gaps."""
     real = queries.function_history
 
     def fake(
-        store: FactsStore, repo_id: int, func_key: str, branch: str, last_n: int = 12
+        store: FactsStore, repo_id: int, func_key: str, branch: str, last_n: int = 12, **kwargs: object
     ) -> list[FunctionPoint]:
-        points = real(store, repo_id, func_key, branch, last_n)
+        points = real(store, repo_id, func_key, branch, last_n, **kwargs)  # type: ignore[arg-type]
         previous = points[-2]
         points[-2] = FunctionPoint(
             previous.run_id,
@@ -222,6 +222,7 @@ async def test_function_history_names_a_lost_class(
             previous.line_pct,
             previous.tests_called,
             tuple(m for m in previous.missing if m != "email:idn"),
+            sig_hash=previous.sig_hash,
         )
         return points
 
@@ -230,9 +231,10 @@ async def test_function_history_names_a_lost_class(
     page = await (await client.get(f"/repos/{demo.repo_id}/functions/{key}")).get_data(as_text=True)
     lost = _section(page, 'class="fn-lost"', "</ul>")
     trend = queries.baseline_trend(_store(demo), demo.repo_id, "main")
-    assert '<span class="chip chip-hollow">email:idn</span> observed in run' in lost
-    assert f"<code>{trend[-2].head_sha[:8]}</code>" in lost and "not since" in lost
+    assert '<span class="chip chip-hollow">email:idn</span> missing now, not missing in run' in lost
+    assert f"<code>{trend[-2].head_sha[:8]}</code>" in lost and "not since" not in lost
     assert "email:multi-label-domain" not in lost
+    assert "Inferred from the stored gaps" in _section(page, 'class="fn-lost"', "</section>")
 
 
 def test_trend_span_wording() -> None:
@@ -360,3 +362,193 @@ def test_sparkline_escapes_hostile_labels() -> None:
         assert not TAG_WITH_HANDLER.search(text), TAG_WITH_HANDLER.search(text)
         assert '"onmouseover="' not in text
         assert "&lt;script&gt;" in text
+
+
+# -- review fixes ---------------------------------------------------------------------------------
+
+
+async def test_function_history_is_anchored_at_an_old_baseline(
+    client: Client, demo: Demo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Viewing a baseline older than the window shows the baselines up to it, it last: the strip
+    never runs backwards (a 2-run window over the demo's six baselines)."""
+    monkeypatch.setattr(files, "HISTORY_RUNS", 2)
+    key = _validate_email_key(demo)
+    trend = queries.baseline_trend(_store(demo), demo.repo_id, "main")
+    old = trend[-3]
+    page = await (await client.get(f"/repos/{demo.repo_id}/functions/{key}?run={old.run_id}")).get_data(
+        as_text=True
+    )
+    history = _section(page, 'id="history"', "</section>")
+    assert 'data-points="2"' in history and "fh-extra" not in history
+    squares = re.findall(r'<li class="fh-[a-z]+( is-current)?">.*?title="baseline ([0-9a-f]{8})', history)
+    assert squares == [("", trend[-4].head_sha[:8]), (" is-current", old.head_sha[:8])]
+    assert "2 baselines of <code>main</code> up to this one" in history
+
+
+async def test_function_history_of_a_pr_run_keeps_the_sample_cap(client: Client, demo: Demo) -> None:
+    """The PR run's point reads ``tests_truncated`` from its stored row, as a baseline's does."""
+    from coverset.web.facts_view import run_facts, run_point
+
+    facts = run_facts(_store(demo), demo.repo_id, demo.pr2_run)
+    capped = [k for k, row in facts.input_cov_rows.items() if (row.get("tests_truncated") or 0) > 0]
+    assert capped, "the demo's sample cap leaves some function capped in PR #2"
+    region = facts.region(capped[0])
+    assert region is not None
+    point = run_point(facts, region, None, "x" * 40)
+    assert point.tests_truncated == facts.input_cov_rows[capped[0]]["tests_truncated"] > 0
+    assert point.sig_hash == region.sig_hash
+
+
+async def test_class_and_module_pages_have_no_history(client: Client, demo: Demo) -> None:
+    rows = _store(demo).read_table(demo.repo_id, demo.baseline_run, "functions").to_pylist()
+    for kind in ("class", "module"):
+        found = next((r for r in rows if r["kind"] == kind), None)
+        if found is None:
+            continue
+        page = await (await client.get(f"/repos/{demo.repo_id}/functions/{found['func_key']}")).get_data(
+            as_text=True
+        )
+        assert 'id="history"' not in page, kind
+
+
+async def test_repo_overview_words_class_changes_as_inferred(
+    client: Client, demo: Demo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trend = queries.baseline_trend(_store(demo), demo.repo_id, "main")
+    real = queries.class_changes(_store(demo), demo.repo_id, trend[-1].run_id, trend[-2].run_id)
+    import dataclasses
+
+    named = dataclasses.replace(real[0], lost=("x:lost",), lost_count=1, gained=("x:gained",), gained_count=1)
+    moved = dataclasses.replace(
+        real[0],
+        lost=(),
+        gained=(),
+        lost_count=0,
+        gained_count=0,
+        expected=7,
+        prior_expected=5,
+        uncompared=True,
+    )
+    resigned = dataclasses.replace(moved, expected=5, sig_changed=True)
+    monkeypatch.setattr(repos, "class_changes", lambda *a, **k: [named, moved, resigned])
+    page = await (await client.get(f"/repos/{demo.repo_id}")).get_data(as_text=True)
+    section = _section(page, "Since the previous baseline</h3>", "Largest gaps")
+    assert "observed in" not in section
+    assert f"x:lost: missing in {trend[-1].head_sha[:8]}, not missing in {trend[-2].head_sha[:8]}" in section
+    assert ">missing now</span>" in section and "inferred from the stored gaps" in section
+    assert "expects 5 → 7 classes: classes not compared" in section
+    assert "its signature changed: classes not compared" in section
+
+
+async def test_repo_overview_delta_is_na_without_a_percentage(
+    client: Client, demo: Demo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    real = queries.baseline_trend
+
+    def trend(*args: object, **kwargs: object) -> list[object]:
+        points = real(*args, **kwargs)  # type: ignore[arg-type]
+        points[-2] = dataclasses.replace(points[-2], statements=0, lines_run=0, classes_expected=0)
+        return points
+
+    monkeypatch.setattr(repos, "baseline_trend", trend)
+    page = await (await client.get(f"/repos/{demo.repo_id}")).get_data(as_text=True)
+    delta = _section(page, 'class="muted ov-delta"', "</p>")
+    assert "lines run n/a · input classes n/a" in delta
+    assert "pts" not in delta.split("(")[0]
+
+
+def test_thumbnail_tree_merges_tiny_tiles() -> None:
+    from coverset.web.render.treemap import Rect, TreeItem, layout
+
+    def fn(file: str, i: int, statements: int, cov: float | None) -> TreeItem:
+        return TreeItem(
+            f"f{i}", f"{file}::f{i}", "function", statements, statements, cov, f"k{file}{i}", i, file
+        )
+
+    big = TreeItem("big.py", "pkg/big.py", "file", 4000, 4000, children=[fn("pkg/big.py", 0, 4000, 0.5)])
+    # 2,000 files of 3 statements (about 34 px² each), 3 functions apiece; one file of 10 small
+    # functions next to a large one
+    many = [
+        TreeItem(
+            f"m{j}.py",
+            f"pkg/m{j}.py",
+            "file",
+            3,
+            2,
+            children=[fn(f"pkg/m{j}.py", i, 1, 0.25) for i in range(3)],
+        )
+        for j in range(2000)
+    ]
+    mixed = TreeItem(
+        "mixed.py",
+        "pkg/mixed.py",
+        "file",
+        2010,
+        2010,
+        children=[fn("pkg/mixed.py", 99, 2000, 1.0), *(fn("pkg/mixed.py", i, 1, None) for i in range(10))],
+    )
+    tree = TreeItem("pkg", "pkg", "dir", 12010, 8010, children=[big, mixed, *many])
+    thumb = repos.thumbnail_tree(tree, 520, 220)
+    leaves = [x for x in layout(thumb, Rect(0, 0, 520, 220)) if not x.item.children]
+    assert len(leaves) == 4 and sum(x.item.statements for x in leaves) == 4000 + 2010 + 2000 * 3
+    files_tile = next(x.item for x in leaves if x.item.name == "2000 small files")
+    assert files_tile.file == "pkg" and files_tile.covered == 4000
+    assert files_tile.input_cov == pytest.approx(0.25)
+    fns_tile = next(x.item for x in leaves if x.item.name == "10 small functions")
+    assert fns_tile.file == "pkg/mixed.py" and fns_tile.input_cov is None and fns_tile.statements == 10
+    # a tree whose tiles are all large enough is returned as it was
+    demo_like = TreeItem("pkg", "pkg", "dir", 4000, 4000, children=[big])
+    assert repos.thumbnail_tree(demo_like, 520, 220) == demo_like
+
+
+async def test_repo_overview_thumbnail_keeps_the_demo_tiles(client: Client, demo: Demo) -> None:
+    page = await (await client.get(f"/repos/{demo.repo_id}")).get_data(as_text=True)
+    thumb = _section(page, 'class="ov-thumb"', "</svg>")
+    assert "small functions" not in thumb and "small files" not in thumb
+    assert thumb.count('class="tm-leaf ') > 20
+
+
+def test_sparkline_clamps_values_and_strips_control_characters() -> None:
+    import xml.dom.minidom
+
+    svg = str(
+        render_sparkline(
+            [
+                SparkSeries("a\x01b", (-1e300, 1e300, 50.0)),
+                SparkSeries("c", (1e308, None, -5.0), dashed=True),
+            ],
+            points=["p\x00", "q\x1b", "r\nend"],
+            label="l\x07",
+            noun="run\x08",
+            reference=1e300,
+            reference_label="ref\x02",
+        )
+    )
+    xml.dom.minidom.parseString(svg)  # well-formed
+    assert not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", svg)
+    assert "r end" in svg and "<title>ref: 100%</title>" in svg
+    assert "ab from 0% to 50%" in svg
+    numbers = [float(n) for n in re.findall(r'(?:x|y|x1|x2|y1|y2|cx|cy|width)="([-0-9.e+]+)"', svg)]
+    assert all(math.isfinite(n) and -1 <= n <= 240 for n in numbers)
+    key = str(render_spark_key([SparkSeries("k\x03", ())]))
+    assert "\x03" not in key
+
+
+def test_no_global_rule_restyles_changed_source_lines() -> None:
+    """The source view marks changed lines ``.ln.chg``; a bare ``.chg`` rule (as the overview's
+    labels once had) restyles every changed line of every source page."""
+    from pathlib import Path
+
+    css = (Path(repos.__file__).parent / "static" / "app.css").read_text(encoding="utf-8")
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for selectors in re.findall(r"([^{}]+)\{", css):
+        for selector in selectors.split(","):
+            if re.search(r"\.chg(?![\w-])", selector):
+                assert re.search(r"\.ln\.chg(?![\w-])", selector), selector.strip()
+    # and the rule this guards against is caught: the old overview label style
+    old = ".chg { margin-left: 6px; }"
+    bad = [s for s in re.findall(r"([^{}]+)\{", old) if not re.search(r"\.ln\.chg(?![\w-])", s)]
+    assert bad == [".chg "]

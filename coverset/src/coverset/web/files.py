@@ -23,6 +23,7 @@ from werkzeug.exceptions import NotFound
 
 from coverset.db.models import PullRequest, Run, TestCase, TestResult
 from coverset.facts.queries import function_history, test_touched
+from coverset.facts.schema import CALLABLE_KINDS
 from coverset.orchestrator.repos import mirror_path
 from coverset.web.context import app_db, app_settings
 from coverset.web.detail import function_detail
@@ -41,6 +42,7 @@ from coverset.web.pr_view import analyse_diff
 from coverset.web.render.shapegrid import render_grid, render_inlay
 from coverset.web.render.source import RegionMark, render_source
 from coverset.web.render.sparkline import SparkSeries, render_spark_key, render_sparkline
+from coverset.web.repos import baseline_candidates
 from coverset.web.run_view import order_rows
 
 bp = Blueprint("files", __name__)
@@ -263,7 +265,7 @@ async def function(rid: int, func_key: str) -> Response:
     detail = await function_detail(
         repo, run, facts, region, analysis=analysis, results=results, finding=findings.get(func_key)
     )
-    history = await function_history_view(repo, run, facts, region)
+    history = await function_history_view(repo, run, facts, region) if region.kind in CALLABLE_KINDS else None
     return await render_page(
         "function.html",
         repo=repo,
@@ -276,14 +278,25 @@ async def function(rid: int, func_key: str) -> Response:
 
 
 async def function_history_view(repo: Any, run: Run, facts: RunFacts, region: Any) -> dict[str, Any]:
-    """The function page's history strip: the function in the default branch's last baselines
-    (plus the viewed run when it is not one of them, e.g. a PR run), a sparkline of line % and
-    input-class %, one square per run and the classes lost since the previous point."""
+    """The function page's history strip: the function in the default branch's last baselines up
+    to the viewed run (created at or before it, so an old baseline shows the runs before it), plus
+    the viewed run as the newest point when it is not a baseline (a PR run), a sparkline of line %
+    and input-class %, one square per run and the classes missing at the viewed run that an earlier
+    comparable point did not miss."""
+    candidates = await baseline_candidates(repo.id, repo.default_branch, HISTORY_RUNS, until=run.created_at)
     points = await asyncio.to_thread(
-        function_history, facts.store, repo.id, region.func_key, repo.default_branch, HISTORY_RUNS
+        function_history,
+        facts.store,
+        repo.id,
+        region.func_key,
+        repo.default_branch,
+        HISTORY_RUNS,
+        until=run.created_at,
+        candidates=candidates,
     )
     extra = run.id not in {p.run_id for p in points}
     if extra:
+        # every point is at or before the viewed run, so it goes last
         points = [*points, await asyncio.to_thread(run_point, facts, region, run.created_at, run.head_sha)]
     index = next(i for i, p in enumerate(points) if p.run_id == run.id)
 

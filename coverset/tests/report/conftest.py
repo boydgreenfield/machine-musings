@@ -25,7 +25,8 @@ FIXTURE_PROJECT = ROOT / "packages" / "pytest-coverset" / "tests" / "fixture_pro
 
 @pytest.fixture(scope="session")
 def fixture_out(tmp_path_factory: pytest.TempPathFactory) -> FixtureRun:
-    """Run the fixture project with pytest-coverset into ``<copy>/out``."""
+    """Run the fixture project with pytest-coverset into ``<copy>/out`` (with the neutral copy
+    ``out/neutral`` that ``--coverset`` always writes, which ``--compare`` reads a base's functions from)."""
     project = tmp_path_factory.mktemp("report-fixture") / "fixture_project"
     shutil.copytree(FIXTURE_PROJECT, project, ignore=shutil.ignore_patterns("__pycache__"))
     env = {
@@ -35,7 +36,7 @@ def fixture_out(tmp_path_factory: pytest.TempPathFactory) -> FixtureRun:
     }
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "pytest_coverset", "-q", "-p", "no:cacheprovider"]
-        + ["--coverset-out", "out", "--coverset-source", "fixturepkg"],
+        + ["--coverset-out", "out", "--coverset-source", "fixturepkg", "--coverset-neutral"],
         cwd=project,
         env=env,
         capture_output=True,
