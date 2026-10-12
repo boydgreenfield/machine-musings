@@ -42,6 +42,8 @@ svg.pbar { width: 56px; height: 6px; vertical-align: 1px; margin-right: 4px; }
 .tests-table details.msg summary { cursor: pointer; color: var(--fail); font-family: var(--font); font-size: 0.8rem; }
 .tests-table details.msg pre { margin: 6px 0 2px; }
 .oc-xfailed, .oc-xpassed { color: var(--ink-2); }
+.oc-no_result { color: var(--muted); }
+.sources-notice { margin: 0 0 14px; padding: 8px 14px; border: 1px solid var(--rule-strong); border-left: 4px solid var(--fail); border-radius: 5px; background: var(--surface-2); font-size: 0.9rem; }
 
 .lens-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 14px; border-bottom: 1px solid var(--rule); font-size: 0.86rem; color: var(--ink-2); }
 .lens-bar select { font: inherit; font-size: 0.84rem; max-width: min(720px, 100%); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink); }

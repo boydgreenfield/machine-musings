@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 
 import pytest
 from quart.typing import TestClientProtocol as Client
@@ -11,8 +12,21 @@ from web_helpers import BOOSTED, HX, Demo, assert_csp_clean
 from coverset.app import CONTENT_SECURITY_POLICY
 
 
+def _a_test_id(demo: Demo) -> int:
+    """The control database's id of a test PR #1 ran (its result is in that run)."""
+    con = sqlite3.connect(demo.db_url.split("///", 1)[1])
+    try:
+        row = con.execute(
+            "SELECT test_id FROM test_results WHERE run_id = ? ORDER BY test_id LIMIT 1", (demo.pr1_run,)
+        ).fetchone()
+    finally:
+        con.close()
+    return int(row[0])
+
+
 def page_urls(demo: Demo) -> list[str]:
     rid = demo.repo_id
+    test_id = _a_test_id(demo)
     return [
         "/",
         f"/repos/{rid}",
@@ -37,6 +51,9 @@ def page_urls(demo: Demo) -> list[str]:
         f"/repos/{rid}/files/src/ledger/accounts/emailcheck.py?pr=2",
         f"/repos/{rid}/files/src/ledger/billing/refund.py?run={demo.pr1_run}",
         f"/repos/{rid}/files/src/ledger/durations/parse.py/lines/16/tests?run={demo.baseline_run}",
+        f"/repos/{rid}/files/src/ledger/billing/refund.py?run={demo.pr1_run}&test={test_id}",
+        f"/repos/{rid}/tests/{test_id}",
+        f"/repos/{rid}/tests/{test_id}?run={demo.pr1_run}",
     ]
 
 

@@ -1,21 +1,21 @@
 {% extends layout %}
-{% block title %}{{ path }}{% endblock %}
+{% block title %}{{ path|visible }}{% endblock %}
 {% block main %}
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a>{% if pr %} / <a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number) }}">PR #{{ pr.number }}</a>{% endif %} / <a href="{{ url_for('repos.map_page', rid=repo.id, run=run.id) }}">map</a> / source</div>
 <div class="source-shell">
   <nav class="file-list" aria-label="Measured files">
-    {% if common_prefix %}<p class="file-list-root">{{ common_prefix }}/</p>{% endif %}
-    {% for p, label in measured %}<a href="{{ url_for('files.source', rid=repo.id, path=p, run=run.id, **({'pr': pr.number} if pr else {})) }}"{% if p == path %} aria-current="page"{% endif %} title="{{ p }}">{{ label }}</a>{% endfor %}
+    {% if common_prefix %}<p class="file-list-root">{{ common_prefix|visible }}/</p>{% endif %}
+    {% for p, label in measured %}<a href="{{ url_for('files.source', rid=repo.id, path=p, run=run.id, **({'pr': pr.number} if pr else {})) }}"{% if p == path %} aria-current="page"{% endif %} title="{{ p|visible }}">{{ label|visible }}</a>{% endfor %}
   </nav>
   <div class="src-frame">
     <div class="src-bar">
-      <span class="path">{{ path }}</span>
+      <span class="path">{{ path|visible }}</span>
       <span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}"><code>{{ run.head_sha|sha }}</code></a></span>
       {% if known %}
       <span>{{ stats.statements }} statements · {{ stats.missed }} never ran · {{ stats.partial }} partial{% if stats.hollow %} · {{ stats.hollow }} input class{{ '' if stats.hollow == 1 else 'es' }} never exercised{% endif %}</span>
       {% else %}<span>not measured in this run</span>{% endif %}
       {% if changed %}<span>{{ changed }} changed line{{ '' if changed == 1 else 's' }} marked +</span>{% endif %}
-      {% if focus %}<span class="focus-note" id="focus-note">lines run by <a href="{{ focus.url }}"><code class="nodeid">{{ focus.nodeid|nodeid }}</code></a>: {{ focus.statements }} of {{ stats.statements }} statements, the rest dimmed · <a href="{{ clear_url }}">show every test</a></span>{% endif %}
+      {% if focus %}<span class="focus-note" id="focus-note">lines run by <a href="{{ focus.url }}"><code class="nodeid">{{ focus.nodeid|visible|nodeid }}</code></a>: {{ focus.statements }} of {{ stats.statements }} statements, the rest dimmed{% if not focus.in_run %} · <strong data-not-in-run>not in this run</strong>: the test has no result in run <code>{{ run.head_sha|sha }}</code>{% endif %} · <a href="{{ clear_url }}">show every test</a></span>{% endif %}
       <span class="muted">{% if prev_url %}<a href="{{ prev_url }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_url %}<a href="{{ next_url }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
     </div>
     <ul class="legend src-legend">

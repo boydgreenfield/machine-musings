@@ -31,6 +31,7 @@ import importlib.resources
 import json
 import os
 import re
+import shutil
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -46,8 +47,17 @@ from coverset.analysis.shapes import NEVER_EXERCISED
 from coverset.facts.queries import TreeNode
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion
-from coverset.report.facts import ReportInput, TestInfo
-from coverset.report.output import PageNames, Writer, hashed_name, neutralize, neutralize_js, prepare_out_dir
+from coverset.report.facts import NO_RESULT, NOT_RUN, ReportInput, TestInfo
+from coverset.report.output import (
+    PageNames,
+    Writer,
+    check_out_dir,
+    hashed_name,
+    neutralize,
+    neutralize_js,
+    staging_dir,
+    swap_in,
+)
 from coverset.units import fmt_ms
 from coverset.web.facts_view import FunctionView, test_file
 from coverset.web.render.html import breakable, json_data, relative_hrefs
@@ -63,9 +73,19 @@ GRID_W_FN = 580.0
 FILE_LIST_WINDOW = 200
 """Beyond twice this many files, a file page lists only this many neighbours on each side."""
 MAX_META_CHARS = 200_000
+"""The about page's verbatim meta dump is cut here (and says so)."""
 MAX_MESSAGE_CHARS = 8 * 1024
+MAX_LISTED = 200
+"""A test page lists at most this many functions it ran, a function page at most this many covering
+tests (then a "+N more" line), so the report grows with tests + functions, not their product."""
 _FUNC_KEY = re.compile(r"^[0-9a-f]{16}$")
-OUTCOME_ORDER = ("failed", "error", "xpassed", "passed", "xfailed", "skipped", "not run")
+OUTCOME_ORDER = ("failed", "error", "xpassed", "passed", "xfailed", "skipped", NO_RESULT, NOT_RUN)
+_OUTCOME_RANK = {name: i for i, name in enumerate(OUTCOME_ORDER)}
+
+
+def outcome_rank(outcome: str | None) -> int:
+    """Sort rank of an outcome label (an unknown label sorts after every known one)."""
+    return _OUTCOME_RANK.get(outcome or NOT_RUN, len(OUTCOME_ORDER))
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,13 +233,23 @@ def stylesheet() -> str:
 
 
 def build_report(inp: ReportInput, out: Path) -> BuildResult:
-    """Write the report for ``inp`` into ``out`` (see :func:`~coverset.report.output.prepare_out_dir`)."""
-    root = prepare_out_dir(out)
-    writer = Writer(root)
-    with relative_hrefs():
-        builder = _Builder(inp, writer)
-        builder.collect()
-        pages = builder.write_all()
+    """Write the report for ``inp`` into ``out`` (see :func:`~coverset.report.output.check_out_dir`).
+
+    The pages are written into a staging directory next to ``out`` that replaces it only when the
+    build succeeded: a failed build leaves the previous report untouched.
+    """
+    target = check_out_dir(out)
+    staging = staging_dir(target)
+    try:
+        writer = Writer(staging)
+        with relative_hrefs():
+            builder = _Builder(inp, writer)
+            builder.collect()
+            pages = builder.write_all()
+        root = swap_in(staging, target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return BuildResult(out_dir=root, index=root / "index.html", pages=pages)
 
 
@@ -269,7 +299,7 @@ class _Builder:
             entry = self.tests.get(nodeid)
             if entry is None:
                 digest = hashed_name(nodeid)
-                info = TestInfo(nodeid, nodeid.split("::", 1)[0], None)
+                info = TestInfo(nodeid, nodeid.split("::", 1)[0], NO_RESULT)
                 entry = self.tests[nodeid] = TestEntry(info, digest, f"tests/{digest}.html", {})
             for path, lines in sorted(by_path.items()):
                 if path in self.files and lines:
@@ -305,6 +335,7 @@ class _Builder:
             page=page,
             title=self.inp.title,
             origin=self.inp.origin,
+            notice=self.inp.notice,
             link=lambda target: _rel(page, target),
             **context,
         )
@@ -354,7 +385,7 @@ class _Builder:
         for fn in self.functions:
             items.append(["function", fn.region.qualname, fn.region.path, fn.page])
         for nodeid, test in sorted(self.tests.items()):
-            items.append(["test", nodeid, test.info.outcome or "not run", test.page])
+            items.append(["test", nodeid, test.info.outcome or NOT_RUN, test.page])
         payload = neutralize_js(str(json_data(items)))
         return f"/* coverset report search index (generated) */\nwindow.COVERSET_SEARCH = {payload};\n"
 
@@ -371,7 +402,7 @@ class _Builder:
             arcs = self.facts.run_arcs.get(path, frozenset())
             branches += len(static.arcs_possible)
             taken += sum(1 for arc in static.arcs_possible if arc in arcs)
-        outcomes = Counter(t.info.outcome or "not run" for t in self.tests.values())
+        outcomes = Counter(t.info.outcome or NOT_RUN for t in self.tests.values())
         capped = sum(1 for f in self.functions if f.hollow and not f.never_exercised)
         return {
             "statements": statements,
@@ -389,7 +420,7 @@ class _Builder:
             "capped": capped,
             "hollow_classes": sum(f.hollow for f in self.functions),
             "tests": len(self.tests),
-            "outcomes": [(name, outcomes[name]) for name in OUTCOME_ORDER if outcomes.get(name)],
+            "outcomes": sorted(outcomes.items(), key=lambda kv: (outcome_rank(kv[0]), kv[0])),
         }
 
     def tree_nodes(self) -> list[TreeNode]:
@@ -497,7 +528,7 @@ class _Builder:
         )
         tests = sorted(
             self.tests.values(),
-            key=lambda t: (OUTCOME_ORDER.index(t.info.outcome or "not run"), t.info.nodeid),
+            key=lambda t: (outcome_rank(t.info.outcome), t.info.nodeid),
         )
         self.render(
             page,
@@ -524,6 +555,8 @@ class _Builder:
             ("Read as", str(meta.get("bundle_kind", ""))),
         ]
         rows.append(("Sources read from", str(meta.get("repo_root", ""))))
+        if meta.get("sources"):
+            rows.append(("Sources", str(meta["sources"])))
         if producer:
             rows.append(("Producer", f"{producer.get('name', '?')} {producer.get('version', '')}".strip()))
         elif flat.get("plugin_version"):
@@ -568,7 +601,10 @@ class _Builder:
         capped = [f for f in self.functions if f.view.cov.tests_truncated]
         dump = json.dumps(meta, indent=2, sort_keys=True, default=str, ensure_ascii=False)
         if len(dump) > MAX_META_CHARS:
-            dump = dump[:MAX_META_CHARS] + "\n… (cut)"
+            dump = (
+                dump[:MAX_META_CHARS]
+                + f"\n… (cut: the meta is {len(dump):,} characters, this page shows the first {MAX_META_CHARS:,})"
+            )
         run_rows = [
             (k, _short(v))
             for k, v in (meta.get("run") or {}).items()
@@ -631,7 +667,7 @@ class _Builder:
             "kind": "file",
             "path": entry.path,
             "tests": [
-                [nodeid, self.outcome(nodeid) or "not run", self.tests[nodeid].hash, sorted(lines)]
+                [nodeid, self.outcome(nodeid) or NOT_RUN, self.tests[nodeid].hash, sorted(lines)]
                 for nodeid, lines in tests
             ],
             "import": sorted(entry.import_lines),
@@ -731,14 +767,14 @@ class _Builder:
             "kind": "function",
             "path": region.path,
             "tests": [
-                [nodeid, self.outcome(nodeid) or "not run", self.tests[nodeid].hash, sorted(lines)]
+                [nodeid, self.outcome(nodeid) or NOT_RUN, self.tests[nodeid].hash, sorted(lines)]
                 for nodeid, lines in sorted(tests_here.items())
                 if lines
             ],
             "import": sorted(n for n in entry.import_lines if region.def_line <= n <= region.end_line),
         }
-        outcomes = Counter(self.outcome(t) or "not run" for t in fn.tests)
-        covering = sorted(fn.tests, key=lambda n: (OUTCOME_ORDER.index(self.outcome(n) or "not run"), n))
+        outcomes = Counter(self.outcome(t) or NOT_RUN for t in fn.tests)
+        covering = sorted(fn.tests, key=lambda n: (outcome_rank(self.outcome(n)), n))
         self.render(
             page,
             "function.html",
@@ -750,8 +786,9 @@ class _Builder:
             grid=grid,
             ribbon=ribbon,
             cells=self.grid_cells(fn),
-            covering=[(n, self.outcome(n), self.test_link(n)) for n in covering],
-            outcomes=[(k, outcomes[k]) for k in OUTCOME_ORDER if outcomes.get(k)],
+            covering=[(n, self.outcome(n), self.test_link(n)) for n in covering[:MAX_LISTED]],
+            covering_more=max(0, len(covering) - MAX_LISTED),
+            outcomes=sorted(outcomes.items(), key=lambda kv: (outcome_rank(kv[0]), kv[0])),
             suggestion=hypothesis_stub(view),
             test_link=self.test_link,
             data=self.data_block(data),
@@ -779,8 +816,12 @@ class _Builder:
                 ]
                 if not body and not observations:
                     continue
-                reach = _param_reach(fn.view, observations)
-                functions.append((fn, len(body), reach))
+                functions.append((fn, len(body), observations))
+        functions_total = len(functions)
+        functions = [
+            (fn, body_lines, _param_reach(fn.view, observations))
+            for fn, body_lines, observations in functions[:MAX_LISTED]
+        ]
         message = entry.info.message
         if message and len(message) > MAX_MESSAGE_CHARS:
             message = message[:MAX_MESSAGE_CHARS] + "\n… (cut)"
@@ -792,6 +833,7 @@ class _Builder:
             message=message,
             files=files,
             functions=functions,
+            functions_total=functions_total,
             strip=render_strip,
             data=None,
         )

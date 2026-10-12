@@ -11,13 +11,17 @@ function's tests passed in and which they never did.
 
 ## Generating it
 
-From a plain pytest run with the plugin:
+From a plain pytest run with the plugin, run from the repository (a git work tree):
 
 ```sh
 pytest --coverset-out .coverset --coverset-source mypkg
 coverset report .coverset                 # writes .coverset/report/, prints .coverset/report/index.html
 coverset report .coverset --open          # and opens it in the browser
 ```
+
+Without `--repo-root`, a `--coverset-out` directory reads its sources from the current directory, and
+only when that is a git work tree that tracks the measured files (see
+[what it trusts](#how-it-is-built-and-what-it-trusts)); elsewhere, pass `--repo-root`.
 
 From a CI bundle (the `bundle.tar.gz` a shard uploads, or a neutral bundle directory or archive
 from another language's reporter, recognised by its `manifest.json`):
@@ -38,7 +42,7 @@ coverset report --run run_01M4P5Q4AJ0HJVV6MTJW890P24 [--repo coverset-demo/ledge
 | `SOURCE` | a `--coverset-out` directory, a `bundle.tar.gz`, or a neutral bundle directory or `tar.gz` |
 | `--run RUN_ID` | build from this run in the facts store instead (with `--repo NAME` to check which repository it belongs to) |
 | `--out DIR` | where to write; default `SOURCE/report` for a directory source, else `./coverset-report` |
-| `--repo-root PATH` | read source files from here; default: the bundle's `git_root` (else `rootdir`) when that directory exists, else the current directory |
+| `--repo-root PATH` | read source files from here (only the files git tracks there when it is a git work tree); default: for a `--coverset-out` directory the git-tracked files of the current directory when it is a git work tree, for an archive or a neutral bundle no source at all. Not with `--run` (an error) |
 | `--title TEXT` | the title on every page |
 | `--open` | open `index.html` in the browser when done |
 
@@ -47,8 +51,14 @@ The command prints the path of `index.html` on stdout (the page counts go to std
 byte-identical files.
 
 The output directory must be new, empty, or a previous report's: every report writes a
-`.coverset-report` marker file at its top, and only a directory holding that marker is emptied and
-rewritten. Anything else is refused, so a mistyped `--out` never deletes someone's files.
+`.coverset-report` marker file at its top, and only a directory holding that marker is replaced.
+Anything else is refused, so a mistyped `--out` never deletes someone's files. The pages are written
+into a hidden staging directory next to `--out` (`.<name>.coverset-build-*`) that replaces it only
+once the build succeeded: a build that fails leaves the previous report as it was.
+
+When no source file was read (no `--repo-root` for an archive or a neutral bundle, or a current
+directory that is not the repository), every page carries a "Sources not read" notice saying why,
+and the command prints the same line on stderr; the coverage itself is all there.
 
 ## What the pages show
 
@@ -58,19 +68,28 @@ rewritten. Anything else is refused, so a mistyped `--out` never deletes someone
 | `files/<path>.html` | The source through the same renderer as the live source view: blue = ran, vermilion = never ran, dotted yellow = took one branch only (with "never jumped to line N"), sticky function headers, inlay chips under each `def` (filled = observed with its sampled calls, dashed = never exercised). The number in the gutter is how many tests ran the line; click it (or press `t`) for the list, each linking to its test page. Press `i` for the function's shape grid and its input-class table. The **data-flow lens** is above the code. |
 | `functions/<key>.html` | The signature with its annotations (or the bundle's declared types), the body with line and branch coverage, the shape grid, the flow ribbon from test files through in-repo callers to parameters, the covering tests with their outcomes, every input class with its redacted example and the tests that passed it in, or for a missing class its Hypothesis strategy with a Copy button, a suggested Hypothesis test, and the sampling note. |
 | `tests/<hash>.html` | One test: outcome, duration, failure message, the files it ran (statements it ran of each, linking to the file with the lens on this test), the functions it ran with body lines, and per parameter two strips: the input classes this test passed in next to the function's never-exercised ones, and the function's whole picture. |
-| `about.html` | Producer, language, Python and coverage.py versions, tracer, the shape tracer's caps, what was dropped while reading the bundle (limits hit), the functions that hit the sample cap, and the bundle's meta verbatim. |
+| `about.html` | Where the sources were read from and how many, producer, language, Python and coverage.py versions, tracer, the shape tracer's caps, what was dropped while reading the bundle (limits hit), the functions that hit the sample cap, and the bundle's meta verbatim (up to 200,000 characters). |
 
-A file listed in the bundle but not found under the repository root is shown as "source not
-available" with its coverage summary only (statements, the lines that never ran, the partial
-branches, the tests that touched it). Function regions come from the sources (for Python) or from
-the bundle's own `functions.jsonl` (neutral bundles), so a Python file without its source has no
-function pages.
+A file listed in the bundle but not read (missing under the repository root, not a regular file,
+larger than 4 MiB, resolving outside the root, not tracked by git there, or no source read at all) is
+shown as "source not available" with its coverage summary only (statements, the lines that never
+ran, the partial branches, the tests that touched it); the about page counts the files read. Function
+regions come from the sources (for Python) or from the bundle's own `functions.jsonl` (neutral
+bundles), so a Python file without its source has no function pages.
 
-Input classes are counted exactly as on the pages: the same catalogue
-(`function_catalogue(region, source)` with the file's annotations and enums, or the bundle's type
-descriptors when the source is not there), and the same wording: a class is "never exercised" only
-when no test of the function hit the shape tracer's sample cap, else "not observed in N sampled
-calls (K tests hit the sample cap)" ([input-classes.md](input-classes.md#never-exercised-or-not-observed)).
+Input classes are counted exactly as on the pages, with the same wording. The catalogue comes from
+the type descriptors the bundle ships for the function whenever it ships them (a neutral bundle's
+`functions.jsonl` `types`, or a converted Python bundle's), whether or not the source is there; only
+a function without shipped descriptors gets `function_catalogue(region, source)` over the file's
+annotations and enums. A class is "never exercised" only when no test of the function hit the shape
+tracer's sample cap, else "not observed in N sampled calls (K tests hit the sample cap)"
+([input-classes.md](input-classes.md#never-exercised-or-not-observed)).
+
+A test's outcome is its result row's; a test that was collected but never ran reads "not run", and a
+test that ran measured lines but has no result row reads "no result". A test page lists at most the
+first 200 functions it ran (file order) and a function page at most 200 covering tests (by outcome,
+then id), each with a "+N more" line, so the pages grow with tests plus functions rather than their
+product; the per-line test lists in the pages' data blocks stay complete.
 
 ## The data-flow lens
 
@@ -113,21 +132,34 @@ Every string in a bundle is untrusted (test ids, failure messages, value reprs, 
 source text itself):
 
 * text reaches HTML only through Jinja autoescaping or the render helpers; links pass `safe_href`,
-  which during a report build also admits relative links to generated `.html` pages and nothing else
-  (`javascript:`, `//host` and absolute URLs become `#`);
+  which during a report build also admits relative links made of plain segments ending in `.html`
+  (with a fragment of `[A-Za-z0-9._~:=-]`, and any number of leading `../`, so the rule alone does
+  not keep a link inside the report: the links the build writes are its own page names) and bare
+  `#fragment`s; anything with a scheme, `//`, a backslash or a quote becomes `#`;
 * per-page data (the tests behind each line) is a single `<script type="application/json">` block
   with `<`, `>` and `&` escaped; the search index is `search-index.js` (JSON, same escaping). There
-  is no other inline script, and every page carries a Content-Security-Policy that allows scripts
-  and stylesheets only from the report's own origin (`file:` when opened from disk), no inline
-  script, no `<base>` and no form submission;
+  is no other inline script, and every page carries a Content-Security-Policy with no inline script,
+  no `<base>` and no form submission. Served over HTTP it admits scripts and stylesheets only from
+  the report's own origin; opened from disk, `file:` in the policy admits any local file, so there
+  the guarantee is the escaping above (no bundle string becomes markup), and the policy only stops
+  inline script;
 * bidirectional control characters (Trojan Source) are written as visible `<U+202E>` markers on every
   page and in every data file;
 * a path that is not a plain relative path of simple segments (`../x.py`, an absolute path, quotes,
-  backslashes, a dot segment) gets a hashed page name (`files/_/<hash>.html`), and so does a path
-  whose page name would collide case-insensitively; every write is checked to resolve inside the
+  backslashes, a dot segment, a first segment `_`, which `files/_/` reserves) gets a hashed page name
+  (`files/_/<hash>.html`), and so does a path whose page, or any directory on its way, would collide
+  case-insensitively with an earlier page or directory (`x` next to `x.html/y`, `Src/a.ts` next to
+  `src/b.ts`); a hashed name that is taken is re-salted; every write is checked to resolve inside the
   output directory;
-* sources are read only under `--repo-root`: plain relative paths, symlinks resolved and required to
-  stay inside, regular files up to 4 MiB;
+* the bundle never chooses which local files are read: its `git_root`, `rootdir` and `repo_root`
+  are ignored. With `--repo-root`, sources are read under it, and when it is a git work tree only the
+  files git tracks there (both the path and the file a symlink resolves to); without it, a
+  `--coverset-out` directory reads the git-tracked files of the current directory when that is a git
+  work tree tracking at least one measured file, and an archive or a neutral bundle reads nothing.
+  Every read is a plain relative path, symlinks resolved and required to stay inside, a regular file
+  up to 4 MiB opened without blocking (a FIFO is skipped), decoded as UTF-8 with its byte-order mark
+  dropped (a Python file's coding cookie is honoured). Git runs with no user or system config and
+  with `core.fsmonitor` off;
 * archives are extracted with the same hardened extractor as ingest (no links, no devices, size and
   member caps), and the bundle readers apply the untrusted-bundle limits of
   [security.md](security.md).
@@ -145,9 +177,11 @@ page.
 * **No invariants page.** Invariant links in the bundle are kept in the facts but not shown.
 * Source files larger than 4 MiB are shown as "source not available". In repositories with more than
   400 measured files a file page lists the 200 files on either side of it (the overview lists all).
+* A test page lists 200 functions and a function page 200 covering tests at most ("+N more").
+* The about page shows the bundle's meta verbatim up to 200,000 characters, then says how long it was.
 * The search covers file paths, function names and test ids, not file contents.
 * `--run` reads the run's sources from the repository's mirror; when the mirror is gone the files
-  are "source not available".
+  are "source not available". `--repo-root` does not go with `--run`.
 
 ## Screenshots
 

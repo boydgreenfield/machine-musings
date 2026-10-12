@@ -16,13 +16,13 @@ that produce trusted markup).
 | `/repos/<rid>/prs/<n>/functions/<func_key>` | Fragment: one "Needs attention" card's expanded content (loaded when the card opens). |
 | `/runs/<run_id>` | Run page: timeline strip, shard Gantt chart, failures, "Why this order", every test. `?replay=1&speed=0.25` replays a stored run; `&freeze=<seconds>` stops the replay at that point of the run's own clock. |
 | `/runs/<run_id>/events` | The run page's SSE stream (HTML regions as named events). |
-| `/repos/<rid>/files/<path>` | Source view. `?run=` picks the run (default: the newest default-branch baseline), `?pr=<n>` uses the PR's latest run and marks changed lines. |
+| `/repos/<rid>/files/<path>` | Source view. `?run=` picks the run (default: the newest default-branch baseline), `?pr=<n>` uses the PR's latest run and marks changed lines, `?test=<test_id>` dims every line that test did not run (see [The test page](#the-test-page)). |
 | `/repos/<rid>/files/<path>/lines/<n>/tests` | Fragment: the tests that ran one line (the gutter popover). |
 | `/repos/<rid>/functions/<func_key>` | One function: shape grid, flow ribbon, source with coverage, covering tests, invariants on it, AI finding. |
 | `/repos/<rid>/functions/<func_key>/shapes` | Fragment: the shape grid; with `&cls=<param>:<class>` one cell's detail. |
 | `/repos/<rid>/map` | Treemap, `?mode=gap` (default) `\|lines\|inputs`, `?path=` zooms into a directory or file, `?run=`. A "largest gaps" table ranks called functions by gap, lists the functions no test called apart, and only counts what has nothing to compare (module-level code, functions that expect no input classes). |
 | `/repos/<rid>/tests` | Every test (each nodeid links to its test page): runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. |
-| `/repos/<rid>/tests/<test_id>` | One test: identity, its result in `?run=` (default: the newest completed default-branch baseline), the last 12 results as squares, and its data flow in that run (see [The test page](#the-test-page)). `test_id` is the control database's test id. |
+| `/repos/<rid>/tests/<test_id>` | One test: identity, its result in `?run=` (default: the newest completed default-branch baseline), the last 12 results as squares, and its data flow in that run (see [The test page](#the-test-page)). `test_id` is the control database's test id (an id beyond 64 bits is a 404). |
 | `/repos/<rid>/tests/by-nodeid?nodeid=&run=` | Redirects (302) to the test page of that nodeid, keeping `run`. Every nodeid in the UI links through the `test_link` macro: the tests table, the run page's failures and "All tests", the PR page's tests, the line popover, a shape cell's tests and the function page's covering tests. |
 | `/repos/<rid>/invariants` | Every declared invariant: statement, status chip, the last 12 statuses, the coverage lens and per-verification evidence. `?run=<PR run>` adds the PR-vs-base comparison and "Invariants changed by this PR". |
 | `/forge/outbox` | Every recorded forge call, newest first; sticky comments and check-run summaries rendered as GitHub-flavoured markdown under "Would be posted to GitHub (fake forge)". `?method=` filters. |
@@ -109,21 +109,29 @@ default-branch baseline; each history square opens the page for its run.
 
 * **Identity**: the nodeid, its file, the markers and whether it is property-based (`@given`),
   read from the test's source at the run's head commit (module `pytestmark`, class `pytestmark`
-  and decorators; "unknown" when the run's facts do not list the file, since the plugin's
-  collected markers are not stored), the invariants that link it in this run with their status,
-  and the rolling statistics.
+  and decorators of the test function; a parametrize id may itself hold `::`, so the name is what
+  lies between the file and the first `[`). When the run's facts do not list the test's file the
+  markers read "not read" and property-based "unknown", since the plugin's collected markers are
+  not stored. Then the invariants that link it in this run with their status, and the rolling
+  statistics. The heading is the test's function with its parametrize id (`test_x[a::b]`).
 * **In this run**: outcome, duration, attempts (each one listed when retried), the flaky flag, rank
-  and shard, and the failure text from the run's `test` events (already redacted). Under it the
+  and shard, and the failure text from the run's `test` events (already redacted; only this test's
+  events are read, newest first). Under it the
   last 12 results as squares in the invariants page's style, oldest first, with a glyph and a
   title each (✓ passed, ✕ failed, ! error, ≈ flaky, – skipped); the selected run is ringed.
 * **Data flow**: an SVG (`render/flow.py`, the ribbon's visual grammar) with four columns: the
   test → in-repo callers in between ("via", only when the shape observations show a call came
   through another function) → the functions it called → their parameters, each labelled with how
-  many input classes this test carried. Ribbon width is sampled calls (a `call_shapes` row
-  aggregates every test of a caller, so a row's samples are shared evenly among its tests; a
-  function the tracer never sampled for this test gets a hairline); the shade steps with the
-  classes carried (1, 2, 3–4, 5+). Every bar is a link: the test to its file's source view, the
-  functions and parameters to the function page.
+  many input classes this test carried. Ribbon width = sampled calls; a hairline = one call (or a
+  function the tracer never sampled for this test, whose body still ran). A `call_shapes` row
+  aggregates every test of a caller, so a row's samples are shared evenly among its tests; one call
+  passes all its parameters, so a ribbon into a function or a "via" carries the samples of its
+  busiest parameter, not their sum, and a ribbon into a parameter that parameter's own. The shade
+  steps with the classes carried (1, 2, 3–4, 5+). Only the 40 functions with the most sampled calls
+  get a bar (the rest share one "+N more functions" bar, and a note under the chart says so) and a
+  function fans out to at most 12 parameters ("+N more parameters"); the table below lists every
+  function. Every bar is a link: the test to its file's source view, the functions and parameters
+  to the function page.
 * **Functions it called**: per file, the functions whose body the test ran (from `test_lines` ∩
   function bodies, `facts/queries.py` `test_touched`, ordered by file then `def` line), "body
   lines run 5 of 7", the line ranges (each a link into the source view), module-level lines, and
@@ -131,9 +139,15 @@ default-branch baseline; each history square opens the page for its run.
   passed in; hollow dashed = a class no test ever passed in; classes only other tests reached are
   left out and counted "N more by other tests") and **any test** (the function's whole picture),
   with the redacted example this test passed when it was the example's test.
-* The source-view links carry `&test=<id>`, which the source view does not filter on yet; the
-  page holds the same lines per path as JSON in `<div hidden id="test-lines" data-test-lines>` for
-  a later "dim the lines this test did not run" mode.
+* The source-view links carry `&test=<id>`: the source view then dims every line that test did not
+  run, says "lines run by <test>: N of M statements" in the bar (with "not in this run" when the
+  test has no result in the selected run), and keeps `test=` on its previous / next file links;
+  "show every test" drops it. A test of another repository is a 404.
+* Every string that comes from a bundle (the test id, paths, function and parameter names,
+  examples, the failure text, and the flow SVG's labels and titles) shows its bidirectional control
+  characters as visible `<U+202E>` markers instead of applying them (the static report marks them
+  the same way; the PR comment strips them). The test and source pages do; the tests list, the run
+  and PR pages still print test ids through the shared `nodeid` filter unmarked.
 
 ## The data-flow overlay
 

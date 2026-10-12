@@ -176,6 +176,9 @@ def test_line(runner: CliRunner, seeded: SeededDemo) -> None:
     assert "in refund (" in text and seeded.failing[:40] in text
     bad = runner.invoke(cli, ["facts", "line", "no-line-number", "--run", seeded.pr1_run])
     assert bad.exit_code == 2 and "PATH:LINE" in bad.output
+    for odd in ("src/x.py:\u00b2", "src/x.py:\u0663"):  # a superscript two, an Arabic-Indic three
+        superscript = runner.invoke(cli, ["facts", "line", odd, "--run", seeded.pr1_run])
+        assert superscript.exit_code == 2 and "PATH:LINE" in superscript.output
 
 
 def test_export(runner: CliRunner, seeded: SeededDemo, tmp_path: Path) -> None:
@@ -193,3 +196,43 @@ def test_export(runner: CliRunner, seeded: SeededDemo, tmp_path: Path) -> None:
     assert index["tables"]["ingest_log"]["source_files"] == [
         f"ingest_log.shard={n}.parquet" for n in range(3)
     ]
+
+
+def test_export_refuses_foreign_dirs_and_never_follows_links(
+    runner: CliRunner, seeded: SeededDemo, tmp_path: Path
+) -> None:
+    from coverset.commands.facts import EXPORT_MARKER
+
+    target = tmp_path / "busy"
+    target.mkdir()
+    (target / "notes.txt").write_text("keep me", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("ORIGINAL", encoding="utf-8")
+    (target / "files.jsonl").symlink_to(outside)
+    refused = runner.invoke(cli, ["facts", "export", "--run", seeded.pr1_run, "--to", str(target)])
+    assert refused.exit_code == 1 and "--force" in refused.output
+    assert (target / "files.jsonl").is_symlink() and not (target / "tables.json").exists()
+    forced = runner.invoke(cli, ["facts", "export", "--run", seeded.pr1_run, "--to", str(target), "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert outside.read_text(encoding="utf-8") == "ORIGINAL"  # the link was replaced, not followed
+    assert not (target / "files.jsonl").is_symlink() and (target / "files.jsonl").stat().st_size > 0
+    assert (target / "notes.txt").read_text(encoding="utf-8") == "keep me"
+    assert (target / EXPORT_MARKER).is_file()
+    # an earlier export is rewritten without --force, even with a planted link in it
+    (target / "tables.json").unlink()
+    (target / "tables.json").symlink_to(outside)
+    again = runner.invoke(cli, ["facts", "export", "--run", seeded.pr1_run, "--to", str(target)])
+    assert again.exit_code == 0, again.output
+    assert outside.read_text(encoding="utf-8") == "ORIGINAL" and not (target / "tables.json").is_symlink()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert runner.invoke(cli, ["facts", "export", "--run", seeded.pr1_run, "--to", str(link)]).exit_code == 1
+
+
+def test_explain_notes_are_redacted_and_capped() -> None:
+    from coverset.commands.facts import MAX_NOTE_CHARS, _safe_note
+
+    token = "ghp_" + "a1B2" * 9
+    note = _safe_note(f"error: bad row {token}\n\u202eevil " + "x" * 2000)
+    assert token not in note and "\u202e" not in note and "\n" not in note
+    assert "\\u202e" in note and len(note) == MAX_NOTE_CHARS and note.endswith("…")

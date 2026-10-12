@@ -10,7 +10,9 @@ source at the run's head commit (read from the mirror like the source view, only
 facts list the file; the plugin's collected markers are not persisted); the invariants that link it
 (``invariant_results.covering_test_ids`` of the run). Result: ``test_results`` and
 ``test_attempts`` of the run, the failure text from the run's ``test`` events (already redacted).
-History: the test's last :data:`HISTORY_RUNS` results, as squares. Data flow, from the run's facts
+History: the test's last :data:`HISTORY_RUNS` results, as squares. Every string from the bundle
+(test id, paths, names) shows its bidirectional controls as visible ``<U+202E>`` markers (the
+``visible`` template filter, :func:`~coverset.report.output.mark_bidi`). Data flow, from the run's facts
 (:func:`~coverset.facts.queries.test_touched` and :func:`~coverset.facts.queries.test_shapes`):
 the functions it called with the lines it ran in each, the input classes it passed per parameter
 (strips: this test vs any test) and the flow SVG (:mod:`coverset.web.render.flow`).
@@ -33,6 +35,7 @@ from coverset.db.models import PullRequest, Run, RunEvent, TestAttempt, TestCase
 from coverset.facts import queries
 from coverset.lang.base import ShapeObs
 from coverset.orchestrator.history import nodeid_hash
+from coverset.report.output import mark_bidi
 from coverset.web.context import app_db
 from coverset.web.facts_view import ParamReach, RunFacts, param_reach, reached_classes, test_file
 from coverset.web.loaders import default_run, facts_for, invariant_rows, read_source, require_run, store
@@ -40,7 +43,7 @@ from coverset.web.pages import get_repo, render_page
 from coverset.web.render.flow import FlowNode, TestCall, render_test_flow
 from coverset.web.render.shapegrid import render_strip
 
-__all__ = ["bp", "line_ranges", "test_decorations"]
+__all__ = ["bp", "line_ranges", "split_nodeid", "test_decorations", "test_label"]
 
 bp = Blueprint("testpage", __name__)
 
@@ -48,6 +51,8 @@ HISTORY_RUNS = 12
 MAX_NODEID_CHARS = 512
 MAX_SOURCE_CHARS = 2_000_000
 FLOW_W = 1100.0
+MAX_DB_ID = 2**63 - 1
+"""Larger path ids cannot be a database id: a 404 before any query (SQLite would overflow)."""
 
 
 # -- source: markers and @given ----------------------------------------------------------------------
@@ -103,6 +108,38 @@ def _module_marks(tree: ast.Module) -> list[ast.expr]:
     return []
 
 
+def split_nodeid(nodeid: str) -> tuple[str, list[str], str]:
+    """``(file, names, params)`` of a node id: ``t.py::Cls::test_x[a::b]`` is
+    ``("t.py", ["Cls", "test_x"], "[a::b]")``. The file ends at the first ``::``, the parametrize id
+    starts at the first ``[`` after it and may itself hold ``::``."""
+    file, sep, rest = nodeid.partition("::")
+    if not sep:
+        return nodeid, [], ""
+    head, bracket, params = rest.partition("[")
+    return file, head.split("::"), bracket + params
+
+
+def test_label(nodeid: str) -> str:
+    """The short name of a test: its function with the parametrize id (``test_x[a::b]``)."""
+    _file, names, params = split_nodeid(nodeid)
+    return (names[-1] + params) if names else nodeid
+
+
+test_label.__test__ = False  # type: ignore[attr-defined]
+
+
+@bp.app_template_filter("visible")
+def visible(value: object) -> str:
+    """A bundle string with bidirectional controls shown as ``<U+202E>`` markers (escape after)."""
+    return mark_bidi("" if value is None else str(value))
+
+
+@bp.app_template_filter("test_label")
+def test_label_filter(value: str) -> str:
+    """:func:`test_label` for templates."""
+    return test_label(value)
+
+
 def test_decorations(source: str, nodeid: str) -> Decorations | None:
     """Markers, invariant ids and ``@given`` of ``nodeid`` from its file's source (None when the
     source does not parse or the test function is not found: a generated or dynamic test)."""
@@ -112,8 +149,8 @@ def test_decorations(source: str, nodeid: str) -> Decorations | None:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
-    names = [part.split("[", 1)[0] for part in nodeid.split("::")[1:]]
-    if not names:
+    _file, names, _params = split_nodeid(nodeid)
+    if not names or not all(names):
         return None
     body: list[ast.stmt] = tree.body
     decorators: list[ast.expr] = _module_marks(tree)
@@ -196,11 +233,9 @@ def _share(obs: ShapeObs) -> int:
     return max(1, math.ceil(obs.samples / max(1, len(obs.tests))))
 
 
-def _test_label(nodeid: str) -> str:
-    return nodeid.rsplit("::", 1)[-1] if "::" in nodeid else nodeid
-
-
 async def _resolve(rid: int, test_id: int) -> tuple[Any, TestCase, Run | None]:
+    if rid > MAX_DB_ID or test_id > MAX_DB_ID:
+        raise NotFound("There is no such test.")
     repo = await get_repo(rid)
     async with app_db().session() as session:
         case = await session.get(TestCase, test_id)
@@ -214,6 +249,8 @@ async def _resolve(rid: int, test_id: int) -> tuple[Any, TestCase, Run | None]:
 @bp.get("/repos/<int:rid>/tests/by-nodeid")
 async def by_nodeid(rid: int) -> Response:
     """Redirect a nodeid (``?nodeid=``, keeping ``?run=``) to its test page."""
+    if rid > MAX_DB_ID:
+        raise NotFound("There is no such repository.")
     repo = await get_repo(rid)
     nodeid = request.args.get("nodeid", "")
     if not nodeid or len(nodeid) > MAX_NODEID_CHARS:
@@ -271,7 +308,6 @@ async def test_page(rid: int, test_id: int) -> Response:
     files: list[FileRow] = []
     decorations = None
     facts_exists = False
-    test_lines: dict[str, list[int]] = {}
     if run is not None:
         facts = await facts_for(run)
         facts_exists = facts.exists
@@ -282,7 +318,6 @@ async def test_page(rid: int, test_id: int) -> Response:
                 decorations = await asyncio.to_thread(test_decorations, source, case.nodeid)
         if facts_exists:
             files, flow = await _data_flow(rid, run, facts, case)
-            test_lines = {f.path: list(f.run_lines) for f in files}
     return await render_page(
         "test.html",
         repo=repo,
@@ -299,21 +334,26 @@ async def test_page(rid: int, test_id: int) -> Response:
         facts_exists=facts_exists,
         files=files,
         flow=flow,
-        test_lines=test_lines,
         test_path=test_file(case.nodeid),
         called=sum(len(f.functions) for f in files),
     )
 
 
 async def _failure_text(session: Any, run_id: str, nodeid: str) -> str | None:
-    """The newest ``longrepr`` the run's ``test`` events carry for ``nodeid`` (redacted at write)."""
-    events = await session.scalars(
-        select(RunEvent)
-        .where(RunEvent.run_id == run_id, RunEvent.kind == "test")
+    """The newest ``longrepr`` the run's ``test`` events carry for ``nodeid`` (redacted at write).
+
+    Only that test's events are read (the JSON ``nodeid`` is matched in SQL), newest first."""
+    payloads = await session.scalars(
+        select(RunEvent.payload)
+        .where(
+            RunEvent.run_id == run_id,
+            RunEvent.kind == "test",
+            RunEvent.payload["nodeid"].as_string() == nodeid,
+        )
         .order_by(RunEvent.seq.desc())
     )
-    for event in events:
-        payload = event.payload or {}
+    for payload in payloads:
+        payload = payload or {}
         text = payload.get("longrepr")
         if payload.get("nodeid") == nodeid and isinstance(text, str) and text:
             return text
@@ -423,7 +463,7 @@ async def _data_flow(rid: int, run: Run, facts: RunFacts, case: TestCase) -> tup
         if test_path in facts.statics
         else url_for("testpage.test_page", rid=rid, test_id=case.id, run=run.id)
     )
-    test_node = FlowNode("test", _test_label(nodeid), test_href, title=nodeid)
+    test_node = FlowNode("test", test_label(nodeid), test_href, title=nodeid)
     flow = render_test_flow(test_node, calls, width=FLOW_W)
     return files, flow
 

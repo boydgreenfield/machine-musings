@@ -3,16 +3,23 @@
 Sources: a ``pytest --coverset-out`` directory, a ``bundle.tar.gz`` (extracted safely into a
 temporary directory with :func:`~coverset.facts.untrusted.extract_bundle`), a neutral bundle
 directory or ``tar.gz`` (``manifest.json``; read with ``coverset.lang.read_any_bundle``), or a run
-in the facts store (:func:`load_run`). Source files are read from ``repo_root`` only (default: the
-bundle's ``git_root``/``rootdir`` when that is an existing directory, else the current directory).
+in the facts store (:func:`load_run`).
+
+Which local files are read is never the bundle's choice (its ``git_root``, ``rootdir`` and paths are
+untrusted): :func:`source_access` decides. With ``--repo-root`` sources are read under that root (only
+the files git tracks there when it is a git work tree); without it, a ``--coverset-out`` directory
+reads from the current directory only when that is a git work tree, and only files git tracks; an
+archive or a neutral bundle reads no source at all. When nothing is read, every page says why.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +27,30 @@ from coverset.facts.convert import read_python_bundle
 from coverset.facts.untrusted import BundleError, extract_bundle
 from coverset.lang.base import IMPORT_CONTEXT, NeutralBundle
 from coverset.report.facts import (
+    MAX_SOURCE_BYTES,
+    NO_RESULT,
+    NOT_RUN,
     BundleFacts,
     ReportInput,
     TestInfo,
     bundle_regions,
     bundle_types,
     catalogue_from_descriptors,
+    decode_source,
     read_sources,
     regions_for,
 )
 
-__all__ = ["input_from_bundle", "load_bundle", "load_run", "neutral_reader", "read_bundle_path"]
+__all__ = [
+    "SourceAccess",
+    "input_from_bundle",
+    "load_bundle",
+    "load_run",
+    "neutral_reader",
+    "read_bundle_path",
+    "source_access",
+    "tracked_files",
+]
 
 MANIFEST = "manifest.json"
 ARCHIVE = "bundle.tar.gz"
@@ -100,22 +120,97 @@ def _read_dir(root: Path) -> tuple[NeutralBundle, str]:
     return read_python_bundle(root), "python"
 
 
-def default_repo_root(meta: dict[str, Any]) -> Path:
-    """The bundle's ``git_root`` (else ``rootdir``, ``repo_root``) when it is an existing directory,
-    else the current directory."""
-    for key in ("git_root", "rootdir", "repo_root"):
-        value = meta.get(key)
-        if isinstance(value, str) and value:
-            candidate = Path(value)
-            if candidate.is_absolute() and candidate.is_dir():
-                return candidate
-    return Path.cwd()
+@dataclass(frozen=True, slots=True)
+class SourceAccess:
+    """Where a report may read source files from."""
+
+    root: Path | None
+    """The directory sources are read under; None reads no source at all."""
+    tracked: frozenset[str] | None = None
+    """When set, only these root-relative paths (the files git tracks under ``root``) are read."""
+    notice: str | None = None
+    """Why no source was read (shown on every page and by the CLI)."""
+
+    def describe(self) -> str:
+        """The about page's "Sources read from" value."""
+        if self.root is None:
+            return "nothing (no source file was read)"
+        return f"{self.root} (only files git tracks there)" if self.tracked is not None else str(self.root)
+
+
+def tracked_files(root: Path) -> frozenset[str] | None:
+    """The paths (relative to ``root``, POSIX) git tracks under ``root``, or None when ``root`` is not
+    in a git work tree or git cannot be run. Git runs with the scrubbed environment of the mirrors
+    (no user or system config) and with the file-system monitor off, so the repository's own config
+    cannot start a program."""
+    from coverset.orchestrator.repos import git_env
+
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root), "ls-files", "-z", "--cached"],
+            env=git_env(),
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return frozenset(p.decode("utf-8", "surrogateescape") for p in proc.stdout.split(b"\0") if p)
+
+
+def is_plugin_dir(source: Path, kind: str) -> bool:
+    """A ``pytest --coverset-out`` directory (``coverage.sqlite`` at its top), as opposed to an
+    archive or a neutral bundle."""
+    source = Path(source)
+    return kind == "python" and source.is_dir() and (source / "coverage.sqlite").is_file()
+
+
+def source_access(
+    source: Path, kind: str, paths: Iterable[str], repo_root: Path | None = None, *, cwd: Path | None = None
+) -> SourceAccess:
+    """Where to read the sources of a bundle from (never from the bundle's own meta):
+
+    * ``repo_root`` given: under it, and only the files git tracks there when it is a git work tree;
+    * a ``--coverset-out`` directory: the current directory, when it is a git work tree that tracks
+      at least one of the bundle's paths (and only the tracked ones are read);
+    * otherwise (an archive, a neutral bundle, or a current directory that is not such a work tree):
+      nothing, with a notice saying to pass ``--repo-root``.
+    """
+    if repo_root is not None:
+        root = Path(repo_root).resolve()
+        return SourceAccess(root, tracked_files(root))
+    if not is_plugin_dir(source, kind):
+        return SourceAccess(
+            None,
+            notice="this bundle is an archive or a neutral bundle, which never chooses the local "
+            "directory sources come from: pass --repo-root DIR to show them.",
+        )
+    here = (cwd or Path.cwd()).resolve()
+    tracked = tracked_files(here)
+    if tracked is None:
+        return SourceAccess(
+            None,
+            notice=f"the current directory ({here}) is not a git work tree, and a bundle never chooses "
+            "the local directory sources come from: run from the repository, or pass --repo-root DIR.",
+        )
+    wanted = list(paths)
+    if wanted and not any(p in tracked for p in wanted):
+        return SourceAccess(
+            None,
+            notice=f"git tracks none of the bundle's {len(wanted)} measured files in the current "
+            f"directory ({here}): run from the repository the tests ran in, or pass --repo-root DIR.",
+        )
+    return SourceAccess(here, tracked)
 
 
 def load_bundle(source: Path, *, repo_root: Path | None = None, title: str | None = None) -> ReportInput:
-    """A report input from a bundle directory or archive, with sources read under ``repo_root``."""
+    """A report input from a bundle directory or archive, with sources read as
+    :func:`source_access` decides."""
     bundle, kind = read_bundle_path(source)
-    return input_from_bundle(bundle, source=Path(source), kind=kind, repo_root=repo_root, title=title)
+    access = source_access(Path(source), kind, bundle.static, repo_root)
+    return input_from_bundle(bundle, source=Path(source), kind=kind, access=access, title=title)
 
 
 def input_from_bundle(
@@ -124,14 +219,25 @@ def input_from_bundle(
     source: Path,
     kind: str,
     repo_root: Path | None = None,
+    access: SourceAccess | None = None,
     title: str | None = None,
 ) -> ReportInput:
     """A report input from an in-memory bundle (``bundle.functions`` and ``bundle.types`` are used
-    when the neutral model carries them)."""
+    when the neutral model carries them). Sources are read as ``access`` says; without it, under
+    ``repo_root`` (git-tracked files only when it is a git work tree), and with neither, not at all.
+    """
     meta = dict(bundle.meta) if isinstance(bundle.meta, dict) else {}
-    root = Path(repo_root) if repo_root is not None else default_repo_root(_flat_meta(meta))
+    if access is None:
+        if repo_root is not None:
+            root = Path(repo_root).resolve()
+            access = SourceAccess(root, tracked_files(root))
+        else:
+            access = SourceAccess(None, notice="no repository root was given: pass --repo-root DIR.")
     paths = sorted(bundle.static)
-    sources = read_sources(root, paths)
+    if access.root is not None:
+        sources = read_sources(access.root, paths, tracked=access.tracked)
+    else:
+        sources = dict.fromkeys(paths)
     regions = regions_for(paths, sources, bundle)
     types = bundle_types(bundle, regions)
     # Declared types shipped in the bundle win over whatever the source parser would read: a
@@ -145,11 +251,15 @@ def input_from_bundle(
         nodeid: {path: frozenset(lines) for path, lines in by_path.items()}
         for nodeid, by_path in bundle.coverage.items()
     }
-    name = root.name or "repository"
+    name = access.root.name if access.root is not None else ""
+    read = sum(1 for text in sources.values() if text is not None)
+    untracked = sum(1 for p in paths if p not in access.tracked) if access.tracked is not None else 0
     about = {
         "source": str(source),
         "bundle_kind": kind,
-        "repo_root": str(root),
+        "repo_root": access.describe(),
+        "sources": f"{read} of {len(paths)} measured files read"
+        + (f"; {untracked} not tracked by git there, so not read" if untracked else ""),
         "regions_from_bundle": bool(bundle_regions(bundle)),
         "types_from_bundle": len(types),
         "meta": meta,
@@ -160,20 +270,16 @@ def input_from_bundle(
         coverage=coverage,
         sources=sources,
         meta=about,
-        title=title or f"Coverage report · {name}",
+        title=title or (f"Coverage report · {name}" if name else "Coverage report"),
         origin=f"bundle {source.name}",
         types=types,
+        notice=access.notice,
     )
 
 
-def _flat_meta(meta: dict[str, Any]) -> dict[str, Any]:
-    """The plugin's meta (top level), or a neutral manifest's ``meta`` merged under it."""
-    inner = meta.get("meta")
-    return {**inner, **meta} if isinstance(inner, dict) else meta
-
-
 def tests_from_bundle(bundle: NeutralBundle) -> list[TestInfo]:
-    """Every test of the bundle: its result row, else its collected item (never ran)."""
+    """Every test of the bundle: its result row, else its collected item (never ran), else
+    ``no result`` for a test that only appears in the coverage."""
     out: dict[str, TestInfo] = {}
     for row in bundle.tests:
         out[row.nodeid] = TestInfo(
@@ -188,7 +294,8 @@ def tests_from_bundle(bundle: NeutralBundle) -> list[TestInfo]:
         out.setdefault(item.nodeid, TestInfo(nodeid=item.nodeid, file=item.file, outcome=None))
     for nodeid in bundle.coverage:
         if nodeid != IMPORT_CONTEXT and nodeid not in out:
-            out[nodeid] = TestInfo(nodeid=nodeid, file=nodeid.split("::", 1)[0], outcome=None)
+            # it ran measured lines, but the bundle has no result for it
+            out[nodeid] = TestInfo(nodeid=nodeid, file=nodeid.split("::", 1)[0], outcome=NO_RESULT)
     return sorted(out.values(), key=lambda t: t.nodeid)
 
 
@@ -269,8 +376,8 @@ async def load_run(
         blobs = {}
     sources: dict[str, str | None] = {p: None for p in paths}
     for path, data in blobs.items():
-        if len(data) <= 4 * 1024 * 1024:
-            sources[path] = data.decode("utf-8", "replace")
+        if len(data) <= MAX_SOURCE_BYTES:
+            sources[path] = decode_source(data, path)
     coverage = await asyncio.to_thread(_store_coverage, store, repo_id, run_id)
     messages: dict[str, tuple[str | None, str | None]] = {}
     for event in events:
@@ -289,7 +396,7 @@ async def load_run(
         tests[nodeid] = TestInfo(
             nodeid=nodeid,
             file=nodeid.split("::", 1)[0],
-            outcome=str(result.outcome),
+            outcome=_outcome_label(result.outcome),
             duration_s=(result.duration_ms or 0.0) / 1000.0 if result.duration_ms is not None else None,
             failed_phase=str(result.failed_phase) if result.failed_phase else phase,
             message=text,
@@ -299,7 +406,12 @@ async def load_run(
         if nodeid and nodeid != IMPORT_CONTEXT and nodeid not in tests:
             text, phase = messages.get(nodeid, (None, None))
             tests[nodeid] = TestInfo(
-                nodeid, nodeid.split("::", 1)[0], row["outcome"], row["duration_s"], phase, text
+                nodeid,
+                nodeid.split("::", 1)[0],
+                _outcome_label(row["outcome"]),
+                row["duration_s"],
+                phase,
+                text,
             )
     convert = [
         {"shard": row["shard_id"], "attempt": row["attempt"], "status": row["status"],
@@ -323,6 +435,14 @@ async def load_run(
         title=title or f"Coverage report · {repo_name} · {label}",
         origin=f"run {run_id} ({head_sha[:8]})",
     )
+
+
+def _outcome_label(value: object) -> str | None:
+    """A stored outcome as the report labels it (the planner's ``not_run`` is "not run")."""
+    if value is None:
+        return None
+    text = str(value)
+    return NOT_RUN if text == "not_run" else text
 
 
 def _json_or_none(text: str | None) -> Any:

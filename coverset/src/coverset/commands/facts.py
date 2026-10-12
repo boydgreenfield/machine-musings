@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +34,10 @@ from coverset.config import Settings
 __all__ = ["ANY_BRANCH", "FACTS_DEBUG_COMMANDS", "facts_query_command", "shapes_command"]
 
 MAX_CELL_CHARS = 60
+MAX_NOTE_CHARS = 500
+"""An ingest note (a converter error, say) is cut here in ``facts explain``."""
+EXPORT_MARKER = ".coverset-export"
+"""File ``facts export`` writes into its target; only such a directory is written into again."""
 ANY_BRANCH = "any"
 """``--branch`` value that pools runs of every branch."""
 
@@ -485,7 +491,7 @@ def _explain(settings: Settings, store: Any, repo: Any, run: Any, extra: dict[st
                 "tests": r.n_tests,
                 "test_lines": r.n_test_lines,
                 "ingested_at": r.ingested_at,
-                "notes": r.tracer_notes,
+                "notes": [_safe_note(note) for note in r.tracer_notes],
             }
             for r in records
         ],
@@ -496,6 +502,17 @@ def _explain(settings: Settings, store: Any, repo: Any, run: Any, extra: dict[st
         if prior is None
         else {"id": prior.id, "status": prior.status, "head_sha": prior.head_sha, "branch": prior.branch},
     }
+
+
+def _safe_note(note: str) -> str:
+    """An ingest note as ``explain`` prints it: credential shapes and registered secrets redacted,
+    control and bidirectional characters shown as escapes, at most :data:`MAX_NOTE_CHARS`. The
+    converter's error text can quote the bundle, which is untrusted."""
+    from coverset.logging import redact
+
+    text = redact(str(note))
+    text = "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text)
+    return text if len(text) <= MAX_NOTE_CHARS else text[: MAX_NOTE_CHARS - 1] + "…"
 
 
 def _limits(store: Any, repo_id: int, run_id: str, records: Any) -> dict[str, Any]:
@@ -683,7 +700,7 @@ def facts_line_command(location: str, repo_spec: str | None, run_id: str | None,
     from coverset.facts.store import FactsStore
 
     path, sep, number = location.rpartition(":")
-    if not sep or not path or not number.isdigit():
+    if not sep or not path or not (number.isascii() and number.isdigit()):
         raise click.BadParameter("expected PATH:LINE, e.g. src/pkg/mod.py:42", param_hint="LOCATION")
     line = int(number)
     settings = load()
@@ -745,10 +762,15 @@ def facts_line_command(location: str, repo_spec: str | None, run_id: str | None,
     "target",
     required=True,
     type=click.Path(file_okay=False, writable=True, path_type=Path),
-    help="Directory to write (created if missing).",
+    help="Directory to write (created if missing). It must be new, empty, or an earlier export's.",
+)
+@click.option(
+    "--force", is_flag=True, help="Write into a non-empty directory that is not an earlier export's."
 )
 @click.option("--json", "as_json", is_flag=True, help="Print the index as JSON.")
-def facts_export_command(repo_spec: str | None, run_id: str, target: Path, as_json: bool) -> None:
+def facts_export_command(
+    repo_spec: str | None, run_id: str, target: Path, force: bool, as_json: bool
+) -> None:
     """Write every facts table of a run as JSON lines (``<table>.jsonl``) plus a ``tables.json``
     index and the repo's ``dictionary.json`` (the ids behind ``test_id``, ``file_id``, ``shape_id``).
 
@@ -756,6 +778,10 @@ def facts_export_command(repo_spec: str | None, run_id: str, target: Path, as_js
     tracer already redacted (and failure text is not stored in facts at all), so the export is safe
     to attach to a bug report; it is still the repository's code structure, so share it as you
     would the repository.
+
+    The target must be new, empty, or hold the ``.coverset-export`` marker an earlier export wrote
+    (``--force`` writes into any directory). Every file is created afresh (an existing name, a
+    symlink included, is removed first and never followed).
     """
     from coverset.facts.dictionary import DICTIONARY_FILE
     from coverset.facts.schema import RUN_TABLES, TABLES
@@ -765,12 +791,15 @@ def facts_export_command(repo_spec: str | None, run_id: str, target: Path, as_js
     repo, run, _extra = run_async(lambda: _repo_and_run(settings, repo_spec, run_id))
     store = FactsStore(settings.facts_dir)
     _require_facts(store, repo, run)
+    _check_export_target(target, force)
     target.mkdir(parents=True, exist_ok=True)
+    with _create(target, EXPORT_MARKER) as fh:
+        fh.write("coverset facts export: this directory is rewritten by `coverset facts export`.\n")
     index: dict[str, Any] = {"repo": repo.full_name, "repo_id": repo.id, "run_id": run.id, "tables": {}}
     for table in TABLES:
         data = store.read_table(repo.id, run.id, table)
         name = f"{table}.jsonl"
-        with (target / name).open("w", encoding="utf-8") as fh:
+        with _create(target, name) as fh:
             for row in data.to_pylist():
                 fh.write(json.dumps(row, default=str) + "\n")
         index["tables"][table] = {
@@ -782,15 +811,56 @@ def facts_export_command(repo_spec: str | None, run_id: str, target: Path, as_js
         }
     dictionary = store.repo_dir(repo.id) / DICTIONARY_FILE
     if dictionary.is_file():
-        (target / DICTIONARY_FILE).write_bytes(dictionary.read_bytes())
+        with _create(target, DICTIONARY_FILE) as fh:
+            fh.write(dictionary.read_text(encoding="utf-8"))
         index["dictionary"] = DICTIONARY_FILE
-    (target / "tables.json").write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    with _create(target, "tables.json") as fh:
+        fh.write(json.dumps(index, indent=2) + "\n")
     rows = [{"table": t, "rows": v["rows"], "file": v["file"]} for t, v in index["tables"].items()]
     _emit(
         index,
         f"wrote {len(rows)} tables to {target}\n" + format_rows(["table", "rows", "file"], rows),
         as_json,
     )
+
+
+def _check_export_target(target: Path, force: bool) -> None:
+    """Refuse a target that is a symlink or not a directory, and a non-empty directory without
+    :data:`EXPORT_MARKER` unless ``force``."""
+    try:
+        st = os.lstat(target)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise click.ClickException(f"{target} exists and is not a directory")
+    if force or not any(target.iterdir()):
+        return
+    try:
+        marker = os.lstat(target / EXPORT_MARKER)
+    except FileNotFoundError:
+        marker = None
+    if marker is None or not stat.S_ISREG(marker.st_mode):
+        raise click.ClickException(
+            f"{target} is not empty and holds no earlier export ({EXPORT_MARKER}): pass an empty or "
+            "new --to directory, or --force to write into it"
+        )
+
+
+def _create(target: Path, name: str) -> Any:
+    """``target/name`` opened for writing as a new file: whatever has that name (a file, or a symlink,
+    which is removed, not followed) goes first, and the open never follows a link."""
+    path = target / name
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise click.ClickException(f"cannot replace {path}: {exc.strerror}") from None
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        raise click.ClickException(f"cannot create {path}: {exc.strerror}") from None
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 FACTS_DEBUG_COMMANDS: dict[str, click.Command] = {

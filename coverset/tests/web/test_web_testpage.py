@@ -70,10 +70,7 @@ async def test_test_page_tells_the_failing_tests_story(client: Client, demo: Dem
     assert ">refund</code></a>" in page  # the function the test called, linked to its page
     assert re.search(r'<svg class="shape-strip"', page)
     assert "this test" in page and "any test" in page
-    blob = re.search(r"data-test-lines='([^']*)'", page)
-    assert blob
-    lines = json.loads(html_lib.unescape(blob.group(1)))
-    assert lines and all(isinstance(n, int) for ns in lines.values() for n in ns)
+    assert "data-test-lines" not in page  # the source view's ?test= lens replaced that payload
     fragment = await client.get(url, headers=HX)
     body = await fragment.get_data(as_text=True)
     assert fragment.status_code == 200 and "<!doctype" not in body.lower() and 'class="flow-test"' in body
@@ -95,9 +92,12 @@ async def test_the_page_agrees_with_the_facts_queries(client: Client, demo: Demo
     assert "refund" in called
     for qualname in called:
         assert f">{html_lib.escape(qualname)}</code></a>" in page
-    blob = re.search(r"data-test-lines='([^']*)'", page)
-    assert blob
-    assert json.loads(html_lib.unescape(blob.group(1))) == {f.path: list(f.lines) for f in touched}
+    for f in touched:
+        n = len(f.lines)
+        assert (
+            f'<code>{html_lib.escape(f.path)}</code> <span class="muted">· {n} line{"" if n == 1 else "s"} run'
+            in page
+        )
     shapes = queries.test_shapes(store, demo.repo_id, demo.pr1_run, nodeid)
     assert shapes and all(nodeid in o.tests or o.caller == nodeid for o in shapes)
     history = queries.test_history(store, demo.repo_id, nodeid, last_n=50)
@@ -279,3 +279,132 @@ def test_test_decorations_reads_markers_and_given() -> None:
     assert testpage.test_decorations(source, "tests/t.py::test_missing") is None
     assert testpage.test_decorations("def (", "tests/t.py::test_plain") is None
     assert testpage.line_ranges([5, 1, 2, 3, 7, 8]) == [(1, 3), (5, 5), (7, 8)]
+
+
+# -- the flow's counts and size --------------------------------------------------------------------
+
+
+def test_flow_counts_a_call_once_however_many_parameters_it_passed() -> None:
+    from coverset.web.render.flow import build_test_flow
+
+    test = FlowNode("t", "test_refund_partial")
+    refund = FlowNode("f", "refund")
+    calls = [TestCall(refund, "total_cents", None, 1, 1), TestCall(refund, "weights", None, 1, 1)]
+    _columns, edges = build_test_flow(test, calls)
+    by_pair = {(e.source, e.target): e for e in edges}
+    into = by_pair[((0, "t"), (2, "f"))]
+    assert into.weight == 1 and "1 sampled call," in into.title  # one call, not one per parameter
+    assert by_pair[((2, "f"), (3, "f\x00total_cents"))].weight == 1
+    # through a caller: test -> via and via -> function count the call once too
+    allocate = FlowNode("g", "allocate_cents")
+    calls = [
+        TestCall(allocate, "total_cents", None, 3, 1, refund),
+        TestCall(allocate, "weights", None, 2, 1, refund),
+    ]
+    _columns, edges = build_test_flow(test, calls)
+    weights = {(e.source, e.target): e.weight for e in edges}
+    assert weights[((0, "t"), (1, "f"))] == 3 and weights[((1, "f"), (2, "g"))] == 3
+    assert "Ribbon width = sampled calls; a hairline = one call" in str(render_test_flow(test, calls))
+
+
+def test_flow_is_capped() -> None:
+    from coverset.web.render.flow import MAX_FLOW_FUNCTIONS, MAX_FLOW_PARAMS
+
+    test = FlowNode("t", "test_big")
+    calls = [
+        TestCall(FlowNode(f"k{i}", f"fn{i}", f"/f/{i}"), p, None, 1 + i % 7, 2)
+        for i in range(5000)
+        for p in ("a", "b")
+    ]
+    svg = str(render_test_flow(test, calls))
+    assert len(svg) < 200_000
+    height = float(re.search(r'viewBox="0 0 [\d.]+ ([\d.]+)"', svg).group(1))  # type: ignore[union-attr]
+    assert height < 4000
+    assert f"+{5000 - MAX_FLOW_FUNCTIONS} more functions" in svg and "data-flow-capped" in svg
+    assert svg.count('class="fl-link"') <= 1 + MAX_FLOW_FUNCTIONS + 2 * MAX_FLOW_FUNCTIONS
+    wide = FlowNode("w", "wide")
+    many = [TestCall(wide, f"p{i}", None, 20 - i, 1) for i in range(MAX_FLOW_PARAMS + 8)]
+    svg = str(render_test_flow(test, many))
+    assert "+8 more parameters" in svg and ">p0 · 1 class<" in svg and "p19" not in svg
+    assert "data-flow-capped" not in svg
+
+
+# -- labels, ids and bidirectional text ------------------------------------------------------------
+
+
+def test_parametrize_ids_may_hold_double_colons() -> None:
+    assert testpage.split_nodeid("t.py::Cls::test_x[a::b]") == ("t.py", ["Cls", "test_x"], "[a::b]")
+    assert testpage.test_label("t.py::test_x[a::b]") == "test_x[a::b]"
+    assert testpage.test_label("//evil.example") == "//evil.example"
+    found = testpage.test_decorations(
+        "import pytest\n@pytest.mark.slow\ndef test_x(a):\n  pass\n", "t.py::test_x[a::b]"
+    )
+    assert found is not None and found.markers == ("slow",)
+
+
+async def test_huge_ids_are_not_found(client: Client, demo: Demo) -> None:
+    rid = demo.repo_id
+    assert (await client.get(f"/repos/{rid}/tests/99999999999999999999")).status_code == 404
+    assert (await client.get("/repos/99999999999999999999/tests/1")).status_code == 404
+    huge = await client.get("/repos/99999999999999999999/tests/by-nodeid?nodeid=t.py::t")
+    assert huge.status_code == 404
+
+
+BIDI_NODEID = "tests/test_refund.py::test_bidi[\u202eevil\u2066x\u2069]"
+
+
+@pytest.fixture
+def bidi_test(demo: Demo) -> Iterator[int]:
+    """A test with bidi controls in its nodeid and a result in the baseline run only."""
+    con = _db(demo)
+    try:
+        cur = con.execute(
+            "INSERT INTO tests (repo_id, nodeid, nodeid_hash, family, quarantined) VALUES (?, ?, ?, ?, 0)",
+            (demo.repo_id, BIDI_NODEID, nodeid_hash(BIDI_NODEID), BIDI_NODEID.split("[", 1)[0]),
+        )
+        test_id = int(cur.lastrowid or 0)
+        con.execute(
+            "INSERT INTO test_results (run_id, test_id, outcome, duration_ms, attempts, flaky, quarantined) "
+            "VALUES (?, ?, 'passed', 1.0, 1, 0, 0)",
+            (demo.baseline_run, test_id),
+        )
+        con.commit()
+        yield test_id
+    finally:
+        con.execute("DELETE FROM test_results WHERE test_id = ?", (test_id,))
+        con.execute("DELETE FROM tests WHERE id = ?", (test_id,))
+        con.commit()
+        con.close()
+
+
+async def test_bidi_controls_are_shown_not_applied(client: Client, demo: Demo, bidi_test: int) -> None:
+    rid = demo.repo_id
+    page = await (await client.get(f"/repos/{rid}/tests/{bidi_test}?run={demo.baseline_run}")).get_data(
+        as_text=True
+    )
+    assert "\u202e" not in page and "\u2066" not in page
+    assert "&lt;U+202E&gt;evil" in page
+    path = "src/ledger/billing/refund.py"
+    lens = await (
+        await client.get(f"/repos/{rid}/files/{path}?run={demo.pr1_run}&test={bidi_test}")
+    ).get_data(as_text=True)
+    assert "\u202e" not in lens and "&lt;U+202E&gt;" in lens
+    assert "data-not-in-run" in lens and "not in this run" in lens  # no result in PR #1's run
+    here = await (
+        await client.get(f"/repos/{rid}/files/{path}?run={demo.baseline_run}&test={bidi_test}")
+    ).get_data(as_text=True)
+    assert "data-not-in-run" not in here
+    test = FlowNode("t", "test_\u202eevil")
+    svg = str(render_test_flow(test, [TestCall(FlowNode("f", "f\u202e"), "p\u2066", None, 1, 1)]))
+    assert "\u202e" not in svg and "\u2066" not in svg and "&lt;U+202E&gt;" in svg
+
+
+async def test_prev_and_next_file_keep_the_lens(client: Client, demo: Demo) -> None:
+    rid = demo.repo_id
+    url = await _failing_test_url(client, demo)
+    test_id = url.split("/tests/", 1)[1].split("?", 1)[0]
+    page = await (
+        await client.get(f"/repos/{rid}/files/src/ledger/billing/refund.py?run={demo.pr1_run}&test={test_id}")
+    ).get_data(as_text=True)
+    navs = re.findall(r'<a href="([^"]+)" rel="(?:prev|next)"', page)
+    assert navs and all(f"test={test_id}" in html_lib.unescape(n) for n in navs)

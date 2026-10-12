@@ -178,7 +178,9 @@ def built(tmp_path: Path) -> tuple[Path, Path]:
     before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
     out = tmp_path / "out"
     bundle = hostile_bundle(repo, outside)
-    inp = input_from_bundle(bundle, source=Path(f"bundle-{SCRIPT}"), kind="neutral", title=f"T {SCRIPT}")  # type: ignore[arg-type]
+    inp = input_from_bundle(
+        bundle, source=Path(f"bundle-{SCRIPT}"), kind="neutral", repo_root=repo, title=f"T {SCRIPT}"
+    )  # type: ignore[arg-type]
     build_report(inp, out)
     after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if not p.is_relative_to(out))
     assert after == before, "the report wrote outside --out"

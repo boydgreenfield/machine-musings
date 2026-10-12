@@ -27,6 +27,7 @@
       <h3>Covering tests <span class="muted">· {% for name, n in outcomes %}{{ n }} {{ name }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not outcomes %}none{% endif %}</span></h3>
       {% if covering %}
       <ul class="test-list" data-covering>{% for nodeid, oc, href in covering %}<li>{{ outcome(oc) }}{{ test_ref(nodeid, link(href) if href else none) }}</li>{% endfor %}</ul>
+      {% if covering_more %}<p class="muted" data-more>+{{ covering_more }} more covering tests not listed (the first {{ covering|length }} by outcome, then id; search finds every test)</p>{% endif %}
       {% else %}<p class="empty">No test calls this function.</p>{% endif %}
     </section>
   </div>

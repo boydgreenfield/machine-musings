@@ -20,7 +20,7 @@ from quart import Blueprint, Response, request, url_for
 from sqlalchemy import select
 from werkzeug.exceptions import NotFound
 
-from coverset.db.models import PullRequest, Run, TestCase
+from coverset.db.models import PullRequest, Run, TestCase, TestResult
 from coverset.facts.queries import test_touched
 from coverset.orchestrator.repos import mirror_path
 from coverset.web.context import app_db, app_settings
@@ -141,12 +141,15 @@ async def source(rid: int, path: str) -> Response:
     if prefix in measured:
         prefix = prefix.rsplit("/", 1)[0] if "/" in prefix else ""
     labels = [(p, p[len(prefix) + 1 :] if prefix else p) for p in measured]
-    extra = {"pr": pr.number} if pr is not None else {}
+    extra: dict[str, Any] = {"pr": pr.number} if pr is not None else {}
+    lens = {"test": focus_test["test_id"]} if focus_test is not None else {}
     prev_url = (
-        url_for("files.source", rid=rid, path=measured[index - 1], run=run.id, **extra) if index > 0 else None
+        url_for("files.source", rid=rid, path=measured[index - 1], run=run.id, **extra, **lens)
+        if index > 0
+        else None
     )
     next_url = (
-        url_for("files.source", rid=rid, path=measured[index + 1], run=run.id, **extra)
+        url_for("files.source", rid=rid, path=measured[index + 1], run=run.id, **extra, **lens)
         if 0 <= index < len(measured) - 1
         else None
     )
@@ -180,18 +183,22 @@ async def _focus_for(
     rid: int, run: Run, path: str, facts: RunFacts
 ) -> tuple[frozenset[int] | None, dict[str, Any] | None]:
     """``?test=<id>``: the lines that test ran in ``path`` (a frozenset, empty when it never
-    touched the file) and the banner data, or ``(None, None)`` without the parameter. A test of
-    another repository is a 404; the id is the database's, as the test page uses it."""
+    touched the file) and the banner data (with ``in_run``: whether the test has a result in this
+    run), or ``(None, None)`` without the parameter. A test of another repository is a 404; the id
+    is the database's, as the test page uses it."""
     test_id = parse_int(request.args.get("test"), minimum=1)
     if test_id is None:
         return None, None
     async with app_db().session() as session:
         case = await session.get(TestCase, test_id)
-    if case is None or case.repo_id != rid:
-        raise NotFound(f"There is no test with id {test_id} in this repository.")
+        if case is None or case.repo_id != rid:
+            raise NotFound(f"There is no test with id {test_id} in this repository.")
+        result = await session.get(TestResult, (run.id, case.id))
     touched = await asyncio.to_thread(test_touched, facts.store, rid, run.id, case.nodeid)
     lines = frozenset(line for file in touched if file.path == path for line in file.lines)
     banner = {
+        "test_id": case.id,
+        "in_run": result is not None,
         "nodeid": case.nodeid,
         "url": url_for("testpage.test_page", rid=rid, test_id=case.id, run=run.id),
         "statements": sum(1 for n in lines if n in facts.line_facts(path).statements),

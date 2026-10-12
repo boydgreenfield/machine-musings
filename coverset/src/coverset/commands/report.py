@@ -33,8 +33,10 @@ __all__ = ["report_command"]
     "--repo-root",
     type=click.Path(path_type=Path, file_okay=False, exists=True),
     default=None,
-    help="Read source files from here (default: the bundle's git_root or rootdir, else the current "
-    "directory). Nothing outside it is read.",
+    help="Read source files from here: only plain relative paths that resolve inside it, and only "
+    "files git tracks there when it is a git work tree. Without it, a --coverset-out directory reads "
+    "the git-tracked files of the current directory (when that is a git work tree), and an archive "
+    "or a neutral bundle reads no source. The bundle never chooses. Not with --run.",
 )
 @click.option(
     "--run", "run_id", default=None, help="Build from this run in the facts store instead of SOURCE."
@@ -58,6 +60,10 @@ def report_command(
         raise click.UsageError("pass either SOURCE or --run RUN_ID")
     if repo_spec is not None and run_id is None:
         raise click.UsageError("--repo goes with --run")
+    if repo_root is not None and run_id is not None:
+        raise click.UsageError(
+            "--repo-root does not go with --run (its sources come from the repository's mirror)"
+        )
     try:
         if run_id is not None:
             from coverset.commands.common import load, run_async
@@ -71,6 +77,8 @@ def report_command(
     except (BundleError, OutDirError, LookupError) as exc:
         raise click.ClickException(str(exc)) from None
     total = sum(result.pages.values())
+    if inp.notice:
+        click.echo(f"sources not read: {inp.notice}", err=True)
     click.echo(
         f"wrote {total} pages ({result.pages['files']} files, {result.pages['functions']} functions, "
         f"{result.pages['tests']} tests) to {result.out_dir}",

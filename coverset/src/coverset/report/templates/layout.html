@@ -31,6 +31,8 @@
   <button type="button" id="theme-toggle" class="theme-toggle">Theme</button>
 </header>
 <main id="main">
+{% if notice %}<p class="sources-notice" role="note" data-sources-notice><strong>Sources not read.</strong> {{ notice }}</p>
+{% endif %}
 {% block main %}{% endblock %}
 </main>
 <footer>{{ title }} · static report from {{ origin }} · no history, no PR diff (see the live pages for those) · press <kbd>?</kbd> for keys</footer>

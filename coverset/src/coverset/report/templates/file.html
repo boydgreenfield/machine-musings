@@ -15,7 +15,7 @@
       <span data-file-stats>{{ entry.statements }} statements · {{ entry.missed }} never ran · {{ entry.partial }} partial{% if entry.hollow %} · {{ entry.hollow }} input class{{ '' if entry.hollow == 1 else 'es' }} never exercised{% endif %} · {{ entry.tests|length|plural('test') }}</span>
       <span class="muted">{% if prev_page %}<a href="{{ link(prev_page) }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_page %}<a href="{{ link(next_page) }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
     </div>
-    {% if lens_tests %}
+    {% if lens_tests and html is not none %}
     <div class="lens-bar">
       <label for="lens">Data-flow lens: what did this test touch?</label>
       <select id="lens">
@@ -36,7 +36,7 @@
     {{ html }}
     {% else %}
     <div class="no-source">
-      <p><strong>Source not available.</strong> <code>{{ entry.path }}</code> is listed in the bundle but could not be read under the repository root, so only its coverage summary is shown.</p>
+      <p><strong>Source not available.</strong> <code>{{ entry.path }}</code> is listed in the bundle but {% if notice %}no source file was read for this report (see the notice above){% else %}could not be read under the repository root (missing, not a regular file, larger than 4 MiB, outside the root, or not tracked by git){% endif %}, so only its coverage summary is shown.</p>
       <dl class="kv">
         <dt>Statements</dt><dd>{{ entry.statements }} ({{ entry.run }} ran, {{ entry.run_pct|pct }})</dd>
         <dt>Never ran</dt><dd>{{ missed_lines or 'none' }}</dd>

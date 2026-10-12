@@ -21,7 +21,8 @@ def bearer(token: str) -> dict[str, str]:
 
 
 async def test_every_page_needs_the_admin_token(client: Client, demo: Demo, admin_token: str) -> None:
-    for url in [*page_urls(demo), "/setup", f"/runs/{demo.pr1_run}/events"]:
+    redirect = f"/repos/{demo.repo_id}/tests/by-nodeid?nodeid=tests/test_refund.py::test_refund_partial"
+    for url in [*page_urls(demo), "/setup", f"/runs/{demo.pr1_run}/events", redirect]:
         anonymous = await client.get(url)
         assert anonymous.status_code == 401, url
         assert (await client.get(url, headers=HX)).status_code == 401, url

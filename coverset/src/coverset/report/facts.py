@@ -17,7 +17,10 @@ neutral model carries them (read with ``getattr``: older ``NeutralBundle`` build
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
+import io
+import tokenize
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -44,12 +47,17 @@ __all__ = [
     "BundleFacts",
     "ReportInput",
     "TestInfo",
+    "decode_source",
     "descriptor_annotation",
     "read_sources",
 ]
 
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 """Larger source files are shown as "source not available" (the report embeds every line)."""
+NOT_RUN = "not run"
+"""The label of a test that was collected (or planned) but never ran."""
+NO_RESULT = "no result"
+"""The label of a test that ran measured lines but has no result row (its outcome is unknown)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +69,8 @@ class TestInfo:
     nodeid: str
     file: str
     outcome: str | None
-    """``passed``, ``failed``, ... or None for a test that was collected but never ran."""
+    """``passed``, ``failed``, ..., :data:`NO_RESULT`, or None (:data:`NOT_RUN`) for a test that was
+    collected but never ran."""
     duration_s: float | None = None
     failed_phase: str | None = None
     message: str | None = None
@@ -84,6 +93,8 @@ class ReportInput:
     """One line saying where the facts came from (a bundle path or a run id)."""
     types: dict[str, dict[str, Any]] = field(default_factory=dict)
     """func_key → parameter (and ``return``) → type descriptor, from a neutral bundle."""
+    notice: str | None = None
+    """Why no source file was read (shown on every page), or None when sources were looked up."""
 
 
 class _Ids:
@@ -114,6 +125,12 @@ class BundleFacts(RunFacts):
         self._catalogues = dict(catalogues or {})
 
     # -- the tables RunFacts reads, built from the bundle -----------------------------------------
+
+    @cached_property
+    def _function_rows(self) -> list[dict[str, Any]]:
+        """No store ``functions`` table: the declared types a bundle ships reach the report as
+        ``catalogues`` (see :meth:`function_view`), so the store's descriptors are empty here."""
+        return []
 
     @cached_property
     def _nodeids(self) -> list[str]:
@@ -372,21 +389,27 @@ def return_annotation(found: FunctionCatalogue) -> Any:
 # -- sources ------------------------------------------------------------------------------------------
 
 
-def read_sources(root: Path, paths: Iterable[str]) -> dict[str, str | None]:
+def read_sources(
+    root: Path, paths: Iterable[str], *, tracked: frozenset[str] | None = None
+) -> dict[str, str | None]:
     """Each path's text under ``root`` (None when missing, unsafe, too large or outside ``root``).
 
     Only plain relative paths are read, symlinks are resolved and must stay inside ``root``, and only
-    regular files up to :data:`MAX_SOURCE_BYTES` are read (decoded as UTF-8 with replacement).
+    regular files up to :data:`MAX_SOURCE_BYTES` are read (:func:`decode_source`). With ``tracked``
+    (the paths git tracks under ``root``), a path is read only when it and the file it resolves to
+    are both in it.
     """
     base = Path(root).resolve()
     out: dict[str, str | None] = {}
     for path in paths:
         out[path] = None
-        if safe_rel_path(path) is None:
+        if safe_rel_path(path) is None or (tracked is not None and path not in tracked):
             continue
         try:
             candidate = (base / path).resolve(strict=True)
             if not candidate.is_relative_to(base):
+                continue
+            if tracked is not None and candidate.relative_to(base).as_posix() not in tracked:
                 continue
             with open_regular(candidate) as fh:
                 data = fh.read(MAX_SOURCE_BYTES + 1)
@@ -394,8 +417,41 @@ def read_sources(root: Path, paths: Iterable[str]) -> dict[str, str | None]:
             continue
         if len(data) > MAX_SOURCE_BYTES:
             continue
-        out[path] = data.decode("utf-8", "replace")
+        out[path] = decode_source(data, path)
     return out
+
+
+_COOKIE_FAMILIES = (
+    "utf-8",
+    "ascii",
+    "latin-1",
+    "iso8859",
+    "cp",
+    "mac-",
+    "koi8",
+    "euc",
+    "shift_jis",
+    "gb",
+    "big5",
+)
+
+
+def decode_source(data: bytes, path: str = "") -> str:
+    """Source bytes as text: a UTF-8 byte-order mark is dropped, a Python file's coding cookie is
+    honoured (as :func:`tokenize.detect_encoding` reads it) when it names an ordinary text encoding,
+    and anything else is UTF-8 with replacement characters."""
+    if path.endswith((".py", ".pyi", ".pyw")):
+        try:
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+            name = codecs.lookup(encoding).name
+        except (SyntaxError, LookupError):
+            name = ""
+        if name.startswith(_COOKIE_FAMILIES) and name not in ("utf-8", "utf-8-sig"):
+            text = data.decode(name, "replace")
+            return text[1:] if text.startswith("\ufeff") else text
+    if data.startswith(codecs.BOM_UTF8):
+        data = data[len(codecs.BOM_UTF8) :]
+    return data.decode("utf-8", "replace")
 
 
 def regions_for(

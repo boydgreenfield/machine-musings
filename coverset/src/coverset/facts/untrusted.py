@@ -98,14 +98,23 @@ def safe_rel_path(value: object) -> str | None:
 
 
 def open_regular(path: Path) -> IO[bytes]:
-    """Open ``path`` for reading without following a symlink; refuse anything but a regular file."""
+    """Open ``path`` for reading without following a symlink; refuse anything but a regular file.
+
+    The open is non-blocking, so a FIFO or a device in place of the file is refused at once instead
+    of hanging the reader; the descriptor is switched back to blocking once it is known to be a
+    regular file.
+    """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise BundleError(f"cannot open {path.name}: {exc.strerror}") from exc
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise BundleError(f"{path.name} is not a regular file")
+        os.set_blocking(fd, True)
+    except BaseException:
         os.close(fd)
-        raise BundleError(f"{path.name} is not a regular file")
+        raise
     return os.fdopen(fd, "rb")
 
 

@@ -29,7 +29,7 @@ def data_block(html: str) -> dict:
 @pytest.fixture(scope="module")
 def report(fixture_out: FixtureRun, tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("report") / "out"
-    build_report(load_bundle(fixture_out.out), out)
+    build_report(load_bundle(fixture_out.out, repo_root=fixture_out.project), out)
     return out
 
 
@@ -148,10 +148,10 @@ def test_function_page_shows_hollow_classes_and_suggestion(report: Path) -> None
 
 def test_regeneration_is_idempotent(fixture_out: FixtureRun, tmp_path: Path) -> None:
     out = tmp_path / "out"
-    inp = load_bundle(fixture_out.out)
+    inp = load_bundle(fixture_out.out, repo_root=fixture_out.project)
     build_report(inp, out)
     first = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
-    build_report(load_bundle(fixture_out.out), out)
+    build_report(load_bundle(fixture_out.out, repo_root=fixture_out.project), out)
     second = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
     assert first == second
 
@@ -161,13 +161,15 @@ def test_out_dir_is_refused_unless_it_is_ours(fixture_out: FixtureRun, tmp_path:
     precious.mkdir()
     (precious / "notes.txt").write_text("keep me", encoding="utf-8")
     with pytest.raises(OutDirError):
-        build_report(load_bundle(fixture_out.out), precious)
+        build_report(load_bundle(fixture_out.out, repo_root=fixture_out.project), precious)
     assert (precious / "notes.txt").read_text(encoding="utf-8") == "keep me"
     empty = tmp_path / "empty"
     empty.mkdir()
-    build_report(load_bundle(fixture_out.out), empty)
+    build_report(load_bundle(fixture_out.out, repo_root=fixture_out.project), empty)
     (empty / "stale.html").write_text("old", encoding="utf-8")
-    build_report(load_bundle(fixture_out.out), empty)  # ours: emptied and rewritten
+    build_report(
+        load_bundle(fixture_out.out, repo_root=fixture_out.project), empty
+    )  # ours: emptied and rewritten
     assert not (empty / "stale.html").exists()
 
 

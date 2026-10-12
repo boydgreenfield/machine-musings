@@ -9,7 +9,7 @@
     <span data-outcome="{{ test.info.outcome or 'not run' }}">{{ outcome(test.info.outcome) }}</span>
     <span>{{ test.info.duration_s|duration }}</span>
     {% if test.info.failed_phase %}<span>failed in {{ test.info.failed_phase }}</span>{% endif %}
-    <span>{{ files|length|plural('file') }} · {{ functions|length|plural('function') }} touched</span>
+    <span>{{ files|length|plural('file') }} · {{ functions_total|plural('function') }} touched</span>
   </p>
 </div>
 {% if message %}
@@ -56,6 +56,7 @@
     {% endfor %}
     </tbody>
   </table>
+  {% if functions_total > functions|length %}<p class="muted" data-more>+{{ functions_total - functions|length }} more functions not listed (a test page lists the first {{ functions|length }}, in file order)</p>{% endif %}
   {% else %}<p class="empty">This test ran no measured function body.</p>{% endif %}
 </section>
 {% endblock %}

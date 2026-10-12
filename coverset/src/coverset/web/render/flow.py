@@ -10,10 +10,15 @@ its bars, last column right of them, middle columns just above their bars (with 
 :func:`build_test_flow` turns one test's calls into those columns: the test → in-repo callers the
 shape observations name ("via", only when a call came through another function) → the functions it
 called → their parameters, labelled with how many input classes this test carried. Ribbon width is
-sampled calls (a function the tracer never sampled for this test still gets a hairline); the shade
-steps with the classes carried (1, 2, 3–4, 5+), as in the ribbon.
+sampled calls: a call passes every parameter at once, so a ribbon into a function (or a "via") is the
+most samples any one parameter got, not their sum, and a ribbon into a parameter is that parameter's
+samples (a function the tracer never sampled for this test still gets a hairline); the shade steps
+with the classes carried (1, 2, 3–4, 5+), as in the ribbon. Only the :data:`MAX_FLOW_FUNCTIONS`
+functions with the most sampled calls get a bar (the rest share one "+N more" bar) and only
+:data:`MAX_FLOW_PARAMS` parameters per function, so the SVG stays a readable size.
 
-Every interpolated value is escaped (``esc``/``attr``) and every URL passes ``safe_href``.
+Every interpolated value is escaped (``esc``/``attr``) after its bidirectional controls are made
+visible (:func:`~coverset.report.output.mark_bidi`), and every URL passes ``safe_href``.
 """
 
 from __future__ import annotations
@@ -24,7 +29,10 @@ from dataclasses import dataclass, field
 
 from markupsafe import Markup
 
-from coverset.web.render.html import attr, esc, num, safe_href, truncate
+from coverset.report.output import mark_bidi
+from coverset.web.render.html import attr as _attr
+from coverset.web.render.html import esc as _esc
+from coverset.web.render.html import num, safe_href, truncate
 
 __all__ = ["FlowEdge", "FlowNode", "TestCall", "build_test_flow", "render_flow", "render_test_flow"]
 
@@ -36,6 +44,11 @@ LABEL_ABOVE = 5.0
 TOP = 34.0
 BOTTOM = 10.0
 MIN_EDGE = 1.0
+MAX_FLOW_FUNCTIONS = 40
+"""A test's flow draws at most this many functions (by sampled calls); the rest share one bar."""
+MAX_FLOW_PARAMS = 12
+"""A function's bar fans out to at most this many parameters (by sampled calls)."""
+MORE_KEY = "\x00more"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +85,16 @@ class _Box:
     out_offset: float = 0.0
     in_offset: float = 0.0
     sums: list[float] = field(default_factory=lambda: [0.0, 0.0])
+
+
+def esc(text: object) -> Markup:
+    """Escaped text with bidirectional controls shown as ``<U+202E>`` markers."""
+    return _esc(mark_bidi("" if text is None else str(text)))
+
+
+def attr(text: object) -> Markup:
+    """An escaped attribute value with bidirectional controls shown as markers."""
+    return _attr(mark_bidi("" if text is None else str(text)))
 
 
 def level(classes: int) -> int:
@@ -244,63 +267,119 @@ def _plural(n: int, word: str, many: str | None = None) -> str:
 
 
 def build_test_flow(
-    test: FlowNode, calls: Sequence[TestCall]
+    test: FlowNode,
+    calls: Sequence[TestCall],
+    *,
+    max_functions: int = MAX_FLOW_FUNCTIONS,
+    max_params: int = MAX_FLOW_PARAMS,
 ) -> tuple[list[tuple[str, list[FlowNode]]], list[FlowEdge]]:
     """The columns and edges of one test's flow (see the module docstring)."""
-    vias: dict[str, FlowNode] = {}
     functions: dict[str, FlowNode] = {}
-    params: dict[str, FlowNode] = {}
-    weights: dict[tuple[tuple[int, str], tuple[int, str]], list[int]] = defaultdict(lambda: [0, 0])
-    param_classes: dict[str, int] = defaultdict(int)
+    # (via key or None, function key) -> param (or None) -> [samples, classes]
+    per_call: dict[tuple[str | None, str], dict[str | None, list[int]]] = defaultdict(dict)
+    via_nodes: dict[str, FlowNode] = {}
+    param_href: dict[tuple[str, str], str | None] = {}
     for call in calls:
         functions.setdefault(call.function.key, call.function)
-        samples = max(0, call.samples)
-        fn_key = (2, call.function.key)
+        via = call.via.key if call.via is not None else None
         if call.via is not None:
-            vias.setdefault(call.via.key, call.via)
-            via_key = (1, call.via.key)
-            _add(weights, (0, test.key), via_key, samples, call.classes)
-            _add(weights, via_key, fn_key, samples, call.classes)
-        else:
-            _add(weights, (0, test.key), fn_key, samples, call.classes)
+            via_nodes.setdefault(call.via.key, call.via)
+        slot = per_call[(via, call.function.key)].setdefault(call.param, [0, 0])
+        slot[0] += max(0, call.samples)
+        slot[1] = max(slot[1], call.classes)
         if call.param is not None:
-            pkey = f"{call.function.key}\x00{call.param}"
-            param_classes[pkey] = max(param_classes[pkey], call.classes)
-            params.setdefault(
-                pkey,
-                FlowNode(key=pkey, label=call.param, href=call.param_href),
+            param_href.setdefault((call.function.key, call.param), call.param_href)
+
+    # one call carries every parameter: a ribbon into a function is its busiest parameter's samples
+    into: dict[tuple[str | None, str], tuple[int, int]] = {
+        key: (max(v[0] for v in by_param.values()), max(v[1] for v in by_param.values()))
+        for key, by_param in per_call.items()
+    }
+    totals: dict[str, int] = defaultdict(int)
+    for (_via, fn), (samples, _classes) in into.items():
+        totals[fn] += samples
+    order = {key: i for i, key in enumerate(functions)}
+    ranked = sorted(functions, key=lambda k: (-totals[k], order[k]))
+    kept = set(ranked[:max_functions])
+    hidden = [k for k in ranked if k not in kept]
+
+    vias: dict[str, FlowNode] = {}
+    weights: dict[tuple[tuple[int, str], tuple[int, str]], list[int]] = defaultdict(lambda: [0, 0])
+    params: dict[str, list[int]] = {}
+    for (via, fn), (samples, classes) in into.items():
+        if fn not in kept:
+            continue
+        fn_key = (2, fn)
+        if via is not None:
+            vias.setdefault(via, via_nodes[via])
+            _add(weights, (0, test.key), (1, via), samples, classes)
+            _add(weights, (1, via), fn_key, samples, classes)
+        else:
+            _add(weights, (0, test.key), fn_key, samples, classes)
+        for param, (p_samples, p_classes) in per_call[(via, fn)].items():
+            if param is None:
+                continue
+            slot = params.setdefault(f"{fn}\x00{param}", [0, 0])
+            slot[0] += p_samples
+            slot[1] = max(slot[1], p_classes)
+    if hidden:
+        more_samples = sum(totals[k] for k in hidden)
+        _add(weights, (0, test.key), (2, MORE_KEY), more_samples, 0)
+
+    param_nodes: list[FlowNode] = []
+    by_function: dict[str, list[tuple[str, list[int]]]] = defaultdict(list)
+    for key, slot in params.items():
+        by_function[key.split("\x00", 1)[0]].append((key, slot))
+    for fn in functions:
+        rows = sorted(by_function.get(fn, ()), key=lambda kv: -kv[1][0])
+        for key, (samples, classes) in rows[:max_params]:
+            name = key.split("\x00", 1)[1]
+            note = _plural(classes, "class", "classes")
+            param_nodes.append(
+                FlowNode(
+                    key=key,
+                    label=name,
+                    href=param_href.get((fn, name)),
+                    note=note,
+                    title=f"{functions[fn].label}({name}): this test carried {note}",
+                )
             )
-            _add(weights, fn_key, (3, pkey), samples, call.classes)
-    param_nodes = []
-    for key, node in params.items():
-        classes = param_classes[key]
-        fn_label = functions[key.split("\x00", 1)[0]].label
-        note = _plural(classes, "class", "classes")
-        param_nodes.append(
+            _add(weights, (2, fn), (3, key), samples, classes)
+        if len(rows) > max_params:
+            rest = rows[max_params:]
+            key = f"{fn}\x00{MORE_KEY}"
+            label = f"+{len(rest)} more parameters"
+            param_nodes.append(FlowNode(key=key, label=label, title=f"{functions[fn].label}: {label}"))
+            _add(weights, (2, fn), (3, key), sum(s for _, (s, _c) in rest), max(c for _, (_s, c) in rest))
+    function_nodes = [functions[k] for k in functions if k in kept]
+    if hidden:
+        label = f"+{len(hidden)} more functions"
+        function_nodes.append(
             FlowNode(
-                key=key,
-                label=node.label,
-                href=node.href,
-                note=note,
-                title=f"{fn_label}({node.label}): this test carried {note}",
+                key=MORE_KEY,
+                label=label,
+                title=f"{label} with fewer sampled calls: the table below lists every function",
             )
         )
     columns: list[tuple[str, list[FlowNode]]] = [
         ("test", [test]),
         ("via", list(vias.values())),
-        ("functions it called", list(functions.values())),
+        ("functions it called", function_nodes),
         ("parameters · classes this test carried", param_nodes),
     ]
+    labels = {(0, test.key): test.label}
+    labels.update({(1, k): v.label for k, v in vias.items()})
+    labels.update({(2, n.key): n.label for n in function_nodes})
+    labels.update({(3, n.key): n.label for n in param_nodes})
     edges = []
     for (a, b), (samples, classes) in weights.items():
-        what = (
-            f"{_plural(samples, 'sampled call')}, {_plural(classes, 'input class', 'input classes')}"
-            if samples
-            else "its body ran; the tracer sampled no call for this test"
-        )
-        source = test.label if a[0] == 0 else (vias[a[1]].label if a[0] == 1 else functions[a[1]].label)
-        target = functions[b[1]].label if b[0] == 2 else vias[b[1]].label if b[0] == 1 else params[b[1]].label
-        title = f"{source} → {target}: {what}"
+        if b == (2, MORE_KEY):
+            what = f"{_plural(samples, 'sampled call')} into {len(hidden)} functions not drawn"
+        elif samples:
+            what = f"{_plural(samples, 'sampled call')}, {_plural(classes, 'input class', 'input classes')}"
+        else:
+            what = "its body ran; the tracer sampled no call for this test"
+        title = f"{labels[a]} → {labels[b]}: {what}"
         edges.append(FlowEdge(a, b, max(samples, MIN_EDGE), level(classes), title))
     return columns, edges
 
@@ -318,8 +397,8 @@ def _add(
 
 
 FLOW_LEGEND = Markup(
-    '<p class="rb-legend">Ribbon width: sampled calls (a hairline when the tracer sampled none for '
-    "this test). Shade: input classes this test carried "
+    '<p class="rb-legend">Ribbon width = sampled calls; a hairline = one call (or none sampled for '
+    "this test: its body ran). Shade: input classes this test carried "
     '<svg viewBox="0 0 64 10" class="sw-row" aria-hidden="true">'
     + "".join(
         f'<rect class="rb-l{i}" x="{(i - 1) * 16}" width="14" height="10" rx="2"/>' for i in range(1, 5)
@@ -331,11 +410,19 @@ FLOW_LEGEND = Markup(
 def render_test_flow(test: FlowNode, calls: Sequence[TestCall], *, width: float = 1100.0) -> Markup:
     """One test's data-flow SVG: test → via → functions → parameters."""
     columns, edges = build_test_flow(test, calls)
+    called = len({call.function.key for call in calls})
+    legend = FLOW_LEGEND
+    if called > MAX_FLOW_FUNCTIONS:
+        legend = Markup(
+            f'{FLOW_LEGEND}<p class="rb-legend" data-flow-capped>Drawn: the {MAX_FLOW_FUNCTIONS} functions '
+            f"with the most sampled calls of the {called} this test called (the table lists every one), "
+            f"and at most {MAX_FLOW_PARAMS} parameters per function.</p>"
+        )
     return render_flow(
         columns,
         edges,
         width=width,
         label=f"Data flow of {test.label}: functions it called and the parameters it passed",
-        legend=FLOW_LEGEND,
+        legend=legend,
         empty="This test called no measured function in this run.",
     )
