@@ -107,8 +107,8 @@ async def test_repo_overview_class_changes_since_the_previous_baseline(client: C
     changes = queries.class_changes(_store(demo), demo.repo_id, trend[-1].run_id, trend[-2].run_id)
     assert f'data-changes="{len(changes)}"' in section
     item = next(li for li in section.split("<li>") if ">merge_intervals</code>" in li)
-    assert "chg-gained" in item and ">intervals:single</span>" in item
-    assert "chg-lost" not in item
+    assert "delta-gained" in item and ">intervals:single</span>" in item
+    assert "delta-lost" not in item
     for change in changes:
         assert f">{change.qualname}</code></a>" in section
         assert f"/functions/{change.func_key}?run={trend[-1].run_id}" in section

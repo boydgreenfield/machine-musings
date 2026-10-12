@@ -51,11 +51,11 @@
         {% for c in ov.changes %}
         <li>
           <a href="{{ url_for('files.function', rid=repo.id, func_key=c.func_key, run=ov.run_id) }}"><code>{{ c.qualname }}</code></a> <span class="muted">{{ c.path }}</span>
-          {% if c.lost %}<span class="chg chg-lost">lost</span> {% for name in c.lost %}<span class="chip chip-hollow" title="{{ name }}: observed in {{ ov.prior.head_sha|sha }}, not in {{ p.head_sha|sha }}">{{ name }}</span> {% endfor %}{% elif c.lost_count %}<span class="chg chg-lost">lost</span> {{ c.lost_count|plural('class', 'classes') }} (no test passes it anything now){% endif %}
-          {% if c.gained %}<span class="chg chg-gained">gained</span> {% for name in c.gained %}<span class="chip" title="{{ name }}: first observed in {{ p.head_sha|sha }}">{{ name }}</span> {% endfor %}{% elif c.gained_count %}<span class="chg chg-gained">gained</span> {{ c.gained_count|plural('class', 'classes') }} (newly called){% endif %}
+          {% if c.lost %}<span class="delta delta-lost">lost</span> {% for name in c.lost %}<span class="chip chip-hollow" title="{{ name }}: observed in {{ ov.prior.head_sha|sha }}, not in {{ p.head_sha|sha }}">{{ name }}</span> {% endfor %}{% elif c.lost_count %}<span class="delta delta-lost">lost</span> {{ c.lost_count|plural('class', 'classes') }} (no test passes it anything now){% endif %}
+          {% if c.gained %}<span class="delta delta-gained">gained</span> {% for name in c.gained %}<span class="chip" title="{{ name }}: first observed in {{ p.head_sha|sha }}">{{ name }}</span> {% endfor %}{% elif c.gained_count %}<span class="delta delta-gained">gained</span> {{ c.gained_count|plural('class', 'classes') }} (newly called){% endif %}
           {% if c.expected_changed %}<span class="muted">· expects {{ c.prior_expected }} → {{ c.expected }} classes</span>{% endif %}
           {% if c.sampled and c.lost_count %}<span class="muted" data-sampled="1">· tests hit the sample cap: a lost class may only have gone unsampled</span>{% endif %}
-          {% if c.newly_uncovered %}<span class="chg chg-lines">lines no longer run</span> {{ c.newly_uncovered|join(', ') }}{% endif %}
+          {% if c.newly_uncovered %}<span class="delta delta-lines">lines no longer run</span> {{ c.newly_uncovered|join(', ') }}{% endif %}
         </li>
         {% endfor %}
       </ul>

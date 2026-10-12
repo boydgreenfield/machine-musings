@@ -630,11 +630,11 @@ svg.spark { display: block; overflow: visible; font-family: var(--font); flex: n
 .ov-changes { list-style: none; margin: 0; padding: 0; }
 .ov-changes li { padding: 5px 0; border-top: 1px solid var(--rule); line-height: 1.8; }
 .ov-changes .chip, .ov-classes .chip, .fn-lost .chip { font-family: var(--mono); font-size: 0.76rem; }
-.chg { margin-left: 6px; font-size: 0.72rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
-.chg-lost, .chg-lines { color: var(--miss-ink); }
-.chg-gained { color: var(--ran-ink); }
-.chg-lost::before, .chg-lines::before { content: "− "; }
-.chg-gained::before { content: "+ "; }
+.delta { margin-left: 6px; font-size: 0.72rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.delta-lost, .delta-lines { color: var(--miss-ink); }
+.delta-gained { color: var(--ran-ink); }
+.delta-lost::before, .delta-lines::before { content: "− "; }
+.delta-gained::before { content: "+ "; }
 .ov-gaps td { vertical-align: top; }
 .ov-classes { line-height: 1.9; }
 .ov-sparks { margin: 0; display: grid; gap: 6px; }
