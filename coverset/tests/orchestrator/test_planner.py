@@ -164,7 +164,7 @@ def test_parse_collect_json_validates_items() -> None:
                     "hypothesis": True,
                 },
                 {"nodeid": "t.py::a", "file": "t.py"},
-                {"nodeid": "x" * 600, "file": "t.py"},
+                {"nodeid": "x" * 5000, "file": "t.py"},
                 {"nodeid": 5},
                 "junk",
             ],

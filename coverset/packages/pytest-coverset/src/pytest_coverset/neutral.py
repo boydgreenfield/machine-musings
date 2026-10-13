@@ -34,7 +34,7 @@ converter does. Either way both readings of one run agree, from any working dire
   the control plane's Python reader leaves them out.
 * ``links.jsonl``: the invariant links.
 
-Test ids longer than 512 characters (the format's limit) are left out of every file and counted,
+Test ids longer than 4,096 characters (the format's limit) are left out of every file and counted,
 so a reader never drops a whole row for one of them. Stale files of either variant
 (``tests.jsonl`` next to ``tests.jsonl.gz``) are removed before writing. ``manifest.json`` is
 written after the data files, with ``meta`` the same mapping as ``meta.json`` except ``neutral``,
@@ -87,7 +87,7 @@ IMPORT_CONTEXT = "<import>"
 NEUTRAL_ENV = "COVERSET_NEUTRAL"
 SHARD_ENV = "COVERSET_SHARD"
 MAX_REPR_CHARS = 200
-MAX_ID_CHARS = 512
+MAX_ID_CHARS = 4096
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_LINE = 1_000_000
 STEMS = ("tests", "files", "coverage", "arcs", "functions", "shapes", "links")

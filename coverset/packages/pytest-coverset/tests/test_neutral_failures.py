@@ -173,7 +173,7 @@ def test_overlong_test_ids_are_left_out_and_counted(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     out = _project(pytester, monkeypatch)
-    long_param = "x" * 600
+    long_param = "x" * 5000
     (pytester.path / "tests" / "test_long.py").write_text(
         "import pytest\nfrom npkg.m import f\n\n\n"
         f"@pytest.mark.parametrize('v', [{long_param!r}, 'short'])\n"
@@ -182,9 +182,9 @@ def test_overlong_test_ids_are_left_out_and_counted(
     _run(pytester).assert_outcomes(passed=4)
     neutral = out / "neutral"
     ids = [row["id"] for row in _rows(neutral / "tests.jsonl.gz")]
-    assert len(ids) == 3 and all(len(i) <= 512 for i in ids)
+    assert len(ids) == 3 and all(len(i) <= 4096 for i in ids)
     shapes = [r for r in _rows(neutral / "shapes.jsonl.gz") if r["kind"] == "obs"]
-    assert shapes and all(all(len(t) <= 512 for t in r["tests"]) for r in shapes)
+    assert shapes and all(all(len(t) <= 4096 for t in r["tests"]) for r in shapes)
     assert any("test_param[short]" in t for r in shapes for t in r["tests"])
     dropped = json.loads((out / "meta.json").read_text())["neutral"]["dropped"]
     assert dropped["tests_long_ids"] == 1 and dropped["coverage_long_test_ids"] == 1

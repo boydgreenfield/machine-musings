@@ -11,7 +11,7 @@
     "test": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 512
+      "maxLength": 4096
     },
     "invariant": {
       "type": "string",

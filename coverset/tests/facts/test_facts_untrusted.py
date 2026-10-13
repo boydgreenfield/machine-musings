@@ -30,12 +30,12 @@ def _append(path: Path, *rows: object) -> None:
 
 @pytest.mark.security
 def test_oversized_and_bad_result_lines_are_dropped(bundle_copy: Path) -> None:
-    limits = BundleLimits(max_json_line_bytes=4096)
+    limits = BundleLimits(max_json_line_bytes=16_384)
     _append(
         bundle_copy / "results.jsonl",
-        {"nodeid": "tests/x.py::huge", "outcome": "passed", "longrepr": "x" * 10_000},
+        {"nodeid": "tests/x.py::huge", "outcome": "passed", "longrepr": "x" * 20_000},
         "{not json",
-        {"nodeid": "tests/x.py::" + "y" * 600, "outcome": "passed"},
+        {"nodeid": "tests/x.py::" + "y" * 5000, "outcome": "passed"},
         {"nodeid": "tests/x.py::weird", "outcome": "exploded"},
         {"nodeid": "../../etc/passwd::t", "outcome": "passed"},
         {"kind": "heartbeat"},

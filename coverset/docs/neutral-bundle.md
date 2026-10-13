@@ -36,8 +36,8 @@ readers (producer-specific detail goes in `manifest.json`'s `meta`).
 
 Paths are POSIX, relative to the repository root, never absolute, never containing `.`, `..` or
 empty segments, a backslash, a control character or a drive letter, at most 512 characters. Test
-ids are the framework's own (pytest nodeids, Jest's `file > describe > name`), at most 512
-characters, unique within the bundle. Line numbers are 1-based and at most 1,000,000. A bundle is
+ids are the framework's own (pytest nodeids, Jest's `file > describe > name`), at most 4,096
+characters (parametrised ids can be long), unique within the bundle. Line numbers are 1-based and at most 1,000,000. A bundle is
 untrusted input; see [Reading a bundle](#reading-a-bundle) for the limits readers apply.
 
 ### `manifest.json`

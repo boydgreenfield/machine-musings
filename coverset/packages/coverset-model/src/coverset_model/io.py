@@ -118,7 +118,7 @@ class Limits:
     gzip_max_bytes: int = 500 * MIB
     max_json_line_bytes: int = 1 * MIB
     max_manifest_bytes: int = 1 * MIB
-    max_nodeid_chars: int = 512
+    max_nodeid_chars: int = 4096
     max_path_chars: int = 512
     max_repr_chars: int = 200
     max_longrepr_chars: int = 8 * 1024

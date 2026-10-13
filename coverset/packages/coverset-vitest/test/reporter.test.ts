@@ -95,12 +95,12 @@ describe("uniqueIds", () => {
     ]);
   });
 
-  it("cuts long ids to 512 characters with a hash, unique and well-formed", () => {
-    const long = "f.test.ts > " + "x".repeat(600);
+  it("cuts long ids to 4,096 characters with a hash, unique and well-formed", () => {
+    const long = "f.test.ts > " + "x".repeat(5000);
     const other = "f.test.ts > " + "x".repeat(599) + "y";
     const ids = uniqueIds([long, other, long, "f.test.ts > " + "\u{1F600}".repeat(300)]);
     for (const id of ids) {
-      expect(id.length).toBeLessThanOrEqual(512);
+      expect(id.length).toBeLessThanOrEqual(4096);
       expect(id.isWellFormed()).toBe(true);
     }
     expect(new Set(ids).size).toBe(4);

@@ -26,7 +26,7 @@ import { PRODUCER, VERSION } from "./version.js";
 export const OUT_ENV = "COVERSET_OUT";
 export const SHARD_ENV = "COVERSET_SHARD";
 export const IMPORT_ID = "<import>";
-const MAX_ID = 512;
+const MAX_ID = 4096;
 /** `<pid>-<thread id>-<8 hex>.jsonl`, the name `setup.ts` gives a worker's spool. */
 const SPOOL_FILE = /^\d+-\d+-[0-9a-f]{8}\.jsonl$/;
 /** `run-<pid>-<8 hex>`, a run's spool directory. */

@@ -98,7 +98,7 @@ def test_conform_keeps_only_statement_lines_and_synthesises_collected_items() ->
         ("tests", lambda rows: [{**rows[0], "file": "/abs/t.ts"}, *rows[1:]], ("tests.jsonl", "path")),
         ("tests", lambda rows: [*rows, rows[0]], ("tests.jsonl", "duplicate")),
         ("tests", lambda rows: [{**rows[0], "id": IMPORT_CONTEXT}, *rows[1:]], ("tests.jsonl", "reserved")),
-        ("tests", lambda rows: [{**rows[0], "id": "x" * 600}, *rows[1:]], ("tests.jsonl", "schema")),
+        ("tests", lambda rows: [{**rows[0], "id": "x" * 5000}, *rows[1:]], ("tests.jsonl", "schema")),
         ("tests", lambda rows: [{**rows[0], "message": "m" * 9000}, *rows[1:]], ("tests.jsonl", "clipped")),
         ("tests", lambda rows: [{**rows[0], "retries": 2}, *rows[1:]], ("tests.jsonl", "unknown_field")),
         ("coverage", lambda rows: [{**rows[0], "lines": [1, 5]}, *rows[1:]], ("coverage.jsonl", "not_statement")),

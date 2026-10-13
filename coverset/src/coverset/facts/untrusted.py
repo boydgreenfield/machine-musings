@@ -92,7 +92,7 @@ class BundleLimits:
     gzip_floor_bytes: int = 16 * MIB
     gzip_max_bytes: int = 500 * MIB
     max_json_line_bytes: int = 1 * MIB
-    max_nodeid_chars: int = 512
+    max_nodeid_chars: int = 4096
     max_repr_chars: int = 200
     max_longrepr_chars: int = 8 * 1024
     max_members: int = 256

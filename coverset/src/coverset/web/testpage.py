@@ -48,7 +48,7 @@ __all__ = ["bp", "line_ranges", "split_nodeid", "test_decorations", "test_label"
 bp = Blueprint("testpage", __name__)
 
 HISTORY_RUNS = 12
-MAX_NODEID_CHARS = 512
+MAX_NODEID_CHARS = 4096
 MAX_SOURCE_CHARS = 2_000_000
 FLOW_W = 1100.0
 MAX_DB_ID = 2**63 - 1

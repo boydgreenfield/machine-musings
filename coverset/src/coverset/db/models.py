@@ -42,6 +42,8 @@ HASH_LEN = 64
 KEY_LEN = 128
 NAME_LEN = 255
 PATH_LEN = 1024
+NODEID_LEN = 4096
+"""Longest test id stored: parametrised pytest ids can run long (the neutral bundle's cap)."""
 
 ForgeKind = Literal["github", "fake", "local"]
 RunStatus = Literal[
@@ -277,7 +279,7 @@ class TestCase(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
-    nodeid: Mapped[str] = mapped_column(String(PATH_LEN))
+    nodeid: Mapped[str] = mapped_column(String(NODEID_LEN))
     nodeid_hash: Mapped[bytes] = mapped_column(LargeBinary(16))
     family: Mapped[str] = mapped_column(String(PATH_LEN))
     file_id: Mapped[int | None] = mapped_column(Integer)

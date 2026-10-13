@@ -135,7 +135,7 @@ test module failed to import (the good items and the errors are both in the file
 was collected. Codes 1 and 2 count only when ``collect.json`` parses."""
 MAX_COLLECT_ERRORS = 100
 MAX_COLLECT_ERROR_CHARS = 8 * 1024
-MAX_NODEID_CHARS = 512
+MAX_NODEID_CHARS = 4096
 DEFAULT_MEDIAN_S = UNKNOWN_DURATION_S
 """Duration assumed for a test nobody has timed yet, when no other test has been timed either."""
 
