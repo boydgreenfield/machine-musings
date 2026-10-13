@@ -186,6 +186,11 @@ class BundleFacts(RunFacts):
         order = np.lexsort((test_id, line, file_id))
         return file_id[order], line[order], test_id[order]
 
+    def release_line_table(self) -> None:
+        """Forget the per-line test table (built again by the next query that reads it): the
+        report reads it only while collecting, and in a large run it is the biggest table."""
+        self.__dict__.pop("_lines", None)
+
     @cached_property
     def run_arcs(self) -> dict[str, frozenset[tuple[int, int]]]:
         return {path: frozenset(arcs) for path, arcs in self.bundle.run_arcs.items()}
@@ -210,10 +215,24 @@ class BundleFacts(RunFacts):
                 out[key].append(obs)
         return out
 
+    @cached_property
+    def _sampling_index(self) -> tuple[dict[Any, list[Any]], dict[Any, list[Any]]]:
+        """The bundle's sampling rows by function triple and by ``(path, qualname)``, in order (a
+        row whose ``func`` is not a tuple never equals a region's triple, so it is left out)."""
+        by_func: dict[Any, list[Any]] = defaultdict(list)
+        by_name: dict[Any, list[Any]] = defaultdict(list)
+        for row in self.bundle.sampling:
+            if not isinstance(row.func, tuple):
+                continue
+            by_func[row.func].append(row)
+            by_name[row.func[:2]].append(row)
+        return by_func, by_name
+
     def sampling(self, region: FunctionRegion) -> FuncSampling | None:
-        rows = [s for s in self.bundle.sampling if s.func == region.triple]
+        by_func, by_name = self._sampling_index
+        rows = by_func.get(region.triple, [])
         if not rows:
-            rows = [s for s in self.bundle.sampling if s.func[:2] == region.triple[:2]]
+            rows = by_name.get(region.triple[:2], [])
             if len({s.func for s in rows}) > 1:
                 rows = []
         if not rows:

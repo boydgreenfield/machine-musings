@@ -233,3 +233,103 @@ def test_summary_line() -> None:
 
 def test_branch_counts_are_distinct_arcs() -> None:
     assert branch_counts([(1, 2), (1, 3), (1, 2), (4, -1)], {(1, 2), (9, 9)}) == (1, 3)
+
+
+# -- the lexing cache --------------------------------------------------------------------------------
+
+CACHED = (
+    "import os\n\n\n@dec\ndef f(a,\n      b):\n    x = [\n        1,\n    ]\n    return x\n\n\n"
+    "class K:\n    def m(self):\n        return (\n            1\n        )\n"
+)
+
+
+def _reference(text: str, facts: LineFacts, path: str, **options: object) -> str:
+    """The renderer without the cache: Pygments lexes and formats the whole text, and the
+    formatter skips the lines outside ``line_range`` itself."""
+    from pygments import highlight
+
+    from coverset.web.render.source import CoverageFormatter
+
+    formatter = CoverageFormatter(
+        facts, text_lines=text.split("\n"), continuations=continuation_lines(text, path), **options
+    )
+    return highlight(text, lexer_for(path), formatter)
+
+
+def _range_cases() -> list[dict[str, object]]:
+    from coverset.web.render.source import RegionMark
+
+    last = CACHED.count("\n") + 1  # past the last line: removed lines there close the view
+    removed = {1: ["gone\n"], 5: ["old a\n"], 10: ["old return\n"], last: ["tail\n"], 17: ["x\n"]}
+    out: list[dict[str, object]] = [
+        {},
+        {"removed": removed},
+        {"regions": [RegionMark(4, 10, "f", "function", "k"), RegionMark(13, 17, "K", "class")]},
+    ]
+    for lo, hi in ((1, 3), (4, 10), (14, 17), (16, last), (5, 400), (300, 400), (7, 6)):
+        out.append({"line_range": (lo, hi), "removed": removed, "anchor_prefix": "Fk-"})
+    out.append({"line_range": (4, 10), "changed": {5, 8}, "tests_url": lambda n: f"#L{n}"})
+    return out
+
+
+@pytest.mark.parametrize("path", ["m.py", "m.ts", "notes.txt"])
+def test_cached_renders_match_the_uncached_renderer(path: str) -> None:
+    from coverset.web.render.source import SourceCache
+
+    facts = LineFacts(
+        statements=frozenset({1, 4, 5, 7, 10, 13, 14, 15}),
+        executed=frozenset({1, 4, 5, 7, 13}),
+        partial={5: (-1,)},
+        tests={1: 2, 5: 1},
+    )
+    cache = SourceCache()
+    for options in _range_cases():
+        expected = _reference(CACHED, facts, path, **options)
+        assert str(render_source(CACHED, facts, path=path, cache=cache, **options)) == expected, options  # type: ignore[arg-type]
+        assert str(render_source(CACHED, facts, path=path, **options)) == expected, options  # type: ignore[arg-type]
+    assert cache.misses == 1
+
+
+def test_a_cache_lexes_and_tokenizes_each_text_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from coverset.web.render import source
+    from coverset.web.render.source import SourceCache
+
+    calls = {"lexer": 0, "continuations": 0}
+    real_lexer, real_continuations = source.lexer_for, source.continuation_lines
+
+    def counting_lexer(path: str):  # type: ignore[no-untyped-def]
+        calls["lexer"] += 1
+        return real_lexer(path)
+
+    def counting_continuations(text: str, path: str = "") -> dict[int, int]:
+        calls["continuations"] += 1
+        return real_continuations(text, path)
+
+    monkeypatch.setattr(source, "lexer_for", counting_lexer)
+    monkeypatch.setattr(source, "continuation_lines", counting_continuations)
+    cache = SourceCache()
+    facts = LineFacts(statements=frozenset({1, 5}), executed=frozenset({1}))
+    first = render_source(CACHED, facts, path="m.py", cache=cache)
+    for n in range(1, 13):
+        render_source(CACHED, facts, path="m.py", cache=cache, line_range=(n, n + 4))
+    assert render_source(CACHED, facts, path="m.py", cache=cache) == first
+    assert calls == {"lexer": 1, "continuations": 1}
+    # another text (or the same text under another lexer) is lexed once more; without a cache, each time
+    render_source(CACHED + "y = 1\n", facts, path="m.py", cache=cache)
+    render_source(CACHED, facts, path="m.ts", cache=cache)
+    render_source(CACHED, facts, path="m.py")
+    render_source(CACHED, facts, path="m.py")
+    assert calls == {"lexer": 5, "continuations": 5}
+
+
+def test_the_cache_keeps_the_most_recent_texts() -> None:
+    from coverset.web.render.source import SourceCache
+
+    cache = SourceCache(maxsize=2)
+    texts = [f"x = {n}\n" for n in range(3)]
+    for text in texts:
+        cache.lexed(text, "m.py")
+    assert cache.lexed(texts[2], "m.py") is cache.lexed(texts[2], "m.py")
+    assert cache.misses == 3
+    cache.lexed(texts[0], "m.py")  # evicted: lexed again
+    assert cache.misses == 4

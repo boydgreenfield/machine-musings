@@ -16,6 +16,11 @@ string, ...), so a token class never collides with the page's own classes (Pygme
 A statement that spans several physical lines (coverage.py reports it at its first line) is painted
 as one block: every continuation line (:func:`continuation_lines`) takes the state of the
 statement's first line and the ``cont`` class, without a gutter count or a "never ran" note.
+
+Lexing is the expensive half and depends on the text alone: a :class:`SourceCache` keeps each
+file's highlighted lines and continuation map, so a build that renders one file many times (the
+report's file page and one page per function) lexes it once, and a ``line_range`` render formats
+only its own lines.
 """
 
 from __future__ import annotations
@@ -23,12 +28,13 @@ from __future__ import annotations
 import io
 import re
 import tokenize
+from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
 from markupsafe import Markup
-from pygments import highlight
+from pygments import format as pygments_format
 from pygments.formatters.html import HtmlFormatter
 from pygments.lexer import Lexer
 from pygments.lexers import JavascriptLexer, PythonLexer, TextLexer, TypeScriptLexer
@@ -42,6 +48,7 @@ __all__ = [
     "LineFacts",
     "LineState",
     "RegionMark",
+    "SourceCache",
     "branch_counts",
     "bracket_continuations",
     "continuation_lines",
@@ -371,6 +378,77 @@ class FileSummary:
         return " · ".join(text for text, _title in self.items())
 
 
+# -- lexing, once per text ----------------------------------------------------------------------
+
+
+def _formatter_options() -> dict[str, object]:
+    """The ``HtmlFormatter`` options of :class:`CoverageFormatter` (the cached line HTML depends on
+    them, so the collector and the renderer share them)."""
+    return {"nowrap": False, "cssclass": "src-code", "classprefix": TOKEN_PREFIX}
+
+
+class _LineCollector(HtmlFormatter):  # type: ignore[type-arg]
+    """Keeps the ``(is_line, html)`` pieces Pygments hands to :meth:`wrap` and writes nothing."""
+
+    def __init__(self) -> None:
+        super().__init__(**_formatter_options())
+        self.pieces: list[tuple[int, str]] = []
+
+    def wrap(self, source: Iterable[tuple[int, str]]) -> Iterator[tuple[int, str]]:  # type: ignore[override]
+        self.pieces.extend(source)
+        return iter(())
+
+
+@dataclass(frozen=True, slots=True)
+class Lexed:
+    """What :func:`render_source` needs of a text before any coverage fact: the highlighted pieces
+    (one per source line), the physical lines and the continuation map."""
+
+    pieces: tuple[tuple[int, str], ...]
+    text_lines: tuple[str, ...]
+    continuations: Mapping[int, int]
+    lines_only: bool
+    """Whether every piece is a source line (what Pygments' HTML formatter yields): only then may
+    a ``line_range`` render take the slice of its lines."""
+
+
+def lex(text: str, path: str = "") -> Lexed:
+    """Highlight ``text`` with :func:`lexer_for` ``(path)`` into per-line HTML, and find its
+    multi-line statements (:func:`continuation_lines`)."""
+    collector = _LineCollector()
+    pygments_format(lexer_for(path).get_tokens(text), collector)
+    pieces = tuple(collector.pieces)
+    return Lexed(
+        pieces,
+        tuple(text.split("\n")),
+        continuation_lines(text, path),
+        lines_only=all(is_line for is_line, _ in pieces),
+    )
+
+
+class SourceCache:
+    """Per-build memo of :func:`lex` by ``(path, text)``, keeping the ``maxsize`` most recently
+    used texts (a report renders a file's page and its functions' pages one after another)."""
+
+    def __init__(self, maxsize: int = 8) -> None:
+        self.maxsize = max(1, maxsize)
+        self._entries: OrderedDict[tuple[str, str], Lexed] = OrderedDict()
+        self.misses = 0
+
+    def lexed(self, text: str, path: str = "") -> Lexed:
+        """The lexed ``text`` (lexed now on a miss)."""
+        key = (path, text)
+        found = self._entries.get(key)
+        if found is not None:
+            self._entries.move_to_end(key)
+            return found
+        self.misses += 1
+        found = self._entries[key] = lex(text, path)
+        while len(self._entries) > self.maxsize:
+            self._entries.popitem(last=False)
+        return found
+
+
 class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
     """``HtmlFormatter`` whose :meth:`wrap` emits one coverage-annotated block per line."""
 
@@ -387,8 +465,9 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         anchor_prefix: str = "L",
         focus: Collection[int] | None = None,
         continuations: Mapping[int, int] | None = None,
+        lexed: Lexed | None = None,
     ) -> None:
-        super().__init__(nowrap=False, cssclass="src-code", classprefix=TOKEN_PREFIX)
+        super().__init__(**_formatter_options())
         self.facts = facts
         self.text_lines = text_lines
         self.regions = sorted(regions, key=lambda r: (r.start, -r.end))
@@ -401,6 +480,23 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         """When set, every line outside it is dimmed (the data-flow lens of one test)."""
         self.continuations = continuations or {}
         """Continuation line → its statement's first line (:func:`continuation_lines`)."""
+        self.lexed = lexed
+        """Pre-highlighted lines (:func:`lex`): replayed instead of formatting the token stream."""
+        self._skipped = 0
+        self._total: int | None = None
+
+    def _format_lines(self, tokensource: Iterable[tuple[object, str]]) -> Iterator[tuple[int, str]]:
+        """The cached lines when :attr:`lexed` is set (only the ``line_range`` slice when every piece
+        is a line), else Pygments' own formatting of ``tokensource``."""
+        if self.lexed is None:
+            return super()._format_lines(tokensource)  # type: ignore[no-any-return]
+        pieces = self.lexed.pieces
+        self._skipped, self._total = 0, None
+        if self.line_range is not None and self.lexed.lines_only:
+            lo = max(1, self.line_range[0])
+            self._skipped, self._total = lo - 1, len(pieces)
+            return iter(pieces[lo - 1 : max(lo - 1, self.line_range[1])])
+        return iter(pieces)
 
     # Pygments calls wrap(source) with (is_line, html) pairs; we yield our own structure.
     def wrap(self, source: Iterable[tuple[int, str]]) -> Iterator[tuple[int, str]]:  # type: ignore[override]
@@ -408,7 +504,7 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         stack: list[RegionMark] = []
         pending = list(self.regions) if self.line_range is None else []
         headers = {id(r): header_line(self.text_lines, r) for r in pending}
-        number = 0
+        number = self._skipped  # lines before the first one fed (a line_range slice)
         yield 0, '<div class="src-lines">'
         for is_line, html in source:
             if not is_line:
@@ -433,6 +529,8 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
             yield 1, self._line(number, html, head_of, depth)
             if head_of is not None and head_of.chips is not None:
                 yield 0, str(head_of.chips)
+        if self._total is not None:
+            number = self._total  # as if the lines after the slice had been fed and skipped
         for text in self.removed.get(number + 1, ()):
             yield 0, self._removed_line(text)
         while stack:
@@ -526,13 +624,17 @@ def render_source(
     tests_url: Callable[[int], str] | None = None,
     anchor_prefix: str = "L",
     focus: Collection[int] | None = None,
+    cache: SourceCache | None = None,
 ) -> Markup:
     """Highlight ``text`` into the line-block structure, with the lexer :func:`lexer_for` picks
-    for ``path`` and its multi-line statements painted as blocks."""
-    lexer = lexer_for(path)
+    for ``path`` and its multi-line statements painted as blocks.
+
+    With a ``cache`` the text is lexed only on its first render (the same output either way); a
+    ``line_range`` render formats only the lines of its range."""
+    lexed = cache.lexed(text, path) if cache is not None else lex(text, path)
     formatter = CoverageFormatter(
         facts,
-        text_lines=text.split("\n"),
+        text_lines=lexed.text_lines,
         regions=regions,
         changed=changed,
         removed=removed,
@@ -540,6 +642,7 @@ def render_source(
         tests_url=tests_url,
         anchor_prefix=anchor_prefix,
         focus=focus,
-        continuations=continuation_lines(text, path),
+        continuations=lexed.continuations,
+        lexed=lexed,
     )
-    return Markup(highlight(text, lexer, formatter))
+    return Markup(pygments_format((), formatter))

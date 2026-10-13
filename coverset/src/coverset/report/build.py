@@ -31,13 +31,15 @@ renderers' links may be relative), data blocks go through
 
 from __future__ import annotations
 
+import gc
 import importlib.resources
 import json
 import os
 import re
 import shutil
-from collections import Counter, defaultdict
-from collections.abc import Iterable
+from bisect import bisect_left, bisect_right
+from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -52,7 +54,7 @@ from coverset.facts.queries import TreeNode
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion
 from coverset.report.compare import SLOWER_FACTOR, SLOWER_MIN_S, Comparison, compare
-from coverset.report.facts import NO_RESULT, NOT_RUN, ReportInput, TestInfo
+from coverset.report.facts import NO_RESULT, NOT_RUN, BundleFacts, ReportInput, TestInfo
 from coverset.report.output import (
     PageNames,
     Writer,
@@ -68,7 +70,14 @@ from coverset.web.facts_view import FunctionView, test_file
 from coverset.web.render.html import breakable, json_data, relative_hrefs
 from coverset.web.render.ribbon import render_ribbon
 from coverset.web.render.shapegrid import GridCell, render_grid, render_inlay, render_strip
-from coverset.web.render.source import FileSummary, LineFacts, RegionMark, branch_counts, render_source
+from coverset.web.render.source import (
+    FileSummary,
+    LineFacts,
+    RegionMark,
+    SourceCache,
+    branch_counts,
+    render_source,
+)
 from coverset.web.render.treemap import build_tree, render_legend, render_treemap
 
 __all__ = ["BuildResult", "build_report"]
@@ -84,6 +93,9 @@ MAX_LISTED = 200
 """A test page lists at most this many functions it ran, a function page at most this many covering
 tests (then a "+N more" line), so the report grows with tests + functions, not their product."""
 _FUNC_KEY = re.compile(r"^[0-9a-f]{16}$")
+MEMO_SIZE = 1024
+"""The test pages keep this many recent input-class strips and per-function reach rows (tests run in
+file order, so neighbours share them; a bound keeps a large run's memory flat)."""
 MAX_LINE_LINKS = 120
 """The Changes page links at most this many lines per file and kind (then "and N more")."""
 MAX_CHANGE_ROWS = 500
@@ -200,6 +212,18 @@ class FileEntry:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _TestIndex:
+    """What every test page looks up, built once before the test pages."""
+
+    observations: dict[str, dict[int, list[Any]]]
+    """Test node id → ``id(fn)`` → its observations (:meth:`_Builder.observations_by_test`)."""
+    measured: dict[str, frozenset[int]]
+    """Path → its statements minus the excluded ones."""
+    spans: dict[str, list[tuple[FnEntry, int, int, int]]]
+    """Path → its functions with their body span and ``id(fn)``."""
+
+
 @dataclass(slots=True)
 class TestEntry:
     """One test with its page."""
@@ -213,6 +237,24 @@ class TestEntry:
 
 
 # -- environment ----------------------------------------------------------------------------------
+
+
+def _memo_text(render: Callable[[object], Markup], limit: int = 65_536) -> Callable[[object], Markup]:
+    """``render`` remembered per plain string (a node id appears on every page that lists its
+    test); anything else is rendered each time."""
+    memo: dict[str, Markup] = {}
+
+    def remembered(text: object) -> Markup:
+        if type(text) is not str:
+            return render(text)
+        found = memo.get(text)
+        if found is None:
+            if len(memo) >= limit:
+                memo.clear()
+            found = memo[text] = render(text)
+        return found
+
+    return remembered
 
 
 def _pct(value: float | None) -> str:
@@ -239,7 +281,7 @@ def environment() -> jinja2.Environment:
         lstrip_blocks=True,
         keep_trailing_newline=True,
     )
-    env.filters["nodeid"] = breakable
+    env.filters["nodeid"] = _memo_text(breakable)
     env.filters["pct"] = _pct
     env.filters["plural"] = _plural
     env.filters["duration"] = _duration
@@ -280,7 +322,16 @@ def build_report(inp: ReportInput, out: Path, *, base: ReportInput | None = None
                 builder.changes = compare(
                     base, inp, now_views={fn.region.func_key: fn.view for fn in builder.functions}
                 )
-            pages = builder.write_all()
+            if isinstance(inp.facts, BundleFacts):
+                inp.facts.release_line_table()  # the pages read only what collect() kept
+            # the facts and views live until the end: keep the collector from rescanning them
+            # after every few thousand pages
+            gc.collect()
+            gc.freeze()
+            try:
+                pages = builder.write_all()
+            finally:
+                gc.unfreeze()
         root = swap_in(staging, target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -310,6 +361,10 @@ class _Builder:
         self.functions: list[FnEntry] = []
         self.tests: dict[str, TestEntry] = {}
         self.changes: Comparison | None = None
+        self.sources = SourceCache()
+        """Each source is lexed once: its file page and its functions' pages are written in a row."""
+        self._strips: _Recent[Markup] = _Recent(MEMO_SIZE)
+        self._reach: _Recent[list[Any]] = _Recent(MEMO_SIZE)
 
     # -- collection -------------------------------------------------------------------------
 
@@ -406,11 +461,23 @@ class _Builder:
         for i, path in enumerate(ordered):
             prev_page = self.files[ordered[i - 1]].page if i > 0 else None
             next_page = self.files[ordered[i + 1]].page if i + 1 < len(ordered) else None
-            self.file_page(self.files[path], prev_page, next_page)
-        for fn in self.functions:
-            self.function_page(fn)
-        for entry in self.tests.values():
-            self.test_page(entry)
+            entry = self.files[path]
+            self.file_page(entry, prev_page, next_page)
+            # the file's functions right after it, while its lexed source is in the cache
+            if entry.functions:
+                tests = sorted((nodeid, sorted(lines)) for nodeid, lines in entry.tests.items())
+                for fn in entry.functions:
+                    self.function_page(fn, tests)
+        index = _TestIndex(
+            observations=self.observations_by_test(),
+            measured={path: e.facts.statements - e.facts.excluded for path, e in self.files.items()},
+            spans={
+                path: [(fn, fn.region.body_start, fn.region.end_line, id(fn)) for fn in e.functions]
+                for path, e in self.files.items()
+            },
+        )
+        for test in self.tests.values():
+            self.test_page(test, index)
         counts = {
             "index": 1,
             "about": 1,
@@ -701,6 +768,7 @@ class _Builder:
                 path=entry.path,
                 regions=regions,
                 tests_url=lambda n: f"#L{n}",
+                cache=self.sources,
             )
             if self.changes is not None and entry.path in self.changes.marks:
                 html = mark_since(html, *self.changes.marks[entry.path])
@@ -781,7 +849,8 @@ class _Builder:
 
     # -- function pages -----------------------------------------------------------------------
 
-    def function_page(self, fn: FnEntry) -> None:
+    def function_page(self, fn: FnEntry, tests: Sequence[tuple[str, Sequence[int]]]) -> None:
+        """``tests``: the file's tests (sorted by node id) with the lines each ran, sorted."""
         from coverset.web.detail import hypothesis_stub
 
         page = fn.page
@@ -797,23 +866,21 @@ class _Builder:
                 line_range=(region.def_line, region.end_line),
                 tests_url=lambda n: f"#L{n}",
                 anchor_prefix=f"F{region.func_key[:8]}-",
+                cache=self.sources,
             )
         grid = render_grid(
             view.grid(), cell_url=lambda cell: "#", target=f"sg-{region.func_key}", width=GRID_W_FN
         )
         ribbon = render_ribbon(view.flows(test_file), width=GRID_W_FN)
-        tests_here = {
-            nodeid: frozenset(n for n in lines if region.def_line <= n <= region.end_line)
-            for nodeid, lines in entry.tests.items()
-        }
+        here = []
+        for nodeid, lines in tests:
+            inside = _within(lines, region.def_line, region.end_line)
+            if inside:
+                here.append([nodeid, self.outcome(nodeid) or NOT_RUN, self.tests[nodeid].hash, inside])
         data = {
             "kind": "function",
             "path": region.path,
-            "tests": [
-                [nodeid, self.outcome(nodeid) or NOT_RUN, self.tests[nodeid].hash, sorted(lines)]
-                for nodeid, lines in sorted(tests_here.items())
-                if lines
-            ],
+            "tests": here,
             "import": sorted(n for n in entry.import_lines if region.def_line <= n <= region.end_line),
         }
         outcomes = Counter(self.outcome(t) or NOT_RUN for t in fn.tests)
@@ -860,31 +927,58 @@ class _Builder:
 
     # -- test pages ---------------------------------------------------------------------------
 
-    def test_page(self, entry: TestEntry) -> None:
+    def observations_by_test(self) -> dict[str, dict[int, list[Any]]]:
+        """Test node id → ``id(fn)`` → the function's observations that test made: those naming it
+        in ``tests``, as the calling test (``caller``) or as the example's test, in the view's order.
+        Built once, so a test page does not scan every observation of every function it touched."""
+        out: dict[str, dict[int, list[Any]]] = defaultdict(dict)
+        for fn in self.functions:
+            for obs in fn.view.observations:
+                related = set(obs.tests)
+                if isinstance(obs.caller, str):
+                    related.add(obs.caller)
+                if obs.example_test is not None:
+                    related.add(obs.example_test)
+                for nodeid in related:
+                    out[nodeid].setdefault(id(fn), []).append(obs)
+        return out
+
+    def reach(self, fn: FnEntry, observations: list[Any]) -> list[Any]:
+        """:func:`_param_reach`, once per function and set of observations (many tests pass a
+        function the same ones)."""
+        key = (id(fn), tuple(id(o) for o in observations))
+        return self._reach.get(key, lambda: _param_reach(fn.view, observations))
+
+    def strip(self, cells: Any, *, label: str = "", missing: str = "never exercised") -> Markup:
+        """:func:`render_strip`, once per distinct strip (of the recent ones)."""
+
+        def render() -> Markup:
+            return render_strip(cells, label=label, missing=missing)
+
+        try:
+            key = (tuple(cells), label, missing)
+            hash(key)
+        except TypeError:  # an unhashable cell: render it each time
+            return render()
+        return self._strips.get(key, render)
+
+    def test_page(self, entry: TestEntry, index: _TestIndex) -> None:
         page = entry.page
-        nodeid = entry.info.nodeid
+        observations = index.observations.get(entry.info.nodeid, {})
         files = []
+        functions: list[tuple[FnEntry, int, list[Any]]] = []
         for path, lines in sorted(entry.files.items()):
-            file_entry = self.files[path]
-            statements = file_entry.facts.statements - file_entry.facts.excluded
-            files.append((file_entry, len(lines & statements), len(statements)))
-        functions = []
-        for file_entry, _, _ in files:
-            lines = entry.files[file_entry.path]
-            for fn in file_entry.functions:
-                body = {n for n in lines if fn.region.body_start <= n <= fn.region.end_line}
-                observations = [
-                    o
-                    for o in fn.view.observations
-                    if nodeid in o.tests or o.caller == nodeid or o.example_test == nodeid
-                ]
-                if not body and not observations:
-                    continue
-                functions.append((fn, len(body), observations))
+            statements = index.measured[path]
+            files.append((self.files[path], len(lines & statements), len(statements)))
+            ordered = sorted(lines)
+            for fn, start, end, key in index.spans[path]:
+                body = bisect_right(ordered, end) - bisect_left(ordered, start)
+                found = observations.get(key)
+                if body > 0 or found:
+                    functions.append((fn, max(0, body), found or []))
         functions_total = len(functions)
         functions = [
-            (fn, body_lines, _param_reach(fn.view, observations))
-            for fn, body_lines, observations in functions[:MAX_LISTED]
+            (fn, body_lines, self.reach(fn, found)) for fn, body_lines, found in functions[:MAX_LISTED]
         ]
         message = entry.info.message
         if message and len(message) > MAX_MESSAGE_CHARS:
@@ -898,12 +992,34 @@ class _Builder:
             files=files,
             functions=functions,
             functions_total=functions_total,
-            strip=render_strip,
+            strip=self.strip,
             data=None,
         )
 
 
 # -- helpers ---------------------------------------------------------------------------------------
+
+
+class _Recent[T]:
+    """A memo of the ``maxsize`` most recently used values."""
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = maxsize
+        self._values: OrderedDict[Hashable, T] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def get(self, key: Hashable, make: Callable[[], T]) -> T:
+        """The value of ``key``, made with ``make()`` when it is not among the recent ones."""
+        try:
+            self._values.move_to_end(key)
+            return self._values[key]
+        except KeyError:
+            value = self._values[key] = make()
+            if len(self._values) > self.maxsize:
+                self._values.popitem(last=False)
+            return value
 
 
 def _short(value: object, limit: int = 300) -> str:
@@ -934,6 +1050,11 @@ def mark_since(html: Markup, lost: frozenset[int], gained: frozenset[int]) -> Ma
         )
 
     return Markup(_LINE_HEAD.sub(mark, str(html)))
+
+
+def _within(lines: Sequence[int], lo: int, hi: int) -> list[int]:
+    """The lines of the sorted ``lines`` from ``lo`` to ``hi``."""
+    return list(lines[bisect_left(lines, lo) : bisect_right(lines, hi)]) if lo <= hi else []
 
 
 def _ranges(lines: Iterable[int]) -> str:
