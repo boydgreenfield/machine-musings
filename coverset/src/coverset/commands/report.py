@@ -5,6 +5,11 @@ or archive; ``--run RUN_ID`` reads a run from the facts store instead (sources f
 mirror at the run's head commit). ``--compare BASE`` (any source the report accepts) or
 ``--compare-run RUN_ID`` adds a Changes page against that base. The logic lives in
 :mod:`coverset.report`.
+
+Limits: a directory the user's own ``pytest --coverset`` wrote is read under the local profile
+(``BundleLimits.local()``: no byte cap); an archive or a neutral bundle may be a pull request's
+output (a CI artifact) and is read under the strict limits ingest uses unless ``--trusted`` is
+passed. A run in the facts store was checked when it was ingested.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from typing import TYPE_CHECKING
 import click
 
 if TYPE_CHECKING:
+    from coverset.facts.untrusted import BundleError
     from coverset.report import ReportInput
 
 __all__ = ["report_command"]
@@ -66,6 +72,14 @@ __all__ = ["report_command"]
     default=None,
     help="Compare with this run in the facts store (works with SOURCE or --run).",
 )
+@click.option(
+    "--trusted",
+    is_flag=True,
+    help="Read an archive or a neutral bundle (SOURCE and --compare) under the local limits instead "
+    "of the strict ones. Only for a bundle you produced yourself: an archive from CI is a pull "
+    "request's output. A directory your own pytest --coverset wrote is always read under the local "
+    "limits.",
+)
 def report_command(
     source: Path | None,
     out: Path | None,
@@ -76,6 +90,7 @@ def report_command(
     repo_spec: str | None,
     compare_source: Path | None,
     compare_run_id: str | None,
+    trusted: bool,
 ) -> None:
     """Write a static HTML coverage report (lines, branches, tests per line, input classes) of one run."""
     from coverset.facts.untrusted import BundleError
@@ -104,10 +119,10 @@ def report_command(
             inp = run_async(lambda: load_run(settings, run_id, repo_spec, title=title))
         else:
             assert source is not None
-            inp = load_bundle(source, repo_root=repo_root, title=title)
+            inp = load_bundle(source, repo_root=repo_root, title=title, trusted=trusted)
         base: ReportInput | None = None
         if compare_source is not None:
-            base = _load_base(compare_source, repo_root)
+            base = _load_base(compare_source, repo_root, trusted=trusted)
         elif compare_run_id is not None:
             from coverset.commands.common import run_async
 
@@ -119,7 +134,9 @@ def report_command(
 
             base = run_async(base_run)
         result = build_report(inp, out or default_out(source), base=base)
-    except (BundleError, OutDirError, LookupError) as exc:
+    except BundleError as exc:
+        raise click.ClickException(limit_message(exc)) from None
+    except (OutDirError, LookupError) as exc:
         raise click.ClickException(str(exc)) from None
     total = sum(result.pages.values())
     if inp.notice:
@@ -144,7 +161,37 @@ def report_command(
         webbrowser.open(result.index.as_uri())
 
 
-def _load_base(base: Path, repo_root: Path | None) -> ReportInput:
+def limit_message(exc: BundleError, *, flag: str = "--trusted", profile: str = "strict") -> str:
+    """The error text for ``exc``; for a cap of the strict limits, also which cap it was, its value,
+    and how to lift it (``flag``). ``profile`` is the profile the caller read under, for a refusal
+    of the neutral reader that reached it as a plain :class:`BundleError`."""
+    from coverset.facts.untrusted import BundleLimitError
+    from coverset.report.load import model_cap
+
+    text = str(exc)
+    if isinstance(exc, BundleLimitError):
+        cap, limit, profile = exc.cap, exc.limit, exc.profile
+    elif getattr(getattr(exc.__cause__, "problem", None), "code", None) == "limit":
+        from coverset_model.io import Limits
+
+        cap = model_cap(text)
+        found = getattr(Limits(), cap, None)
+        limit = int(found) if isinstance(found, (int, float)) else None
+    else:
+        return text
+    if profile != "strict":
+        return text
+    value = f"{limit:,}" if limit is not None else "its strict value"
+    return (
+        f"{text}\n"
+        f"That is the strict cap {cap} = {value}, for a bundle a pull request produced (an "
+        f"archive or a neutral bundle from CI is one). If you produced this bundle yourself, pass "
+        f"{flag} to read it under the local limits. A directory your own pytest --coverset wrote "
+        "is never capped this way."
+    )
+
+
+def _load_base(base: Path, repo_root: Path | None, *, trusted: bool = False) -> ReportInput:
     """The ``--compare`` base as a report input; a missing or unreadable base is a clean error."""
     import sqlite3
 
@@ -154,8 +201,10 @@ def _load_base(base: Path, repo_root: Path | None) -> ReportInput:
     if not base.exists():
         raise click.ClickException(f"the base {base} does not exist")
     try:
-        return load_base(base, repo_root=repo_root, title="base")
-    except (BundleError, OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        return load_base(base, repo_root=repo_root, title="base", trusted=trusted)
+    except BundleError as exc:
+        raise click.ClickException(f"cannot read the base {base}: {limit_message(exc)}") from None
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
         raise click.ClickException(f"cannot read the base {base}: {exc}") from None
 
 

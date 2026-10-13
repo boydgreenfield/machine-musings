@@ -10,6 +10,14 @@ untrusted): :func:`source_access` decides. With ``--repo-root`` sources are read
 the files git tracks there when it is a git work tree); without it, a ``--coverset-out`` directory
 reads from the current directory only when that is a git work tree, and only files git tracks; an
 archive or a neutral bundle reads no source at all. When nothing is read, every page says why.
+
+Which limits apply (:func:`report_limits`): a directory the user's own ``pytest --coverset`` wrote
+(``coverage.sqlite`` or a ``neutral/`` copy at its top) is trusted input and is read under
+``BundleLimits.local()``; an archive or a neutral bundle may be a pull request's output (a CI
+artifact) and is read under the strict limits ingest uses, unless the caller says it is trusted
+(``coverset report --trusted``). A plugin directory is read from its raw files: the
+``bundle.tar.gz`` next to them packs the same files and is never extracted, and only the files
+that are read count against any byte cap.
 """
 
 from __future__ import annotations
@@ -24,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from coverset.facts.convert import read_python_bundle
-from coverset.facts.untrusted import BundleError, extract_bundle
+from coverset.facts.untrusted import BundleError, BundleLimitError, BundleLimits, extract_bundle
 from coverset.lang.base import IMPORT_CONTEXT, NeutralBundle
 from coverset.report.facts import (
     MAX_SOURCE_BYTES,
@@ -43,19 +51,38 @@ from coverset.report.facts import (
 )
 
 __all__ = [
+    "BundleRead",
     "SourceAccess",
     "input_from_bundle",
     "load_base",
     "load_bundle",
     "load_run",
+    "model_cap",
     "neutral_reader",
     "read_bundle_path",
+    "read_source",
+    "report_limits",
     "source_access",
     "tracked_files",
 ]
 
 MANIFEST = "manifest.json"
 ARCHIVE = "bundle.tar.gz"
+COVERAGE_SQLITE = "coverage.sqlite"
+NEUTRAL_SUBDIR = "neutral"
+"""Where ``pytest --coverset`` writes the neutral copy of a ``--coverset-out`` bundle."""
+_NEUTRAL_REQUIRED = ("tests", "files", "coverage")
+
+LOCAL_LIMITS = (
+    "local: a directory your own pytest --coverset wrote, read without the byte cap and with the "
+    "generous caps of BundleLimits.local()"
+)
+STRICT_LIMITS = (
+    "strict: an archive or a neutral bundle may be a pull request's output (a CI artifact), so the "
+    "caps ingest uses apply (--trusted lifts them)"
+)
+TRUSTED_LIMITS = "local: passed with --trusted"
+RUN_LIMITS = "local: a run in the facts store, already checked under the strict limits when it was ingested"
 
 
 def neutral_reader() -> Callable[[Path], NeutralBundle] | None:
@@ -83,17 +110,74 @@ def _rejected() -> tuple[type[Exception], ...]:
     return (BundleRejected,)
 
 
-def read_bundle_path(source: Path) -> tuple[NeutralBundle, str]:
-    """Read a bundle directory or archive: ``(bundle, kind)`` where kind is ``python`` or ``neutral``."""
+@dataclass(frozen=True, slots=True)
+class BundleRead:
+    """A bundle as :func:`read_source` read it."""
+
+    bundle: NeutralBundle
+    kind: str
+    """``python`` (converted from a pytest-coverset bundle) or ``neutral``."""
+    read_from: str
+    """Which files were read (the about data's ``read_from``)."""
+    limits: str
+    """Which limits profile applied, and why (the about data's ``limits``)."""
+
+
+def is_local_output(source: Path) -> bool:
+    """A directory the user's own ``pytest --coverset`` wrote: ``coverage.sqlite`` or a ``neutral/``
+    copy at its top (and no ``manifest.json``, which makes it a neutral bundle)."""
     source = Path(source)
+    if source.is_symlink() or not source.is_dir() or (source / MANIFEST).exists():
+        return False
+    return (source / COVERAGE_SQLITE).is_file() or _complete_neutral(source / NEUTRAL_SUBDIR)
+
+
+def report_limits(source: Path, *, trusted: bool = False) -> tuple[BundleLimits, str]:
+    """The limits ``coverset report`` reads ``source`` under, and why: the local profile for a
+    ``pytest --coverset`` output directory (:func:`is_local_output`) or with ``trusted``, the strict
+    profile ingest uses for anything else (an archive or a neutral bundle may be a PR's output)."""
+    if is_local_output(source):
+        return BundleLimits.local(), LOCAL_LIMITS
+    if trusted:
+        return BundleLimits.local(), TRUSTED_LIMITS
+    return BundleLimits(), STRICT_LIMITS
+
+
+def read_source(source: Path, *, trusted: bool = False) -> BundleRead:
+    """Read a bundle directory or archive under :func:`report_limits`."""
+    source = Path(source)
+    limits, why = report_limits(source, trusted=trusted)
     if source.is_dir():
-        return _read_dir(source)
+        bundle, kind, read_from = _read_dir(source, limits)
+        return BundleRead(bundle, kind, read_from, why)
     if not source.is_file():
         raise BundleError(f"{source} is neither a bundle directory nor a bundle archive")
+    bundle, kind, read_from = _read_archive(source, limits)
+    return BundleRead(bundle, kind, read_from, why)
+
+
+def read_bundle_path(source: Path, *, trusted: bool = False) -> tuple[NeutralBundle, str]:
+    """Read a bundle directory or archive: ``(bundle, kind)`` where kind is ``python`` or ``neutral``."""
+    read = read_source(source, trusted=trusted)
+    return read.bundle, read.kind
+
+
+def _read_archive(source: Path, limits: BundleLimits) -> tuple[NeutralBundle, str, str]:
     with tempfile.TemporaryDirectory(prefix="coverset-report-") as tmp:
-        root = extract_bundle(source, Path(tmp) / "bundle")
+        root = extract_bundle(source, Path(tmp) / "bundle", limits)
         inner = _single_subdir(root)
-        return _read_dir(inner)
+        bundle, kind, read_from = _read_dir(inner, limits)
+    return bundle, kind, f"{source.name}, extracted: {read_from}"
+
+
+def _complete_neutral(root: Path) -> bool:
+    """``root`` is a neutral bundle directory with its manifest and every required file."""
+    if root.is_symlink() or not root.is_dir() or not (root / MANIFEST).is_file():
+        return False
+    return all(
+        (root / f"{stem}.jsonl").is_file() or (root / f"{stem}.jsonl.gz").is_file()
+        for stem in _NEUTRAL_REQUIRED
+    )
 
 
 def _single_subdir(root: Path) -> Path:
@@ -104,22 +188,84 @@ def _single_subdir(root: Path) -> Path:
     return root
 
 
-def _read_dir(root: Path) -> tuple[NeutralBundle, str]:
-    archive = root / ARCHIVE
-    if not (root / MANIFEST).is_file() and not (root / "coverage.sqlite").is_file() and archive.is_file():
-        return read_bundle_path(archive)
+def _read_dir(root: Path, limits: BundleLimits) -> tuple[NeutralBundle, str, str]:
+    """``(bundle, kind, read_from)`` of a bundle directory. The raw files win: a directory with
+    ``coverage.sqlite`` is read from it (its ``bundle.tar.gz`` and ``neutral/`` copy are never
+    opened); without it, a complete ``neutral/`` copy is read; a directory holding only
+    ``bundle.tar.gz`` is read as that archive."""
     if (root / MANIFEST).is_file():
-        reader = neutral_reader()
-        if reader is None:
-            raise BundleError(
-                f"{root} is a neutral bundle ({MANIFEST}), but this build has no "
-                "coverset.lang.read_any_bundle to read it"
-            )
-        try:
-            return reader(root), "neutral"
-        except _rejected() as exc:
-            raise BundleError(f"neutral bundle refused: {exc}") from exc
-    return read_python_bundle(root), "python"
+        return _read_neutral(root, limits), "neutral", f"{MANIFEST} and the neutral files next to it"
+    if (root / COVERAGE_SQLITE).is_file():
+        bundle = read_python_bundle(root, limits=limits)
+        convert = bundle.meta.get("convert") if isinstance(bundle.meta, dict) else None
+        files = convert.get("files") if isinstance(convert, dict) else None
+        read_from = "the raw files (" + ", ".join(files or [COVERAGE_SQLITE]) + ")"
+        unread = [
+            name
+            for name in (ARCHIVE, "neutral.tar.gz", NEUTRAL_SUBDIR + "/")
+            if (root / name.rstrip("/")).exists()
+        ]
+        if unread:
+            read_from += f"; {', '.join(unread)} not read (the same run, packed or converted)"
+        return bundle, "python", read_from
+    neutral = root / NEUTRAL_SUBDIR
+    if _complete_neutral(neutral):
+        read_from = f"{NEUTRAL_SUBDIR}/ (the plugin's neutral copy; there is no {COVERAGE_SQLITE} here)"
+        return _read_neutral(neutral, limits), "neutral", read_from
+    archive = root / ARCHIVE
+    if archive.is_file():
+        return _read_archive(archive, limits)
+    return read_python_bundle(root, limits=limits), "python", "the raw files"
+
+
+def _read_neutral(root: Path, limits: BundleLimits) -> NeutralBundle:
+    """A neutral bundle directory under ``limits``; a breached cap of the neutral reader is a
+    :class:`BundleLimitError` (so the CLI can say how to lift it)."""
+    try:
+        from coverset.lang import read_any_bundle
+    except ImportError:  # pragma: no cover - every build of coverset has coverset.lang
+        raise BundleError(f"{root} is a neutral bundle ({MANIFEST}), but this build cannot read it") from None
+    try:
+        return read_any_bundle(root, limits=limits)
+    except BundleError as exc:
+        problem = getattr(exc.__cause__, "problem", None)
+        if getattr(problem, "code", None) == "limit":
+            from coverset.lang.neutral import model_limits
+
+            cap = model_cap(str(exc))
+            value = getattr(model_limits(limits), cap, None)
+            raise BundleLimitError(
+                f"{exc} ({cap} of the {limits.profile} limits)",
+                cap=cap,
+                value=None,
+                limit=int(value) if isinstance(value, (int, float)) else None,
+                profile=limits.profile,
+            ) from exc
+        raise
+    except _rejected() as exc:
+        raise BundleError(f"neutral bundle refused: {exc}") from exc
+
+
+_MODEL_CAPS = (
+    ("manifest.json", "max_manifest_bytes"),
+    ("bytes (limit", "max_bundle_bytes"),
+    ("expands beyond", "gzip_max_bytes"),
+    ("members declare", "gzip_max_bytes"),
+    ("members", "max_members"),
+    ("coverage cells", "max_coverage_cells"),
+    ("distinct test ids", "max_tests"),
+    ("distinct paths", "max_paths"),
+    ("distinct shape keys", "max_shape_keys"),
+    ("functions", "max_functions"),
+    ("coverage.jsonl", "max_coverage_rows"),
+    ("lines", "max_rows"),
+    ("wall-clock", "max_seconds"),
+)
+
+
+def model_cap(message: str) -> str:
+    """The ``coverset_model.io.Limits`` field a neutral reader refusal names (best effort)."""
+    return next((cap for needle, cap in _MODEL_CAPS if needle in message), "a neutral reader cap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,19 +389,28 @@ def source_access(
     return SourceAccess(here, tracked)
 
 
-def load_bundle(source: Path, *, repo_root: Path | None = None, title: str | None = None) -> ReportInput:
-    """A report input from a bundle directory or archive, with sources read as
+def load_bundle(
+    source: Path, *, repo_root: Path | None = None, title: str | None = None, trusted: bool = False
+) -> ReportInput:
+    """A report input from a bundle directory or archive, read under :func:`report_limits` (an
+    archive or a neutral bundle under the strict limits unless ``trusted``), with sources read as
     :func:`source_access` decides."""
-    bundle, kind = read_bundle_path(source)
-    access = source_access(Path(source), kind, bundle.static, repo_root)
-    return input_from_bundle(bundle, source=Path(source), kind=kind, access=access, title=title)
+    read = read_source(source, trusted=trusted)
+    access = source_access(Path(source), read.kind, read.bundle.static, repo_root)
+    return input_from_bundle(
+        read.bundle,
+        source=Path(source),
+        kind=read.kind,
+        access=access,
+        title=title,
+        read_from=read.read_from,
+        limits=read.limits,
+    )
 
 
-NEUTRAL_SUBDIR = "neutral"
-"""Where ``pytest --coverset`` writes the neutral copy of a ``--coverset-out`` bundle."""
-
-
-def load_base(source: Path, *, repo_root: Path | None = None, title: str | None = "base") -> ReportInput:
+def load_base(
+    source: Path, *, repo_root: Path | None = None, title: str | None = "base", trusted: bool = False
+) -> ReportInput:
     """A ``--compare`` base: as :func:`load_bundle`, except that its function index is its own
     wherever the base ships one. A ``--coverset-out`` directory carries the neutral copy
     ``neutral/`` (with the ``functions`` rows the plugin indexed from the tested text), and a
@@ -266,7 +421,8 @@ def load_base(source: Path, *, repo_root: Path | None = None, title: str | None 
     import dataclasses
 
     source = Path(source)
-    bundle, kind = read_bundle_path(source)
+    read = read_source(source, trusted=trusted)
+    bundle, kind = read.bundle, read.kind
     if not bundle_regions(bundle) and is_plugin_dir(source, kind):
         shipped = _neutral_copy(source)
         if shipped is not None and bundle_regions(shipped):
@@ -275,17 +431,25 @@ def load_base(source: Path, *, repo_root: Path | None = None, title: str | None 
             )
     access = source_access(source, kind, bundle.static, repo_root)
     return input_from_bundle(
-        bundle, source=source, kind=kind, access=access, title=title, prefer_shipped=True
+        bundle,
+        source=source,
+        kind=kind,
+        access=access,
+        title=title,
+        prefer_shipped=True,
+        read_from=read.read_from,
+        limits=read.limits,
     )
 
 
 def _neutral_copy(source: Path) -> NeutralBundle | None:
-    """The neutral copy a ``--coverset-out`` directory carries, or None (absent or unreadable)."""
+    """The neutral copy a ``--coverset-out`` directory carries, or None (absent or unreadable). It
+    is the user's own output, so it is read under the local limits."""
     root = source / NEUTRAL_SUBDIR
     if root.is_symlink() or not (root / MANIFEST).is_file():
         return None
     try:
-        bundle, kind = _read_dir(root)
+        bundle, kind, _ = _read_dir(root, BundleLimits.local())
     except (BundleError, OSError, ValueError, KeyError):
         return None
     return bundle if kind == "neutral" else None
@@ -300,12 +464,15 @@ def input_from_bundle(
     access: SourceAccess | None = None,
     title: str | None = None,
     prefer_shipped: bool = False,
+    read_from: str | None = None,
+    limits: str | None = None,
 ) -> ReportInput:
     """A report input from an in-memory bundle (``bundle.functions`` and ``bundle.types`` are used
     when the neutral model carries them). Sources are read as ``access`` says; without it, under
     ``repo_root`` (git-tracked files only when it is a git work tree), and with neither, not at all.
     With ``prefer_shipped`` (a ``--compare`` base) the shipped ``functions`` rows win over indexing
-    the local text (see :func:`load_base`).
+    the local text (see :func:`load_base`). ``read_from`` and ``limits`` (which files were read,
+    under which limits profile) go into the about data when given.
     """
     meta = dict(bundle.meta) if isinstance(bundle.meta, dict) else {}
     if access is None:
@@ -351,6 +518,10 @@ def input_from_bundle(
         "types_from_bundle": len(types),
         "meta": meta,
     }
+    if read_from is not None:
+        about["read_from"] = read_from
+    if limits is not None:
+        about["limits"] = limits
     return ReportInput(
         facts=facts,
         tests=tests_from_bundle(bundle),
@@ -509,6 +680,7 @@ async def load_run(
     about = {
         "source": f"facts store run {run_id}",
         "bundle_kind": "facts store",
+        "limits": RUN_LIMITS,
         "repo_root": f"mirror of {repo_name} at {head_sha}",
         "run": run_info,
         "ingest": convert,

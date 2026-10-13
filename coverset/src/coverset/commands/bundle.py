@@ -13,6 +13,9 @@
   written through a symlink left in DIR.
 
 PATH is a bundle directory or ``tar.gz``. Nothing here touches the database or the facts store.
+Every command reads PATH under the strict limits ingest applies to a pull request's bundle;
+``--trusted`` (for a bundle you produced yourself) reads it under the local profile instead
+(``coverset_model.io.Limits.local()``, ``BundleLimits.local()``).
 """
 
 from __future__ import annotations
@@ -25,6 +28,17 @@ import click
 
 __all__ = ["bundle_group"]
 
+_TRUSTED_HELP = (
+    "Read PATH under the local limits (no byte cap, generous row and cell caps, no time budget) "
+    "instead of the strict ones a pull request's bundle gets. Only for a bundle you produced yourself."
+)
+
+
+def _model_limits(trusted: bool) -> Any:
+    from coverset_model.io import Limits
+
+    return Limits.local() if trusted else Limits()
+
 
 @click.group("bundle")
 def bundle_group() -> None:
@@ -34,11 +48,12 @@ def bundle_group() -> None:
 @bundle_group.command("validate")
 @click.argument("path", type=click.Path(path_type=Path, exists=True))
 @click.option("--json", "as_json", is_flag=True, help="Print the problems as JSON lines.")
-def validate_command(path: Path, as_json: bool) -> None:
+@click.option("--trusted", is_flag=True, help=_TRUSTED_HELP)
+def validate_command(path: Path, as_json: bool, trusted: bool) -> None:
     """Print every problem with the neutral bundle at PATH; exit 1 when there is any."""
     from coverset_model.io import validate
 
-    problems = validate(path)
+    problems = validate(path, limits=_model_limits(trusted))
     for problem in problems:
         if as_json:
             click.echo(
@@ -70,11 +85,12 @@ def validate_command(path: Path, as_json: bool) -> None:
 @bundle_group.command("info")
 @click.argument("path", type=click.Path(path_type=Path, exists=True))
 @click.option("--json", "as_json", is_flag=True, help="Print the summary as one JSON object.")
-def info_command(path: Path, as_json: bool) -> None:
+@click.option("--trusted", is_flag=True, help=_TRUSTED_HELP)
+def info_command(path: Path, as_json: bool, trusted: bool) -> None:
     """Describe the neutral bundle at PATH: manifest, rows per file, languages, limits hit."""
     from coverset_model.io import inspect
 
-    found = inspect(path)
+    found = inspect(path, limits=_model_limits(trusted))
     summary: dict[str, Any] = {
         "path": str(path),
         "manifest": {k: v for k, v in (found.manifest or {}).items() if k != "meta"},
@@ -86,6 +102,7 @@ def info_command(path: Path, as_json: bool) -> None:
         "limits_hit": found.dropped,
         "problems": len(found.problems),
         "fatal": next((str(p) for p in found.problems if p.fatal), None),
+        "limits": "local" if trusted else "strict",
     }
     if as_json:
         click.echo(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -110,6 +127,11 @@ def info_command(path: Path, as_json: bool) -> None:
         click.echo("limits and checks hit: none")
     if summary["fatal"]:
         click.echo(f"refused: {summary['fatal']}")
+        if not trusted and any(p.fatal and p.code == "limit" for p in found.problems):
+            click.echo(
+                "(a cap of the strict limits for a pull request's bundle: pass --trusted for a bundle "
+                "you produced yourself)"
+            )
     elif found.problems:
         click.echo(f"{len(found.problems)} problems (coverset bundle validate lists them)")
 
@@ -131,23 +153,29 @@ def info_command(path: Path, as_json: bool) -> None:
 )
 @click.option("--gzip", "compress", is_flag=True, help="Write .jsonl.gz files.")
 @click.option("--shard", type=int, default=None, help="The manifest's shard index.")
+@click.option("--trusted", is_flag=True, help=_TRUSTED_HELP)
 def convert_command(
-    path: Path, out: Path, source_root: Path | None, compress: bool, shard: int | None
+    path: Path, out: Path, source_root: Path | None, compress: bool, shard: int | None, trusted: bool
 ) -> None:
     """Write the pytest-coverset bundle at PATH as a neutral bundle in DIR."""
     import dataclasses
     import re
 
-    from coverset.facts.untrusted import BundleError
+    from coverset.facts.untrusted import BundleError, BundleLimits
     from coverset.lang import read_any_bundle
     from coverset_model import __version__
     from coverset_model.io import READER_META_KEYS, validate, write_bundle
     from coverset_model.schema import CREATED_AT_PATTERN
 
     try:
-        bundle = read_any_bundle(path, source_root=source_root)
+        bundle = read_any_bundle(
+            path, source_root=source_root, limits=BundleLimits.local() if trusted else BundleLimits()
+        )
     except BundleError as exc:
-        raise click.ClickException(f"cannot read {path}: {exc}") from exc
+        from coverset.commands.report import limit_message
+
+        message = limit_message(exc, profile="local" if trusted else "strict")
+        raise click.ClickException(f"cannot read {path}: {message}") from exc
     meta = bundle.meta if isinstance(bundle.meta, dict) else {}
     recorded = meta.get("bundle") if isinstance(meta.get("bundle"), dict) else None
     if recorded is not None:  # a neutral bundle: keep what it says it is
@@ -194,7 +222,7 @@ def convert_command(
         },
         compress=compress,
     )
-    problems = validate(out)
+    problems = validate(out, limits=_model_limits(trusted))
     click.echo(
         f"wrote {out}: {len(bundle.tests)} tests, {len(bundle.static)} files, "
         f"{sum(len(by) for by in bundle.coverage.values())} coverage rows, {len(bundle.functions)} functions, "

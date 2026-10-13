@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tarfile
 import zlib
 from collections import Counter
@@ -22,7 +23,9 @@ from pathlib import Path
 from typing import IO, Any
 
 __all__ = [
+    "NO_CAP",
     "BundleError",
+    "BundleLimitError",
     "BundleLimits",
     "CappedReader",
     "StreamCapError",
@@ -33,12 +36,30 @@ __all__ = [
 ]
 
 MIB = 1024 * 1024
+GIB = 1024 * MIB
+NO_CAP = sys.maxsize
+"""A byte cap that is never reached (the local profile's ``max_bundle_bytes``)."""
 _COPY_CHUNK = 1 * MIB
 _DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 class BundleError(ValueError):
     """The bundle violates a hard limit or is malformed beyond repair; nothing is ingested."""
+
+
+class BundleLimitError(BundleError):
+    """A :class:`BundleLimits` cap was hit: ``cap`` names the field, ``value`` is what the bundle
+    has (bytes, cells, tests, ...) and ``limit`` the cap's value, so a caller can say which cap it
+    was and how to lift it (``coverset report --trusted``)."""
+
+    def __init__(
+        self, message: str, *, cap: str, value: int | None, limit: int | None, profile: str = "strict"
+    ) -> None:
+        super().__init__(message)
+        self.cap = cap
+        self.value = value
+        self.limit = limit
+        self.profile = profile
 
 
 class StreamCapError(BundleError):
@@ -60,6 +81,10 @@ class BundleLimits:
     keeps one shard's ingest near 300 MB of memory (read plus the ``test_lines`` arrays, measured
     in ``docs/security.md`` B14); the plan's sizing (10k tests x ~2k lines per run, 20M cells) fits
     when the run has at least five shards (``scripts/bench_facts.py`` uses eight, 2.5M cells each).
+
+    These defaults are the **strict** profile, for a bundle a pull request produced (ingest, and
+    ``coverset report`` of an archive or a neutral bundle). :meth:`local` is the profile for a
+    directory the user's own ``pytest --coverset`` wrote; ``profile`` names which one a value is.
     """
 
     max_bundle_bytes: int = 200 * MIB
@@ -76,6 +101,55 @@ class BundleLimits:
     max_tests: int = 50_000
     max_paths: int = 50_000
     max_shape_keys: int = 20_000
+    max_json_file_bytes: int = 64 * MIB
+    """``coverage.json``, ``collect.json``, ``durations.json`` and ``meta.json`` are parsed whole;
+    a larger one is skipped and counted (``<name>.oversized``)."""
+    profile: str = "strict"
+    """``strict`` (a pull request's bundle) or ``local`` (:meth:`local`); shown in errors and the
+    report's about data."""
+
+    @classmethod
+    def local(cls) -> BundleLimits:
+        """The profile for trusted input: a directory the user's own ``pytest --coverset`` wrote
+        (or an archive passed with ``coverset report --trusted``).
+
+        No byte cap on a directory (``max_bundle_bytes`` is :data:`NO_CAP`, so only the files that
+        are read count at all), a tarball may expand to 16 GiB with up to 4096 members, and
+        ``max_coverage_cells`` is 100,000,000: about 1 GB of memory at the compact 8 bytes per
+        cell the readers keep (one pointer per line into a shared pool of line numbers), plus the
+        report's own per-test sets. Tests and paths are capped at 2,000,000 and 1,000,000, shape
+        keys at 1,000,000, a JSON line at 64 MiB and a whole JSON file at 1 GiB. The neutral
+        reader's matching profile (``coverset_model.io.Limits.local``) also raises its row caps and
+        has no wall-clock budget. The per-value rules (line numbers, id and message lengths) are
+        the strict profile's: they decide what a value means, not how much work a bundle is.
+        """
+        return cls(
+            max_bundle_bytes=NO_CAP,
+            gzip_ratio=1000,
+            gzip_floor_bytes=1 * GIB,
+            gzip_max_bytes=16 * GIB,
+            max_json_line_bytes=64 * MIB,
+            max_members=4096,
+            max_coverage_cells=100_000_000,
+            max_tests=2_000_000,
+            max_paths=1_000_000,
+            max_shape_keys=1_000_000,
+            max_json_file_bytes=1 * GIB,
+            profile="local",
+        )
+
+    def exceeded(
+        self, message: str, *, cap: str, value: int | None = None, limit: int | None = None
+    ) -> BundleLimitError:
+        """The error for ``cap`` (a field name) hit by ``value``: ``message`` plus which cap of which
+        profile it is. ``limit`` is the cap's value when it is derived (the gzip cap of a stream)."""
+        return BundleLimitError(
+            f"{message} ({cap} of the {self.profile} limits)",
+            cap=cap,
+            value=value,
+            limit=getattr(self, cap) if limit is None else limit,
+            profile=self.profile,
+        )
 
     def gzip_cap(self, compressed_bytes: int) -> int:
         """Maximum decompressed bytes allowed for a gzip stream of ``compressed_bytes``."""
@@ -236,11 +310,22 @@ def extract_bundle(tar_gz_path: Path, dest_dir: Path, limits: BundleLimits | Non
     if not stat.S_ISREG(st.st_mode):
         raise BundleError("bundle archive is not a regular file")
     if st.st_size > limits.max_bundle_bytes:
-        raise BundleError(f"bundle archive is {st.st_size} bytes (limit {limits.max_bundle_bytes})")
+        raise limits.exceeded(
+            f"bundle archive is {st.st_size} bytes (limit {limits.max_bundle_bytes})",
+            cap="max_bundle_bytes",
+            value=st.st_size,
+        )
     dest_dir.mkdir(parents=True, exist_ok=True)
     if any(dest_dir.iterdir()):
         raise BundleError(f"extraction directory {dest_dir} is not empty")
     cap = min(limits.gzip_cap(st.st_size), limits.max_bundle_bytes)
+    cap_name = (
+        "max_bundle_bytes"
+        if cap == limits.max_bundle_bytes
+        else "gzip_max_bytes"
+        if cap == limits.gzip_max_bytes
+        else "gzip_ratio"
+    )
     written = 0
     try:
         with (
@@ -250,14 +335,21 @@ def extract_bundle(tar_gz_path: Path, dest_dir: Path, limits: BundleLimits | Non
         ):
             for count, member in enumerate(tar, start=1):
                 if count > limits.max_members:
-                    raise BundleError(f"bundle has more than {limits.max_members} members")
+                    raise limits.exceeded(
+                        f"bundle has more than {limits.max_members} members", cap="max_members", value=count
+                    )
                 name = _member_name(member)
                 if member.isdir():
                     _make_dirs(dest_dir, name)
                 elif member.isreg() and not _is_sparse(member):
                     written += member.size
                     if written > cap:
-                        raise BundleError(f"bundle members declare more than {cap} bytes")
+                        raise limits.exceeded(
+                            f"bundle members declare more than {cap} bytes",
+                            cap=cap_name,
+                            value=written,
+                            limit=cap,
+                        )
                     parent, _, _ = name.rpartition("/")
                     if parent:
                         _make_dirs(dest_dir, parent)
@@ -272,6 +364,8 @@ def extract_bundle(tar_gz_path: Path, dest_dir: Path, limits: BundleLimits | Non
                     raise BundleError(
                         f"refused tar member {name!r}: links, devices and sparse files are not allowed"
                     )
+    except StreamCapError as exc:
+        raise limits.exceeded(str(exc), cap=cap_name, limit=cap) from exc
     except (tarfile.TarError, EOFError, OSError, zlib.error) as exc:
         raise BundleError(f"corrupt bundle archive: {exc}") from exc
     return dest_dir

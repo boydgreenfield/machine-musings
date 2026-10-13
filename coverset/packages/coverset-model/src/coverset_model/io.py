@@ -28,9 +28,11 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import stat
+import sys
 import tarfile
 import time
 import zlib
@@ -145,6 +147,35 @@ class Limits:
         """Maximum decompressed bytes allowed for a gzip stream of ``compressed_bytes``."""
         ratio_cap = max(self.gzip_floor_bytes, self.gzip_ratio * compressed_bytes)
         return min(self.gzip_max_bytes, ratio_cap)
+
+    @classmethod
+    def local(cls) -> Limits:
+        """The profile for trusted input: a bundle the user's own run wrote (``coverset report`` of
+        a ``pytest --coverset`` directory's ``neutral/`` copy, or anything passed with
+        ``--trusted``). The defaults stay the strict profile, for a bundle a pull request produced.
+
+        No byte cap on a directory, an archive may expand to 16 GiB, 100,000,000 coverage cells
+        (about 1 GB at 8 bytes each), 2,000,000 tests, 1,000,000 paths and shape keys, 10,000,000
+        functions, 100,000,000 lines per file and no wall-clock budget. The per-value rules
+        (lengths of ids, paths, messages and examples; line numbers) are unchanged.
+        """
+        return cls(
+            max_bundle_bytes=sys.maxsize,
+            gzip_ratio=1000,
+            gzip_floor_bytes=1024 * MIB,
+            gzip_max_bytes=16 * 1024 * MIB,
+            max_json_line_bytes=64 * MIB,
+            max_manifest_bytes=16 * MIB,
+            max_members=4096,
+            max_coverage_cells=100_000_000,
+            max_tests=2_000_000,
+            max_paths=1_000_000,
+            max_shape_keys=1_000_000,
+            max_functions=10_000_000,
+            max_rows=100_000_000,
+            max_coverage_rows=100_000_000,
+            max_seconds=math.inf,
+        )
 
     @classmethod
     def from_object(cls, other: object) -> Limits:

@@ -24,6 +24,7 @@ registered by default.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -65,8 +66,19 @@ def register_language(name: str) -> None:
 
 
 def model_limits(limits: BundleLimits | None) -> model_io.Limits:
-    """The neutral reader's limits with every field ``BundleLimits`` shares copied over."""
-    return model_io.Limits.from_object(limits) if limits is not None else model_io.Limits()
+    """The neutral reader's limits with every field ``BundleLimits`` shares copied over.
+
+    The fields only the neutral reader has (row caps, the wall-clock budget, ...) come from the
+    profile ``limits`` names: ``coverset_model.io.Limits.local()`` for ``BundleLimits.local()``,
+    the strict defaults otherwise (ingest always passes the strict profile).
+    """
+    if limits is None:
+        return model_io.Limits()
+    base = model_io.Limits.local() if limits.profile == "local" else model_io.Limits()
+    shared = {
+        name: getattr(limits, name) for name in model_io.Limits.__dataclass_fields__ if hasattr(limits, name)
+    }
+    return dataclasses.replace(base, **shared)
 
 
 def read_neutral_bundle(

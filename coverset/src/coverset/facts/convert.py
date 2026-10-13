@@ -103,7 +103,6 @@ _COVERAGE_TABLES = ("file", "context", "line_bits", "arc")
 _MAX_SCHEMA_OBJECTS = 256  # coverage.py's schema v7 has about a dozen tables and indexes
 _MAX_NAME_CHARS = 512
 _MAX_COUNT = 2**63 - 1
-_MAX_JSON_FILE_BYTES = 64 * 1024 * 1024
 _MAX_SOURCE_BYTES = 16 * 1024 * 1024
 _FETCH_ROWS = 65_536
 _SHAPE_TYPE = re.compile(r"(?:NoneType|bool|int|float|str|bytes|list|tuple|dict|set|frozenset|obj:[^|\s]+)")
@@ -239,7 +238,7 @@ class _Reader:
         if len(value) > self.limits.max_nodeid_chars:
             self.stats["long_nodeids"] += 1
             return None
-        _remember(self.nodeids, value, self.limits.max_tests, "nodeids")
+        _remember(self.nodeids, value, self.limits, "max_tests", "nodeids")
         return value
 
     def rel_path(self, value: object) -> str | None:
@@ -250,14 +249,14 @@ class _Reader:
         if self.head_paths is not None and checked not in self.head_paths:
             self.stats["paths_not_in_head"] += 1
             return None
-        _remember(self.paths, checked, self.limits.max_paths, "paths")
+        _remember(self.paths, checked, self.limits, "max_paths", "paths")
         return checked
 
     def shape_key(self, value: object) -> str | None:
         if not isinstance(value, str) or not is_shape_key(value):
             self.stats["shapes.bad_keys"] += 1
             return None
-        _remember(self.shape_keys, value, self.limits.max_shape_keys, "shape keys")
+        _remember(self.shape_keys, value, self.limits, "max_shape_keys", "shape keys")
         return value
 
     def line(self, value: object) -> int | None:
@@ -275,11 +274,11 @@ class _Reader:
         path = self.path(name)
         if path is None:
             return None
-        if self.present[name] > _MAX_JSON_FILE_BYTES:
+        if self.present[name] > self.limits.max_json_file_bytes:
             self.stats[f"{name}.oversized"] += 1
             return None
         with open_regular(path) as fh:
-            raw = fh.read(_MAX_JSON_FILE_BYTES + 1)
+            raw = fh.read(self.limits.max_json_file_bytes + 1)
         try:
             return json.loads(raw)
         except (ValueError, RecursionError):
@@ -296,22 +295,16 @@ class _Reader:
     # -- inventory -------------------------------------------------------------------------
 
     def inventory(self) -> None:
-        """Size-check the whole bundle, hash the known files and note which ones exist."""
+        """Note which of the known files exist, size-check them and hash them.
+
+        Only the files that are read count against ``max_bundle_bytes``: anything else in the
+        directory (the plugin's own ``bundle.tar.gz``, which packs these same files, its
+        ``neutral/`` copy, an earlier report) is never opened, so it is not counted either. An
+        extracted archive cannot hold more than the cap anyway (:func:`extract_bundle` bounds it).
+        """
         root_st = os.lstat(self.root)
         if not stat.S_ISDIR(root_st.st_mode):
             raise BundleError("bundle path is not a directory")
-        total = 0
-        stack = [self.root]
-        while stack:
-            with os.scandir(stack.pop()) as entries:
-                for entry in entries:
-                    st = entry.stat(follow_symlinks=False)
-                    total += st.st_size
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(Path(entry.path))
-        if total > self.limits.max_bundle_bytes:
-            raise BundleError(f"bundle is {total} bytes (limit {self.limits.max_bundle_bytes})")
-        self.stats["bundle_bytes"] = total
         for name in BUNDLE_FILES:
             candidate = self.root / name
             try:
@@ -322,8 +315,17 @@ class _Reader:
                 self.stats["refused_files"] += 1
                 continue
             self.present[name] = st.st_size
-            self.digest.update(f"{name}\0{st.st_size}\0".encode())
-            with open_regular(candidate) as fh:
+        total = sum(self.present.values())
+        if total > self.limits.max_bundle_bytes:
+            raise self.limits.exceeded(
+                f"bundle is {total} bytes (limit {self.limits.max_bundle_bytes})",
+                cap="max_bundle_bytes",
+                value=total,
+            )
+        self.stats["bundle_bytes"] = total
+        for name, size in self.present.items():
+            self.digest.update(f"{name}\0{size}\0".encode())
+            with open_regular(self.root / name) as fh:
                 while chunk := fh.read(1 << 20):
                     self.digest.update(chunk)
         for required in (COVERAGE_SQLITE, RESULTS):
@@ -552,16 +554,24 @@ def _dir_prefix(value: object) -> str:
     return f"{checked}/" if checked is not None else ""
 
 
-def _remember(seen: set[str], value: str, limit: int, what: str) -> None:
-    """Add ``value`` to ``seen``; more than ``limit`` distinct values reject the bundle."""
+def _remember(seen: set[str], value: str, limits: BundleLimits, cap: str, what: str) -> None:
+    """Add ``value`` to ``seen``; more distinct values than the cap ``cap`` reject the bundle."""
     if value not in seen:
         seen.add(value)
+        limit = getattr(limits, cap)
         if len(seen) > limit:
-            raise BundleError(f"bundle names more than {limit} distinct {what}")
+            raise limits.exceeded(f"bundle names more than {limit} distinct {what}", cap=cap, value=len(seen))
 
 
 class _CoverageDb:
-    """Bounded decoding of one ``coverage.sqlite`` (arcs and numbits) into per-test first lines."""
+    """Bounded decoding of one ``coverage.sqlite`` (arcs and numbits) into per-test first lines.
+
+    Rows are streamed: each (context, file) pair is decoded, mapped to first lines and stored as
+    soon as it is read (numbits hold one row per pair; arcs are grouped per pair by SQLite, along
+    the table's own ``(file_id, context_id, ...)`` index), so no second copy of the executed
+    lines is ever held. Every stored line is one shared int object (:meth:`_tuple`), 8 bytes per
+    cell.
+    """
 
     def __init__(self, reader: _Reader, con: sqlite3.Connection) -> None:
         self.reader = reader
@@ -569,11 +579,15 @@ class _CoverageDb:
         self.limits = reader.limits
         self.cells = 0
         self._anchors: dict[str, _Anchors] = {}
+        self._static: dict[str, StaticFile] = {}
+        self._pool: list[int] = []
+        self.coverage: dict[str, dict[str, tuple[int, ...]]] = defaultdict(dict)
 
     def read(
         self, static: dict[str, StaticFile], *, want_arcs: bool
     ) -> tuple[dict[str, dict[str, tuple[int, ...]]], dict[str, tuple[tuple[int, int], ...]]]:
         kinds = self._schema()
+        self._static = static
         files: dict[int, str] = {}
         for file_id, raw_path in self.con.execute("SELECT id, path FROM file WHERE typeof(id) = 'integer'"):
             checked = self.reader.coverage_path(raw_path)
@@ -588,15 +602,14 @@ class _CoverageDb:
             elif (nodeid := self.reader.nodeid(raw_context)) is not None:
                 contexts[context_id] = nodeid
 
-        raw: dict[tuple[str, str], list[np.ndarray]] = defaultdict(list)
         if "line_bits" in kinds:
-            self._numbits(files, contexts, raw)
+            self._numbits(files, contexts)
         arcs: dict[str, tuple[tuple[int, int], ...]] = {}
         if "arc" in kinds:
-            self._arc_lines(files, contexts, raw)
+            self._arc_lines(files, contexts)
             if want_arcs:
                 arcs = self._run_arcs(files)
-        return self._first_lines(raw, static), arcs
+        return dict(self.coverage), arcs
 
     def _schema(self) -> set[str]:
         """The documented tables present, refusing anything a writer could use to run code on read.
@@ -624,7 +637,11 @@ class _CoverageDb:
     def _add_cells(self, n: int) -> None:
         self.cells += n
         if self.cells > self.limits.max_coverage_cells:
-            raise BundleError(f"coverage.sqlite holds more than {self.limits.max_coverage_cells} cells")
+            raise self.limits.exceeded(
+                f"coverage.sqlite holds more than {self.limits.max_coverage_cells} cells",
+                cap="max_coverage_cells",
+                value=self.cells,
+            )
 
     def _arc_filter(self) -> str:
         limit = self.limits.max_line_number
@@ -634,9 +651,7 @@ class _CoverageDb:
             f"AND typeof(tono) = 'integer' AND tono BETWEEN -{limit} AND {limit}"
         )
 
-    def _numbits(
-        self, files: dict[int, str], contexts: dict[int, str], raw: dict[tuple[str, str], list[np.ndarray]]
-    ) -> None:
+    def _numbits(self, files: dict[int, str], contexts: dict[int, str]) -> None:
         max_blob = self.limits.max_line_number // 8 + 1
         for file_id, context_id, numbits in self.con.execute(
             "SELECT file_id, context_id, numbits FROM line_bits"
@@ -649,34 +664,37 @@ class _CoverageDb:
             lines = numbits_to_lines(numbits)
             lines = lines[lines > 0]
             self._add_cells(lines.size)
-            raw[(contexts[context_id], files[file_id])].append(lines)
+            self._keep(contexts[context_id], files[file_id], lines)
 
-    def _arc_lines(
-        self, files: dict[int, str], contexts: dict[int, str], raw: dict[tuple[str, str], list[np.ndarray]]
-    ) -> None:
+    def _arc_lines(self, files: dict[int, str], contexts: dict[int, str]) -> None:
+        """Executed lines from arcs (their positive endpoints), one SQL row per (file, context).
+
+        Grouping in SQLite (``group_concat``, along the arc table's unique index) avoids the
+        sort of a ``UNION ... ORDER BY`` over every endpoint and one Python tuple per arc: on a
+        15M-arc bundle this read takes a few seconds instead of half a minute.
+        """
         valid = self._arc_filter()
         (total,) = self.con.execute("SELECT count(*) FROM arc").fetchone()
         if total > 2 * self.limits.max_coverage_cells:
-            raise BundleError(f"coverage.sqlite holds {total} arcs, over twice the cell limit")
-        (bad,) = self.con.execute(f"SELECT count(*) FROM arc WHERE NOT ({valid})").fetchone()
-        if bad:
-            self.reader.stats["coverage.bad_arcs"] += bad
-        cursor = self.con.execute(
-            f"SELECT context_id, file_id, fromno FROM arc WHERE {valid} AND fromno > 0 "
-            f"UNION SELECT context_id, file_id, tono FROM arc WHERE {valid} AND tono > 0 "
-            "ORDER BY 1, 2"
-        )
-        known_contexts = np.fromiter(contexts, dtype=np.int64, count=len(contexts))
-        known_files = np.fromiter(files, dtype=np.int64, count=len(files))
-        while chunk := cursor.fetchmany(_FETCH_ROWS):
-            block = np.asarray(chunk, dtype=np.int64)
-            block = block[np.isin(block[:, 0], known_contexts) & np.isin(block[:, 1], known_files)]
-            if not len(block):
+            raise self.limits.exceeded(
+                f"coverage.sqlite holds {total} arcs, over twice the cell limit",
+                cap="max_coverage_cells",
+                value=total,
+            )
+        kept = 0
+        for context_id, file_id, count, froms, tos in self.con.execute(
+            "SELECT context_id, file_id, count(*), group_concat(fromno), group_concat(tono) "
+            f"FROM arc WHERE {valid} GROUP BY file_id, context_id"
+        ):
+            kept += count
+            if file_id not in files or context_id not in contexts:
                 continue
-            self._add_cells(len(block))
-            change = (np.diff(block[:, 0]) != 0) | (np.diff(block[:, 1]) != 0)
-            for part in np.split(block, np.flatnonzero(change) + 1):
-                raw[(contexts[int(part[0, 0])], files[int(part[0, 1])])].append(part[:, 2])
+            ends = np.concatenate((_int_list(froms), _int_list(tos)))
+            lines = np.unique(ends[ends > 0])
+            self._add_cells(lines.size)
+            self._keep(contexts[context_id], files[file_id], lines)
+        if total > kept:
+            self.reader.stats["coverage.bad_arcs"] += total - kept
 
     def _run_arcs(self, files: dict[int, str]) -> dict[str, tuple[tuple[int, int], ...]]:
         """Executed arcs per file (union over contexts), used only without ``coverage.json``."""
@@ -688,34 +706,55 @@ class _CoverageDb:
         while chunk := cursor.fetchmany(_FETCH_ROWS):
             count += len(chunk)
             if count > self.limits.max_coverage_cells:
-                raise BundleError(f"coverage.sqlite holds more than {self.limits.max_coverage_cells} arcs")
+                raise self.limits.exceeded(
+                    f"coverage.sqlite holds more than {self.limits.max_coverage_cells} arcs",
+                    cap="max_coverage_cells",
+                    value=count,
+                )
             for file_id, from_line, to_line in chunk:
                 if file_id in files:
                     arcs[files[file_id]].add((from_line, to_line))
         return {path: tuple(sorted(found)) for path, found in arcs.items()}
 
-    def _first_lines(
-        self, raw: dict[tuple[str, str], list[np.ndarray]], static: dict[str, StaticFile]
-    ) -> dict[str, dict[str, tuple[int, ...]]]:
-        coverage: dict[str, dict[str, tuple[int, ...]]] = defaultdict(dict)
-        limit = self.limits.max_line_number
-        for (nodeid, path), parts in raw.items():
-            lines = np.concatenate(parts)
-            lines = lines[(lines > 0) & (lines <= limit)]
-            facts = static.get(path)
-            if facts is not None:
-                if path not in self._anchors:
-                    self._anchors[path] = _Anchors.of(facts.statements, facts.excluded)
-                lines = self._anchors[path].map(lines)
-                beyond = lines > facts.n_lines
-                if path in self.reader.measured_lengths and beyond.any():
-                    self.reader.stats["coverage.lines_beyond_file"] += int(beyond.sum())
-                    lines = lines[~beyond]
-            else:
-                lines = np.unique(lines)
-            if lines.size:
-                coverage[nodeid][path] = tuple(lines.tolist())
-        return dict(coverage)
+    def _keep(self, nodeid: str, path: str, lines: np.ndarray) -> None:
+        """Store the first lines of ``lines`` (raw executed lines of one test and file)."""
+        lines = lines[(lines > 0) & (lines <= self.limits.max_line_number)]
+        facts = self._static.get(path)
+        if facts is not None:
+            if path not in self._anchors:
+                self._anchors[path] = _Anchors.of(facts.statements, facts.excluded)
+            lines = self._anchors[path].map(lines)
+            beyond = lines > facts.n_lines
+            if path in self.reader.measured_lengths and beyond.any():
+                self.reader.stats["coverage.lines_beyond_file"] += int(beyond.sum())
+                lines = lines[~beyond]
+        else:
+            lines = np.unique(lines)
+        if not lines.size:
+            return
+        by_path = self.coverage[nodeid]
+        earlier = by_path.get(path)
+        if earlier is not None:  # a pair in both tables, or twice in a table without its unique index
+            lines = np.union1d(np.asarray(earlier, dtype=np.int64), lines)
+        by_path[path] = self._tuple(lines)
+
+    def _tuple(self, lines: np.ndarray) -> tuple[int, ...]:
+        """``lines`` (sorted) as a tuple of shared int objects: one per distinct line number in the
+        whole bundle, so a cell costs the tuple's 8-byte pointer and not a 28-byte int of its own."""
+        pool = self._pool
+        top = int(lines[-1])
+        if top >= len(pool):
+            pool.extend(range(len(pool), top + 1))
+        return tuple(map(pool.__getitem__, lines.tolist()))
+
+
+def _int_list(text: object) -> np.ndarray:
+    """A ``group_concat`` of integers (``"3,4,-1"``) as an int64 array."""
+    if isinstance(text, int):
+        return np.asarray([text], dtype=np.int64)
+    if not isinstance(text, str) or not text:
+        return np.empty(0, dtype=np.int64)
+    return np.fromstring(text, dtype=np.int64, sep=",")
 
 
 @dataclass(frozen=True, slots=True)
