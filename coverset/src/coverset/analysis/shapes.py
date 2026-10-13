@@ -23,6 +23,7 @@ See ``docs/input-classes.md`` for the rules.
 from __future__ import annotations
 
 import ast
+import functools
 from collections.abc import Mapping, Sequence
 from typing import Final
 
@@ -105,7 +106,7 @@ def function_catalogue(
             annotations = {_bare(p): a for p, a in zip(item.region.params, item.annotations, strict=True)}
             returns = item.returns
             break
-    enums = enum_index({region.path: source})
+    enums = _enums_of(region.path, source)
     resolver = enums.get if enums else None
     types: dict[str, TypeDescriptor | None] = {p: descriptor(a, resolver) for p, a in annotations.items()}
     types["return"] = descriptor(returns, resolver)
@@ -151,6 +152,13 @@ def type_index(sources: Mapping[str, str]) -> dict[FuncTriple, dict[str, TypeDes
                 found["return"] = descriptor(item.returns, resolver)
                 index[region.triple] = found
     return index
+
+
+@functools.lru_cache(maxsize=256)
+def _enums_of(path: str, source: str) -> dict[str, tuple[str, ...]]:
+    """:func:`enum_index` of one file, remembered per (path, text): a report builds a catalogue per
+    function and would otherwise parse the whole file once per function."""
+    return enum_index({path: source})
 
 
 def enum_index(sources: Mapping[str, str]) -> dict[str, tuple[str, ...]]:
