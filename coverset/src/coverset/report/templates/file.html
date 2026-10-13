@@ -13,7 +13,7 @@
     <div class="src-bar">
       <span class="path">{{ entry.path }}</span>
       {% if since %}<span data-since>since base: {{ since[0]|length }} lost, {{ since[1]|length }} gained · <a href="{{ link('changes.html') }}">changes</a></span>{% endif %}
-      <span data-file-stats>{{ entry.statements }} statements · {{ entry.missed }} never ran · {{ entry.partial }} partial{% if entry.hollow %} · {{ entry.hollow }} input class{{ '' if entry.hollow == 1 else 'es' }} never exercised{% endif %} · {{ entry.tests|length|plural('test') }}</span>
+      <span class="src-summary" data-file-stats>{% for text, title in entry.summary.items() %}<span title="{{ title }}">{{ text }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</span>
       <span class="muted">{% if prev_page %}<a href="{{ link(prev_page) }}" rel="prev" data-key-nav>previous file</a> <kbd>[</kbd>{% endif %} {% if next_page %}<a href="{{ link(next_page) }}" rel="next" data-key-nav>next file</a> <kbd>]</kbd>{% endif %} · <kbd>?</kbd> keys</span>
     </div>
     {% if lens_tests and html is not none %}

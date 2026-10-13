@@ -141,7 +141,7 @@ def test_inlay_more_chip_is_hollow_only_when_a_hidden_class_is_missing() -> None
 async def test_source_header_count_matches_the_chips(client: Client, demo: Demo) -> None:
     url = f"/repos/{demo.repo_id}/files/src/ledger/durations/parse.py?run={demo.pr2_run}"
     html = await (await client.get(url)).get_data(as_text=True)
-    header = re.search(r"(\d+) input class(?:es)? never exercised", html)
+    header = re.search(r"input classes (\d+) of (\d+) \(", html)
     assert header
     inlays = re.findall(r'<div class="inlay">(.*?)<details class="fn-grid"', html, re.S)
     hollow = sum(len(re.findall(r'class="chip chip-hollow"', i)) for i in inlays)
@@ -151,7 +151,7 @@ async def test_source_header_count_matches_the_chips(client: Client, demo: Demo)
             r'class="chip chip-more chip-hollow" title="[^"]*\((\d+) never exercised', inlay
         ):
             hidden += int(title)
-    assert hollow + hidden == int(header.group(1))
+    assert hollow + hidden == int(header.group(2)) - int(header.group(1))
     # functions that expect no input classes get no inlay at all
     roles = await (
         await client.get(f"/repos/{demo.repo_id}/files/src/ledger/billing/invoices.py?run={demo.pr2_run}")

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -300,4 +301,4 @@ def test_the_report_shows_sources_and_declared_types(run: dict, tmp_path: Path) 
     assert "never exercised" in rate
     apply = next(text for text in pages.values() if "<title>applyDiscount" in text)
     assert "applyDiscount(totalCents: float, percent: float) -&gt; float" in apply
-    assert "Math.round" in apply  # the source was read
+    assert "Math.round" in re.sub(r"<[^>]+>", "", apply)  # the source was read (and tokenised)

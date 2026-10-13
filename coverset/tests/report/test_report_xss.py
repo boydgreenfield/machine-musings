@@ -370,3 +370,14 @@ def test_the_changes_page_escapes_hostile_strings(tmp_path: Path) -> None:
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in changes
     assert "&lt;U+202E&gt;evil" in changes
     assert 'data-file="src/removed&#34;onmouseover=&#34;alert(1)' in changes
+
+
+def test_the_map_status_text_is_escaped(built: tuple[Path, Path]) -> None:
+    out, _ = built
+    index = (out / "index.html").read_text(encoding="utf-8")
+    assert '<p class="tm-status" data-tm-status aria-hidden="true">' in index
+    infos = re.findall(r'<a [^>]*data-info="([^"]*)"', index)
+    assert infos
+    # the hostile qualname and path ride in data-info as entities, never as live markup or quotes
+    assert any("&lt;script&gt;alert(1)&lt;/script&gt;" in info for info in infos)
+    assert any("&#34;onmouseover=&#34;alert(1)" in info for info in infos)

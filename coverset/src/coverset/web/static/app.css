@@ -67,6 +67,16 @@
   --c6: light-dark(#db7486, #d46e80);
   --c7: light-dark(#4f5aac, #5c69bc);
 
+  /* syntax colours (source view): muted, clear of the coverage hues (blue ran, vermilion never ran,
+     yellow partial); each is >= 4.5:1 on the surface and on the never-ran and partial tints in both
+     modes (light: keyword 7.6, builtin 6.9, string 6.4, number 7.0, comment 5.8 on #fff, 5.0+ on
+     the tints; dark: 7.9 / 8.6 / 9.4 / 8.6 / 6.1 on #15191e, 4.7+ on the tints) */
+  --syn-keyword: light-dark(#6a3d9a, #b9a3dc);
+  --syn-builtin: light-dark(#1d6464, #86c0bb);
+  --syn-string: light-dark(#2f6b3a, #a3c795);
+  --syn-number: light-dark(#8f3a6e, #dca5c2);
+  --syn-comment: light-dark(#5d6670, #8f99a3);
+
   --radius: 6px;
   --line-h: 20px;
 }
@@ -311,6 +321,9 @@ svg.flow-ribbon { display: block; width: 100%; max-width: 100%; height: auto; fo
 .src-frame { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
 .src-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 8px 14px; border-bottom: 1px solid var(--rule); background: var(--surface-2); font-size: 0.86rem; color: var(--ink-2); }
 .src-bar .path { font-family: var(--mono); color: var(--ink); font-weight: 600; }
+/* the file summary: one line; it wraps between its pieces, never inside one */
+.src-summary { font-variant-numeric: tabular-nums; }
+.src-summary > span { white-space: nowrap; }
 .src-code { overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: var(--line-h); }
 .src-lines { min-width: max-content; padding: 4px 0; }
 .src-code { container-type: inline-size; }
@@ -335,6 +348,20 @@ svg.flow-ribbon { display: block; width: 100%; max-width: 100%; height: auto; fo
 .ln.del .src { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted) 60%, transparent); }
 .ln.is-current { box-shadow: inset 0 0 0 2px var(--focus); }
 .ln:target { box-shadow: inset 0 0 0 2px var(--focus); }
+/* a continuation line of a multi-line statement: its first line's bar, a lighter tint, no count */
+.ln.cont.mis { background: color-mix(in srgb, var(--miss-tint) 55%, var(--surface)); }
+.ln.cont.mis .gn, .ln.cont.run .gn { color: color-mix(in srgb, var(--muted) 75%, var(--surface)); }
+/* syntax tokens (Pygments classes, prefixed tk-); operators and punctuation stay ink */
+.src-code .tk-k, .src-code .tk-kc, .src-code .tk-kd, .src-code .tk-kn, .src-code .tk-kp, .src-code .tk-kr, .src-code .tk-ow { color: var(--syn-keyword); }
+.src-code .tk-nb, .src-code .tk-bp, .src-code .tk-kt, .src-code .tk-nd { color: var(--syn-builtin); }
+.src-code .tk-s, .src-code .tk-sa, .src-code .tk-sb, .src-code .tk-sc, .src-code .tk-dl, .src-code .tk-s1, .src-code .tk-s2,
+.src-code .tk-se, .src-code .tk-sh, .src-code .tk-sx, .src-code .tk-sr, .src-code .tk-ss { color: var(--syn-string); }
+.src-code .tk-m, .src-code .tk-mb, .src-code .tk-mf, .src-code .tk-mh, .src-code .tk-mi, .src-code .tk-il, .src-code .tk-mo { color: var(--syn-number); }
+.src-code .tk-c, .src-code .tk-ch, .src-code .tk-cm, .src-code .tk-cp, .src-code .tk-cpf, .src-code .tk-c1, .src-code .tk-cs,
+.src-code .tk-sd { color: var(--syn-comment); font-style: italic; }
+.src-code .tk-nf, .src-code .tk-fm, .src-code .tk-nc { font-weight: 650; }
+/* excluded, removed and dimmed lines drop the token colours: they recede as plain text */
+.ln.exc .src [class^="tk-"], .ln.del .src [class^="tk-"], .src-focus .ln.dim > .src [class^="tk-"] { color: inherit; font-weight: inherit; }
 .brn { font-family: var(--font); font-size: 11.5px; color: light-dark(#5c5500, #f0e442); padding: 0 8px; white-space: nowrap; }
 .brn::before { content: "◐ "; }
 /* the function link sits in the last grid column, pinned to the right edge of the code viewport */
@@ -438,6 +465,13 @@ svg.treemap { width: 100%; height: auto; display: block; font-family: var(--font
 .tm-leaf { stroke: var(--surface); stroke-width: 1.5; }
 .tm-leaf-link:hover .tm-leaf, .tm-leaf-link:focus-visible .tm-leaf { stroke: var(--focus); stroke-width: 2.5; }
 .tm-leaf-link:focus-visible { outline: none; }
+/* the status line above a map: the hovered or focused tile's numbers, at once */
+.tm-status {
+  margin: 0 0 4px; min-height: 1.45em; text-align: right; font-size: 0.82rem; line-height: 1.45;
+  color: var(--ink); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.tm-status .tm-status-idle { color: var(--muted); font-style: italic; }
+.ov-thumb .tm-status { min-height: 2.9em; display: flex; align-items: flex-end; justify-content: flex-end; }
 .tm-b1 { fill: var(--tb1); } .tm-b2 { fill: var(--tb2); } .tm-b3 { fill: var(--tb3); }
 .tm-b4 { fill: var(--tb4); } .tm-b5 { fill: var(--tb5); }
 .tm-g1 { fill: var(--tg1); } .tm-g2 { fill: var(--tg2); } .tm-g3 { fill: var(--tg3); }

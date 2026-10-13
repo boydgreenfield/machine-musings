@@ -78,6 +78,30 @@ def test_treemap_renderer() -> None:
     root = TreeItem(name="", path="", kind="dir", statements=5, covered=3, children=[file])
     html = render_treemap(root, leaf_url=lambda i: JS_URL, dir_url=lambda i: JS_URL, label=EVIL)
     assert_safe(html)
+    # the hover line's text rides in data-info, escaped like the aria-label it repeats
+    infos = re.findall(r'data-info="([^"]*)"', str(html))
+    assert len(infos) >= 2 and all("<" not in info and '"' not in info for info in infos)
+    assert any("&lt;script&gt;alert(1)&lt;/script&gt;&#34;onmouseover=&#34;alert(1)" in i for i in infos)
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("evil.py", 'x = "</span>"onmouseover=alert(1) <script>"\ny = (\n    "</div></code>",\n)\n'),
+        ("evil.py", 'def f():\n    """</span><img src=x onerror=alert(1)>\n\n    "onmouseover="\n    """\n'),
+        ("evil.ts", 'const a = "</span>\\"onmouseover=alert(1)";\nconst b = `</code>\n${"<script>"}\n`;\n'),
+        ("evil.tsx", 'const el = <div title={"\\"onmouseover=x"}>{"</span>"}</div>;\n'),
+        ("evil.txt", '</span>"onmouseover=alert(1)\n'),
+    ],
+)
+def test_token_spans_never_break_escaping(path: str, code: str) -> None:
+    facts = LineFacts(statements=frozenset({1, 2}), executed=frozenset({1}))
+    html = str(render_source(code, facts, path=path, tests_url=lambda n: JS_URL))
+    assert_safe(html)
+    assert "<img" not in html and "<div title" not in html and "</code></code>" not in html
+    # every literal "</span>" in the source came out escaped: the spans balance
+    assert html.count("<span") == html.count("</span>")
+    assert "&lt;/span&gt;" in html
 
 
 def test_shape_grid_renderers() -> None:

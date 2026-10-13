@@ -17,7 +17,10 @@
   {% if root %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, run=run.id) }}">whole repository</a>{% endif %}
 </div>
 <p class="muted">{% if mode == 'gap' %}Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes; outlined tiles are module-level code.{% elif mode == 'inputs' %}Share of each function's expected input classes some test passed in. Hatched tiles were never called.{% else %}Share of each function's statements that some test ran.{% endif %}</p>
-{{ svg }}
+<div data-tm-box>
+  <p class="tm-status" data-tm-status aria-hidden="true"><span class="tm-status-idle">hover a tile</span></p>
+  {{ svg }}
+</div>
 <section class="panel map-table">
   <div class="panel-head"><h2>Largest gaps</h2><span class="aside">called functions whose lines ran but whose tests never tried some input classes</span></div>
   {% if gaps %}

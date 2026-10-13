@@ -46,6 +46,7 @@ coverset report --run run_01M4P5Q4AJ0HJVV6MTJW890P24 [--repo coverset-demo/ledge
 | `--repo-root PATH` | read source files under this directory, as given: when it is a git work tree only the files git tracks there, by the bundle's repository-relative paths; only when git tracks none of the bundle's paths under it but the top of its work tree does (a subdirectory was named) are they read from that top instead. Default: for a `--coverset-out` directory the git-tracked files of the work tree the current directory is in (from its top), for an archive or a neutral bundle no source at all. Not with `--run` (an error) |
 | `--compare BASE` | compare with this base and add a **Changes** page ([below](#comparing-with-a-base)); BASE is any source the report accepts (a `--coverset-out` directory, a `bundle.tar.gz`, a neutral bundle); its functions come from the rows it ships where it has them ([whose function index](#what-the-changes-page-compares)) |
 | `--compare-run RUN_ID` | compare with this run in the facts store instead (with `SOURCE` or `--run`; with `--repo` it must belong to that repository too) |
+| `--trusted` | read an archive or a neutral bundle (`SOURCE` and `--compare`) under the local limits instead of the strict ones; only for a bundle you produced yourself ([which limits apply](#which-limits-apply)) |
 | `--title TEXT` | the title on every page |
 | `--open` | open `index.html` in the browser when done |
 
@@ -67,8 +68,8 @@ and the command prints the same line on stderr; the coverage itself is all there
 
 | Page | Contents |
 |---|---|
-| `index.html` | Totals (statements, lines run, branches taken, partial lines, functions and how many a test called, functions with input classes never exercised, tests by outcome); the treemap in **Gap** mode with a **Lines** toggle (the map's encoding, see [ui.md](ui.md#the-data-flow-overlay)); the file table, sortable by every column (statements, run %, never ran, partial, tests touching the file, gap = line % minus input-class %); the functions whose tests never passed in some expected class; every test with its outcome, duration, files touched and its failure message (expand it). |
-| `files/<path>.html` | The source through the same renderer as the live source view: blue = ran, vermilion = never ran, dotted yellow = took one branch only (with "never jumped to line N"), sticky function headers, inlay chips under each `def` (filled = observed with its sampled calls, dashed = never exercised). The number in the gutter is how many tests ran the line; click it (or press `t`) for the list, each linking to its test page. Press `i` for the function's shape grid and its input-class table. The **data-flow lens** is above the code. |
+| `index.html` | Totals (statements, lines run, branches taken, partial lines, functions and how many a test called, functions with input classes never exercised, tests by outcome); the treemap in **Gap** mode with a **Lines** toggle (the map's encoding, see [ui.md](ui.md#the-data-flow-overlay)) and the hover line above it (muted "hover a tile" until a tile is hovered or focused, then its path, qualname, statements, lines %, input classes or "never called by a test", from the tile's `data-info`); the file table, sortable by every column (statements, run %, never ran, partial, tests touching the file, gap = line % minus input-class %); the functions whose tests never passed in some expected class; every test with its outcome, duration, files touched and its failure message (expand it). |
+| `files/<path>.html` | The summary line in the bar (`lines 28.5% (294 of 1030) · branches 61.2% (30 of 49) · input classes 12 of 68 (17.6%) · gap 11 pts · 1 test`, the live source view's; branches left out without any, "no input classes" and no gap when the file's called functions expect none). The source through the same renderer as the live source view, with its syntax colours (Python for `.py`/`.pyi`, the TypeScript and JavaScript lexers for the Vitest reporter's `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` sources, else plain text; muted, under the coverage cues, see [ui.md](ui.md#the-source-view)): blue = ran, vermilion = never ran, dotted yellow = took one branch only (with "never jumped to line N"), a multi-line statement painted as one block (its continuation lines share its first line's bar with a lighter tint, no count and no note), inlay chips under each `def` (filled = observed with its sampled calls, dashed = never exercised). The number in the gutter is how many tests ran the line; click it (or press `t`) for the list, each linking to its test page. Press `i` for the function's shape grid and its input-class table. The **data-flow lens** is above the code. |
 | `functions/<key>.html` | The signature with its annotations (or the bundle's declared types), the body with line and branch coverage, the shape grid, the flow ribbon from test files through in-repo callers to parameters, the covering tests with their outcomes, every input class with its redacted example and the tests that passed it in, or for a missing class its Hypothesis strategy with a Copy button, a suggested Hypothesis test, and the sampling note. |
 | `tests/<hash>.html` | One test: outcome, duration, failure message, the files it ran (statements it ran of each, linking to the file with the lens on this test), the functions it ran with body lines, and per parameter two strips: the input classes this test passed in next to the function's never-exercised ones, and the function's whole picture. |
 | `changes.html` | Only with `--compare` / `--compare-run`: what this run gained or lost against the base ([below](#comparing-with-a-base)). The index then carries a tile ("Changes since base: n lines lost, m classes lost, k tests changed") linking to it, file pages mark newly uncovered and newly covered lines in the gutter, and a function page says in one line what changed for it. |
@@ -196,7 +197,8 @@ or cannot be read is an error naming the base, before anything is written.
 
 On a file page, the lens selector lists every test that ran a line of the file. Pick one and the
 lines it did not run are dimmed: what is left is what that test touched, statement by statement,
-including the module-level code it did not need. The line under the selector says how many lines it
+including the module-level code it did not need (a multi-line statement's continuation lines follow
+its first line; dimmed lines drop their syntax colours). The line under the selector says how many lines it
 ran. A test page links to each file it touched with the lens already on (`files/<path>.html#lens=<test
 hash>`), so "what did this test exercise, and with which inputs" is two clicks: the test page's
 strips for the inputs, the lens for the lines.
@@ -205,7 +207,7 @@ strips for the inputs, the lens for the lines.
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Next / previous line that never ran or took only one branch |
+| `j` / `k` | Next / previous line that never ran or took only one branch (continuation lines of a multi-line statement are skipped) |
 | `n` / `N` | Next / previous function with an input class no test passed in |
 | `t` | Tests that ran the current line (again to close) |
 | `i` | Show or hide the current function's shape grid |
@@ -216,7 +218,8 @@ strips for the inputs, the lens for the lines.
 Keys are ignored while typing in a field and with Ctrl, Alt or Cmd held. Clicking a square of a
 shape grid highlights its row in the input-class table under it. The theme button cycles auto →
 light → dark (stored in `localStorage`, key `coverset-theme`); colours come from the pages'
-stylesheet (`light-dark()` tokens, Okabe-Ito coverage colours, filled vs hollow dashed squares).
+stylesheet (`light-dark()` tokens, Okabe-Ito coverage colours, filled vs hollow dashed squares, the
+muted `--syn-*` syntax colours; `report.css` adds the rule that drops them on lines the lens dims).
 
 ## How it is built, and what it trusts
 
@@ -263,8 +266,38 @@ source text itself):
   dropped (a Python file's coding cookie is honoured). Git runs with no user or system config and
   with `core.fsmonitor` off;
 * archives are extracted with the same hardened extractor as ingest (no links, no devices, size and
-  member caps), and the bundle readers apply the untrusted-bundle limits of
-  [security.md](security.md).
+  member caps), and the bundle readers apply the bundle limits of [security.md](security.md)
+  (section 7) in the profile below.
+
+### Which limits apply
+
+The caps of `BundleLimits` (and the neutral reader's `coverset_model.io.Limits`) exist for bundles a
+pull request produced. `coverset report` picks the profile from the source, never from its content:
+
+| Source | Profile |
+|---|---|
+| a directory your own `pytest --coverset` wrote (`coverage.sqlite` or a complete `neutral/` copy at its top, no `manifest.json`) | **local** (`BundleLimits.local()`): no byte cap, 100,000,000 coverage cells, 2,000,000 tests, 1,000,000 paths and shape keys, no wall-clock budget |
+| an archive (`bundle.tar.gz`, a neutral `tar.gz`, or a directory holding only `bundle.tar.gz`) or a neutral bundle directory | **strict** (the limits ingest uses), unless `--trusted` is passed: an archive from CI is a pull request's output |
+| `--run RUN_ID` / `--compare-run` | **local**: the run was checked under the strict limits when it was ingested |
+
+A plugin directory is read from its raw files (`coverage.sqlite`, `coverage.json`, `results.jsonl`,
+...): the `bundle.tar.gz` and `neutral.tar.gz` next to them pack the same run and are never
+extracted, the `neutral/` copy is read only when `coverage.sqlite` is missing, and only the files
+that are read count against any byte cap (an earlier `report/` does not either). The about data says
+which files were read (`read_from`) and under which profile (`limits`).
+
+When a cap of the strict profile is hit, the command names the cap, its value and `--trusted`:
+
+```text
+Error: bundle archive is 393962834 bytes (limit 209715200) (max_bundle_bytes of the strict limits)
+That is the strict cap max_bundle_bytes = 209,715,200, for a bundle a pull request produced (an
+archive or a neutral bundle from CI is one). If you produced this bundle yourself, pass --trusted to
+read it under the local limits. A directory your own pytest --coverset wrote is never capped this way.
+```
+
+The local profile's 100,000,000 cells are about 1 GB of memory at the 8 bytes a cell the readers keep
+(one pointer per line into a shared pool of line numbers), before the report's own per-test sets.
+`coverset bundle info | validate | convert` read under the strict profile too and take `--trusted`.
 
 `tests/report/test_report_xss.py` feeds a bundle full of hostile strings and paths through every
 page.
@@ -283,6 +316,10 @@ page.
 * A test page lists 200 functions and a function page 200 covering tests at most ("+N more").
 * The about page shows the bundle's meta verbatim up to 200,000 characters, then says how long it was.
 * The search covers file paths, function names and test ids, not file contents.
+* Size: a 470-file repository with 5,098 tests (a 124 MB branch-coverage `coverage.sqlite`, 3.2M
+  arc rows) reads in about 4 s and builds 9,218 pages (1.1 GB) in about 100 s at a peak of 815 MB;
+  most of the time goes to highlighting each function page's file. A synthetic 1,000 files ×
+  1,000 statements × 300 tests (11.2M cells, 15M arcs) reads in 8 s at 240 MB.
 * `--run` reads the run's sources from the repository's mirror; when the mirror is gone the files
   are "source not available". `--repo-root` does not go with `--run`.
 * `--compare` against a base that ships no `functions` rows (a `bundle.tar.gz`, a `--coverset-out`

@@ -40,7 +40,7 @@ from coverset.web.loaders import (
 from coverset.web.pages import get_repo, parse_int, render_page
 from coverset.web.pr_view import analyse_diff
 from coverset.web.render.shapegrid import render_grid, render_inlay
-from coverset.web.render.source import RegionMark, render_source
+from coverset.web.render.source import FileSummary, LineFacts, RegionMark, branch_counts, render_source
 from coverset.web.render.sparkline import SparkSeries, render_spark_key, render_sparkline
 from coverset.web.repos import baseline_candidates
 from coverset.web.run_view import order_rows
@@ -106,11 +106,13 @@ async def source(rid: int, path: str) -> Response:
     line_facts = await asyncio.to_thread(facts.line_facts, path)
     focus, focus_test = await _focus_for(rid, run, path, facts)
     regions = []
-    hollow_total = 0
+    expected = observed = 0
     for region in facts.callables(path):
         view = await asyncio.to_thread(facts.function_view, region, text)
         hollow = view.hollow if view.observations else 0
-        hollow_total += hollow
+        if view.observations:
+            expected += len(view.cov.expected)
+            observed += view.cov.observed_expected
         shapes_url = url_for("files.shapes", rid=rid, func_key=region.func_key, run=run.id)
         regions.append(
             RegionMark(
@@ -159,12 +161,9 @@ async def source(rid: int, path: str) -> Response:
         if 0 <= index < len(measured) - 1
         else None
     )
-    stats = {
-        "statements": len(line_facts.statements - line_facts.excluded),
-        "missed": sum(1 for n in line_facts.statements if line_facts.state(n) == "mis"),
-        "partial": len(line_facts.partial),
-        "hollow": hollow_total,
-    }
+    summary = await asyncio.to_thread(
+        _summary, facts, path, line_facts, expected, observed, text.count("\n") + 1
+    )
     return await render_page(
         "source.html",
         repo=repo,
@@ -176,12 +175,38 @@ async def source(rid: int, path: str) -> Response:
         common_prefix=prefix,
         prev_url=prev_url,
         next_url=next_url,
-        stats=stats,
+        summary=summary,
         known=line_facts.known,
         changed=len(changed),
         focus=focus_test,
         focus_lines=len(focus or ()),
         clear_url=url_for("files.source", rid=rid, path=path, run=run.id, **extra),
+    )
+
+
+def _summary(
+    facts: RunFacts, path: str, line_facts: LineFacts, expected: int, observed: int, last_line: int
+) -> FileSummary:
+    """The source view's summary line: lines, branches, input classes, gap, tests."""
+    measured = line_facts.statements - line_facts.excluded
+    static = facts.statics.get(path)
+    taken, possible = (
+        branch_counts(
+            static.arcs_possible,
+            facts.run_arcs.get(path, frozenset()),
+        )
+        if static is not None
+        else (0, 0)
+    )
+    return FileSummary(
+        statements=len(measured),
+        ran=len(measured & line_facts.executed),
+        branches=possible,
+        branches_taken=taken,
+        expected=expected,
+        observed=observed,
+        tests=len(facts.tests_in_range(path, 1, last_line)),
+        partial=len(line_facts.partial),
     )
 
 

@@ -4,7 +4,8 @@
    - a failed htmx request writes "Could not load this section (HTTP n)" into its target
    - morphs keep the reader's open/closed state of <details data-keep-open>
    - copy buttons, keyboard activation of SVG buttons, the line-tests popover position
-   - source-view keys: j/k n/N t i [ ] ? */
+   - source-view keys: j/k n/N t i [ ] ? (j/k skip the continuation lines of a multi-line statement)
+   - the treemap status line: a tile's data-info on hover and keyboard focus (map, overview thumbnail) */
 (function () {
   "use strict";
 
@@ -162,6 +163,13 @@
     if (next) setCurrent(next, true);
   }
 
+  function statementLine(line) {
+    // a continuation line of a multi-line statement answers for its first line
+    var first = line && line.getAttribute("data-first");
+    var shell = first && line.closest(".src-lines");
+    return (shell && shell.querySelector('.ln[data-line="' + first + '"]')) || line;
+  }
+
   function currentLine() {
     var all = lines();
     var index = currentIndex(all);
@@ -169,7 +177,7 @@
   }
 
   function openTests() {
-    var line = currentLine();
+    var line = statementLine(currentLine());
     if (!line) return;
     var button = line.querySelector("button.gt");
     if (button) {
@@ -222,8 +230,8 @@
       return;
     }
     var handled = true;
-    if (key === "j") step(".ln.mis, .ln.par", 1);
-    else if (key === "k") step(".ln.mis, .ln.par", -1);
+    if (key === "j") step(".ln.mis:not(.cont), .ln.par:not(.cont)", 1);
+    else if (key === "k") step(".ln.mis:not(.cont), .ln.par:not(.cont)", -1);
     else if (key === "n") stepFunction(1);
     else if (key === "N") stepFunction(-1);
     else if (key === "t") openTests();
@@ -233,6 +241,42 @@
     else handled = false;
     if (handled) event.preventDefault();
   });
+
+  // -- treemap status line: the hovered or focused tile's numbers, at once ---------------------
+  function tileStatus(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var box = target.closest("[data-tm-box]");
+    if (!box) return;
+    var status = box.querySelector("[data-tm-status]");
+    if (!status) return;
+    var tile = target.closest("a[data-info]");
+    if (tile && box.contains(tile)) {
+      status.textContent = tile.getAttribute("data-info") || "";
+      status.classList.add("is-live");
+    }
+  }
+
+  function tileStatusReset(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var box = target.closest("[data-tm-box]");
+    if (!box) return;
+    var next = event.relatedTarget;
+    if (next && box.contains(next) && next.closest && next.closest("a[data-info]")) return;
+    var status = box.querySelector("[data-tm-status]");
+    if (!status || !status.classList.contains("is-live")) return;
+    var idle = document.createElement("span");
+    idle.className = "tm-status-idle";
+    idle.textContent = "hover a tile";
+    status.replaceChildren(idle);
+    status.classList.remove("is-live");
+  }
+
+  document.addEventListener("mouseover", tileStatus);
+  document.addEventListener("focusin", tileStatus);
+  document.addEventListener("mouseout", tileStatusReset);
+  document.addEventListener("focusout", tileStatusReset);
 
   // -- clicks: theme, copy, line selection, popover placement --------------------------------
   document.addEventListener("click", function (event) {

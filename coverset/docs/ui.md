@@ -184,7 +184,8 @@ latest one is the run it describes (it links to its run page).
   function's tile to its file), and the heading links to the whole map. Tiles that would be smaller
   than 64 px² are merged per file ("12 small functions") or per directory ("40 small files") into
   one tile of the same area, coloured by their statement-weighted numbers, so a large repository
-  ships a few dozen tiles instead of tens of thousands (the demo's tiles are all far larger).
+  ships a few dozen tiles instead of tens of thousands (the demo's tiles are all far larger). The
+  hover line above it shows a tile's numbers at once, as on the map (see the data-flow overlay).
 * **Largest gaps** (`top_gaps`, top 8): called functions with the most input classes no test passed
   in, with "16 of 18", the body's line % and up to six class names as hollow chips ("+N more").
 * Without a finalized baseline the section says so and the PR and run lists follow as before.
@@ -269,12 +270,67 @@ it relevant: an email-shaped string was seen, so the email sub-classes are expec
   properties); module-level code is an outlined tile in the surface colour. Lines and Input classes
   modes use a blue ramp with the same bins. Tile labels are dark on the light steps and light on
   the dark ones (at least 4.5:1). The SVG is a group of links, each with its own `aria-label`.
+* **Hover line**: a status line sits right-aligned directly above the map (and above the overview's
+  thumbnail), muted "hover a tile" until a tile is hovered or focused with the keyboard; then it
+  shows that tile's whole text at once: `src/ledger/billing/refund.py::refund · 14 statements ·
+  lines 86% · input classes 40% · gap 46 points`, "never called by a test" for a function no test
+  called, "module-level code: no input classes", and for a directory or file its path, statements
+  and line %. The text is the tile's `aria-label`, carried in `data-info` (the native `<title>`
+  tooltip stays); `app.js` (and `report.js` for the report) fills the line by event delegation
+  (`mouseover`/`focusin` on the map, back to the placeholder on `mouseout`/`focusout`), so no
+  inline handler is needed. The line is `aria-hidden`: a screen reader already reads the focused
+  tile's label.
+
+## The source view
+
+* **Summary line** in the bar, after the path: `lines 28.5% (294 of 1030) · branches 61.2% (30 of
+  49) · input classes 12 of 68 (17.6%) · gap 11 pts · 1 test`. Lines are the measured statements
+  some test or import ran; branches are the file's possible branch arcs and those the run took
+  (the facts store's `file_cov` counts; left out when the file has no branch); input classes are
+  the expected classes of the file's called functions and how many some test passed in; the gap is
+  line % minus input-class % (never below 0), the number the map's Gap mode colours by. A file
+  whose called functions expect no input class says "no input classes" and shows no gap. Tests
+  are the tests (not import time) that ran a line of the file. Each piece has hover text ("736
+  never ran", "37 lines took one branch only", "56 input classes never exercised"); the line wraps
+  between pieces, never inside one, so it stays readable at phone width.
+* **Syntax colours**: Python (`.py`, `.pyi`), TypeScript (`.ts`, `.mts`, `.cts`, `.tsx`) and
+  JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`) are highlighted with their Pygments lexers, anything
+  else is plain text (still one block per line). Keywords are violet, builtins, types and
+  decorators teal, strings green, numbers plum, comments and docstrings grey italic; function and
+  class names at their definition are bold ink (the TypeScript lexer does not tell a definition
+  name apart, so there they stay ink); operators and punctuation stay ink. The palette is muted and
+  avoids the coverage hues, so the blue / vermilion / dotted-yellow bars and tints, the `+` diff
+  column and the lens stay the loudest marks. Every token colour keeps at least 4.5:1 on the
+  surface and on the never-ran and partial tints in both themes (light: keyword `#6a3d9a` 7.6:1,
+  builtin `#1d6464` 6.9, string `#2f6b3a` 6.4, number `#8f3a6e` 7.0, comment `#5d6670` 5.8 on
+  white, 5.0 or more on the tints; dark: `#b9a3dc` 7.9, `#86c0bb` 8.6, `#a3c795` 9.4, `#dca5c2`
+  8.6, `#8f99a3` 6.1 on `#15191e`, 4.7 or more on the tints). Excluded, removed and dimmed (lens)
+  lines drop the token colours and recede as plain text. Token spans carry Pygments' classes with
+  a `tk-` prefix (`tk-k`, `tk-s2`), so a token class never collides with the page's own classes.
+* **Multi-line statements** are painted as one block. coverage.py reports a statement at its first
+  line, so a parenthesised import, a call with its arguments on their own lines, a dict literal, a
+  backslash continuation or a triple-quoted string used to colour only its first line. Every
+  continuation line now takes the state of its statement's first line with the `cont` class: the
+  same bar colour, a lighter tint, no gutter count and no "never ran" note (the first line keeps
+  those), so a never-run 8-line import reads as one vermilion block. For Python the continuation
+  lines are found with `tokenize`, by the rule coverage.py builds its `_multiline` map with (the
+  lines up to the `NEWLINE` token that ends the logical line: inside brackets, after a backslash,
+  inside a multi-line string, blank and comment-only lines among them). A compound statement's
+  header ends at its colon, so `def f(\n  a,\n  b\n):` covers the header lines only, never the
+  body. For TypeScript and JavaScript a bracket-depth scanner marks the lines that start while a
+  `(`, `[` or object-literal `{` is open, and the inner lines of a template literal; a block `{`
+  (after `)`, `=>`, `else`, a class name, or at a statement's start) ends the chain, so a callback
+  body passed as an argument keeps its own statements (strings and comments are skipped; a regex
+  literal or `${...}` nesting can mislead the scanner). A line coverage measures on its own always
+  keeps its own state. A partial branch stays on the first line (its continuation lines read as
+  ran). The diff column (`chg`) stays per physical line; the lens follows the statement, so a
+  continuation line is lit when the test ran its first line.
 
 ## Source view keys
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Next / previous line that never ran or took only one branch |
+| `j` / `k` | Next / previous line that never ran or took only one branch (a multi-line statement's continuation lines are skipped: they belong to its first line) |
 | `n` / `N` | Next / previous function with an input class no test passed in |
 | `t` | Tests that ran the current line |
 | `i` | Show or hide the current function's shape grid |
@@ -295,8 +351,9 @@ in a form field and with Ctrl, Alt or Cmd held.
   with gaps); invariant chips likewise (✓ ✕ ? ≈ …), and so do the invariant history squares (a
   glyph and a title each, captioned "oldest → newest"). The coverage lens reads "linked tests: N ·
   never reached:" followed by dashed chips, without the invariant's key repeated. Score components
-  use their own categorical colours, never the coverage or status hues. `--muted` text keeps at
-  least 4.5:1 on the page background.
+  use their own categorical colours, never the coverage or status hues, and so do the source view's
+  muted syntax colours (`--syn-*`, see [The source view](#the-source-view)). `--muted` text keeps
+  at least 4.5:1 on the page background.
 * System font stacks; tabular numerals everywhere; visible `:focus-visible` rings; shape-grid
   squares and gutter buttons are keyboard reachable; charts carry `<title>` hover text and the
   treemap and timeline have text equivalents (the gaps table, a hidden milestone list).
@@ -321,7 +378,8 @@ text alone). URLs pass `safe_href` (same-site paths and http(s) only). Markdown 
 markdown-it-py with `html=False`, images off and links limited to http(s); the sticky comment's
 fixed `<details><summary>` skeleton is rebuilt from whole lines and its hidden marker dropped.
 `tests/web/test_render_xss.py` feeds `<script>`, `"onmouseover=` and `javascript:` to every
-renderer. The test page's flow renderer (`render/flow.py`) and the page itself (hostile nodeids, failure text and example reprs) are tested the same way in `tests/web/test_web_testpage.py`. The CSP (`script-src 'self'`) forbids inline and eval'd script, so the htmx config sets
+renderer, including `</span>` and `"onmouseover=` inside string and docstring tokens of every lexer
+and a hostile qualname in a treemap tile's `data-info`. The test page's flow renderer (`render/flow.py`) and the page itself (hostile nodeids, failure text and example reprs) are tested the same way in `tests/web/test_web_testpage.py`. The CSP (`script-src 'self'`) forbids inline and eval'd script, so the htmx config sets
 `allowEval: false` and no `hx-on` or trigger filters are used. Pages need the admin token whenever
 one is configured; the quarantine toggle and approval are POSTs carrying the CSRF token from
 `hx-headers` on `<body>` (or a hidden form field).

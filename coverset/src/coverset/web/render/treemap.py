@@ -17,7 +17,9 @@ In ``inputs`` and ``gap`` a function no test called is hatched (there is nothing
 called function with no expected input classes is neutral grey, and module-level code is an
 outlined tile in the surface colour (it takes no arguments, so it has no input classes). Clicking a
 leaf opens the source view at its def line; hovering shows the numbers. The SVG is a ``group`` of
-links, each with its own ``aria-label``.
+links, each with its own ``aria-label`` and the same text in ``data-info``, which the pages' scripts
+copy into the status line above the map (``<p class="tm-status" data-tm-status>`` in the
+templates, "hover a tile" until then) on hover and keyboard focus.
 """
 
 from __future__ import annotations
@@ -242,6 +244,8 @@ def leaf_bucket(item: TreeItem, mode: Mode) -> tuple[str, str]:
     if inputs is not None:
         base += f" · input classes {_pct(inputs)}"
     if mode == "lines":
+        if inputs is None and not called and not is_module(item):
+            base += " · never called by a test"
         return (f"tm-b{_bucket(line)}" if line is not None else "tm-none"), base
     if is_module(item):
         return "tm-module", base + " · module-level code: no input classes"
@@ -292,7 +296,8 @@ def render_treemap(
             cls, text = leaf_bucket(item, mode)
             title = f"{item.file}::{item.name} · {text}"
             parts.append(
-                f'<a href="{attr(safe_href(leaf_url(item)))}" class="tm-leaf-link" aria-label="{attr(title)}">'
+                f'<a href="{attr(safe_href(leaf_url(item)))}" class="tm-leaf-link" aria-label="{attr(title)}"'
+                f' data-info="{attr(title)}">'
                 f"<title>{esc(title)}</title>"
                 f'<rect class="tm-leaf {cls}" {geometry} rx="2"/>'
             )
@@ -308,7 +313,8 @@ def render_treemap(
             line = _line_pct(item)
             title = f"{item.path} · {item.statements} statements · lines {_pct(line)}"
             parts.append(
-                f'<a href="{attr(safe_href(dir_url(item)))}" class="tm-group-link" aria-label="{attr(title)}">'
+                f'<a href="{attr(safe_href(dir_url(item)))}" class="tm-group-link" aria-label="{attr(title)}"'
+                f' data-info="{attr(title)}">'
                 f"<title>{esc(title)}</title>"
                 f'<rect class="{cls}" {geometry} rx="3"/>'
             )

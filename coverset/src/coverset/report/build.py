@@ -68,7 +68,7 @@ from coverset.web.facts_view import FunctionView, test_file
 from coverset.web.render.html import breakable, json_data, relative_hrefs
 from coverset.web.render.ribbon import render_ribbon
 from coverset.web.render.shapegrid import GridCell, render_grid, render_inlay, render_strip
-from coverset.web.render.source import LineFacts, RegionMark, render_source
+from coverset.web.render.source import FileSummary, LineFacts, RegionMark, branch_counts, render_source
 from coverset.web.render.treemap import build_tree, render_legend, render_treemap
 
 __all__ = ["BuildResult", "build_report"]
@@ -143,6 +143,8 @@ class FileEntry:
     tests: dict[str, frozenset[int]] = field(default_factory=dict)
     """Tests (not ``<import>``) that ran lines of this file, with those lines."""
     import_lines: frozenset[int] = frozenset()
+    branches: tuple[int, int] = (0, 0)
+    """``(taken, possible)`` branch arcs (:func:`~coverset.web.render.source.branch_counts`)."""
 
     @property
     def statements(self) -> int:
@@ -182,6 +184,20 @@ class FileEntry:
         if not self.expected or self.run_pct is None:
             return None
         return max(0.0, self.run_pct - 100.0 * self.observed / self.expected)
+
+    @property
+    def summary(self) -> FileSummary:
+        """The file page's summary line (the source view's, same numbers)."""
+        return FileSummary(
+            statements=self.statements,
+            ran=self.run,
+            branches=self.branches[1],
+            branches_taken=self.branches[0],
+            expected=self.expected,
+            observed=self.observed,
+            tests=len(self.tests),
+            partial=self.partial,
+        )
 
 
 @dataclass(slots=True)
@@ -306,6 +322,10 @@ class _Builder:
                 page=self.names.file_page(path),
                 source=self.inp.sources.get(path),
                 facts=facts.line_facts(path),
+                branches=branch_counts(
+                    facts.statics[path].arcs_possible,
+                    facts.run_arcs.get(path, frozenset()),
+                ),
             )
         for info in self.inp.tests:
             digest = hashed_name(info.nodeid)
@@ -420,13 +440,8 @@ class _Builder:
         files = list(self.files.values())
         statements = sum(f.statements for f in files)
         run = sum(f.run for f in files)
-        branches = 0
-        taken = 0
-        for path in self.files:
-            static = self.facts.statics[path]
-            arcs = self.facts.run_arcs.get(path, frozenset())
-            branches += len(static.arcs_possible)
-            taken += sum(1 for arc in static.arcs_possible if arc in arcs)
+        branches = sum(f.branches[1] for f in files)
+        taken = sum(f.branches[0] for f in files)
         outcomes = Counter(t.info.outcome or NOT_RUN for t in self.tests.values())
         capped = sum(1 for f in self.functions if f.hollow and not f.never_exercised)
         return {

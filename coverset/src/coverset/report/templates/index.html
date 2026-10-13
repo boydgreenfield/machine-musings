@@ -33,8 +33,11 @@
   </div>
   <p class="muted" data-map-legend="gap">Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes; outlined tiles are module-level code.</p>
   <p class="muted" data-map-legend="lines" hidden>Share of each function's statements that some test ran.</p>
-  <div class="map-view" data-map-view="gap">{{ maps.gap }}</div>
-  <div class="map-view" data-map-view="lines" hidden>{{ maps.lines }}</div>
+  <div data-tm-box>
+    <p class="tm-status" data-tm-status aria-hidden="true"><span class="tm-status-idle">hover a tile</span></p>
+    <div class="map-view" data-map-view="gap">{{ maps.gap }}</div>
+    <div class="map-view" data-map-view="lines" hidden>{{ maps.lines }}</div>
+  </div>
 </section>
 
 <section class="panel" id="files">

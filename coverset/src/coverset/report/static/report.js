@@ -3,8 +3,9 @@
    - the line-tests popover, built from the page's JSON data block (#report-data)
    - the data-flow lens: dim the lines the selected test did not run (#lens=<test hash> preselects)
    - shape grids under def lines (key i) and the grid cell -> input-class row link
-   - treemap Gap / Lines toggle, sortable tables, search over files / functions / tests
-   - keys: j/k n/N t i [ ] / ?
+   - treemap Gap / Lines toggle, the status line above it (a tile's data-info on hover and focus),
+     sortable tables, search over files / functions / tests
+   - keys: j/k n/N t i [ ] / ? (j/k skip the continuation lines of a multi-line statement)
    - document.body.dataset.ready = "1" once all of the above is initialised (screenshots) */
 (function () {
   "use strict";
@@ -151,6 +152,10 @@
         line.classList.add("lens-hit");
         hits += 1;
       }
+      // the continuation lines of a multi-line statement follow its first line
+      Array.prototype.forEach.call(shell.querySelectorAll('.ln.cont[data-first="' + n + '"]'), function (cont) {
+        cont.classList.add("lens-hit");
+      });
     });
     shell.classList.add("lens-on");
     if (bar) bar.classList.add("is-active");
@@ -270,6 +275,13 @@
     if (next) setCurrent(next, true);
   }
 
+  function statementLine(line) {
+    // a continuation line of a multi-line statement answers for its first line
+    var first = line && line.getAttribute("data-first");
+    var shell = first && line.closest(".src-lines");
+    return (shell && shell.querySelector('.ln[data-line="' + first + '"]')) || line;
+  }
+
   function currentLine() {
     var all = lines();
     var index = currentIndex(all);
@@ -282,7 +294,7 @@
       popover.hidePopover();
       return;
     }
-    var line = currentLine();
+    var line = statementLine(currentLine());
     if (line) showLineTests(line, line.querySelector("button.gt") || line.querySelector(".gn"));
   }
 
@@ -475,8 +487,8 @@
     } else if (key === "[") follow("prev");
     else if (key === "]") follow("next");
     else if (!document.querySelector(".src-lines")) handled = false;
-    else if (key === "j") step(".ln.mis, .ln.par", 1);
-    else if (key === "k") step(".ln.mis, .ln.par", -1);
+    else if (key === "j") step(".ln.mis:not(.cont), .ln.par:not(.cont)", 1);
+    else if (key === "k") step(".ln.mis:not(.cont), .ln.par:not(.cont)", -1);
     else if (key === "n") stepFunction(1);
     else if (key === "N") stepFunction(-1);
     else if (key === "t") toggleTests();
@@ -523,6 +535,42 @@
       if (results) results.hidden = true;
     }
   });
+
+  // -- treemap status line: the hovered or focused tile's numbers, at once ---------------------
+  function tileStatus(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var box = target.closest("[data-tm-box]");
+    if (!box) return;
+    var status = box.querySelector("[data-tm-status]");
+    if (!status) return;
+    var tile = target.closest("a[data-info]");
+    if (tile && box.contains(tile)) {
+      status.textContent = tile.getAttribute("data-info") || "";
+      status.classList.add("is-live");
+    }
+  }
+
+  function tileStatusReset(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var box = target.closest("[data-tm-box]");
+    if (!box) return;
+    var next = event.relatedTarget;
+    if (next && box.contains(next) && next.closest && next.closest("a[data-info]")) return;
+    var status = box.querySelector("[data-tm-status]");
+    if (!status || !status.classList.contains("is-live")) return;
+    var idle = document.createElement("span");
+    idle.className = "tm-status-idle";
+    idle.textContent = "hover a tile";
+    status.replaceChildren(idle);
+    status.classList.remove("is-live");
+  }
+
+  document.addEventListener("mouseover", tileStatus);
+  document.addEventListener("focusin", tileStatus);
+  document.addEventListener("mouseout", tileStatusReset);
+  document.addEventListener("focusout", tileStatusReset);
 
   document.addEventListener("toggle", function (event) {
     var details = event.target;

@@ -118,3 +118,32 @@ def test_cli_run(demo: DemoData, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     )
     assert wrong.exit_code == 1 and "unknown repository" in wrong.output
     assert CliRunner().invoke(cli, ["report", "--repo", "x", str(tmp_path)]).exit_code == 2
+
+
+def test_the_parse_py_summary_line_matches_the_store(pr2: Path, demo: DemoData) -> None:
+    from html import unescape
+
+    from coverset.web.facts_view import run_facts
+
+    store = FactsStore(demo.settings.facts_dir)  # type: ignore[attr-defined]
+    row = next(
+        r for r in store.read_table(demo.repo_id, demo.pr2_run, "file_cov").to_pylist() if r["path"] == PARSE
+    )
+    tests = len(run_facts(store, demo.repo_id, demo.pr2_run).tests_in_range(PARSE, 1, 10_000))
+    html = (pr2 / f"files/{PARSE}.html").read_text(encoding="utf-8")
+    found = re.search(r'<span class="src-summary" data-file-stats>(.*?)</span></span>', html, re.S)
+    assert found
+    text = unescape(re.sub(r"<[^>]+>", "", found.group(1)))
+    statements, covered = row["statements"], row["covered"]
+    branches, taken = row["branches"], row["branches_covered"]
+    assert text.startswith(
+        f"lines {100.0 * covered / statements:.1f}% ({covered} of {statements})"
+        f" · branches {100.0 * taken / branches:.1f}% ({taken} of {branches}) · input classes "
+    ), text
+    classes = re.search(r"input classes (\d+) of (\d+) \(([\d.]+)%\) · gap (\d+) pts · (\d+) tests?$", text)
+    assert classes, text
+    observed, expected = int(classes.group(1)), int(classes.group(2))
+    assert int(classes.group(4)) == round(
+        max(0.0, 100.0 * covered / statements - 100.0 * observed / expected)
+    )
+    assert int(classes.group(5)) == tests

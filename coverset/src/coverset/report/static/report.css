@@ -51,6 +51,8 @@ svg.pbar { width: 56px; height: 6px; vertical-align: 1px; margin-right: 4px; }
 .lens-on .ln[data-line]:not(.lens-hit) { opacity: 0.32; }
 .lens-on .ln[data-line]:not(.lens-hit).fn-head { opacity: 0.6; }
 .lens-on .ln.lens-hit { box-shadow: inset 3px 0 0 var(--ran-ink); }
+/* the syntax colours (app.css --syn-*, tk- token classes) recede on the lines the lens dims */
+.lens-on .ln[data-line]:not(.lens-hit) .src [class^="tk-"] { color: inherit; font-weight: inherit; }
 
 .no-source { padding: 14px 16px; }
 dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 18px; margin: 6px 0; font-size: 0.9rem; }

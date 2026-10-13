@@ -239,3 +239,21 @@ def test_gantt_classes() -> None:
     fail = re.search(r'gt-block gt-fail" x="[\d.]+" y="[\d.]+" width="([\d.]+)"', html)
     assert fail and float(fail.group(1)) >= 6.0  # a failure never disappears into a sliver
     assert "No shard has reported" in str(render_gantt({}, span=1.0))
+
+
+def test_treemap_tiles_carry_their_hover_text_in_data_info() -> None:
+    svg = str(
+        render_treemap(build_tree(_nodes()), leaf_url=lambda i: "/l", dir_url=lambda i: "/d", label="map")
+    )
+    links = re.findall(r"<a [^>]*>", svg)
+    for link in links:
+        label = re.search(r'aria-label="([^"]*)"', link)
+        info = re.search(r'data-info="([^"]*)"', link)
+        assert label and info and label.group(1) == info.group(1)
+    infos = re.findall(r'class="tm-leaf-link" aria-label="[^"]*" data-info="([^"]*)"', svg)
+    assert any("::f · " in i and "statements · lines 60%" in i and "input classes 25%" in i for i in infos)
+    assert any("::g · " in i and "never called by a test" in i for i in infos)
+    lines = str(
+        render_treemap(build_tree(_nodes()), mode="lines", leaf_url=lambda i: "/l", dir_url=lambda i: "/d")
+    )
+    assert "x.py::g · 6 statements · lines 0% · never called by a test" in lines
