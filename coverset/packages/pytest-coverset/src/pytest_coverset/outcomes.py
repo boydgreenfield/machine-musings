@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -39,8 +39,20 @@ class TestResult:
     stop: float | None
 
     def as_dict(self) -> dict[str, Any]:
-        """JSON-ready mapping of every field."""
-        return asdict(self)
+        """JSON-ready mapping of every field (every field is a scalar: no ``asdict`` deep copy)."""
+        return {
+            "nodeid": self.nodeid,
+            "file": self.file,
+            "outcome": self.outcome,
+            "duration_s": self.duration_s,
+            "failed_phase": self.failed_phase,
+            "fail_sig": self.fail_sig,
+            "longrepr": self.longrepr,
+            "truncated": self.truncated,
+            "reason": self.reason,
+            "start": self.start,
+            "stop": self.stop,
+        }
 
 
 def exception_name(exc_type: type[BaseException]) -> str:

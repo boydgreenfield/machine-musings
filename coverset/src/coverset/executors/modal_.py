@@ -11,8 +11,10 @@ container for sandboxes.
   carries it as ``location``. A stale id surfaces as ``NotFoundError`` from ``Sandbox.create`` and
   triggers one rebuild.
 * **Trusted snapshots** (:meth:`ModalExecutor.ensure_snapshot`): only for commits reachable from the
-  repo's default branch. A sandbox from the env image receives the ``git archive`` tarball, collects
-  (``pytest --collect-only``) and byte-compiles the checkout with hash-checked pycs into
+  repo's default branch. A sandbox from the env image receives the ``git archive`` tarball, installs
+  the project when its ``EnvSpec.install`` is ``wheel`` or ``editable`` and the packages that live in
+  the repository (committed wheels, path dependencies; ``pip install --no-deps --no-build-isolation
+  --no-index``, plus coverset's import fallback; see :mod:`coverset.lang.python_env`), collects (``pytest --collect-only``) and byte-compiles the checkout with hash-checked pycs into
   ``PYTHONPYCACHEPREFIX``, then ``snapshot_filesystem(ttl=7 d)``; the image id and ``expires_at`` go
   into ``snapshots``, where the planner picks the newest ready one (it never waits for one).
 * **Workers** (:meth:`ModalExecutor.acquire`): claimed from the warm pool first (pooled sandboxes are
@@ -80,6 +82,7 @@ from coverset.executors.base import (
 from coverset.executors.local import _Pump  # the shared line splitter (per-line cut, stdout cap)
 from coverset.executors.modal_images import build_and_record, configure_builder, env_image, image_from_id
 from coverset.lang.base import EnvSpec
+from coverset.lang.python_env import install_needed
 
 __all__ = [
     "APP_NAME",
@@ -565,6 +568,8 @@ class ModalExecutor:
         started = time.monotonic()
         try:
             await worker.put_tree(tarball, "repo")
+            if env.spec is not None and install_needed(env.spec):
+                await _install_project(worker, env.spec, self.settings.max_stdout_bytes)
             env_vars = {"PYTHONPATH": _pythonpath(worker, env.spec.source_root if env.spec else "")}
             collect = await worker.run(
                 [
@@ -1590,6 +1595,39 @@ class ModalExecutor:
             )
             self._db_tasks.add(task)
             task.add_done_callback(self._db_tasks.discard)
+
+
+async def _install_project(worker: ModalWorker, spec: EnvSpec, stdout_cap: int) -> None:
+    """Install the snapshot commit's project into the sandbox's interpreter before it is snapshotted.
+
+    The sandbox has no network: the build backend is in the env image (``EnvSpec`` adds
+    ``[build-system] requires`` for an installed project), so pip builds without isolation or an
+    index. A failure fails the snapshot build; runs keep the previous snapshot or the env image.
+    """
+    from collections import deque
+
+    from coverset.lang.python_env import BUILD_ENV, local_packages, snapshot_install_commands
+
+    root = worker.path("repo")
+    source = root if spec.source_root in ("", ".") else worker.path(f"repo/{spec.source_root}")
+    mode = spec.install if spec.install in ("editable", "wheel") else "none"
+    local = local_packages(spec.requirements_txt)
+    tail: deque[str] = deque(maxlen=20)
+    for cmd in snapshot_install_commands(mode, repo_dir=root, source_dir=source, local=local):
+        tail.clear()
+        result = await worker.run(
+            cmd,
+            cwd="repo",
+            env=dict(BUILD_ENV),
+            timeout_s=SNAPSHOT_COLLECT_TIMEOUT_S,
+            on_line=lambda text, _stream: tail.append(text),
+            stdout_cap=stdout_cap,
+        )
+        if result.exit_code != 0 or result.timed_out:
+            detail = " | ".join(tail)[-600:]
+            raise ExecutorError(
+                f"installing the project for the snapshot failed (exit {result.exit_code}): {detail}"
+            )
 
 
 def _pythonpath(worker: ModalWorker, source_root: str) -> str:

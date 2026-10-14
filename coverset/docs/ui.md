@@ -16,11 +16,11 @@ that produce trusted markup).
 | `/repos/<rid>/prs/<n>/functions/<func_key>` | Fragment: one "Needs attention" card's expanded content (loaded when the card opens). |
 | `/runs/<run_id>` | Run page: timeline strip, shard Gantt chart, failures, "Why this order", every test. `?replay=1&speed=0.25` replays a stored run; `&freeze=<seconds>` stops the replay at that point of the run's own clock. |
 | `/runs/<run_id>/events` | The run page's SSE stream (HTML regions as named events). |
-| `/repos/<rid>/files/<path>` | Source view. `?run=` picks the run (default: the newest default-branch baseline), `?pr=<n>` uses the PR's latest run and marks changed lines, `?test=<test_id>` dims every line that test did not run (see [The test page](#the-test-page)). |
+| `/repos/<rid>/files/<path>` | Source view. `?run=` picks the run (default: the newest default-branch baseline), `?pr=<n>` uses the PR's latest run and marks changed lines, `?test=<test_id>` dims every line that test did not run (see [The test page](#the-test-page)), `?highlight=all\|missing` picks the highlight mode (see [View settings](#view-settings)). |
 | `/repos/<rid>/files/<path>/lines/<n>/tests` | Fragment: the tests that ran one line (the gutter popover). |
 | `/repos/<rid>/functions/<func_key>` | One function: its history over the last baselines (see [Function history](#function-history)), shape grid, flow ribbon, source with coverage, covering tests, invariants on it, AI finding. |
 | `/repos/<rid>/functions/<func_key>/shapes` | Fragment: the shape grid; with `&cls=<param>:<class>` one cell's detail. |
-| `/repos/<rid>/map` | Treemap, `?mode=gap` (default) `\|lines\|inputs`, `?path=` zooms into a directory or file, `?run=`. A "largest gaps" table ranks called functions by gap, lists the functions no test called apart, and only counts what has nothing to compare (module-level code, functions that expect no input classes). |
+| `/repos/<rid>/map` | Treemap, `?mode=gap` (default) `\|lines\|inputs`, `?modules=thin` (default) `\|full\|hidden` (module-level code), `?layout=ordered` (default) `\|squarified`, `?path=` zooms into a directory or file, `?run=` (a PR run is drawn in its baseline's frame). A "largest gaps" table ranks called functions by gap, lists the functions no test called apart, and only counts what has nothing to compare (module-level code, functions that expect no input classes). |
 | `/repos/<rid>/tests` | Every test (each nodeid links to its test page): runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. |
 | `/repos/<rid>/tests/<test_id>` | One test: identity, its result in `?run=` (default: the newest completed default-branch baseline), the last 12 results as squares, and its data flow in that run (see [The test page](#the-test-page)). `test_id` is the control database's test id (an id beyond 64 bits is a 404). |
 | `/repos/<rid>/tests/by-nodeid?nodeid=&run=` | Redirects (302) to the test page of that nodeid, keeping `run`. Every nodeid in the UI links through the `test_link` macro: the tests table, the run page's failures and "All tests", the PR page's tests, the line popover, a shape cell's tests and the function page's covering tests. |
@@ -267,9 +267,11 @@ it relevant: an email-shaped string was seen, so the email sub-classes are expec
   with round edges (0-20-40-60-80-100) whose first bin is already a visible step: the stronger the
   colour, the more of the function ran under tests that never tried whole kinds of input. Hatched
   tiles were never called; grey tiles expect no input classes (functions without parameters,
-  properties); module-level code is an outlined tile in the surface colour. Lines and Input classes
-  modes use a blue ramp with the same bins. Tile labels are dark on the light steps and light on
-  the dark ones (at least 4.5:1). The SVG is a group of links, each with its own `aria-label`.
+  properties); module-level code is an outlined tile in the surface colour, dashed when it is drawn
+  reduced (see [Module-level code on the map](#module-level-code-on-the-map)). Lines and Input
+  classes modes use a blue ramp with the same bins. Tile labels are dark on the light steps and light
+  on the dark ones (at least 4.5:1). The SVG is a group of links, each with its own `aria-label`.
+  The layout is ordered (see [A map that holds still](#a-map-that-holds-still)).
 * **Hover line**: a status line sits right-aligned directly above the map (and above the overview's
   thumbnail), muted "hover a tile" until a tile is hovered or focused with the keyboard; then it
   shows that tile's whole text at once: `src/ledger/billing/refund.py::refund · 14 statements ·
@@ -326,25 +328,185 @@ it relevant: an email-shaped string was seen, so the email sub-classes are expec
   ran). The diff column (`chg`) stays per physical line; the lens follows the statement, so a
   continuation line is lit when the test ran its first line.
 
-## Source view keys
+## Keys
 
-| Key | Action |
-|---|---|
-| `j` / `k` | Next / previous line that never ran or took only one branch (a multi-line statement's continuation lines are skipped: they belong to its first line) |
-| `n` / `N` | Next / previous function with an input class no test passed in |
-| `t` | Tests that ran the current line |
-| `i` | Show or hide the current function's shape grid |
-| `[` / `]` | Previous / next file |
-| `?` | Keys help |
+One table drives the keys on every page: `KEYS` in `static/app.js`, mirrored by `KEYS` in the
+static report's `report.js` (`tests/web/test_keys_table.py` checks that the help dialog, this table
+and both scripts agree). `?` opens the help dialog, which lists only the keys of the page it was
+opened on (a row whose kind of content is missing, say the source keys on the map, is hidden). Keys
+are ignored while typing in a form field and with Ctrl, Alt or Cmd held. A filter or search box
+takes `Enter` (open the first match) and `Esc` (clear it).
 
-Keys are ignored while typing
-in a form field and with Ctrl, Alt or Cmd held.
+| Key | Where | Action |
+|---|---|---|
+| `?` | everywhere | This help: the keys of this page |
+| `Esc` | everywhere | Close the help, the tests popover or the go-to hint |
+| `/` | pages with a search or filter box | Focus it (the source view's file list filter; the report's search) |
+| `g o` | everywhere | Go to the repository overview |
+| `g t` | everywhere | Go to the tests page |
+| `g m` | everywhere | Go to the coverage map |
+| `g e` | when the economy page exists | Go to the economy page |
+| `g i` | everywhere | Go to the invariants page |
+| `r` | pages that show a run | Open that run's page (the map and the source view show the newest baseline unless `?run=` picks one) |
+| `j` / `k` | source view | Next / previous line that never ran or took only one branch (a multi-line statement's continuation lines are skipped: they belong to its first line) |
+| `n` / `N` | source view | Next / previous function with an input class no test passed in |
+| `t` | source view | Tests that ran the current line |
+| `i` | source view | Show or hide the current function's shape grid |
+| `h` | source view, function page | Highlight every measured line, or only what never ran or took one branch |
+| `.` | source view, function page | Show or hide the input-class chips under def lines |
+| `[` / `]` | source view | Previous / next file |
+| `m` | coverage map | Next colour mode: Gap, Lines, Input classes |
+| `M` | coverage map | Next module-level code weight: full, thin, hidden |
+
+`g` waits 1.5 s for its letter and says so in a small hint at the bottom right ("g … o t m i"). The
+go-to targets are never URLs in the script: they are the links in the help dialog (`data-go` on
+each; the economy row wraps the economy feature's own nav include, so it exists exactly when that
+page does) and, for `r`, the run link the page itself carries (`data-go="r"`).
+
+## View settings
+
+How a page paints coverage is a view setting with four agreed keys, resolved per reader by the
+scoped settings (`user > repo > org > instance > default`, `coverset/settings_scopes.py`; a user may
+override every one):
+
+| Key | Values (default first) | Query parameter | Key | What it changes |
+|---|---|---|---|---|
+| `view.highlight` | `all`, `missing` | `?highlight=` (source view, function page) | `h` | `all` paints every measured line; `missing` keeps the vermilion and dotted-yellow treatment and drops the blue bar of executed lines to a faint gutter mark, so what never ran is all that stands out |
+| `view.map_mode` | `gap`, `lines`, `inputs` | `?mode=` (map) | `m` | The map's colour |
+| `view.map_module_weight` | `thin`, `full`, `hidden` | `?modules=` (map, repository overview) | `M` | How module-level code shows on the map and the overview's thumbnail |
+| `view.theme` | `auto`, `light`, `dark` | | header button | Colour scheme (a click on the header button beats the setting in this browser, see below) |
+
+Each page resolves them in this order: the **query parameter**, then what somebody **chose in the
+scoped settings** (`view_prefs`; a value still at its built-in default counts as unset unless the
+settings layer says where each value came from, through a `sources` map), then the reader's own
+choice in **this browser** (`localStorage`: `coverset-highlight`, `coverset-map`,
+`coverset-theme`, `coverset-chips`; the map choice also in the `coverset-map` cookie, below), then
+the **default**. The server writes its answer and where
+it came from into `<meta name="coverset-view" data-highlight="missing"
+data-highlight-from="query|prefs|default" ...>` before `app.js`, a synchronous script in the head:
+it sets `data-highlight` (and `data-theme`, `data-chips`) on `<html>` before the body is parsed, so
+the first paint is already in the right mode (no flash of the other one). A server choice also sits
+on the source frame (`<div class="src-frame" data-highlight="missing">`), so it holds without
+script. The map is drawn on the server, so a reader's map mode and module weight (from `m`, `M` or
+the switches) also go into a small first-party cookie, `coverset-map=<mode>.<modules>` (`SameSite=Lax`,
+a year; the server accepts only the listed values). The map page and the repository overview read it
+after the query parameter and the scoped settings (source `reader`), so the first request already
+draws the reader's map and the overview's Gap thumbnail follows the same module weight: no second
+render, no reload. (A browser that saved a choice before the cookie existed gets the cookie written
+from `localStorage` on its next page, and reloads that one map once.)
+
+The **theme** is the one view setting a reader changes in the header rather than by a key: a click
+cycles from the theme on screen (auto → light → dark), and it beats `view.theme` from the scoped
+settings in this browser. The script stores the pick together with the settings value it overrode
+(`coverset-theme-over`), so the pick holds until somebody changes the setting; a new setting value
+wins again until the reader clicks once more.
+
+Toggling with `h` (or the "Highlight" button in the source bar, `aria-pressed`, both labels stacked in
+one grid cell so the button never changes width) flips one attribute, stores the choice, and adds
+`highlight=` to the links the page built (`data-keep-view`: previous / next file, the file list) and
+to the address, so the next page and a reload paint the same. An explicit `?highlight=` is kept by
+the server in the same links.
+
+### Missing coverage as regions
+
+A never-run block reads as one region, not confetti: the blank, comment-only and other stateless
+lines (`else:`, a docstring) **between** statements that never ran get the `gap` class and the
+block's vermilion bar and lighter tint (`render/source.py` `gap_lines`: a maximal run of lines whose
+statements all never ran, with the stateless lines inside it; a partial, executed or excluded line
+ends it, and stateless lines at its edges stay out). Continuation lines of a multi-line statement
+already take their statement's state (see [The source view](#the-source-view)). Both modes paint
+gap blocks; `missing` mode is where they matter most. A range render (the function page) looks just
+past its range to find the block it sits in.
+
+### Module-level code on the map
+
+Imports, constants and `def`/`class` lines run when a module is imported, so module-level code
+reads as covered whatever the tests do: drawn at full size, a file of constants or a large
+`__init__.py` is a big blue (or "no gap") tile that says nothing about the tests, and it inflates the
+covered area. `view.map_module_weight` decides how it shows (`render/treemap.py` `weigh_modules`):
+
+* **thin** (default): each `<module>` leaf gets the smaller of its statements and 10% of its file's
+  function statements (at least 1), drawn with a dashed outline, its hover text saying "shown
+  reduced: drawn as 6 of 40 statements", and the legend lists "module-level code shown reduced"
+  (its hover text gives the reason above). A file of nothing but module-level code keeps a sliver.
+* **full**: area = statements, as before.
+* **hidden**: module leaves are left out of the layout; a file's area is its function statements
+  and its hover text still reports "module-level code: 40 statements, 100% ran (hidden from the
+  map)". A file of nothing but module-level code disappears.
+
+The numbers in every hover text and in the "Largest gaps" table stay the real statement counts; only
+areas change. The repository overview's Gap thumbnail follows the same setting (`?modules=` there
+too).
+
+### A map that holds still
+
+The map uses an **ordered** layout by default (`render/treemap.py` `ordered_split`): siblings keep
+a fixed order (directories and files by path, a file's functions in source order with module-level
+code first, path as the tie-break); the list is cut where the running weight is closest to half and
+the rectangle across its longer side in proportion, recursively. Squarified layouts (`?layout=
+squarified`) sort by size, so a function that grows a little can swap places with one across the
+map. Measured as the share of function tiles whose centre moves more than 5% of the map (Euclidean,
+in coordinates scaled to the map's width and height; `centre_moves`) at 1200 × 620 with thin module
+weight:
+
+| Comparison | Squarified | Ordered |
+|---|---|---|
+| The demo's 5 pairs of consecutive baselines (each adds functions and files: 15 → 53 tiles) | 62.0% (111 of 179) | 56.4% (101 of 179) |
+| PR #1 (adds `refund.py` and a function) against the latest baseline | 71.7% (38 of 53) | 22.6% (12 of 53, anchored: all in `billing/`) |
+| PR #2 (changes one function's body) against the latest baseline | 11.3% (6 of 53) | 0% (anchored) |
+| A real 4,015-tile repository, ±10% statements on 10% of its functions (5 trials) | 3.2% | 0.1% |
+| The same, a new 10-statement function in 20 of its files (3 trials) | 21.6% | 2.8% |
+
+On the demo's baselines most tiles move with either layout: between consecutive baselines the
+repository grows by whole files, and a map that keeps proportional areas has to make room. When the
+sizes change a little (the usual commit) the ordered layout barely moves.
+
+**A PR run is drawn in its baseline's frame** (`anchor_to`): every directory, file and function the
+repository's latest baseline has keeps the baseline's area, whatever its children add up to now; a
+function the PR adds takes a share of its file's area. The map of a PR run is therefore the
+baseline's picture with the PR's colours, and only the inside of files or directories the PR changed
+moves. The page says "layout from baseline `77e37dc`: the baseline's rectangles, this run's colours"
+(linking to the baseline's map) whenever that changes any size.
+
+## Speed
+
+Pages stay light: no per-line or per-tile event listener (everything is delegated from `document`),
+no layout thrash (the scripts read geometry only on a key press; `j`/`k` find the line at the top
+of the viewport by a binary search), and nothing that moves once painted: fixed gutter columns, the
+highlight toggle sized for both labels, the theme button sized for its longest label, the
+status line above a map reserving its height, and the lens menu of the report at a fixed width.
+
+* **Source lines** skip their style, layout and paint until they are near the viewport:
+  `content-visibility: auto` with `contain-intrinsic-size: auto 0px auto 20px` (every line is one
+  20 px row, so the scroll height and `#L` anchors are exact before a line is first drawn). The sticky
+  `def` lines stay real so they can stick. The width of the block is set from the first paint by an
+  invisible, zero-height copy of the widest line (its text and its branch note, first in
+  `.src-lines`, `aria-hidden`): without it an off-screen line counts with its placeholder width, and
+  the horizontal scroll width grew each time a long line below the fold was first scrolled into view. Rows of tables are left alone (skipped rows would let
+  column widths change while scrolling); a page marks whole panels below the fold `.lazy-panel`
+  instead (the report's file, gap and test tables).
+* The report's data-flow lens builds its menu from the page's data block the first time it is used,
+  instead of shipping one `<option>` per test (4,261 of them, 610 KB, on the largest file below).
+
+Measured with the static report of a real 4,015-function Flask code base (`coverset report` on its
+`.coverset` bundle; Chromium headless shell, 1440 × 900, median of 7 loads from `file://`, the same
+stylesheet and line markup the live source view uses; before and after measured back to back):
+
+| Page | Before | After |
+|---|---|---|
+| `spreadsheets.py`, 2,205 lines: first contentful paint / DOMContentLoaded / longest task | 104 / 120 ms / 77 ms | 68 / 80 ms / none over 50 ms |
+| `sample.py`, 1,623 lines, 4,261 tests touch it: FCP / DOMContentLoaded / longest task | 140 / 185 ms / 103 ms | 68 / 75 ms / none over 50 ms |
+| The report's index, 11 MB, 4,520 tiles per map, 5,081 test rows: DOMContentLoaded / longest task | 602 ms / 207 ms | 239 ms / none over 50 ms |
+
+Cumulative layout shift is 0 on all of them. On the server, rendering `spreadsheets.py` (Pygments
+lexing included) takes 63 ms; from the per-process lexing cache 3.8 ms (3.2 ms before gap blocks).
 
 ## Theming and accessibility
 
 * `:root { color-scheme: light dark }` and every colour token defined once with `light-dark()`;
-  the header's theme button cycles auto → light → dark, stored in `localStorage`
-  (`coverset-theme`) and applied as `<html data-theme>` before first paint.
+  the header's theme button cycles auto → light → dark from the theme on screen, stored in
+  `localStorage` (`coverset-theme`) and applied as `<html data-theme>` before first paint; a click
+  beats `view.theme` from the scoped settings in this browser (see "View settings").
 * Colour is reserved for data. Coverage uses Okabe-Ito: **blue** `#0072B2` = ran, **vermilion**
   `#D55E00` = never ran (with a heavier edge), **yellow** `#F0E442` = took one branch (dotted
   edge). Status chips always pair colour with a symbol and a word (✕ FAIL, ✓ PASS, dashed ✓ PASS

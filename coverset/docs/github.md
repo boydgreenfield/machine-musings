@@ -34,6 +34,8 @@ There are two ways to connect a repository, and they combine:
    | `public` | `false` (only your account or organization can install it) |
    | `hook_attributes.url` | `COVERSET_PUBLIC_URL/webhooks/github` |
    | `redirect_url` | `COVERSET_PUBLIC_URL/setup/github/callback` |
+   | `callback_urls` | `[COVERSET_PUBLIC_URL/auth/github/callback]`: the OAuth callback of "Sign in with GitHub" ([docs/auth.md](auth.md)) |
+   | `request_oauth_on_install` | `false`: installing the App never starts a sign-in |
    | `default_permissions` | `checks: write`, `contents: read`, `pull_requests: write`, `issues: write`, `metadata: read` |
    | `default_events` | `pull_request`, `push`, `check_run`, `check_suite`, `repository` |
 
@@ -49,6 +51,13 @@ There are two ways to connect a repository, and they combine:
    * `COVERSET_GITHUB_APP_ID`, `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET`,
      `COVERSET_GITHUB_WEBHOOK_SECRET` and the key path into `.env` (other lines are kept), plus
      `COVERSET_ALLOWED_OWNERS=<App owner>` when no allowed owners are configured.
+
+   The client id and secret are what "Sign in with GitHub" uses: after the restart the login page
+   offers it, and collaborators who sign in see the repositories GitHub grants them
+   ([docs/auth.md](auth.md)). Add your own login to `COVERSET_ADMINS` to be an instance admin
+   when signed in with GitHub (the admin token always is). An App created before the manifest
+   carried `callback_urls` needs `COVERSET_PUBLIC_URL/auth/github/callback` added under the App's
+   settings on GitHub ("Callback URL"), and a client secret generated there and written to `.env`.
 
    Both files are written atomically with mode `0600`. If either already holds credentials the
    finish step answers 409. Replacing them is a `POST` with `overwrite=1` and the CSRF token, and it
@@ -329,6 +338,20 @@ Unknown and private repositories are both a plain 404. Anonymous callers get a r
 | `GET /v1/runs/<run_id>` | `{run_id, state, conclusion, counts, summary, summary_url}` |
 | `GET /v1/runs/<run_id>/events?since=<seq>` | `{events: [{seq, kind, payload}], done}` (`since` and `Last-Event-ID` are integers of at most 18 digits, `repo_id` at most 19; anything else is a 400) |
 | same path with `Accept: text/event-stream` | SSE frames `id`/`event`/`data`, resumable with `Last-Event-ID`, a `: ping` comment at least every 15 s, ending after the `done` event |
+
+## Upload mode
+
+The tests keep running in the repository's own CI. `pytest --coverset` writes the bundle, and
+`coverset-ci upload` (or the composite action `src/coverset/forge/gha/upload/action.yml`) sends it
+to `POST /v1/bundles`. coverset then computes patch coverage, input-class gaps and invariants, and
+posts the same sticky comment and check run. The upload authenticates with the job's OIDC token
+(`permissions: id-token: write`; a repository coverset does not know yet is registered when its
+owner is in `COVERSET_ALLOWED_OWNERS`), or with a repository token that has the `upload` scope.
+Patch coverage needs a way to fetch the repository: the App installed, or token mode. Without one,
+the run still gets totals, gaps and invariants, and its reason says
+`no diff available: install the GitHub App or set a base`. There is no anticipatory ordering, no
+warm start, and results arrive after CI finishes. See [docs/upload.md](upload.md), and
+[docs/examples/coverset-upload.yml](examples/coverset-upload.yml) for a workflow.
 
 ## Future work: merge queues
 

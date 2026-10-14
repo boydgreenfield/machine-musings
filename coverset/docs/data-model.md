@@ -135,6 +135,22 @@ Run tables (one file per run):
 | `file_cov` | `file_id`, `path`, `statements`, `covered`, `branches`, `branches_covered`, `partial_branches`, `percent` | `percent = 100 × (covered + branches_covered) / (statements + branches)` |
 | `func_input_cov` | `func_key`, `tests_called`, `tests_sampled`, `tests_truncated`, `blocks_expected`, `blocks_observed`, `missing_json` | input-class coverage per function; the class columns stay null without a catalogue. `tests_truncated` is counted over the whole run with `analysis/shapes.cap_hits`, the definition the verdict and the UI use: 0 when no shard capped the function, else the tests that called it (lines in its body) but were never sampled, at least 1 |
 
+Per-run summaries of `test_lines` (run tables, written by `finalize_run` through `facts/aggregates.py`, dropped with `file_cov` whenever a shard is ingested again):
+
+| Table | Columns | Notes |
+|---|---|---|
+| `func_body` | `func_key`, `statements`, `covered`, `lines[]`, `covered_lines[]` | each callable's body by the function page's rule (statements in `[body_start, end_line]` minus excluded; a line ran when a test ran it, or `<import>` did and it is not the def line); what the overview's gaps, a function's history and the class changes read instead of scanning `test_lines` |
+| `tree_leaf` | `file_id`, `func_key`, `statements`, `covered` | the treemap's leaves (the innermost callable owns a statement, else the file's module leaf, `func_key` null) |
+| `line_hits` | `file_id`, `line`, `tests`, `by_import` | per executed line: the tests other than `<import>` that ran it and whether `<import>` did; the source view's line states and per-line test counts |
+
+A reader uses a summary only when it is newer than every file it was computed from (`queries.summary_is_fresh`: one listing and a few `stat` calls), else it computes the same answer from `test_lines`, so runs finalized before the summaries existed, and facts edited by hand, read correctly (`test_summaries_answer_exactly_what_test_lines_answers`, `test_a_summary_older_than_its_sources_is_ignored`). `line_hits.tests` is a `count(*)`: a run stores each (test, file, line) cell once (ingest drops repeated cells, and a test's lines live in one shard).
+
+The compact layout (shard table, written only with `COVERSET_FACTS_COMPACT=1`, see [Compact layout](#compact-layout-test_file_bits)):
+
+| Table | Columns | Notes |
+|---|---|---|
+| `test_file_bits` | `test_id`, `file_id`, `n_lines`, `bits` | one row per (test, file): the lines as a bitset in coverage.py's numbits format (line `n` is bit `n % 8` of byte `n // 8`), sorted by `(test_id, file_id)`; `n_lines` is the bit count |
+
 Line numbers are `int32`. coverage.py arcs use negative numbers for code-object entry and exit, so arc columns allow them.
 
 **Schema changes.** Facts files carry no version number: `facts/schema.py` is the one current schema, and `FactsStore.read_table` conforms every file to it on read (a column a file lacks reads as nulls) while the DuckDB views read with `union_by_name`. A new nullable column therefore needs no migration. `functions.types_json` was added this way (2026-10-11): runs ingested before it read null there, and their pages fall back to parsing the head source, as before.
@@ -184,14 +200,15 @@ A branch is partial when its from-line ran and not all of its possible exits are
 
 ### Querying with DuckDB
 
-There is no DuckDB database file. Every query opens a fresh in-memory connection (`FactsStore.connect`):
+There is no DuckDB database file. A connection is an in-memory database with views over the committed Parquet files (`FactsStore.connect`):
 
 1. `duckdb.connect` with `autoinstall_known_extensions` and `autoload_known_extensions` off.
-2. `SET allowed_directories` to the facts root and `SET enable_external_access = false`.
-3. One view per requested table: `read_parquet([<explicit list of committed files>], hive_partitioning=true, union_by_name=true, hive_types={'repo': BIGINT, 'run': VARCHAR})`, with `repo_id` and `run_id` taken from the partition directories. A table with no files gets an empty view of the right schema.
-4. `SET lock_configuration = true`.
+2. `SET allowed_directories` to the directories in scope (the facts root only for a connection that spans every repo; the repo's directory, or only its runs' directories, for a scoped one, so a scoped connection and the user SQL run on it can never `read_parquet` another repository's files; `test_a_scoped_connection_cannot_read_another_repository`) and `SET enable_external_access = false`.
+3. `SET memory_limit` and `SET threads` from `COVERSET_FACTS_MEMORY_LIMIT` (default `512MB`) and `COVERSET_FACTS_THREADS` (default `min(4, CPUs)`).
+4. One view per requested table: `read_parquet([<explicit list of committed files>], hive_partitioning=true, union_by_name=true, hive_types={'repo': BIGINT, 'run': VARCHAR})`, with `repo_id` and `run_id` taken from the partition directories. A table with no files gets an empty view of the right schema.
+5. `SET lock_configuration = true`.
 
-Views can be scoped to one repo, one run, or a list of runs, and to the tables a query needs, which keeps a per-request connection cheap. Because nothing holds a lock on a database file, the CLI, scripts, tests and screenshots can query while `coverset serve` ingests. A query that hits a file replaced mid-read is retried once.
+Views can be scoped to one repo, one run, or a list of runs, and to the tables a query needs. Readers do not build them per query: `FactsStore.lease` hands out a cursor of a cached connection for the scope (see [Caches](#caches)), which every function of `facts/queries.py` uses. Because nothing holds a lock on a database file, the CLI, scripts, tests and screenshots can query while `coverset serve` ingests. A query that hits a file replaced mid-read is retried once, and the retry's lease sees the new files.
 
 User SQL goes through `FactsStore.query`, which accepts exactly one `SELECT` statement (`test_query_accepts_only_a_single_select`, `test_connection_cannot_reach_other_files`). From the CLI:
 
@@ -221,6 +238,55 @@ uv run coverset facts query "SELECT path, statements, covered, branches, branche
 
 As an example, on the PR #2 run of a local demo, `SELECT count(DISTINCT tl.test_id) FROM functions f JOIN test_lines tl ON tl.file_id = f.file_id AND tl.line BETWEEN f.body_start AND f.end_line WHERE f.qualname = 'validate_email' AND tl.test_id <> 0` returned 24, and `file_cov` showed `src/ledger/accounts/emailcheck.py` and `src/ledger/billing/allocate.py` at 100.0% line and branch coverage.
 
+### Caches
+
+Every file of the store is immutable once visible: a run changes only by new files (an attempt, its commit row in `ingest_log`, a finalize's run tables), an atomic replace (a new inode under the same name) or a deletion (superseded attempts, gc). So a run's **stamp**, the sorted `(name, inode, size, mtime_ns)` of its `*.parquet` entries (`facts/cache.py`, `run_stamp`: one `scandir` and one `stat` per file, 36 µs for a finalized run), changes whenever anything a reader could see changes. Every cache below is keyed by the stamps of the runs it read and recomputes them on every lookup, so there is no invalidation message to miss: an ingest, a finalize or a gc makes the very next lookup miss. The inode is in the stamp because a replace within one tick of a coarse filesystem clock (ext4) keeps the mtime and often the size.
+
+| Cache | Key | Holds | Bound | Code |
+|---|---|---|---|---|
+| connections | store root, scope (repo, runs), tables, the scope's allowed directories + the scope's stamps | one in-memory DuckDB database per scope with its views; `FactsStore.lease` hands out a cursor of it | `COVERSET_FACTS_CACHE_ENTRIES` (16) databases, each with `COVERSET_FACTS_MEMORY_LIMIT` (512MB) and `COVERSET_FACTS_THREADS` | `facts/cache.py` `ConnectionCache`, `facts/store.py` `lease` |
+| query results | query, arguments, runs + their stamps | the result of `treemap`, `top_gaps`, `class_changes`, `run_summary`, `test_touched`, `test_shapes`, the picked baselines and the points of `baseline_trend` and `function_history` | `COVERSET_FACTS_RESULT_ENTRIES` (256) | `facts/cache.py` `ResultCache`, `facts/queries.py` `_memo` |
+| run facts | store root, repo, run + its stamp | the web's `IndexedRunFacts`: `test_lines` as sorted arrays with an index of each file's rows, `line_hits` by file, `call_shapes` sorted by function with each function's row span and `func_sampling` rows by function, and the memoised function views, line facts, body coverage and branch gaps | `COVERSET_RUN_FACTS_ENTRIES` (8) runs and `COVERSET_RUN_FACTS_MB` (384) of estimated bytes: `memory_bytes` weighs everything an entry holds (arrays, Arrow tables, the Python graphs of its views and memo entries, by sampling; 86 MB for a fully warmed run of the real bundle against 77 MB from an exact walk), checked on every lookup, hits included; the newest run always stays | `web/loaders.py` `cached_run_facts` |
+| source text | mirror, commit, path | blob text; the first miss for a commit reads every measured source of the run in one `git cat-file --batch` (if that batch fails, for example on a missing path with a space that `read_blobs` cannot parse, the requested path is read alone and the commit's later misses read one path each) | `COVERSET_SOURCE_CACHE_MB` (64) | `web/loaders.py` `read_source` |
+| highlighted source | path, text | the Pygments lexing of a file (`render/source.py` `SourceCache`) | 32 texts | `web/loaders.py` `source_cache` |
+
+Details that matter for correctness:
+
+* A cursor (`DuckDBPyConnection.cursor()`) is its own connection to the cached database: it sees the views, it cannot change the locked configuration, and an Arrow table registered on it (`patch_coverage`'s changed lines) is visible to it alone (`test_an_arrow_table_registered_on_a_lease_is_private_to_it`). Empty tables are real (empty) tables, not registered Arrow objects, for that reason.
+* An evicted or superseded database is never closed: closing a DuckDB connection closes its cursors, which another thread may be using. It is dropped and freed with its last cursor (`test_a_cursor_outlives_the_eviction_of_its_connection`).
+* There is one database per scope, never one shared database with a schema per scope, so a user query on one run's scope cannot name another scope's views (and `allowed_directories` keeps it inside the repo). The allowed directories are part of the key: two scopes that list the same runs, such as two repos with no runs yet or the unscoped and repo scope of a one-repo store, never share a database (`test_scopes_with_the_same_runs_never_share_a_connection`).
+* The run-facts budget bounds what the cache holds, not the process: freed run facts leave about 450 MB of allocator fragmentation on the real bundle (measured with `scripts/bench_facts.py --cache-memory`; `docs/benchmarks.md`, "Memory", has the footprint per budget and the sizing advice).
+* Memoised list results are returned as copies, and every memoised value is a frozen dataclass, so a caller's sort or append never reaches the cache.
+* `IndexedRunFacts` answers exactly what `RunFacts` answers (`test_indexed_run_facts_answer_what_run_facts_answers` compares every method on a finalized and an unfinalized run); `pr_view.analyse_diff` keys its own cache by the facts object, so it follows the same stamps.
+
+The static files are cached by the browser instead: `url_for('static', ...)` carries `?v=<12 hex digits of the file's SHA-256>`, a request at the current version is `Cache-Control: public, max-age=31536000, immutable`, any other revalidates (`no-cache` with the ETag), and HTML, CSS, JavaScript, SVG and JSON responses over 1 KiB are gzipped for clients that accept it (level 3 for pages: the 3 MB treemap page goes out as 267 KB for 6 ms of CPU; static files once at level 9, kept). Streamed responses (the SSE event stream) are never compressed (`app.py` `install_response_caching`, `tests/web/test_static_caching.py`).
+
+Gzip and BREACH: every page carries the session's fixed CSRF token (`<body hx-headers>`) and many reflect query input. With compression, a network observer who can make the victim's browser request a page with chosen input could recover the token from response lengths. So a dynamic response is compressed only when the browser marks the request `Sec-Fetch-Site: same-origin` or `none`: the app's own links and htmx requests, a typed URL or a bookmark. An attacker's page cannot issue such a request. A request started by another site (`cross-site`, `same-site`) gets the identity encoding, and every dynamic response varies on `Sec-Fetch-Site`. A client that sends no `Sec-Fetch-Site` (curl, the CLI, an old browser) gets gzip only when the body does not contain its session's CSRF token. Static files hold no secret and are always compressed (`test_dynamic_bodies_are_never_compressed_for_another_site`). Masking the token per response (sending a random pad and the token XOR the pad) would allow compressing everything, but it belongs to `web/auth.py`, so it is left as a follow-up.
+
+### Compact layout (`test_file_bits`)
+
+`test_lines` is one row per (test, file, line). Sorted by `(file_id, line, test_id)` and written with zstd and dictionary encoding it is already small (2.2 MB for the real 5,099-test bundle's 2.1 million rows, 5.9 MB for the synthetic 20 million), but every question about one test scans all of it, and it is most of a run's bytes. The compact layout stores the same cells as one bitset per (test, file) in coverage.py's numbits format (`facts/convert.py` `lines_to_bitsets`, built with no Python loop; `bitsets_to_lines` unpacks a whole table at once), as the shard table `test_file_bits`, **next to** `test_lines` when `COVERSET_FACTS_COMPACT=1`. Readers use it where every committed shard of the run has it (`queries.has_compact_layout`); today that is `test_touched` (the test page and `coverset facts test`), which decodes only the test's rows instead of filtering every row.
+
+Measured (`docs/benchmarks.md`, "Compact layout"):
+
+| | real bundle (2.1M cells, 115,572 test-file pairs) | synthetic (20M cells, 202,000 pairs) |
+|---|---|---|
+| `test_lines` Parquet | 2.22 MB | 5.86 MB |
+| `test_file_bits` Parquet (by test, file) | 0.33 MB (6.7x smaller) | 1.24 MB (4.7x smaller) |
+| build at ingest | 0.17 s | 0.39 s per 2.5M-cell shard |
+| one test's lines (p50) | 3.4 ms long, 1.5 ms bits | 6.3 ms long, 2.8 ms bits |
+| one line's tests (p50) | 2.3 ms long, 1.6 ms bits (file-sorted copy) | 6.3 ms long, 2.6 ms bits |
+| all cells back to arrays | 0.04 s | 0.11 s |
+
+**Recommendation.** Keep `test_lines` as the source of truth in v1 and leave the flag off by default: with the summaries above, the pages no longer scan `test_lines` per request, and writing both layouts costs 8 to 11 % more bytes per run for one faster query. Turn it on where the test page's facts query matters (2.3x faster on the 20-million-cell run); it is safe to switch either way at any time (a run with bitsets in only some shards reads `test_lines`). The bitsets become the default when the remaining `test_lines` readers move over, and then `test_lines` can stop being written:
+
+1. `finalize_run` computes `file_cov`, `func_input_cov`'s callers and the three summaries from the in-memory `_LineIndex` arrays of the ingest (or from `bitsets_to_lines`) instead of SQL over `test_lines`.
+2. `patch_coverage` and `function_history`'s fallback read `line_hits` (union of executed lines) and `func_body`, which already cover them for finalized runs.
+3. `tests_covering` / the line popover and `ParquetPriorRun` decode the bitsets of the files they touch (sorting `test_file_bits` by `(file_id, test_id)` instead makes that read 0.46 MB on the synthetic run and keeps per-test reads at a row-group skip).
+4. Ingest writes `test_file_bits` only; a run keeps reading `test_lines` wherever it has them, so old runs need no rewrite and age out with retention.
+
+That takes a 5,000-test run from 4.3 MB to about 2.4 MB (see [Measured ceiling](#measured-ceiling)).
+
 ### Debugging a run
 
 Five `coverset facts` subcommands answer the usual "what did this run record?" questions without
@@ -248,6 +314,8 @@ the newest completed default-branch baseline, as on the UI pages; required for `
 `coverset gc [--dry-run]` (`commands/maintenance.py`) deletes runs older than the cutoff that are not queued or running, deletes old `run_events`, nulls old delivery payloads, deletes delivery rows past `max(30, COVERSET_RETENTION_DELIVERIES_DAYS)` days, and removes expired facts directories with `facts/gc.py` (`expire_runs`). It always keeps the latest completed baseline per repo and the latest run per open PR. A facts run's age is its `runs_dim.created_at`, else the directory's mtime. A run directory is renamed to a hidden name before deletion, so readers never see half a run.
 
 `coverset repo purge NAME` deletes a repository's rows, its facts directory and its mirror.
+
+Production windows imported with `coverset flows import` live beside the runs, under `repo=<id>/prod/service=<service>/batch=<stamp>-<sha12>/` (tables `prod_windows`, `prod_funcs`, `prod_shapes`, `prod_calls`, `prod_flows`; `PROD_SCHEMAS` in `facts/schema.py`, kept out of `SCHEMAS`), never in a run directory, so the run views and `coverset gc` never see them. Their shape ids come from the same `dictionary.json` as `call_shapes`. Their retention is `coverset flows prune --older-than-days N` (default 30); `repo purge` removes them with the repo. See [production-flows.md](production-flows.md#data-model).
 
 The same pass (`orchestrator/history.py`, `collect_garbage`) runs in-process: `serve` starts it as a Quart background task when it starts serving and then every 24 hours (`app.py`, `schedule_gc`; stopped by the app's shutdown event). After each PR run the runner applies the per-PR rule (`history.expire_pr_runs`): the PR's latest run stays, its other runs older than `COVERSET_RETENTION_RUNS_DAYS` are deleted with their facts. Both take a module-level lock without waiting, so a second gc in the same process skips instead of racing, and neither runs under `COVERSET_ENV=test` unless a test invokes it.
 
@@ -306,14 +374,26 @@ hashes), and its `shape_catalogue` reads the shipped type descriptors, so the st
 
 ## Measured ceiling
 
-`scripts/bench_facts.py` generates synthetic shard bundles at the plan's scale (2,000 files, 200,000 statement lines, 10,000 tests × 2,000 lines per test in 8 shards, 30 runs, 1,000,000 `call_shapes` rows) and times conversion, ingest and finalisation, plus the p50 and p95 latency of `line_tests`, a 500-line `patch_coverage`, `treemap` and `shapes_for_function`. `--out docs/numbers.json` merges its `facts_*` keys into that file. The measured figures are in [docs/benchmarks.md](benchmarks.md); this page quotes none.
+`scripts/bench_facts.py` generates synthetic shard bundles at the plan's scale (2,000 files, 200,000 statement lines, 10,000 tests × 2,000 lines per test in 8 shards, 30 runs, 1,000,000 `call_shapes` rows) and times conversion, ingest and finalisation, plus the p50 and p95 latency of `line_tests`, a 500-line `patch_coverage`, `treemap` and `shapes_for_function`; it also packs every shard as the archives a worker uploads (the pytest-coverset `bundle.tar.gz` and the same bundle in the neutral format) and pushes each set through the control plane's own path (extract, `read_any_bundle` under the strict limits, `ingest_shard`, `finalize_run`) in a fresh process, reporting its peak RSS. `--out docs/numbers.json` merges its `facts_*` keys into that file. With `--real DIR --repo-root GIT` it ingests a real `pytest --coverset` output into a scratch control plane and times every page instead. The figures are in [docs/benchmarks.md](benchmarks.md).
+
+What one run costs on disk, measured (bytes of the visible Parquet files of a finalized run; summaries and the test-economy tables included):
+
+| Repository | `test_lines` rows | `test_lines` | whole run | runs per 10 GB of facts |
+|---|---:|---:|---:|---:|
+| real, 5,099 tests, 464 measured files, 1 shard | 2,077,269 | 2.2 MB | 4.3 MB | about 2,300 |
+| real, with the compact layout instead of `test_lines` (projected) | | 0.33 MB | 2.4 MB | about 4,100 |
+| synthetic, 10,000 tests × 2,000 lines, 8 shards | 20,160,000 | 5.9 MB | 11.3 MB | about 880 |
+
+The control database adds about 1 MB per run of a 5,000-test repository (one `test_results` row per test; the `tests` and `test_stats` rows are per repository), plus `run_events` rows, which expire after `COVERSET_RETENTION_EVENTS_DAYS`. At the default 30-day run retention a repository that runs 5,000 tests 60 times a day (pull requests and baselines) keeps 1,800 runs: 7.7 GB of facts, under one 10 GB volume.
 
 ## Scale-out path
 
-**Designed, not built.** When one machine's Parquet directory stops being enough, three steps apply in order, each behind the same `FactsStore` and `facts/queries.py` functions:
+When one machine's Parquet directory stops being enough, three steps apply in order, each behind the same `FactsStore` and `facts/queries.py` functions. The first is half built: the per-(test, file) bitsets exist (`test_file_bits`, [Compact layout](#compact-layout-test_file_bits)), measured at 6.7x smaller than `test_lines` on the real bundle; what is left of step 1 is keying them by content.
 
-1. **Content-addressed per-(test, blob) bitsets.** Most tests execute the same lines of an unchanged file run after run. Store one bitset of executed lines per `(test, file blob sha)` and reference it from each run, so an unchanged file costs one row per run instead of one row per line.
+1. **Content-addressed per-(test, blob) bitsets.** Most tests execute the same lines of an unchanged file run after run. Key each `test_file_bits` row by `(test, file blob sha)` instead of by run and reference it from each run, so an unchanged file costs one reference per run instead of one bitset (and the long table's one row per line). On the real bundle a run's bitsets are 0.33 MB; with most files unchanged between baselines, a run would add tens of kilobytes.
 2. **DuckLake.** Keep the Parquet files, move the catalogue (which files belong to which run and attempt, today `ingest_log`) into a DuckLake catalogue, so several control planes can read and write the same facts.
 3. **Postgres with `pg_roaringbitmap`.** Store the per-(test, blob) bitsets as roaring bitmaps in Postgres, which makes "tests covering line L" and patch coverage set operations inside the database.
 
 The control database moves to Postgres through `COVERSET_DATABASE_URL`; that path is untested.
+
+Before any of these, one process serves more than this page's ceiling suggests: the pages read per-run summaries and memoised results (see [Caches](#caches)), so a request costs O(functions of the page), not O(cells of the run); what grows with the number of runs is disk (above) and, at ingest, memory. Converting and ingesting a shard runs in the ingest pool's worker processes (the default `process` mode), so its peak stays out of the server; `finalize_run` runs in the runner, inside the server process, and on a 20-million-cell run it peaks at 1 GB without the test-economy pass and 3 GB with it (measured in `docs/benchmarks.md`). Running `finalize_run` in the ingest pool as well is the next step for a server with little memory.

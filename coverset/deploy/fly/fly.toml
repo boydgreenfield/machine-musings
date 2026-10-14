@@ -1,0 +1,64 @@
+# coverset on Fly.io: one Machine, one volume, always on. deploy/fly/README.md has the commands.
+# `fly launch --no-deploy --copy-config --config deploy/fly/fly.toml` rewrites `app` to the name you pick.
+
+app = "coverset-CHANGEME"
+primary_region = "iad"
+
+# `coverset serve` drains in-flight requests on SIGTERM (10 s), then the warm pool.
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  # Run `fly deploy` from the project root (the build context); the README passes
+  # `--dockerfile Dockerfile` too, so the path below (relative to this file) is only a fallback.
+  dockerfile = "../../Dockerfile"
+
+[env]
+  COVERSET_ENV = "prod"
+  COVERSET_BIND = "0.0.0.0:8000"
+  COVERSET_DATA_DIR = "/data"
+  # Fly's proxy ends X-Forwarded-For with the app's own IP; on a Fly Machine (FLY_APP_NAME is set)
+  # coverset takes the client from Fly-Client-IP instead, and the scheme from X-Forwarded-Proto.
+  COVERSET_TRUST_PROXY = "true"
+  COVERSET_EXECUTOR = "modal"
+  COVERSET_MODAL_ENVIRONMENT = "coverset"
+
+# SQLite, Parquet facts, git mirrors, and the .env + App key that /setup writes (WORKDIR is /data).
+[[mounts]]
+  source = "coverset_data"
+  destination = "/data"
+  initial_size = "10gb"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Always on: webhooks must not wait for a cold start, and the dispatcher, reaper and warm-pool
+  # maintainer run in this process.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    # Requests, not connections: SSE streams are long-lived requests.
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 400
+
+  [http_service.http_options]
+    # coverset's SSE streams send ": ping" every 15 s, well inside this.
+    idle_timeout = 600
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+[deploy]
+  # A volume-backed Machine is replaced in place (canary/bluegreen need volume-less Machines).
+  strategy = "rolling"

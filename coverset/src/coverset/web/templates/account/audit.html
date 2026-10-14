@@ -1,0 +1,44 @@
+{% extends layout %}
+{% block title %}Audit log{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('dashboard.index') }}">coverset</a> / audit</div>
+<div class="page-head"><h1>Audit log</h1><span class="meta"><span>newest {{ limit }} events{% if action or repo_id %} matching the filter{% endif %}</span></span></div>
+
+<form method="get" action="{{ url_for('account.audit_page') }}" class="audit-filters">
+  <label>Action
+    <select name="action">
+      <option value="">any</option>
+      {% for name in actions %}<option value="{{ name }}"{% if name == action %} selected{% endif %}>{{ name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Repository
+    <select name="repo">
+      <option value="">any</option>
+      {% for rid, repo in repos.items() %}<option value="{{ rid }}"{% if rid == repo_id %} selected{% endif %}>{{ repo.full_name }}</option>{% endfor %}
+    </select>
+  </label>
+  <button class="btn secondary" type="submit">Filter</button>
+  {% if action or repo_id %}<a href="{{ url_for('account.audit_page') }}">Clear</a>{% endif %}
+</form>
+
+<section class="panel">
+<div class="table-scroll"><table class="audit-table">
+  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Repository</th><th>From</th><th>Details</th></tr></thead>
+  <tbody>
+  {% for e in events %}
+  <tr>
+    <td><time datetime="{{ e.at.isoformat() }}">{{ e.at|stamp }}</time></td>
+    <td><span class="badge">{{ e.actor_kind }}</span> {{ e.actor_label }}</td>
+    <td><code>{{ e.action }}</code></td>
+    <td>{% if e.target_kind %}{{ e.target_kind }} <code>{{ e.target_id }}</code>{% else %}–{% endif %}</td>
+    <td>{% if e.repo_id and e.repo_id in repos %}<a href="{{ url_for('repos.repo', rid=e.repo_id) }}">{{ repos[e.repo_id].full_name }}</a>{% elif e.repo_id %}#{{ e.repo_id }}{% else %}–{% endif %}</td>
+    <td><code>{{ e.ip or '–' }}</code></td>
+    <td class="audit-details">{% for k, v in e.details.items() %}<span class="chip-more chip"><b>{{ k }}</b> {% if v is iterable and v is not string %}{{ v|join(', ') }}{% else %}{{ v }}{% endif %}</span> {% endfor %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7" class="empty">Nothing recorded yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+</section>
+{% endblock %}

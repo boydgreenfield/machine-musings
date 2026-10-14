@@ -37,7 +37,7 @@ from coverset.forge.manifest import (
 )
 from coverset.forge.markdown import safe_url
 from coverset.forge.registry import forge_mode
-from coverset.web.auth import current_auth, request_host_is_loopback
+from coverset.web.auth import current_auth, is_admin, request_host_is_loopback
 from coverset.web.context import app_settings
 
 bp = Blueprint("setup", __name__)
@@ -114,8 +114,9 @@ def _forwarded() -> bool:
 
 
 def _admin_session() -> bool:
-    """An admin bearer or login cookie (open mode is not a session: anyone on loopback has it)."""
-    return current_auth() in ("cookie", "bearer")
+    """An instance admin with credentials: the admin token (bearer or cookie) or a signed-in user
+    with ``role = admin`` (open mode is not a session: anyone on loopback has it)."""
+    return is_admin() and current_auth() != "open"
 
 
 def _local_operator() -> bool:
@@ -225,6 +226,14 @@ async def _exchange(*, overwrite: bool) -> str | tuple[str, int]:
         return await _problem(502, "GitHub did not finish the setup", str(exc))
     except CredentialsExist:
         return await _problem(409, "Credentials already stored", "Start again from /setup.")
+    from coverset.web.audit import audit_now
+
+    await audit_now(
+        "credentials_written",
+        target_kind="github_app",
+        target_id=credentials.app_id,
+        details={"slug": credentials.slug, "owner": credentials.owner, "overwrite": overwrite},
+    )
     return await render_template(
         "setup/done.html",
         credentials=credentials,

@@ -1,0 +1,2 @@
+{# Repository nav: "Economy" (web/economy.py), the test economy of the repository's runs; also the g e target of the keys dialog. #}
+<a href="{{ url_for('economy.economy_page', rid=nav_repo.id) }}"{% if endpoint is defined and endpoint.startswith('economy.') %} aria-current="page"{% endif %}>Economy</a>

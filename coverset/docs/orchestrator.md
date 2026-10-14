@@ -49,8 +49,9 @@ queued ──▶ claim + policy ──▶ plan ───────────
    planning.
 3. **Plan.** The repo's bare mirror (`data/mirrors/<repo_id>.git`) is refreshed; the head commit is
    exported with `git archive` into a temporary control-plane checkout. The environment spec is the
-   repo's `uv export` plus the pytest-coverset wheel (`executors/env_export.py`), and the executor
-   builds or finds it (`ensure_env`). An untrusted run never builds an environment the executor does
+   repo's pinned requirements plus the pytest-coverset wheel (`executors/env_export.py`), and the
+   executor builds or finds it (`ensure_env`); see [The environment](#the-environment) for where the
+   requirements come from and how the project itself gets installed. An untrusted run never builds an environment the executor does
    not have (Modal's image builder has network access): it is `skipped`, `neutral`, "untrusted PR
    changes the environment: approve to build" until a maintainer approves it, and refused even then
    when the requirements carry direct URL, VCS or index references (`planner._untrusted_env`). A
@@ -237,6 +238,40 @@ The demo uses this to own its deliberately flaky test: history run *n* of `main`
 (`4 % 3 == 1`), its retry sees `5` and passes, and the failure is recorded as flaky. PR runs leave
 `extra_env` empty.
 
+## The environment
+
+Where the requirements come from (`lang/python_env.py`, called by `PythonAdapter.env_spec`; the first
+that applies wins): `[tool.coverset] requirements`; `uv.lock` (`uv export --frozen --offline
+--no-hashes --no-emit-project --no-emit-workspace --no-emit-local --all-groups`, plus `--all-extras` when
+the project declares extras); `poetry.lock` and `Pipfile.lock`, converted by coverset with their
+markers; requirement files found by name (`requirements*.txt`, `requirements/*.txt`; minimum-version and
+docs files skipped); `[project]` metadata with every extra and the test/dev dependency groups;
+`setup.cfg`/`setup.py` literals read with `ast`. The last four are pinned with `uv pip compile --universal
+--no-build`, offline first against coverset's own uv cache, and cached by the sha256 of the resolved
+inputs under `~/.cache/coverset/requirements/`, so the same inputs always pin the same versions and only
+the first resolution of new inputs needs the network. Nothing from the repository runs on the control
+plane: no `setup.py` is executed, the project is never resolved, `--no-build` refuses sdist-only
+dependencies, index options in requirement files are dropped, and direct URL/VCS references are never
+handed to the resolver (only requirements by name are compiled; the references are appended verbatim,
+and `file:` URLs and filesystem paths are refused outright), so an untrusted PR cannot make the control
+plane fetch anything before `_untrusted_env` applies its approval and direct-reference gate. `EnvSpec.env_source` records the
+source (`uv.lock`, `requirements`, `poetry`, `pipenv`, `pyproject`, `setup`); the requirements text of
+every source but `uv.lock` starts with a header naming it and the digest of the resolved inputs, so
+`env_hash` changes exactly when they do (the hashes of uv-locked repositories are unchanged).
+
+The project is imported from `PYTHONPATH=<source_root>:<repo>` and normally never installed.
+`EnvSpec.install` (`[tool.coverset] install`, default `auto`) is `wheel` or `editable` for projects that
+only work installed (entry points they read themselves, metadata read at import, generated version
+files, compiled extensions); then the backend's `[build-system] requires` join the requirements, and
+the project is installed with `--no-deps --no-build-isolation`: by Modal when it builds a trusted
+snapshot, before collecting, and by the LocalExecutor per (environment, commit) into
+`~/.cache/coverset/installs/<key>/site`, which the run's workers get as a site directory. Packages that
+live in the repository (committed wheels, path dependencies, workspace members) are recorded as
+`# coverset-local:` lines and installed in the same step. `PYTHONPATH` still comes first; an import hook
+written next to the install serves only compiled extension modules and build-generated modules from the
+installed copy. `coverset doctor --repo PATH` shows every one of these decisions for a repository;
+[docs/getting-started.md](getting-started.md) has the matrix, the keys and the caveats.
+
 ## The LocalExecutor is a convenience, not a sandbox
 
 The LocalExecutor runs a PR's tests as your user, on your machine, with your network. It scrubs the
@@ -265,8 +300,9 @@ Implement `coverset.executors.base.Executor` and `Worker` (and register the kind
 
 | method | contract |
 |---|---|
-| `ensure_env(EnvSpec) -> EnvRef` | build or find the environment for `spec.env_hash`: Python `spec.python`, `spec.requirements_txt`, then the plugin wheel `spec.plugin_wheel` **without its dependencies** (`build_env_spec` already appended `coverage==<coverset's locked version>`, and `pytest==...` when the repo has no pytest, unless the repo's lock pins them; those pins are part of `env_hash`; the project itself is never installed) |
-| `ensure_snapshot(env, repo, sha) -> SnapshotRef \| None` | a trusted filesystem snapshot of a default-branch commit, or None when unsupported |
+| `ensure_env(EnvSpec) -> EnvRef` | build or find the environment for `spec.env_hash`: Python `spec.python`, `spec.requirements_txt`, then the plugin wheel `spec.plugin_wheel` **without its dependencies** (`build_env_spec` already appended `coverage==<coverset's locked version>`, and `pytest==...` when the repo has no pytest, unless the repo's lock pins them; those pins are part of `env_hash`; the project itself is never installed into the environment) |
+| `ensure_snapshot(env, repo, sha) -> SnapshotRef \| None` | a trusted filesystem snapshot of a default-branch commit, or None when unsupported; when `install_needed(env.spec)` (`lang/python_env.py`), install the project and the repository's local packages into it first (`snapshot_install_commands`) |
+| `install_project(env, checkout, *, sha, run_id)` (optional) | for executors without snapshots: install the head's project and local packages for that run's workers; the planner calls it for trusted runs when `install_needed(spec)` |
 | `acquire(base, n, resources, ttl_s, labels) -> list[Worker]` | up to `n` workers (fewer under capacity pressure; raise `CapacityError` only when none at all can be had). `resources.network` is `blocked` for untrusted runs. `labels` carry `coverset_run`, `repo`, `role` for reaping |
 | `capabilities()` | `egress`, `warm_pool`, `fs_snapshot`, `max_workers`, `name` |
 | `cost_usd(resources, seconds)` | the rate card; the runner calls it with each worker's lifetime (acquire to release) and sums it into `runs.cost_estimate` and the daily budget, and prices reservations with it |
@@ -330,5 +366,7 @@ created is left running; anything a crash leaves behind is ended by Modal's `idl
   target, verify kinds, review finding, the run's status and the scan's status. The runner runs the
   same scan after every trusted, completed baseline of the default branch's tip (step 8 above).
   Code: `commands/invariants.py`.
+* `coverset doctor --repo PATH [--json] [--no-collect] [--offline] [--write-config]`: what coverset
+  would do with a repository, without running its tests ([docs/getting-started.md](getting-started.md)).
 * `coverset seed-demo`, `coverset warm`, `coverset facts query SQL`, `coverset shapes FUNC [--markdown] [--suggest]`,
   `coverset invariants check`, `coverset gc [--dry-run]`, `coverset repo purge NAME`, `coverset modal reap [--all]`.

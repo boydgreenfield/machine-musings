@@ -99,7 +99,9 @@ class IngestJob:
     limits: BundleLimits
     source_root: str
     """The control plane's checkout of the head commit (``n_lines`` and path checks)."""
-    head_paths: frozenset[str]
+    head_paths: frozenset[str] | None
+    """The head tree's paths (rows naming any other path are dropped); None only in upload mode
+    without a head tree, where the bundle itself is the only description of the commit."""
     functions: tuple[FunctionRegion, ...]
     keep_paths: frozenset[str] = frozenset()
     """Paths whose static facts and executed-line union come back in the outcome."""
@@ -114,6 +116,11 @@ class IngestJob:
     read_timeout_s: float = READ_TIMEOUT_S
     """Wall-clock limit of extraction plus conversion; past it the shard fails (enforced with
     ``SIGALRM`` where the job runs on a process's main thread, as in the process pool)."""
+    regions_from_bundle: bool = False
+    """Take the bundle's shipped regions (and declared types) for paths ``functions`` lacks even
+    for a ``python`` job. Only upload mode sets it, when no head checkout exists (no mirror and no
+    uploaded sources): the uploader is authenticated as the repository and nothing else describes
+    its functions. Managed runs never set it."""
 
 
 class IngestTimeout(Exception):
@@ -235,7 +242,7 @@ def job_regions(job: IngestJob, bundle: NeutralBundle) -> tuple[list[FunctionReg
     (the sources are the reference, and a bundle is untrusted); any other job adds, for each path
     the index lacks, the bundle's regions and their declared types.
     """
-    if job.language == "python":
+    if job.language == "python" and not job.regions_from_bundle:
         return list(job.functions), {}
     functions = merge_regions(job.functions, bundle.functions)
     shipped = {r.triple for r in functions} - {r.triple for r in job.functions}

@@ -35,6 +35,110 @@ MAX_MISSING_CLASSES = 30
 MAX_INVARIANTS = 30
 MAX_CLASSES_PER_CELL = 3
 MAX_SNIPPET_CHARS = 1_200
+MAX_TAX_TESTS = 10
+"""The tax keeps at most this many lowest-leverage and duplicating new tests (the PR card's lists)."""
+
+
+# -- the PR test tax (docs/economy.md) ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TaxTest:
+    """A new test the PR test tax names: its size, what it alone covers, and the existing test whose
+    flow it repeats (when it does)."""
+
+    nodeid: str
+    statements: int | None
+    unique_facts: int
+    leverage: float | None
+    duplicates: str | None = None
+    """The existing test it duplicates: the same facts (``same flow``) or a superset (``subset``)."""
+    how: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TestTaxLine:
+    """The PR test tax as the verdict carries it (stored in ``runs.summary_json["test_tax"]``).
+
+    Computed once at verdict time from the run's economy facts and the repository's
+    ``policy.test_tax_threshold`` (:func:`coverset.report.economy.tax_line`), so the sticky comment,
+    the check run and the PR page's card say the same thing. ``statements_measured`` is False when
+    the base's test files could not be read (the statement count is then unknown, never zero).
+    """
+
+    __test__ = False
+
+    added_statements: int
+    removed_statements: int
+    newly_covered_lines: int
+    new_classes: int
+    tax: float
+    threshold: float
+    flagged: bool
+    base_exact: bool = True
+    statements_measured: bool = True
+    new_tests: int = 0
+    lowest_leverage: tuple[TaxTest, ...] = ()
+    duplicates: tuple[TaxTest, ...] = ()
+    duplicate_count: int = 0
+    """New tests that repeat an existing test's flow (``duplicates`` lists at most :data:`MAX_TAX_TESTS`)."""
+
+    @classmethod
+    def from_json(cls, data: object) -> TestTaxLine | None:
+        """Rebuild a stored tax (``dataclasses.asdict`` form); None for anything malformed."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            tests = {
+                name: tuple(TaxTest(**row) for row in data.get(name) or () if isinstance(row, dict))
+                for name in ("lowest_leverage", "duplicates")
+            }
+            values = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+            return cls(**{**values, **tests})
+        except TypeError:
+            return None
+
+
+@dataclass(frozen=True, slots=True)
+class EconomySummary(VerdictSummary):
+    """A :class:`VerdictSummary` that also carries the PR test tax (only PR runs with a base run)."""
+
+    test_tax: TestTaxLine | None = None
+
+
+def with_test_tax(summary: VerdictSummary, tax: TestTaxLine | None) -> VerdictSummary:
+    """``summary`` carrying ``tax`` (unchanged when ``tax`` is None, so other runs' JSON is as before)."""
+    if tax is None:
+        return summary
+    values = {name: getattr(summary, name) for name in VerdictSummary.__dataclass_fields__}
+    return EconomySummary(**values, test_tax=tax)
+
+
+def test_tax_line(tax: TestTaxLine | None) -> str | None:
+    """``Test tax: 95 test statements for 3 newly covered lines (threshold 8) · 2 new tests duplicate
+    existing flows``, bold when flagged; None when the PR added no test statement and duplicates no
+    flow (nothing to say). Built from numbers only: no PR text reaches it."""
+    if tax is None or (tax.added_statements <= 0 and tax.duplicate_count <= 0 and tax.statements_measured):
+        return None
+    covered = _plural(tax.newly_covered_lines, "newly covered line", "newly covered lines")
+    if tax.new_classes:
+        covered += f" and {_plural(tax.new_classes, 'input class', 'input classes')}"
+    if tax.statements_measured:
+        statements = _plural(tax.added_statements, "test statement", "test statements")
+        text = f"Test tax: {statements} for {covered} (threshold {tax.threshold:g})"
+    else:
+        text = f"Test tax: test statements not measured, {covered}"
+    if tax.flagged:
+        text = f"**{text}**"
+    if tax.duplicate_count:
+        verb = "duplicates" if tax.duplicate_count == 1 else "duplicate"
+        text += f" · {_plural(tax.duplicate_count, 'new test', 'new tests')} {verb} existing flows"
+    if not tax.base_exact:
+        text += " · compared with an earlier run, not the base commit"
+    return text
+
+
+test_tax_line.__test__ = False  # type: ignore[attr-defined]  # a renderer, not a pytest test
 
 
 def _plural(count: int, singular: str, plural: str) -> str:
@@ -310,6 +414,8 @@ def _render(summary: VerdictSummary, *, heading: bool) -> str:
     intro = [line for line in (md_text(summary.reason) if summary.reason else "", _headline(summary)) if line]
     if (rank := _rank_line(summary)) is not None:
         intro.append(rank)
+    if (tax := test_tax_line(getattr(summary, "test_tax", None))) is not None:
+        intro.append(tax)
     if intro:
         head.append(["  \n".join(intro)])
     tail: list[list[str]] = []

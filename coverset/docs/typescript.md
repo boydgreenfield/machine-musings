@@ -54,12 +54,16 @@ export default defineConfig({
   when it is listed after another file.
 * The plugin also sets `coverage.instrumenter` to a wrapper of Vitest's Istanbul instrumenter (of
   yours, when the config names one): see [Lines and stack traces](#shapes-the-instrumentation).
-* No `pool` setting is needed: the default `forks` pool with `isolate: true`, `threads`, and
-  `isolate: false` with reused workers all give the same bundle (each worker appends to its own
-  spool file; the counter checkpoint lives on `globalThis`, once per worker, so the setup file
-  running again for every test file does not hand earlier files' lines to `<import>`; a counter
-  reset between test files is detected). Checked by comparing `--isolate=false --maxWorkers=1`
-  in both pools with the default run.
+* No `pool` setting is needed, and nothing has to run single-threaded: the default `forks` pool
+  with `isolate: true`, `threads`, `--no-file-parallelism` and `isolate: false` with reused
+  workers all give the same bundle (each worker appends to its own spool file; the counter
+  checkpoint lives on `globalThis`, once per worker, so the setup file running again for every
+  test file does not hand earlier files' lines to `<import>`; a counter reset between test files
+  is detected). The one thing that does not parallelise cleanly is *concurrent tests inside one
+  file* (`test.concurrent`): see [Parallelism](#parallelism). Checked by
+  `test_pools_and_file_parallelism_give_the_same_bundle` (`tests/e2e/test_vitest_reporter.py`),
+  which compares the default run with `--pool=threads` and with `--no-file-parallelism` file by
+  file.
 * Invariants and property tests are declared through Vitest's test metadata,
   `it("takes 10% off", { meta: { invariant: "discount_never_negative" } }, () => ...)`; the package
   adds `invariant`, `invariants` and `property` to Vitest's `TaskMeta` type.
@@ -346,6 +350,56 @@ no top-level example (`<Class>` inside a container). Lone surrogates never reach
 string the reporter writes, test ids and names included, has them replaced by U+FFFD before it is
 serialised (never written as a `\udXXX` escape).
 
+## Parallelism
+
+Nothing in coverset-vitest needs Vitest to run single-threaded. What runs where:
+
+* **Test files run in parallel**, in Vitest's worker pool (`forks` by default: child processes;
+  `threads`: worker threads). Each worker has its own Istanbul counters
+  (`globalThis.__VITEST_COVERAGE__`), its own shape recorder and its own spool file
+  (`<pid>-<thread id>-<8 hex>.jsonl`); the reporter merges the spools in Vitest's main process.
+  File-level parallelism is therefore exact: `examples/ts-app` gives the same bundle, file by
+  file (tests without their timings), with the default pool, with `--pool=threads` and with
+  `--no-file-parallelism` (`test_pools_and_file_parallelism_give_the_same_bundle`).
+* **Tests inside one file run one after another**, unless they are marked concurrent:
+  `test.concurrent`, `describe.concurrent`, or `sequence.concurrent: true` in the config. Vitest
+  then starts up to `maxConcurrency` (default 5) of them together in one worker, and they
+  interleave at every `await`.
+
+Concurrent tests are the one case that cannot be exact for lines: Istanbul's counters are plain
+numbers shared by everything in the worker, so a counter that moved between two checkpoints does
+not say which test's continuation moved it. What coverset-vitest does about it (measured on a file
+of two tests that await timers, `ships` calling `rateFor` and `merges` calling `mergeRanges`):
+
+| | Before (one "current test") | Now |
+|---|---|---|
+| lines of `ships` | both functions' | both functions' (everything that ran while it was active) |
+| lines of `merges` | none: lost to `ships` | both functions' |
+| shapes of `rateFor` | attributed to `merges` | `ships`: exact |
+| shapes of `mergeRanges` | `merges` | `merges` |
+| what tells you | nothing | a console warning, `manifest.meta.warnings`, `concurrent_tests` and `overlapping_tests` in `manifest.meta`, marker `concurrent` on each such test |
+
+* **Lines: a superset.** While tests overlap, the setup file writes each counter delta to every
+  active test (`setup.ts`), so a concurrent test's lines are everything that ran while it was
+  active: never fewer than its own. "Which tests cover this line" (test selection, the impact
+  of a change) therefore never misses a test; "what does this test cover" overstates. Before, the
+  delta went to whichever test had started last, and a test could end with no lines at all.
+* **Shapes: exact.** For a test marked concurrent the setup file also enters the test id into an
+  `AsyncLocalStorage`, whose store follows the test's own async continuations, and the recorder
+  asks it whose call it is while more than one test is active. The storage is created on the
+  first concurrent test only: async-local storage turns on Node's promise hooks for the worker,
+  which a suite without concurrent tests should not pay for.
+* **Detecting it.** The reporter prints `coverset-vitest: N test(s) ran while another test of
+  the same worker was running (M marked test.concurrent, ...)` once per run and puts the same
+  text in `manifest.meta.warnings`; `meta.concurrent_tests` counts the tests marked concurrent
+  and `meta.overlapping_tests` those that really overlapped (each overlap is spooled by the
+  worker as `{"k": "overlap", "tasks": [...]}`), and each test marked concurrent carries the
+  marker `concurrent` in `tests.jsonl`. A run where nothing overlapped prints nothing.
+* **Getting exact lines.** `vitest --run --maxConcurrency=1` keeps the tests marked concurrent but
+  runs them one at a time: the lines are then exact and there is no warning (checked by the
+  end-to-end test, which runs the same file sequentially, concurrently and with
+  `--maxConcurrency=1`: `test_concurrent_tests_keep_every_line_they_may_have_run_and_are_flagged`).
+
 ## Overhead
 
 `examples/ts-app` (20 tests, 5 files), median of 5 runs after a warm-up, Node 23.11, Vitest 5.0.3,
@@ -357,6 +411,13 @@ on the machine this was written on:
 | Istanbul coverage only | 571 ms | 153 ms |
 | coverset-vitest, `COVERSET_SHAPES=0` | 973 ms | 164 ms |
 | coverset-vitest with shapes | 982 ms | 316 ms |
+
+Re-measured on 2026-10-13 on an M4 Max shared with other work (load average about 6, so every
+number is higher and noisier; medians of 5 after a warm-up round): plain 535 ms, Istanbul only
+702 ms, the reporter without shapes 1,372 ms, with shapes 1,652 ms; with `--pool=threads`
+1,781 ms and with `--no-file-parallelism` 2,180 ms (the bundle is the same in all three:
+[Parallelism](#parallelism)). On a suite this small the workers' start-up dominates, so one file
+at a time is slowest; the reporter's own cost is fixed per run (below), not per worker.
 
 The ~0.4 s over Istanbul alone is fixed per run, not per test: loading the TypeScript compiler
 (once, in Vitest's main process, shared by the plugin and the reporter) and type-checking the
@@ -377,9 +438,9 @@ in the statements of the loaded files.
   lines low (coverage and the bundle are unaffected).
 * **Async code.** Async functions and generators are recorded but never act as callers (they
   suspend, and a stack cannot say who resumed them): calls they make are attributed to the
-  synchronous instrumented caller below them or to the test. Tests that run concurrently
-  (`test.concurrent`, `describe.concurrent`) share one current test, so their lines and shapes are
-  attributed to whichever test was set last; run them sequentially for per-test facts.
+  synchronous instrumented caller below them or to the test. Concurrent tests
+  (`test.concurrent`, `describe.concurrent`, `sequence.concurrent`) get every line that ran while
+  they were active, a superset of their own, and a warning ([Parallelism](#parallelism)).
 * **Exceptions.** A function that throws leaves its frame on the caller stack until an enclosing
   instrumented function returns or the test ends, so a call made from a `catch` block in between
   can name the thrower as its caller.

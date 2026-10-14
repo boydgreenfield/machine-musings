@@ -1,0 +1,21 @@
+{# Header account menu: who is signed in, Account, Audit (admins), Sign out; or a Sign in link.
+   The avatar is an initials badge, not GitHub's image: the CSP allows img-src 'self' data: only. #}
+<div class="account-nav">
+{% if principal and not principal.is_public %}
+  {% if principal.login %}
+  <span class="account-avatar" aria-hidden="true">{{ principal.login[:1]|upper }}</span>
+  <a class="account-who" href="{{ url_for('account.account_page') }}"{% if request.endpoint == 'account.account_page' %} aria-current="page"{% endif %} title="Account">@{{ principal.login }}{% if principal.instance_admin %} <span class="badge">admin</span>{% endif %}</a>
+  {% else %}
+  <a class="account-who" href="{{ url_for('account.account_page') }}"{% if request.endpoint == 'account.account_page' %} aria-current="page"{% endif %} title="Account">{{ principal.label }}</a>
+  {% endif %}
+  {% if principal.instance_admin %}<a class="account-link" href="{{ url_for('account.audit_page') }}"{% if request.endpoint == 'account.audit_page' %} aria-current="page"{% endif %}>Audit</a>{% endif %}
+  {% if principal.kind != 'admin' or principal.label == 'admin token' %}
+  <form method="post" action="{{ url_for('account.logout') }}" class="account-signout">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="theme-toggle">Sign out</button>
+  </form>
+  {% endif %}
+{% elif login_available %}
+  <a class="account-link" href="{{ url_for('account.login_form', next=request.full_path.rstrip('?')) }}">Sign in</a>
+{% endif %}
+</div>

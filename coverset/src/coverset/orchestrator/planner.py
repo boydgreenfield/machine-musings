@@ -97,6 +97,7 @@ from coverset.facts.queries import ParquetPriorRun
 from coverset.facts.store import FactsStore
 from coverset.lang.base import CollectedItem, EnvSpec, LanguageAdapter, PriorRun
 from coverset.lang.python import CoversetConfig, PythonAdapter, read_tool_config
+from coverset.lang.python_env import install_needed
 from coverset.logging import redact
 from coverset.orchestrator import history
 from coverset.orchestrator.repos import (
@@ -107,6 +108,7 @@ from coverset.orchestrator.repos import (
     read_blobs,
     tree_paths,
 )
+from coverset.settings_scopes import effective_policy
 
 __all__ = [
     "COLLECT_TIMEOUT_S",
@@ -393,6 +395,9 @@ async def plan_run(
     try:
         await asyncio.to_thread(extract_archive, tarball, checkout)
         config = await asyncio.to_thread(_load_config, adapter, checkout)
+        async with db.session() as session:  # scoped policy outranks [tool.coverset] (docs/settings.md)
+            policy = await effective_policy(session, repo, settings)
+        config = policy.apply(config, instance_max_shards=settings.max_shards)
         head_paths = frozenset(await asyncio.to_thread(tree_paths, mirror, run.head_sha))
         env = await _ensure_env(db, settings, executor, adapter, checkout, config, env_spec_builder, run)
         base_ref = await _snapshot_or_env(db, executor, env, repo, run)
@@ -536,6 +541,11 @@ async def _ensure_env(
         env = await _untrusted_env(executor, spec, run) if not run.trusted else None
         if env is None:
             env = await executor.ensure_env(spec)
+        # [tool.coverset] install: executors without snapshots (LocalExecutor) install the head's
+        # project for this run's workers; Modal installs it in the trusted snapshot instead.
+        installer = getattr(executor, "install_project", None)
+        if callable(installer) and run.trusted and install_needed(spec):
+            await installer(env, checkout, sha=run.head_sha, run_id=run.id)
     except PlanError:
         raise
     except (ExecutorError, RuntimeError, ValueError, OSError) as exc:

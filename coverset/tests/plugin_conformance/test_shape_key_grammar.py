@@ -12,6 +12,7 @@ import dataclasses
 import gzip
 import importlib.util
 import json
+import re
 from collections import OrderedDict
 from decimal import Decimal
 from pathlib import Path
@@ -176,7 +177,16 @@ def test_test_features_keys_are_in_the_grammar(key: str) -> None:
     assert_in_grammar(key)
 
 
-@pytest.mark.parametrize("value", FEATURE_VALUES + STRING_KIND_TEXTS + EXTRA_VALUES, ids=repr)
+def _value_id(value: Any) -> str:
+    """An id that is the same in every process: pytest-xdist workers refuse to run when their ids
+    differ ("Different tests were collected"). An object's repr holds its memory address and a set's
+    order follows string hashing, which is randomised per process, so those are spelled stably."""
+    if type(value) in (set, frozenset):
+        return f"{type(value).__name__}({sorted(_value_id(v) for v in value)})"
+    return re.sub(r" at 0x[0-9a-f]+>", ">", repr(value))
+
+
+@pytest.mark.parametrize("value", FEATURE_VALUES + STRING_KIND_TEXTS + EXTRA_VALUES, ids=_value_id)
 def test_computed_keys_are_in_the_grammar(value: Any) -> None:
     assert_in_grammar(shape_key(value))
 

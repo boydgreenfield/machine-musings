@@ -37,6 +37,8 @@
 <section class="panel"><p class="empty">This run has no coverage facts yet{% if run.status in ('queued', 'running') %}: they land when its shards finish{% endif %}.</p></section>
 {% endif %}
 
+{% include "economy/_pr_tax_slot.html" ignore missing %}
+
 {% if cards %}
 <section aria-labelledby="attention">
   <div class="panel-head"><h2 id="attention">Needs attention</h2><span class="aside">changed functions, most severe first · filled square = input class a test passed in, hollow = never exercised</span></div>

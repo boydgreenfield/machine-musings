@@ -26,6 +26,24 @@ written, :meth:`CoverageContext.remap_files` renames every file of both data fil
 ``coverage.sqlite`` is rebuilt with coverage.py's public ``CoverageData.update(..., map_path=)`` (the
 same call ``coverage combine`` uses for ``[paths]``). Both are written under temporary names and
 renamed into place; nothing is rebuilt when no name changes (a run from the git root).
+
+Write cost: coverage.py opens, configures (two pragmas, a ``REGEXP`` function) and closes its SQLite
+connection around every write, so each ``switch_context`` cost about 177 µs, most of it connecting
+(2,000 switches of a one-function module on an M-series Mac; 25 µs once the connection stays
+open). :func:`held_connection` keeps one connection open across writes by entering coverage.py's
+own ``SqliteDb`` context once (its nesting counter then skips the connect, commit and close of every
+inner write). :class:`CoverageContext` holds it from the first context switch that wrote data and
+commits at most every :data:`COMMIT_INTERVAL_S` (and after a failed test). In a serial run nothing
+reads ``coverage.sqlite`` before this process packs the bundle, so a SIGKILL that loses up to a second
+of per-test lines loses nothing extra: the in-memory shapes and the bundle are gone too. An xdist
+worker is different: when it dies, the controller still merges its data file next to results that
+say its earlier tests passed, so a worker commits at every switch (``commit_interval_s = 0``; with
+coverage.py's ``journal_mode=off`` and ``synchronous=off`` a commit is a few microseconds and no
+fsync) and only the test that was running when it died loses its lines.
+The hold relies on two private names (``CoverageData._connect`` and ``SqliteDb.nest``); when they
+are missing (another coverage.py version) nothing is held and every write behaves as before.
+:func:`merge_data_files` combines several data files (pytest-xdist workers) with the public
+``CoverageData.update``, which keeps every context.
 """
 
 from __future__ import annotations
@@ -33,8 +51,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -57,6 +76,73 @@ IMPORT_CONTEXT = "<import>"
 """How ``tracer_lost_at`` names the ``''`` context (imports and collection, before the first test)."""
 MAX_WARNINGS = 50
 MAX_LOSSES = 20
+COMMIT_INTERVAL_S = 1.0
+"""How long per-test data may sit in an open SQLite transaction before it is committed."""
+
+
+@contextmanager
+def held_connection(data: coverage.CoverageData) -> Iterator[bool]:
+    """Keep ``data``'s SQLite connection (this thread's) open for the block; yields whether it is held.
+
+    Every coverage.py read or write inside the block reuses the connection instead of connecting,
+    configuring and closing it again, and writes stay in one transaction that is committed when the
+    block ends. Without the private API this needs, the block is a no-op (yields False).
+    """
+    db = _enter_db(data)
+    try:
+        yield db is not None
+    finally:
+        _exit_db(db)
+
+
+def _enter_db(data: coverage.CoverageData) -> Any:
+    """Enter coverage.py's ``SqliteDb`` for this thread once (its nest counter then skips reconnects)."""
+    connect = getattr(data, "_connect", None)
+    if connect is None:
+        return None
+    try:
+        db = connect()
+        if not hasattr(db, "nest") or not hasattr(db, "con"):
+            return None
+        db.__enter__()
+    except Exception:
+        return None
+    return db
+
+
+def _exit_db(db: Any) -> None:
+    """Leave a ``SqliteDb`` entered by :func:`_enter_db`: commit and close when it is the outermost."""
+    if db is None:
+        return
+    with suppress(Exception):
+        db.__exit__(None, None, None)
+
+
+def merge_data_files(target: Path, sources: Iterable[Path]) -> list[str]:
+    """Combine coverage data files into ``target`` (replaced) with ``CoverageData.update``.
+
+    Contexts are kept (a test's lines stay under its node id) and file names are not mapped, so the
+    sources must name files the same way (workers that ran in one working directory). A source
+    that cannot be read is skipped; the messages are returned.
+    """
+    problems: list[str] = []
+    target.unlink(missing_ok=True)
+    combined = coverage.CoverageData(basename=str(target), suffix=False)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", CoverageWarning)
+            for source in sources:
+                part = coverage.CoverageData(basename=str(source), suffix=False)
+                try:
+                    part.read()
+                    combined.update(part)  # one transaction per source, inside coverage.py
+                except Exception as exc:
+                    problems.append(f"{source}: {type(exc).__name__}: {exc}")
+                finally:
+                    part.close(force=True)
+    finally:
+        combined.close(force=True)
+    return problems
 
 
 class ForeignTracerError(RuntimeError):
@@ -94,6 +180,13 @@ class CoverageContext:
         """The first :data:`MAX_LOSSES` detected losses: ``{"context", "found", "reinstalled"}``."""
         self.tracer_lost_count = 0
         """Context switches at which the tracer was found missing (one per affected test)."""
+        self.switches = 0
+        self.switch_seconds = 0.0
+        """Time spent in :meth:`switch` (coverage's flush of the previous test included)."""
+        self._held: Any = None
+        self._last_commit = 0.0
+        self.commit_interval_s = COMMIT_INTERVAL_S
+        """Longest wait between commits of the held connection; 0 commits at every switch."""
 
     @contextmanager
     def _quiet(self) -> Iterator[None]:
@@ -137,10 +230,35 @@ class CoverageContext:
     def switch(self, nodeid: str) -> None:
         """Attribute everything measured from now on to ``nodeid`` (after checking the tracer is ours)."""
         if self._running and nodeid != self.context:
+            started = time.perf_counter()
             self.check_tracer()
             with self._quiet():
                 self.cov.switch_context(nodeid)
             self.context = nodeid
+            self._written()
+            self.switches += 1
+            self.switch_seconds += time.perf_counter() - started
+
+    def _written(self, *, commit: bool = False) -> None:
+        """After a flush: hold the connection once data exists, commit every ``commit_interval_s``."""
+        now = time.monotonic()
+        if self._held is None:
+            data = getattr(self.cov, "_data", None)
+            # Not before coverage.py's first write: that write erases the file (`_start_using`).
+            if data is not None and getattr(data, "_have_used", False):
+                self._held = _enter_db(data) or False
+                self._last_commit = now
+            return
+        if self._held and (commit or now - self._last_commit >= self.commit_interval_s):
+            with suppress(Exception):
+                self._held.con.commit()
+            self._last_commit = now
+
+    def _release(self) -> None:
+        """Commit and close the held connection (before coverage.py saves or anything reads the file)."""
+        held, self._held = self._held, None
+        if held:
+            _exit_db(held)
 
     def _our_tracers(self) -> list[object]:
         collector = getattr(self.cov, "_collector", None)
@@ -189,10 +307,11 @@ class CoverageContext:
         return self.tracer_installed()
 
     def flush(self) -> None:
-        """Write the current context's data to the SQLite file now."""
+        """Write the current context's data to the SQLite file now (and commit it)."""
         if self._running:
             with self._quiet():
                 self.cov.get_data()
+            self._written(commit=True)
 
     def stop(self) -> None:
         """Stop measuring and save the data file (saved even when stopping fails). Idempotent."""
@@ -200,12 +319,23 @@ class CoverageContext:
             return
         self.check_tracer(repair=False)
         self._running = False
+        self._release()
         with self._quiet():
             try:
                 if self._on_top():
                     self.cov.stop()
             finally:
                 self.cov.save()
+
+    def load(self) -> None:
+        """Read an existing data file (merged from xdist workers) instead of measuring.
+
+        Without this a report would start a fresh, never-read data object, and coverage.py erases
+        the file on such an object's first use.
+        """
+        if self.data_file.is_file():
+            with self._quiet():
+                self.cov.load()
 
     def write_json(self) -> None:
         """Write ``coverage.json`` (format 3); an empty report when nothing was measured."""

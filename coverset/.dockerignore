@@ -1,0 +1,34 @@
+# Allow-list: the image needs the project, its workspace packages, the lock, the migrations
+# (under src/), and what `coverset seed-demo` / `coverset replay` read (scripts/, examples/demo-*,
+# fixtures/). Everything else (docs images, tests, the TypeScript packages, node_modules, local
+# data and secrets) stays out of the build context.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!alembic.ini
+!src/
+!packages/coverset-model/
+!packages/pytest-coverset/
+!scripts/
+!examples/demo-app/
+!examples/demo-prs/
+!fixtures/
+
+# Never ship local state, caches or secrets, even inside allowed directories.
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.pytest_cache
+**/.ruff_cache
+**/.hypothesis
+**/.coverset
+**/node_modules
+**/dist
+**/build
+**/.env
+**/.env.*
+**/secrets
+**/*.pem
+**/*.key
+packages/*/tests

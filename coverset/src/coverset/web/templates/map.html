@@ -1,22 +1,28 @@
 {% extends layout %}
 {% block title %}Map · {{ repo.full_name }}{% endblock %}
 {% block main %}
-<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / map{% for p, name in crumbs or [] %} / <a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, path=p, run=run.id) }}">{{ name }}</a>{% endfor %}</div>
+{% set keep = keep or {} %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / map{% for p, name in crumbs or [] %} / <a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, path=p, run=run.id, **keep) }}">{{ name }}</a>{% endfor %}</div>
 <div class="page-head">
   <h1>Coverage map</h1>
-  {% if run %}<p class="meta"><span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}"><code>{{ run.head_sha|sha }}</code></a> on {{ run.branch or 'detached head' }}</span><span>area = statements; click a function to open its source</span></p>{% endif %}
+  {% if run %}<p class="meta"><span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r"><code>{{ run.head_sha|sha }}</code></a> on {{ run.branch or 'detached head' }}</span><span>area = statements; click a function to open its source</span>{% if frame_from %}<span class="map-frame" data-frame>layout from baseline <a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, path=root, run=frame_from.id, **keep) }}"><code>{{ frame_from.head_sha[:7] }}</code></a>: the baseline's rectangles, this run's colours</span>{% endif %}</p>{% endif %}
 </div>
 {% if not run %}
 <section class="panel"><p class="empty">No completed run with facts yet.</p></section>
 {% else %}
 <div class="map-tools">
-  <span class="seg" role="group" aria-label="Colour by">
-    {% for m in modes %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=m, path=root, run=run.id) }}" aria-current="{{ 'true' if m == mode else 'false' }}">{{ {'gap': 'Gap', 'lines': 'Lines', 'inputs': 'Input classes'}[m] }}</a>{% endfor %}
+  <span class="seg" role="group" aria-label="Colour by (key m)">
+    {% for m in modes %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=m, path=root, run=run.id, **keep) }}" data-map-mode="{{ m }}" aria-current="{{ 'true' if m == mode else 'false' }}">{{ {'gap': 'Gap', 'lines': 'Lines', 'inputs': 'Input classes'}[m] }}</a>{% endfor %}
+  </span>
+  <span class="seg-label" id="modules-label">module-level code</span>
+  <span class="seg" role="group" aria-labelledby="modules-label" title="{{ module_why }} (key M)">
+    {% for w in module_weights %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, path=root, run=run.id, **dict(keep, modules=w)) }}" data-map-modules="{{ w }}" aria-current="{{ 'true' if w == modules else 'false' }}">{{ {'full': 'Full', 'thin': 'Thin', 'hidden': 'Hidden'}[w] }}</a>{% endfor %}
   </span>
   {{ legend }}
-  {% if root %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, run=run.id) }}">whole repository</a>{% endif %}
+  {% if root %}<a href="{{ url_for('repos.map_page', rid=repo.id, mode=mode, run=run.id, **keep) }}">whole repository</a>{% endif %}
 </div>
-<p class="muted">{% if mode == 'gap' %}Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes; outlined tiles are module-level code.{% elif mode == 'inputs' %}Share of each function's expected input classes some test passed in. Hatched tiles were never called.{% else %}Share of each function's statements that some test ran.{% endif %}</p>
+<p class="muted map-note">{% if mode == 'gap' %}Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes.{% elif mode == 'inputs' %}Share of each function's expected input classes some test passed in. Hatched tiles were never called.{% else %}Share of each function's statements that some test ran.{% endif %}
+{% if modules == 'thin' %}Dashed tiles are module-level code, drawn at most a tenth of their file's function statements: {{ module_why|lower }}{% elif modules == 'hidden' %}Module-level code is left out (each file's hover text still gives its numbers): {{ module_why|lower }}{% else %}Outlined tiles are module-level code at full size.{% endif %}</p>
 <div data-tm-box>
   <p class="tm-status" data-tm-status aria-hidden="true"><span class="tm-status-idle">hover a tile</span></p>
   {{ svg }}

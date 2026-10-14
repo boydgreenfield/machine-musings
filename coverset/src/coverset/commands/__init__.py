@@ -50,12 +50,23 @@ def register_commands(
     from coverset.commands.report import report_command
 
     cli.add_command(report_command, "report")
+    from coverset.commands.flows import flows_group
+
+    cli.add_command(flows_group, "flows")
+    from coverset.commands.rust import rust_group
+
+    cli.add_command(rust_group, "rust")
+    from coverset.commands.deploy_cmd import deploy_group
     from coverset.commands.doctor import doctor_group
     from coverset.commands.economy import economy_group
     from coverset.commands.mcp import mcp_group
     from coverset.commands.users import users_group
 
+    cli.add_command(deploy_group, "deploy")
     cli.add_command(doctor_group, "doctor")
     cli.add_command(economy_group, "tests")
     cli.add_command(mcp_group, "mcp")
     cli.add_command(users_group, "users")
+    from coverset.commands.settings_cmd import settings_group
+
+    cli.add_command(settings_group, "settings")

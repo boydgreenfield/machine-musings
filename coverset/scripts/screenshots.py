@@ -8,7 +8,8 @@ Chromium through Playwright at 1440×900, device scale 1. Full-size PNGs land in
 (gitignored); the JPEGs are resized to 1200 px wide at quality 82, lowered stepwise until each is at
 most 250 KB. The recipe per page is in docs/ui.md ("Screenshots").
 
-The ``report`` group (``report.jpg``, ``report-source.jpg``, ``report-changes.jpg``) needs no server:
+The ``report`` group (``report.jpg``, ``report-source.jpg``, ``report-changes.jpg``,
+``report-economy.jpg``) needs no server:
 it builds the static report of PR #2's run with ``coverset report --run`` into
 ``<data-dir>/report-shots`` and PR #1's run compared with its ``main`` baseline (``--compare-run``)
 into ``<data-dir>/report-changes-shots``, and opens their pages from ``file://`` (docs/report.md).
@@ -53,8 +54,8 @@ QUALITY = 82
 MIN_QUALITY = 50
 MAX_BYTES = 250 * 1024
 READY = 'body[data-ready="1"]'
-SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test", "repo")
-REPORT_SHOT_NAMES = ("report", "report-source", "report-changes")
+SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test", "repo", "economy")
+REPORT_SHOT_NAMES = ("report", "report-source", "report-changes", "report-economy")
 GROUPS = {"report": REPORT_SHOT_NAMES}
 """``--only`` names that stand for several shots."""
 REPORT_LENS_TEST = "tests/test_windows.py::test_expires_at"
@@ -409,7 +410,24 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
             clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
         )
 
+    def economy(page: Any, path: Path) -> None:
+        # PR #1's test economy: the tiles, its Test tax card, the leverage histogram and the
+        # biggest tests that add nothing alone (down to the bottom of that row).
+        goto(page, f"{base}/repos/{rid}/economy?run={ids.pr1_run}")
+        bottom = page.evaluate(
+            "() => { const s = document.querySelector('.eco-overview');"
+            " const r = s ? s.getBoundingClientRect() : null;"
+            " return r ? r.bottom + window.scrollY : document.body.scrollHeight; }"
+        )
+        height = max(VIEWPORT["height"], int(bottom) + 12)
+        page.screenshot(
+            path=str(path),
+            full_page=True,
+            clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
+        )
+
     return {
+        "economy": economy,
         "pr": pr,
         "run-live": run_live,
         "why-order": why_order,
@@ -500,6 +518,11 @@ def take_report_shots(
                     target = SHOTS / f"report-source{suffix}.png"
                     report_source(page, report, target)
                     pngs.append(target)
+                if "report-economy" in only and report is not None:
+                    log(f"{scheme}: report-economy")
+                    target = SHOTS / f"report-economy{suffix}.png"
+                    report_economy(page, report, target)
+                    pngs.append(target)
                 if "report-changes" in only and changes is not None:
                     log(f"{scheme}: report-changes")
                     target = SHOTS / f"report-changes{suffix}.png"
@@ -509,6 +532,21 @@ def take_report_shots(
         finally:
             browser.close()
     return pngs
+
+
+def report_economy(page: Any, report: Path, path: Path) -> None:
+    """The report's Economy page: tiles, the leverage histogram and the first rows of the leverage
+    table (a clip down to the table's tenth row)."""
+    goto(page, (report / "economy.html").as_uri())
+    bottom = page.evaluate(
+        "() => { const rows = document.querySelectorAll('#eco-tests tbody tr');"
+        " const r = rows.length ? rows[Math.min(9, rows.length - 1)].getBoundingClientRect() : null;"
+        " return r ? r.bottom + window.scrollY : document.body.scrollHeight; }"
+    )
+    height = max(VIEWPORT["height"], int(bottom) + 12)
+    page.screenshot(
+        path=str(path), full_page=True, clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height}
+    )
 
 
 def report_index(page: Any, report: Path, path: Path) -> None:
@@ -541,6 +579,7 @@ def report_source(page: Any, report: Path, path: Path) -> None:
     page.set_viewport_size({"width": VIEWPORT["width"], "height": SOURCE_HEIGHT})
     try:
         goto(page, (report / "files" / f"{PARSE_PATH}.html").as_uri())
+        page.focus("#lens")  # the menu's options are built from the data block when it is first used
         index = page.evaluate(
             """(nodeid) => {
                 const option = Array.from(document.querySelectorAll('#lens option'))

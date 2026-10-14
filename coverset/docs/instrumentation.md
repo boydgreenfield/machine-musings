@@ -17,7 +17,7 @@ It also orders tests by a scores file and registers the `invariant(id)` marker. 
 | pytest 8.2 or later | `@file` argument files, used to hand each shard its node ids | `pytest>=8.2` |
 | coverage.py 7.16 | the ctrace core with dynamic contexts, SQLite data schema 7 | `coverage>=7.16,<8`; the workspace pins 7.16.2 |
 | no other `sys.settrace` tracer | coverage's ctrace core needs the trace function | a foreign tracer at start is a `pytest.UsageError` (exit 4), test `test_foreign_tracer_is_a_usage_error`; one installed later is detected ([When the tracer is lost](#when-the-tracer-is-lost)) |
-| no xdist workers | results, coverage and shapes are recorded in the pytest process | `--coverset-out` with `-n N` (N > 0 or `auto`) is a `pytest.UsageError` before anything is written (`test_xdist_workers_are_refused`) |
+| pytest-xdist: local workers only (optional) | with `-n N` every worker runs the plugin into its own directory and the controller merges one bundle ([Running in parallel](#running-in-parallel)); the merge reads every worker's files from this disk and working directory | `--tx ssh=...`, `socket=...`, `popen//chdir=...` and `--rsyncdir` are a `pytest.UsageError` (`test_remote_workers_are_a_usage_error`) |
 
 The control plane itself runs on Python 3.13. Instrumented repositories need 3.12 or 3.13 (3.14 is untested).
 
@@ -112,7 +112,7 @@ The control plane reads `tracer_lost_at`: `facts/convert.py` (`tracer_mismatch`)
 
 ### When data reaches disk
 
-coverage.py writes the current context's data to SQLite on every `switch_context`, so a test's lines are on disk as soon as the next test starts. After a `failed` or `error` result the plugin flushes immediately (`cov.get_data()`). At session end it stops, saves, and writes `coverage.json` with `cov.json_report()` (format 3). There is no separate timer: the plan's "save every 50 tests or 30 s" is covered by the per-switch write.
+coverage.py hands the current context's data to SQLite on every `switch_context`. It used to connect to the file, set two pragmas, register a function, insert, commit and close the connection for every one of those writes: 177 µs per test, 0.9 s of a 5,000-test run, most of it connecting (`coverage_ctx.py`'s docstring has the measurement). The plugin now keeps that connection open from the first write that has data (it enters coverage.py's own `SqliteDb` context once, so its nesting counter skips every inner connect and close) and commits at most once a second, plus at once after a `failed` or `error` result (`cov.get_data()`, then a commit): 25 µs per switch. In a serial run a SIGKILL therefore loses at most a second of per-test lines, which it loses anyway together with the in-memory shapes and the bundle (in a serial run nothing reads `coverage.sqlite` before this process packs the bundle). An xdist worker is the exception: when it dies, the controller still merges its data file, next to results that say its earlier tests passed. A worker therefore commits at every switch (`CoverageContext.commit_interval_s = 0`), which keeps the connection held and adds about 19 µs per switch (32 µs to 51 µs in the same microbenchmark on a loaded machine; coverage.py's `journal_mode=off` and `synchronous=off` make a commit cheap and fsync-free); only the test that was running when the worker died loses its lines. The hold uses two private names of coverage.py (`CoverageData._connect`, `SqliteDb.nest`); without them nothing is held and every write behaves as before. At session end the plugin releases the connection, stops, saves, and writes `coverage.json` with `cov.json_report()` (format 3). `meta.timings.context_switches` and `context_switch_s` say how many switches the run made and what they cost in all.
 
 ### Stopping early
 
@@ -134,7 +134,7 @@ The plugin does not invent exit codes; these are pytest's, and the plugin reache
 | 0 | every test passed |
 | 1 | some test failed (also after collection errors with `--continue-on-collection-errors`, `test_collection_errors_still_write_a_bundle`) |
 | 2 | interrupted: STOP file or SIGTERM |
-| 4 | usage error: a foreign tracer, xdist workers, Python below 3.12, an unreadable `--coverset-scores` file, an output directory that is a symlink, lies below a symlink inside the repository, or is a file, `--coverset` with nothing to measure, or a conftest that fails to import |
+| 4 | usage error: a foreign tracer, remote xdist workers, Python below 3.12, an unreadable `--coverset-scores` file, an output directory that is a symlink, lies below a symlink inside the repository, or is a file, `--coverset` with nothing to measure, or a conftest that fails to import |
 | 5 | no tests collected |
 
 The runner treats 0, 1 and 5 as normal shard ends, and 2 as normal only after it asked for a stop (`runner._shard_error`).
@@ -321,7 +321,7 @@ Readers apply one rule (`coverset.facts.convert.read_python_bundle` and the neut
 | `collect.json` | `{"items": [{nodeid, file, line, markers, invariant_ids, hypothesis}], "errors": [{nodeid, longrepr, truncated}]}`. `line` is 1-based (the first decorator line). `hypothesis` is true for `@given` tests. |
 | `durations.json` | `{nodeid: duration_s}` |
 | `invariant_links.jsonl` | `{"test_id": <nodeid>, "invariant_id": <id>}` per marker link |
-| `meta.json` | `schema`, `plugin_version`, `python`, `coverage_version`, `pytest_version`, `core`, `tracer`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `context_format`, `tool_id`, `git_root`, `repo_root` (both absolute), `rootdir` and `cwd` (relative to `repo_root`, [Paths](#paths)), `coverage_paths` (`repository` or `cwd`), `configfile`, `sources`, `trace_modules`, `full_trace`, `shapes`, `shapes_disabled_reason`, `repr_examples`, `shape_samples`, `shape_settle`, `full_trace_cap`, `neutral` (`{"requested": false}` without `--coverset-neutral`; with it, the export's outcome: `status` `written`, `failed` or `interrupted`, `rows`, `dropped`, `seconds`, and `path`, `sha256`, `bytes` of the archive when written; the copy inside `bundle.tar.gz`, packed before the export, says `pending`), `functions_traced`, `functions_truncated`, `tracer_errors`, `hypothesis` (`version`, `deadline_ms`), `exit_code`, `counts`, `stop_requested`, `errors`, `warnings` (advice that is not an error, such as sources that measured no file; printed on `--coverset`'s summary line), `started_at`, `finished_at`, `timings` (`session_wall_s`, `tracer_callback_s`, `tracer_events`) |
+| `meta.json` | `schema`, `plugin_version`, `python`, `coverage_version`, `pytest_version`, `core`, `tracer`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `context_format`, `tool_id`, `git_root`, `repo_root` (both absolute), `rootdir` and `cwd` (relative to `repo_root`, [Paths](#paths)), `coverage_paths` (`repository` or `cwd`), `configfile`, `sources`, `trace_modules`, `full_trace`, `shapes`, `shapes_disabled_reason`, `repr_examples`, `shape_samples`, `shape_settle`, `full_trace_cap`, `neutral` (`{"requested": false}` without `--coverset-neutral`; with it, the export's outcome: `status` `written`, `failed` or `interrupted`, `rows`, `dropped`, `seconds`, and `path`, `sha256`, `bytes` of the archive when written; the copy inside `bundle.tar.gz`, packed before the export, says `pending`), `functions_traced`, `functions_truncated`, `tracer_errors`, `hypothesis` (`version`, `deadline_ms`), `exit_code`, `counts`, `stop_requested`, `errors`, `warnings` (advice that is not an error, such as sources that measured no file; printed on `--coverset`'s summary line), `started_at`, `finished_at`, `timings` (`session_wall_s`, `tracer_callback_s`, `tracer_events`, `context_switches`, `context_switch_s`, and `finalize`: seconds per finalisation step, `coverage_save`, `coverage_json`, `coverage_paths`, `shapes`, `static_files`, `merge` under xdist, and `tarball` in the copy rewritten after the neutral export), `xdist` (`null` for a run without workers; [Running in parallel](#running-in-parallel)) |
 
 With `--coverset-neutral` the directory also holds `neutral/` and `neutral.tar.gz` ([below](#the-neutral-bundle)); neither is a member of `bundle.tar.gz`, whose eight members are unchanged.
 
@@ -386,6 +386,38 @@ coverset bundle validate .coverset/neutral
 coverset report .coverset
 ```
 
+## Running in parallel
+
+There are four ways a suite runs on more than one core, and they compose: coverset shards across sandboxes, a CI matrix uploads several shards, pytest-xdist splits one pytest run across processes, and Vitest spreads test files across workers. Each ends in one bundle per shard; the control plane merges shards.
+
+| Where | What splits the suite | Who merges | Notes |
+|---|---|---|---|
+| coverset on Modal (or the local executor) | the planner: `K = ceil(Σ p50 / target_shard_seconds)` shards, capped by `max_shards`, balanced longest-first ([docs/orchestrator.md](orchestrator.md)) | the control plane's ingest, one bundle per shard | the runner never passes `-n` (`PythonAdapter.test_command` adds `--numprocesses=0` when xdist is installed): one pytest process per sandbox, so per-shard wall time is what the planner predicts |
+| your CI, upload mode | your matrix (`pytest --coverset` in each job, any split you like, `pytest-split`, `--splits`, ...) | the server: `coverset-ci upload --label <job>` per job, one shard per label, merged into one run per commit ([docs/upload.md](upload.md)); `--shards N` holds the verdict until N labels are in | each job may itself use `-n` (next row): the label's bundle is already merged |
+| one machine, pytest-xdist | `pytest --coverset -n 8` (`--dist load`, the default, or `--dist loadfile`) | the xdist controller, at session end ([below](#pytest-xdist)) | local workers only |
+| Vitest | Vitest's pool: test files across worker processes (`forks`) or threads | the reporter, from one spool file per worker | exact for any pool and for `--no-file-parallelism`; concurrent tests inside one file are attributed as a superset ([docs/typescript.md](typescript.md#parallelism)) |
+
+### pytest-xdist
+
+`pytest --coverset -n 8` (or `--coverset-out DIR -n auto`) gives one bundle in `DIR`, the same files a serial run writes. `pytest_coverset/parallel.py` has the two roles and `merge.py` the merge:
+
+* **The controller**, the process you started, runs no test, so it measures nothing. Before xdist starts its workers it removes what an earlier run left in `DIR/workers/` and publishes `COVERSET_XDIST` (the output directory, whether the run is a local one, whether events are streamed, a run id) in the environment the workers inherit. It also puts each worker's directory in `workerinput["coverset_out"]`; the worker checks that the two agree. The environment variable is what starts the worker early enough: a worker's conftest files are imported before `workerinput` exists, and coverage must already run by then to measure their imports. The controller removes `DIR/workers/` only when coverset made it: it writes `DIR/workers/.coverset-xdist` (the run id) when it creates the directory, removes an existing one only when that marker is there, and reuses an empty one; any other `workers/` (a project's own `workers` package under `--coverset-out=.`, a CI artifacts directory) is a usage error (exit 4) and is never touched (`test_a_foreign_workers_directory_is_never_removed`). After a clean merge it removes the directory only if the marker still holds this run's id.
+* **Each worker** (`gw0`, `gw1`, ...) pops `COVERSET_XDIST` at once (the tests' subprocesses never see it) and runs the whole plugin into `DIR/workers/<gw>/`: coverage with its own data file and one context per test, the shape tracer, `results.jsonl`, `collect.json`. It writes no tarball, no `coverage.json` and no neutral export, keeps coverage.py's own file names, and finishes its files inside `pytest_sessionfinish`, before xdist reports the worker done (`workeroutput["coverset"]` says what it wrote).
+* **The merge** (`merge.py`), at the controller's session end: `coverage.sqlite` is the workers' data files combined with coverage.py's public `CoverageData.update` (which keeps every context), then loaded, reported to `coverage.json` and renamed to repository paths once, exactly as a serial run does; `results.jsonl` is every worker's rows; `collect.json` the first worker's collection (every worker collects the whole suite; xdist checks they agree); `shapes.jsonl.gz` re-indexed into one header, samples added, tests united, the example kept that a serial run would keep (the one from the earliest test in collection order), a function truncated when any worker capped it. Import time is counted once: every worker imports the same modules, so an observation whose caller is `<import>` keeps the largest count of any worker and a function's `calls` counts its import-time calls once. Then the usual `meta.json`, `bundle.tar.gz`, neutral export, events and `--coverset` summary line.
+* **Events**: the controller emits `collected` (from xdist's collection), one `test` event per test, folded from the reports xdist forwards (workers attach the exception type of a failure to the report, so `fail_sig` matches the worker's own row; `test_failures_fold_the_same_on_the_controller`), `heartbeat`, `bundle_written`, `neutral_written` and `done`. Workers write their own events to `events.jsonl` in their directory only when the controller streams events.
+* **`meta.json`** of the merged bundle: `tracer`, `tool_id`, `tracer_lost_at`, `tracer_losses`, `coverage_warnings`, `functions_traced`, `functions_truncated`, `tracer_errors` and the tracer timings come from the workers (summed or the first one set), every worker error is in `errors` prefixed `xdist worker <gw>:`, and `xdist` is `{"role": "controller", "run", "dist", "workers": [{"id", "tests", "exit_code", "session_wall_s", "errors", "finished"}], "nodes_down", "merge_s"}` (`null` for a run without workers). There is one `workers` entry per worker directory, named after it, so a worker that died is listed as itself with `finished: false`, `tests: 0` and `exit_code: null`.
+* **When a worker dies** (a test calls `os._exit`, the OOM killer): xdist reports the running test as failed and starts a replacement worker. The merge keeps every other result, uses the controller's row for the dead test (`failed`, `fail_sig` of `xdist.WorkerCrashed`), keeps the coverage of every test the dead worker had finished (it committed each at its switch; only the dying test's own lines are lost), says `meta.json missing: the worker did not finish` in `errors`, and keeps `DIR/workers/` for a look; after a clean merge it is removed (`test_a_crashed_worker_keeps_the_rest_and_says_so`).
+
+What is equal to a serial run: on the plugin's fixture project the merged bundle and a serial bundle have the same `(context, file, arc)` rows, results (all but timings), decoded shape rows (examples included), `coverage.json` (all but its timestamp), `collect.json`, invariant links and neutral coverage rows, with `-n 2` and `--dist load` and `--dist loadfile` (`test_the_merged_bundle_equals_the_serial_one`). What can differ on other suites, by design:
+
+* **Module- and class-scoped fixtures under `--dist load`.** A module's tests can land on several workers; the fixture is set up once per worker, and its lines go to the test that set it up there. Use `--dist loadfile` (or `loadscope`) when fixtures are heavy; it also saves the repeated set-up.
+* **Adaptive sampling.** Each worker samples a function until it settles, so with N workers a hot function can be sampled up to N times the per-session cap; `calls` is "sampled calls" either way, and a class missing from a capped function still reads "not observed in N sampled calls".
+* **Test order.** `results.jsonl` is in collection order (a serial run's is execution order).
+
+Only local workers can be merged (their files on this disk, their names relative to this working directory): `--tx ssh=...`, `--tx socket=...`, `popen//chdir=...` and `--rsyncdir` are a usage error (exit 4) before any worker starts. `-n 0`, `--collect-only` and `-p no:xdist` are serial runs. `--coverset-stop-file` is checked by every worker before each of its tests; the first to see it stops, xdist stops the run (`Interrupted: coverset: stop requested`, exit 2), and the tests that never ran are `not_run` in the merged bundle, with `stop_requested: true`. `--coverset-scores` works too: every worker sorts its collection the same way, and xdist hands tests out in that order.
+
+Cost: the merge took 0.07 s for 1,200 tests on 4 workers and 0.10 s on 8 (`meta.xdist.merge_s`), plus the usual `coverage.json` and neutral export once on the merged data. Scaling numbers are under [Overhead](#overhead).
+
 ## Hypothesis
 
 Hypothesis and coverset coexist on 3.12 and later. Hypothesis's scrutineer claims `sys.monitoring` tool id 3; coverset never asks for 3. A `@given(st.floats())` test is traced like any other, and the plugin's tests check that `nan` and an infinity are recorded for such a parameter (`test_recorded_shapes`).
@@ -403,14 +435,48 @@ The plugin does not change Hypothesis settings itself. It records the active def
 
 ## Overhead
 
-Per-test coverage with the ctrace core plus the shape tracer costs time. `packages/pytest-coverset/scripts/measure_overhead.py` measures it: it runs a suite in three modes (plain pytest, coverage only, coverage plus shapes), interleaved, in a temporary copy, and prints the median wall time of each plus `overhead_x` (coverage plus shapes ÷ plain).
+`packages/pytest-coverset/scripts/measure_overhead.py` measures what each layer costs. It runs a suite in up to five modes, interleaved so drift hits all of them, in a temporary copy, and prints the median wall time of each (a `python -m pytest` subprocess, start-up included), each mode's multiplier over plain pytest, and the median of the plugin's own timings from `meta.json`:
+
+| Mode | What runs |
+|---|---|
+| `plain` | `pytest` |
+| `covpy` | `coverage run --branch --source=...` with `COVERAGE_CORE=ctrace`: coverage.py alone, one context for the whole run |
+| `coverage` | the plugin with `--coverset-shapes=off`: one context per test, results, the bundle |
+| `coverage_shapes` | the plugin with the shape tracer (what the runner passes; `overhead_x`) |
+| `neutral` | the plugin, the shape tracer and `--coverset-neutral` (what `--coverset` does) |
 
 ```sh
-uv run python packages/pytest-coverset/scripts/measure_overhead.py
+uv run python packages/pytest-coverset/scripts/measure_overhead.py                       # fixture project
 uv run python packages/pytest-coverset/scripts/measure_overhead.py --target examples/demo-app --source ledger
+uv run python packages/pytest-coverset/scripts/measure_overhead.py --target examples/bench-suite --source benchsuite \
+    --conftest-append packages/pytest-coverset/scripts/stub_busy_conftest.py              # 1,200 near-empty tests
+uv run python packages/pytest-coverset/scripts/measure_overhead.py ... --workers 8 --modes plain,neutral   # with xdist
 ```
 
-The measured multiplier for whole suites is in [docs/numbers.json](numbers.json) and [docs/benchmarks.md](benchmarks.md).
+### Layer by layer
+
+Median of 5 interleaved runs, Python 3.13.0, coverage.py 7.16.2, an M4 Max (16 cores) shared with other work (load average about 6), 2026-10-13. "Before" is the plugin at the start of this change (`git archive HEAD`), measured in the same session. The stubbed bench suite is `examples/bench-suite` with `busy()` turned into a no-op (`stub_busy_conftest.py`): 1,200 tests that do almost nothing, so per-test costs dominate.
+
+| Suite | plain | coverage.py alone | + per-test contexts | + shapes | + neutral export |
+|---|---|---|---|---|---|
+| demo app, 97 tests | 2.63 s | 1.13× | 1.13× (before: 1.15×) | 1.17× (1.17×) | 1.18× (1.23×) |
+| bench suite, 1,200 stubbed tests | 0.99 s | 1.91× | 2.13× (before: 2.64×) | 2.14× (2.68×) | 2.12× (3.03×) |
+
+Read across a row, the steps are what each layer adds. On the stubbed bench suite: coverage.py's C tracer alone costs 0.9 s for 1,200 tests (it runs on every call pytest itself makes, 0.75 ms per test); per-test contexts and the plugin's bookkeeping add 0.2 s (of which the context switches are 0.12 s, `meta.timings.context_switch_s`); the shape tracer adds 0.02 s here (its callbacks totalled 0.018 s, `tracer_callback_s`); the neutral export 0.065 s. Before this change the same three plugin layers added 0.5 s, 0.03 s and 0.3 s.
+
+What was fixed, measured by itself (`cProfile` over a run, then each fix with the output compared byte for byte or as the tests compare it):
+
+| Cost | Before | After | How |
+|---|---|---|---|
+| a context switch (coverage.py writes the previous test's data) | 177 µs | 25 µs (microbenchmark: 2,000 switches of a one-function module) | one SQLite connection held across writes, committed once a second; an xdist worker commits at every switch (about 51 µs) so a crash keeps its finished tests ([When data reaches disk](#when-data-reaches-disk)) |
+| the neutral export, 1,200 stubbed tests | 0.35 s | 0.065 s | the same: coverage.py connected and closed around each of its 2,400 per-(test, file) queries |
+| the neutral export of a real 5,081-test bundle (123 MB `coverage.sqlite`, 115,573 coverage rows) | 29.9 s | 9.8 s, identical files | the held connection (to 12.0 s), then one set union per file instead of 10 million set inserts when arcs supply the lines (to 9.8 s) |
+| `bundle.tar.gz` of that bundle | 13.3 s (gzip level 9) | 3.6 s (level 6), 0.13% larger | `TARBALL_COMPRESSLEVEL` |
+| `results.jsonl` | a `write` + `flush` per test | buffered, flushed every second and after a failure | `ResultsLog` |
+| events when nobody listens (`--coverset`, no nonce) | a `dataclasses.asdict` copy and a JSON encoding per test | skipped | `EventWriter.enabled`; `TestResult.as_dict` builds the dict directly |
+| test file paths | two `realpath` calls per test, twice | once per file | `CoversetSession._rel` |
+
+The coverage.py core is now most of what is left, and it is per call, not per test: see [What would make it faster](#what-would-make-it-faster).
 
 ### Overhead on tight loops
 
@@ -426,6 +492,57 @@ A suite's multiplier hides how a single hot function behaves. Wall time relative
 | tight loop | coverage + shapes, full-trace, 100,000-call safety cap | 2.8× | 2.9× | after the cap: 2.84× / 2.87× |
 
 The re-measurements ran `measure_overhead.py --python <venv> --target <tight-loop copy> --source tpkg` (adding `-- --coverset-full-trace=full.txt` for the full-trace rows; medians 2.23 s and 2.24 s against 0.79 s and 0.78 s plain). With the cap, a hot changed function costs about what coverage alone costs.
+
+### Scaling with workers
+
+`examples/bench-suite` as generated (1,200 CPU-bound tests, 174 s of `busy()` in all), on one machine with pytest-xdist and the neutral export on, one run serial and the median of 3 with workers, same day and machine as above:
+
+| Workers | plain | `--coverset-out ... --coverset-neutral` | merge (`meta.xdist.merge_s`) | `bundle.tar.gz` | `neutral.tar.gz` |
+|---|---|---|---|---|---|
+| none | 208.5 s | 181.0 s | | 342 KB | 45 KB |
+| 4 | 50.4 s | 48.6 s | 0.08 s | 355 KB | 73 KB |
+| 8 | 29.1 s | 25.8 s | 0.10 s | 365 KB | 90 KB |
+
+The instrumented runs are not slower here because this suite cannot show tracing cost: `busy()` calibrates its loop at import under whatever tracer is active, so a test costs its nominal milliseconds either way, and the difference between columns is noise from a shared machine. What the table does show: the run scales with workers as plain pytest does, the merge is a tenth of a second, `coverage.sqlite` is the same size (909 KB: the same contexts and arcs), and the neutral archive grows with workers because each worker samples shapes on its own ([pytest-xdist](#pytest-xdist)). With `busy()` stubbed, so that per-test overhead dominates, 1,200 tests take 1.42 s plain and 2.31 s instrumented on 4 workers (1.62×), 1.89 s and 2.83 s on 8 (1.49×), against 2.14× serial: per-test costs are spread over the workers like the tests.
+
+### A 5,000-test application suite
+
+A private Flask application's suite, 5,426 tests in 470 files, Postgres and Redis on localhost (one database per xdist worker, which the suite's own conftest sets up), measured once each on 2026-10-13 on the same shared machine, outputs written outside the repository (`--coverset-out=<elsewhere> --coverset-source=flask --coverset-neutral`, `-p no:cacheprovider`, `PYTHONDONTWRITEBYTECODE=1`; `git status --ignored` was identical before and after):
+
+| Run | Wall time | Notes |
+|---|---|---|
+| `pytest` | 549.7 s | |
+| `pytest --coverset-out ... --coverset-neutral` | 508.4 s | within run-to-run noise of plain: the tests wait on Postgres, and the tracer's cost hides in that wait |
+| `pytest -n 8` | 84.5 s | |
+| `pytest -n 8 --coverset-out ... --coverset-neutral` | 145.1 s | 1.72× plain `-n 8`, 3.5× faster than the serial instrumented run |
+
+Where the instrumented runs spend their time (`meta.json`):
+
+| Step | serial | `-n 8` |
+|---|---|---|
+| per-worker session (tests plus tracing) | 482.8 s | 108.6 s on each worker (plain: 81.4 s) |
+| context switches, 5,426 | 14.6 s (2.7 ms each: the SQLite inserts of each test's arcs, about 130 MB in all) | 18.5 s summed over the workers |
+| shape tracer callbacks | 2.1 s | 10.4 s summed (each worker samples on its own) |
+| merge (data files, `coverage.json`, shapes) | | 11.9 s, of which `coverage.json` 4.2 s and shapes 1.7 s |
+| `coverage.json` | 5.0 s | (in the merge) |
+| `bundle.tar.gz` | 3.2 s (56 MB) | 2.6 s (44 MB) |
+| neutral export | 9.9 s (5.8 MB) | 9.6 s (9.8 MB) |
+
+So under `-n 8` the tracing costs about a third more per worker (eight workers and Postgres compete for the cores, so the tracer's CPU no longer hides in I/O waits), and the controller adds a serial tail of about 25 s after the last test: the merge, the report, the archive and the export. The same suite's instrumented serial run took 486 s before this change with a 21 s neutral export and a level-9 archive (an earlier run of the previous plugin on the same suite, from its `meta.json`); measured offline on that bundle, the export now takes 9.8 s instead of 29.9 s and the archive 3.6 s instead of 13.3 s. 5 tests failed in both serial runs and passed in both `-n 8` runs, plain and instrumented alike: a property of the suite, not of the plugin.
+
+### What would make it faster
+
+The budget now, per test and per call, and what would cut each part:
+
+| Part | Cost today | What would make it smaller |
+|---|---|---|
+| coverage.py's ctrace core | about 0.75 ms per test of a near-empty suite, and a C callback on every Python call and line of measured code (2.5× on a tight loop) | **sysmon instead of ctrace.** coverage.py's `sys.monitoring` core disables each line after its first hit, so measured code runs at full speed once warm. It is refused today for two reasons ([Why the ctrace core](#why-the-ctrace-core)): branch coverage needs Python 3.14's `BRANCH_LEFT`/`BRANCH_RIGHT` events, and it has no dynamic contexts. The plugin does not need coverage.py's dynamic contexts: it could flush and re-arm per test itself (`sys.monitoring.restart_events()`, then one callback per distinct line and branch a test runs), so on 3.14 the per-test cost becomes "lines the test touched" instead of "every line event". `restart_events()` is global, so the shape tracer's `DISABLE`d non-targets come back once per test and are disabled again at one callback each. |
+| our own line tracer | (not built) | The same idea without coverage.py: a `sys.monitoring` tool with `LINE` and `BRANCH` events on target code objects only (the shape tracer already finds them), a bitmap per code object per test, `DISABLE` after the first hit. It removes coverage.py's per-call file-name check on non-measured code (pytest's own calls, which are most of the 0.75 ms) and the SQLite writes per test (the data would go straight into the neutral format). The cost is reimplementing arc semantics coverage.py gets right (exceptions, generators, `finally`), so it is the second step, after sysmon on 3.14. |
+| per-test bookkeeping | about 0.17 ms per test on the stubbed bench suite, 0.1 ms of it the context switch (coverage.py's write, the warning capture, the tracer check), the rest the result row and the report folding | little left; the switch could skip `warnings.catch_warnings` (coverage.py does not warn on a switch in practice) |
+| shapes | 2 s of callbacks over the 5,081-test suite below, capped per function | the caps already bound it; a hot changed function costs what coverage alone costs |
+| finalisation | `coverage.json` 2.3 s, neutral export 9.8 s, tarball 3.6 s on the 5,081-test bundle | the export reads arcs once per (test, file) pair through coverage.py's public API and once more to find the pairs; one SQL pass over the `arc` table would halve it, at the price of depending on coverage.py's schema |
+| the xdist merge tail | about 25 s after the last test on the 5,426-test suite (combining data files 6 s, `coverage.json` 4 s, shapes 2 s, archive 3 s, export 10 s) | most of it could run in the workers, in parallel: every context but `<import>` lives in exactly one worker, so each worker could write its own neutral coverage rows and the controller would only concatenate them and merge `<import>` |
+| one process | the serial suite | `-n N` ([pytest-xdist](#pytest-xdist)), or shards (coverset on Modal, or upload mode with one label per CI job) |
 
 ## Running it by hand
 
@@ -469,4 +586,4 @@ To test the plugin itself:
 uv run pytest packages/pytest-coverset/tests -q -p no:cacheprovider
 ```
 
-The check on Python 3.12, outside the workspace lock, is `uv run --no-cache --isolated --no-project --python 3.12 --with ./packages/pytest-coverset --with pytest==9.1.1 --with hypothesis==6.168.5 pytest packages/pytest-coverset/tests -q -p no:cacheprovider` (187 passed on 2026-10-11, as on 3.13).
+The check on Python 3.12, outside the workspace lock, is `uv run --isolated --no-project --python 3.12 --with-editable ./packages/pytest-coverset --with pytest==9.1.1 --with hypothesis==6.168.5 --with pytest-xdist==3.8.0 pytest packages/pytest-coverset/tests -q -p no:cacheprovider -n 8` (234 passed on 2026-10-13; without `--with pytest-xdist==3.8.0` and `-n 8`, 211 passed and `test_xdist.py` skipped). `--with-editable` matters: `--with ./packages/pytest-coverset` can reuse a cached wheel of an older build of the same version (`--no-cache` avoids that too, but needs the network).

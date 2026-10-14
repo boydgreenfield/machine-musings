@@ -64,6 +64,29 @@ interface SpoolCov {
 
 type SpoolShapes = { k: "shapes" } & ShapeDump;
 
+/** Written by a worker when a test starts while others are still running (concurrent tests). */
+interface SpoolOverlap {
+  k: "overlap";
+  tasks: string[];
+}
+
+type SpoolRow = SpoolCov | SpoolShapes | SpoolOverlap;
+
+/**
+ * The warning for a run whose tests overlapped (concurrent tests that really ran at the same time
+ * in one worker): what is attributed how, and what to do about it. Tests marked concurrent that
+ * never overlapped (`--maxConcurrency=1`) need none. Exported for the tests.
+ */
+export function concurrencyWarning(concurrent: number, overlapping: number): string | null {
+  if (overlapping === 0) return null;
+  return (
+    `${overlapping} test(s) ran while another test of the same worker was running (${concurrent} marked ` +
+    "test.concurrent, describe.concurrent or sequence.concurrent): Istanbul's counters are shared, so each " +
+    "of those tests' lines are everything that ran while it was active, a superset of its own (argument " +
+    "shapes are still attributed exactly). Run with --maxConcurrency=1 for exact per-test lines."
+  );
+}
+
 interface StaticFile {
   path: string;
   abs: string;
@@ -218,6 +241,7 @@ export function testRowOf(
   if (mode === "skip") markers.add("skip");
   if (mode === "todo") markers.add("todo");
   if (fails) markers.add("xfail");
+  if (testCase.options.concurrent === true) markers.add("concurrent");
   for (const annotation of testCase.annotations()) {
     if (annotation.type && annotation.type !== "notice") markers.add(annotation.type);
   }
@@ -354,8 +378,8 @@ export class CoversetReporter implements Reporter {
     return path === null || path.split("/").includes("node_modules") ? null : path;
   }
 
-  private readSpools(): (SpoolCov | SpoolShapes)[] {
-    const rows: (SpoolCov | SpoolShapes)[] = [];
+  private readSpools(): SpoolRow[] {
+    const rows: SpoolRow[] = [];
     let names: string[] = [];
     try {
       names = readdirSync(this.spoolDir).filter((n) => SPOOL_FILE.test(n)).sort();
@@ -366,7 +390,7 @@ export class CoversetReporter implements Reporter {
       for (const line of readFileSync(join(this.spoolDir, name), "utf8").split("\n")) {
         if (!line.trim()) continue;
         try {
-          rows.push(JSON.parse(line) as SpoolCov | SpoolShapes);
+          rows.push(JSON.parse(line) as SpoolRow);
         } catch {
           // a worker killed mid-write leaves a torn last line
         }
@@ -397,6 +421,7 @@ export class CoversetReporter implements Reporter {
       modules.push({ module, file, cases: [...module.children.allTests()] });
     }
     const ids = uniqueIds(modules.flatMap(({ file, cases }) => cases.map((c) => `${file} > ${c.fullName}`)));
+    const concurrentTests = modules.reduce((n, m) => n + m.cases.filter((c) => c.options.concurrent === true).length, 0);
     let next = 0;
     for (const { module, file, cases } of modules) {
       let source: string[] | null = null;
@@ -430,9 +455,17 @@ export class CoversetReporter implements Reporter {
     const spools = this.readSpools();
     const cells = new Map<string, { test: string; file: string; lines: Set<number>; arcs: Map<string, [number, number]> }>();
     const dumps: SpoolShapes[] = [];
+    const overlapping = new Set<string>();
     for (const row of spools) {
       if (row.k === "shapes") {
         dumps.push(row);
+        continue;
+      }
+      if (row.k === "overlap") {
+        for (const task of Array.isArray(row.tasks) ? row.tasks : []) {
+          const id = taskToId.get(task);
+          if (id !== undefined) overlapping.add(id);
+        }
         continue;
       }
       if (row.k !== "cov") continue;
@@ -489,6 +522,9 @@ export class CoversetReporter implements Reporter {
       .filter((p) => files.get(p)!.executedArcs.size > 0)
       .map((p) => ({ file: p, arcs: sortArcs(files.get(p)!.executedArcs.values()) }));
 
+    const concurrency = concurrencyWarning(concurrentTests, overlapping.size);
+    if (concurrency !== null) warnings.push(concurrency);
+
     // functions.jsonl ---------------------------------------------------------------------------
     const functionRows = await this.functions(files, warnings);
 
@@ -511,6 +547,8 @@ export class CoversetReporter implements Reporter {
         coverage: "istanbul (per-test counter deltas)",
         recorder_errors: recorderErrors,
         reattributed_callers: reattributed,
+        concurrent_tests: concurrentTests,
+        overlapping_tests: overlapping.size,
         dropped,
         warnings,
       },

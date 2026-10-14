@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tarfile
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,12 @@ INVARIANT_LINKS_FILE = "invariant_links.jsonl"
 SHAPES_FILE = "shapes.jsonl.gz"
 META_FILE = "meta.json"
 BUNDLE_FILE = "bundle.tar.gz"
+RESULTS_FLUSH_S = 1.0
+"""Longest time a finished test's ``results.jsonl`` row may sit in the write buffer."""
+RESULTS_BUFFER_BYTES = 64 * 1024
+TARBALL_COMPRESSLEVEL = 6
+"""gzip level of ``bundle.tar.gz``. For a 5,081-test suite (123 MB ``coverage.sqlite``) level 9 took
+13.3 s and level 6 3.6 s for an archive 0.13% larger (53.4 MB); level 1 takes 1.2 s for 9.6% more."""
 BUNDLE_MEMBERS = (
     "coverage.sqlite",
     "coverage.json",
@@ -76,9 +83,10 @@ def invariant_ids(item: pytest.Item) -> tuple[str, ...]:
     return tuple(found)
 
 
-def describe_item(item: pytest.Item, repo_root: str) -> CollectedItem:
-    """Describe a collected item for ``collect.json``."""
-    rel = norm_path(item.path, repo_root)
+def describe_item(item: pytest.Item, repo_root: str, rel: str | None = None) -> CollectedItem:
+    """Describe a collected item for ``collect.json`` (``rel``: its file, when already normalised)."""
+    if rel is None:
+        rel = norm_path(item.path, repo_root)
     _, line, _ = item.location
     obj = getattr(item, "obj", None)
     is_hypothesis = (
@@ -151,19 +159,29 @@ def write_empty_shapes(path: Path) -> None:
 
 
 class ResultsLog:
-    """Appends final test rows to ``results.jsonl`` as tests finish and keeps them for the bundle."""
+    """Appends final test rows to ``results.jsonl`` as tests finish and keeps them for the bundle.
+
+    Rows are buffered and flushed at most every :data:`RESULTS_FLUSH_S` seconds, and at once for a
+    failed or errored test, instead of one ``write`` system call per test: the file is read only
+    from the finished bundle (the rows also stay in memory for it), and a process killed outright
+    loses its shapes and bundle anyway.
+    """
 
     def __init__(self, out_dir: Path) -> None:
         self.path = out_dir / RESULTS_FILE
-        self._file = self.path.open("w", encoding="utf-8")
+        self._file = self.path.open("w", encoding="utf-8", buffering=RESULTS_BUFFER_BYTES)
+        self._last_flush = time.monotonic()
         self.results: list[TestResult] = []
 
     def add(self, result: TestResult) -> None:
-        """Record one result (kept even if the write fails) and flush it to disk."""
+        """Record one result (kept even if the write fails); flush when one is due."""
         self.results.append(result)
         if not self._file.closed:
             self._file.write(dumps(result.as_dict()) + "\n")
-            self._file.flush()
+            now = time.monotonic()
+            if result.outcome in ("failed", "error") or now - self._last_flush >= RESULTS_FLUSH_S:
+                self._file.flush()
+                self._last_flush = now
 
     def close(self) -> None:
         """Close the file (idempotent)."""
@@ -240,7 +258,9 @@ def make_tarball(out_dir: Path) -> tuple[Path, str, int]:
     try:
         with (
             tmp.open("wb") as raw,
-            gzip.GzipFile(filename=BUNDLE_FILE, mode="wb", fileobj=raw) as compressed,
+            gzip.GzipFile(
+                filename=BUNDLE_FILE, mode="wb", fileobj=raw, compresslevel=TARBALL_COMPRESSLEVEL
+            ) as compressed,
             tarfile.open(fileobj=compressed, mode="w") as tar,
         ):
             for name in BUNDLE_MEMBERS:

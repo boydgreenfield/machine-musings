@@ -12,7 +12,7 @@ from quart.typing import TestClientProtocol as Client
 
 from coverset.app import MAX_CONTENT_LENGTH, create_app
 from coverset.config import Settings
-from coverset.web.auth import CSRF_HEADER, current_auth, is_admin, is_public, require_admin
+from coverset.web.auth import CSRF_HEADER, current_auth, is_admin, is_admin_only, is_public, require_admin
 
 
 @pytest.fixture
@@ -140,6 +140,11 @@ async def test_non_admin_bearer_reaches_self_authorizing_views(settings: Setting
         ("GET", "/healthz", True),
         ("HEAD", "/healthz", True),
         ("POST", "/login", True),
+        ("GET", "/auth/github", True),
+        ("GET", "/auth/github/callback", True),
+        ("POST", "/auth/github/callback", False),
+        ("GET", "/account", False),
+        ("GET", "/audit", False),
         ("GET", "/static/app.css", True),
         ("GET", "/", False),
         ("POST", "/logout", False),
@@ -148,6 +153,27 @@ async def test_non_admin_bearer_reaches_self_authorizing_views(settings: Setting
 )
 def test_is_public(method: str, path: str, public: bool) -> None:
     assert is_public(method, path) is public
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    ("path", "admin_only"),
+    [
+        ("/setup", True),
+        ("/setup/github/finish", True),
+        ("/forge/outbox", True),
+        ("/settings/instance", True),
+        ("/settings/instance/executor", True),
+        ("/v1/facts", True),
+        ("/audit", True),
+        ("/settings/tokens", False),
+        ("/setupx", False),
+        ("/repos/1", False),
+        ("/", False),
+    ],
+)
+def test_is_admin_only(path: str, admin_only: bool) -> None:
+    assert is_admin_only(path) is admin_only
 
 
 @pytest.mark.security

@@ -65,6 +65,8 @@ def build_manifest(public_url: str, *, name: str | None = None) -> dict[str, Any
         "public": False,
         "hook_attributes": {"url": f"{base}/webhooks/github", "active": True},
         "redirect_url": f"{base}/setup/github/callback",
+        "callback_urls": [f"{base}/auth/github/callback"],
+        "request_oauth_on_install": False,
         "default_permissions": dict(APP_PERMISSIONS),
         "default_events": list(APP_EVENTS),
     }

@@ -56,7 +56,9 @@ def _skip_reason() -> str | None:
     return None
 
 
-def _npm_test(out: Path, **extra: str) -> subprocess.CompletedProcess[str]:
+def _npm_test(
+    out: Path, *, cwd: Path = APP, npm_args: tuple[str, ...] = (), **extra: str
+) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
         "COVERSET_ROOT": str(ROOT),
@@ -67,8 +69,8 @@ def _npm_test(out: Path, **extra: str) -> subprocess.CompletedProcess[str]:
     }
     env.pop("COVERSET_SHARD", None)
     proc = subprocess.run(
-        ["npm", "test"],
-        cwd=APP,
+        ["npm", "test", *(("--", *npm_args) if npm_args else ())],
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -302,3 +304,128 @@ def test_the_report_shows_sources_and_declared_types(run: dict, tmp_path: Path) 
     apply = next(text for text in pages.values() if "<title>applyDiscount" in text)
     assert "applyDiscount(totalCents: float, percent: float) -&gt; float" in apply
     assert "Math.round" in re.sub(r"<[^>]+>", "", apply)  # the source was read (and tokenised)
+
+
+# -- parallelism ------------------------------------------------------------------------------------
+
+
+def _sorted_lines(path: Path) -> list[str]:
+    return sorted(path.read_text().splitlines())
+
+
+@pytest.mark.parametrize(
+    "args", [("--pool=threads",), ("--no-file-parallelism",)], ids=["threads", "one-file-at-a-time"]
+)
+def test_pools_and_file_parallelism_give_the_same_bundle(run: dict, args: tuple[str, ...]) -> None:  # type: ignore[type-arg]
+    # Each worker spools to its own file, so how test files are spread over workers (forks by
+    # default, worker threads, or one file at a time) changes nothing in the bundle.
+    out = run["tmp"] / f"neutral-{args[0].strip('-')}"
+    _npm_test(out, npm_args=args)
+    for name in (
+        "files.jsonl",
+        "coverage.jsonl",
+        "arcs.jsonl",
+        "functions.jsonl",
+        "shapes.jsonl",
+        "links.jsonl",
+    ):
+        assert _sorted_lines(out / name) == _sorted_lines(run["out"] / name), name
+    assert sorted(map(json.dumps, _tests_without_timings(out / "tests.jsonl"))) == sorted(
+        map(json.dumps, _tests_without_timings(run["out"] / "tests.jsonl"))
+    )
+
+
+OVERLAP_TESTS = """
+import { describe, expect, it } from "vitest";
+import { rateFor } from "../src/shipping";
+import { mergeRanges } from "../src/ranges";
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+describe%s("overlap", () => {
+  it("ships", async () => {
+    await tick();
+    expect(rateFor("domestic", [100])).toBe(300);
+    await tick();
+  });
+
+  it("merges", async () => {
+    await tick();
+    expect(mergeRanges([[1, 3], [2, 5]])).toEqual([[1, 5]]);
+    await tick();
+  });
+});
+"""
+
+
+def _overlap_project(root: Path, concurrent: bool) -> Path:
+    """The example's sources and config with one test file of two tests that await (``describe.concurrent``
+    or plain ``describe``); ``node_modules`` is the example's, linked."""
+    root.mkdir(parents=True)
+    shutil.copytree(APP / "src", root / "src")
+    for name in ("package.json", "tsconfig.json", "vitest.config.ts"):
+        shutil.copy2(APP / name, root / name)
+    (root / "tests").mkdir()
+    (root / "tests" / "overlap.test.ts").write_text(OVERLAP_TESTS % (".concurrent" if concurrent else ""))
+    (root / "node_modules").symlink_to(APP / "node_modules", target_is_directory=True)
+    return root
+
+
+def _coverage_by_test(out: Path) -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    for line in (out / "coverage.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        found.setdefault(row["test"].rsplit(" > ", 1)[-1], set()).add(row["file"])
+    return found
+
+
+def _shape_tests(out: Path, qualname: str) -> set[str]:
+    rows = [json.loads(line) for line in (out / "shapes.jsonl").read_text().splitlines()]
+    return {
+        t.rsplit(" > ", 1)[-1]
+        for r in rows
+        if r["kind"] == "obs" and r["func"][1] == qualname
+        for t in r["tests"]
+    }
+
+
+def test_concurrent_tests_keep_every_line_they_may_have_run_and_are_flagged(tmp_path: Path) -> None:
+    reason = _skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    runs = {
+        "sequential": (False, ()),
+        "concurrent": (True, ()),
+        "one-at-a-time": (True, ("--maxConcurrency=1",)),
+    }
+    results = {}
+    for name, (concurrent, args) in runs.items():
+        project = _overlap_project(tmp_path / name, concurrent)
+        out = project / "out"
+        proc = _npm_test(out, cwd=project, npm_args=args, COVERSET_ROOT=str(project))
+        results[name] = (out, proc.stdout + proc.stderr)
+
+    exact = {"<import>": {"src/shipping.ts"}, "ships": {"src/shipping.ts"}, "merges": {"src/ranges.ts"}}
+    for name in ("sequential", "one-at-a-time"):
+        out, _ = results[name]
+        assert _coverage_by_test(out) == exact, name
+        assert json.loads((out / "manifest.json").read_text())["meta"]["warnings"] == [], name
+
+    concurrent, output = results["concurrent"]
+    # Istanbul's counters are shared: each test gets everything that ran while it was active (it
+    # used to be: "ships" got both tests' lines and "merges" none at all).
+    assert _coverage_by_test(concurrent) == {
+        "<import>": {"src/shipping.ts"},
+        "ships": {"src/shipping.ts", "src/ranges.ts"},
+        "merges": {"src/shipping.ts", "src/ranges.ts"},
+    }
+    # Shapes follow each test's own async continuation: exact (they used to go to "merges").
+    assert _shape_tests(concurrent, "rateFor") == {"ships"}
+    assert _shape_tests(concurrent, "mergeRanges") == {"merges"}
+    meta = json.loads((concurrent / "manifest.json").read_text())["meta"]
+    assert (meta["concurrent_tests"], meta["overlapping_tests"]) == (2, 2)
+    assert len(meta["warnings"]) == 1 and "--maxConcurrency=1" in meta["warnings"][0]
+    assert "coverset-vitest: 2 test(s) ran while another test of the same worker was running" in output
+    rows = [json.loads(line) for line in (concurrent / "tests.jsonl").read_text().splitlines()]
+    assert {tuple(row["markers"]) for row in rows} == {("concurrent",)}
+    assert validate(concurrent) == []

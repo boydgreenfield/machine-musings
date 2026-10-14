@@ -17,6 +17,15 @@ A statement that spans several physical lines (coverage.py reports it at its fir
 as one block: every continuation line (:func:`continuation_lines`) takes the state of the
 statement's first line and the ``cont`` class, without a gutter count or a "never ran" note.
 
+Misses read as regions, not confetti: the blank, comment-only and other non-statement lines between
+two statements that never ran (``else:``, a comment block, the blank line between two branches) get
+the ``gap`` class (:func:`gap_lines`), so a never-run block is one vermilion run of lines. What the
+page emphasises is a view setting, ``view.highlight`` (:data:`HIGHLIGHTS`): ``all`` paints every
+measured line, ``missing`` keeps the vermilion and yellow treatment and drops the blue of executed
+lines to a faint gutter mark. The markup is the same in both; the stylesheet keys on
+``data-highlight`` (on ``<html>`` and the source frame), so the server's choice paints on first load
+and the toggle (key ``h``) flips one attribute.
+
 Lexing is the expensive half and depends on the text alone: a :class:`SourceCache` keeps each
 file's highlighted lines and continuation map, so a build that renders one file many times (the
 report's file page and one page per function) lexes it once, and a ``line_range`` render formats
@@ -43,6 +52,7 @@ from pygments.lexers.jsx import JsxLexer, TsxLexer
 from coverset.web.render.html import attr, esc, safe_href
 
 __all__ = [
+    "HIGHLIGHTS",
     "CoverageFormatter",
     "FileSummary",
     "LineFacts",
@@ -52,6 +62,7 @@ __all__ = [
     "branch_counts",
     "bracket_continuations",
     "continuation_lines",
+    "gap_lines",
     "header_line",
     "lexer_for",
     "python_continuations",
@@ -59,6 +70,9 @@ __all__ = [
 ]
 
 LineState = Literal["run", "mis", "par", "exc", ""]
+Highlight = Literal["all", "missing"]
+HIGHLIGHTS: tuple[Highlight, ...] = ("all", "missing")
+"""``view.highlight``: paint every measured line (default) or only what never ran or took one branch."""
 TOKEN_PREFIX = "tk-"
 """Prefix of the Pygments token classes (``tk-k``, ``tk-s2``, ...): clear of the page's classes."""
 _DEF = re.compile(r"^\s*(?:async\s+def|def|class)\b")
@@ -287,6 +301,29 @@ def bracket_continuations(text: str) -> dict[int, int]:
     return out
 
 
+def gap_lines(states: Sequence[LineState]) -> frozenset[int]:
+    """The lines (1-based) that join a never-run block: ``states[i]`` is line ``i + 1``'s painted
+    state (a continuation line's is its statement's). A *gap block* is a maximal run of consecutive
+    lines whose statements all never ran, together with the stateless lines (blank, comment-only,
+    ``else:``, a docstring) between them; this returns those stateless lines. A run that ends at an
+    executed, partial or excluded line, or at the end of the text, keeps its trailing stateless
+    lines out, and so does its start: a block begins and ends with a statement that never ran."""
+    out: list[int] = []
+    pending: list[int] = []
+    open_block = False
+    for number, state in enumerate(states, 1):
+        if state == "mis":
+            out.extend(pending)
+            pending.clear()
+            open_block = True
+        elif state == "" and open_block:
+            pending.append(number)
+        else:
+            open_block = False
+            pending.clear()
+    return frozenset(out)
+
+
 # -- the file summary line ----------------------------------------------------------------------
 
 
@@ -484,6 +521,8 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         """Pre-highlighted lines (:func:`lex`): replayed instead of formatting the token stream."""
         self._skipped = 0
         self._total: int | None = None
+        self.gaps = self._gap_lines()
+        """Stateless lines inside a never-run block (:func:`gap_lines`), painted with it."""
 
     def _format_lines(self, tokensource: Iterable[tuple[object, str]]) -> Iterator[tuple[int, str]]:
         """The cached lines when :attr:`lexed` is set (only the ``line_range`` slice when every piece
@@ -506,6 +545,7 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
         headers = {id(r): header_line(self.text_lines, r) for r in pending}
         number = self._skipped  # lines before the first one fed (a line_range slice)
         yield 0, '<div class="src-lines">'
+        yield 0, self._width_line(lo, hi)
         for is_line, html in source:
             if not is_line:
                 yield 0, html
@@ -538,6 +578,37 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
             yield 0, "</section>"
         yield 0, "</div>"
 
+    def _width_line(self, lo: int, hi: int) -> str:
+        """An invisible, zero-height copy of the widest rendered line (its plain text and its
+        branch note), first in ``.src-lines``.
+
+        Source lines are ``content-visibility: auto``: a line off screen is size-contained and
+        counts with its placeholder width, so without this the block's scroll width would grow
+        each time a long line below the fold is first scrolled into view (and the horizontal
+        scrollbar would appear mid-scroll). This line is always rendered, so the block is as wide
+        as its widest line from the first paint, in the same font and grid as the real one, with
+        no script and no inline style (the report's CSP allows neither)."""
+        last = min(hi, len(self.text_lines))
+        best, width, note = "", -1, ""
+        for number in range(max(1, lo), last + 1):
+            text = self.text_lines[number - 1].rstrip("\r\n")
+            extra = ""
+            if number in self.facts.partial and self._painted(number) == "par":
+                extra = _branch_note(self.facts.partial[number])
+            size = len(text.expandtabs(8)) + (len(extra) + 4 if extra else 0)
+            if size > width:
+                best, width, note = text, size, extra
+        for texts in self.removed.values():
+            for raw in texts:
+                text = raw.rstrip("\r\n")
+                if len(text.expandtabs(8)) > width:
+                    best, width, note = text, len(text.expandtabs(8)), ""
+        brn = f'<span class="brn">{esc(note)}</span>' if note else ""
+        return (
+            '<div class="ln src-w" aria-hidden="true"><span class="gd"></span><span class="gn"></span>'
+            f'<span class="gt"></span><code class="src">{esc(best) or " "}</code>{brn}</div>'
+        )
+
     def _open_section(self, region: RegionMark, depth: int) -> str:
         key = f' data-fn="{attr(region.func_key)}"' if region.func_key else ""
         return (
@@ -560,14 +631,34 @@ class CoverageFormatter(HtmlFormatter):  # type: ignore[type-arg]
             return None
         return first
 
-    def _line(self, number: int, html: str, head: RegionMark | None, depth: int) -> str:
+    def _gap_lines(self) -> frozenset[int]:
+        """:func:`gap_lines` over the rendered lines, widened to the nearest stateful line on each
+        side (a ``line_range`` render looks just past its range, not at the whole file)."""
+        last = len(self.text_lines)
+        lo, hi = self.line_range or (1, last)
+        lo, hi = max(1, lo), min(last, hi)
+        while lo > 1 and not self._painted(lo):
+            lo -= 1
+        while hi < last and not self._painted(hi):
+            hi += 1
+        found = gap_lines([self._painted(n) for n in range(lo, hi + 1)])
+        return frozenset(n + lo - 1 for n in found)
+
+    def _painted(self, number: int) -> LineState:
+        """The state line ``number`` is painted with: its own, or its statement's first line's for a
+        continuation line (whose partial-branch cue stays on the first line)."""
         first = self._first_line(number)
         state = self.facts.state(number if first is None else first)
-        if first is not None and state == "par":
-            state = "run"  # the partial-branch cue stays on the statement's first line
+        return "run" if first is not None and state == "par" else state
+
+    def _line(self, number: int, html: str, head: RegionMark | None, depth: int) -> str:
+        first = self._first_line(number)
+        state = self._painted(number)
         classes = ["ln"]
         if state:
             classes.append(state)
+        elif number in self.gaps:
+            classes.append("gap")
         if first is not None:
             classes.append("cont")
         if number in self.changed:

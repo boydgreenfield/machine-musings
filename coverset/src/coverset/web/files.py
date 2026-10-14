@@ -36,13 +36,24 @@ from coverset.web.loaders import (
     pr_run,
     read_source,
     require_run,
+    result_rows,
+    source_cache,
 )
 from coverset.web.pages import get_repo, parse_int, render_page
 from coverset.web.pr_view import analyse_diff
+from coverset.web.principal import require_repo
 from coverset.web.render.shapegrid import render_grid, render_inlay
-from coverset.web.render.source import FileSummary, LineFacts, RegionMark, branch_counts, render_source
+from coverset.web.render.source import (
+    HIGHLIGHTS,
+    FileSummary,
+    LineFacts,
+    RegionMark,
+    branch_counts,
+    render_source,
+)
 from coverset.web.render.sparkline import SparkSeries, render_spark_key, render_sparkline
-from coverset.web.repos import baseline_candidates
+from coverset.web.render.treemap import resolve_view
+from coverset.web.repos import baseline_candidates, request_view_prefs
 from coverset.web.run_view import order_rows
 
 bp = Blueprint("files", __name__)
@@ -87,6 +98,7 @@ def chips_for(view: FunctionView, shapes_url: str) -> Markup | None:
 @bp.get("/repos/<int:rid>/files/<path:path>")
 async def source(rid: int, path: str) -> Response:
     """The source view of one file in one run."""
+    require_repo(rid)
     repo = await get_repo(rid)
     run, pr = await _run_for(rid, repo)
     if run is None:
@@ -142,6 +154,7 @@ async def source(rid: int, path: str) -> Response:
         removed=removed,
         tests_url=tests_url,
         focus=focus,
+        cache=source_cache(),
     )
     measured = sorted(facts.statics)
     index = measured.index(path) if path in measured else -1
@@ -150,6 +163,13 @@ async def source(rid: int, path: str) -> Response:
         prefix = prefix.rsplit("/", 1)[0] if "/" in prefix else ""
     labels = [(p, p[len(prefix) + 1 :] if prefix else p) for p in measured]
     extra: dict[str, Any] = {"pr": pr.number} if pr is not None else {}
+    # view.highlight: ?highlight= > the scoped settings > (the reader's localStorage, in app.js) > all;
+    # the links this page builds keep an explicit ?highlight=
+    highlight, highlight_from = resolve_view(
+        "highlight", request.args.get("highlight"), await request_view_prefs(), HIGHLIGHTS, "all"
+    )
+    if highlight_from == "query":
+        extra["highlight"] = highlight
     lens = {"test": focus_test["test_id"]} if focus_test is not None else {}
     prev_url = (
         url_for("files.source", rid=rid, path=measured[index - 1], run=run.id, **extra, **lens)
@@ -181,6 +201,9 @@ async def source(rid: int, path: str) -> Response:
         focus=focus_test,
         focus_lines=len(focus or ()),
         clear_url=url_for("files.source", rid=rid, path=path, run=run.id, **extra),
+        highlight=highlight,
+        highlight_from=highlight_from,
+        keep_view={"highlight": highlight} if highlight_from == "query" else {},
     )
 
 
@@ -240,6 +263,7 @@ async def _focus_for(
 @bp.get("/repos/<int:rid>/files/<path:path>/lines/<int:n>/tests")
 async def line_tests(rid: int, path: str, n: int) -> Response:
     """The tests that executed one line (fragment for the tests popover)."""
+    require_repo(rid)
     repo = await get_repo(rid)
     run, _pr = await _run_for(rid, repo)
     if run is None:
@@ -250,8 +274,7 @@ async def line_tests(rid: int, path: str, n: int) -> Response:
     tests = await asyncio.to_thread(facts.tests_in_range, path, n, n)
     at_import = await asyncio.to_thread(facts.import_covers, path, n)
     async with app_db().session() as session:
-        _order, results = await order_rows(session, run)
-    by_id = {r["nodeid"]: r for r in results}
+        by_id = await result_rows(session, run, tests)
     rows = sorted(
         ((t, by_id.get(t, {})) for t in tests), key=lambda item: (item[1].get("rank") or 10**9, item[0])
     )
@@ -263,6 +286,7 @@ async def line_tests(rid: int, path: str, n: int) -> Response:
 async def _function(rid: int, func_key: str) -> tuple[Any, Run, RunFacts, Any]:
     if not FUNC_KEY.fullmatch(func_key):
         raise NotFound()
+    require_repo(rid)
     repo = await get_repo(rid)
     run, _pr = await _run_for(rid, repo)
     if run is None:

@@ -64,6 +64,7 @@ from typing import Any
 import coverage
 
 from pytest_coverset.bundle import CollectedItem
+from pytest_coverset.coverage_ctx import held_connection
 from pytest_coverset.outcomes import TestResult
 from pytest_coverset.regions import index_functions
 
@@ -92,6 +93,8 @@ MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_LINE = 1_000_000
 STEMS = ("tests", "files", "coverage", "arcs", "functions", "shapes", "links")
 _TRUE = frozenset({"1", "true", "yes", "on"})
+_NO_LINES: set[int] = set()
+"""Placeholder line set of a (context, file) pair whose lines are read from its arcs (never mutated)."""
 _SHARD = re.compile(r"[0-9]{1,7}")
 
 
@@ -453,6 +456,15 @@ class NeutralWriter:
             return
         data = coverage.CoverageData(basename=str(sqlite_path), suffix=False, no_disk=False)
         data.read()  # marks the data as used: a CoverageData never read would erase the file
+        # One connection for the thousands of per-(context, file) queries below: coverage.py would
+        # otherwise connect and close around each (0.38 s of 0.40 s for 1,200 tests).
+        with held_connection(data):
+            yield from self._coverage_pairs(data, static)
+
+    def _coverage_pairs(
+        self, data: coverage.CoverageData, static: dict[str, _Static]
+    ) -> Iterator[dict[str, Any]]:
+        """The rows of :meth:`_coverage_rows`, read from ``data`` (its connection held by the caller)."""
         has_arcs = data.has_arcs()
         names: dict[str, tuple[str, _Static | None]] = {}
         for raw in data.measured_files():
@@ -466,7 +478,15 @@ class NeutralWriter:
         pairs: dict[str, dict[str, set[int]]] = defaultdict(dict)
         data.set_query_contexts(None)
         for raw in names:
-            for line, contexts in data.contexts_by_lineno(raw).items():
+            by_line = data.contexts_by_lineno(raw)
+            if has_arcs:
+                # Only which (context, file) pairs exist matters here (the lines come from each
+                # pair's arcs below): one set union per file instead of a set insert per line and
+                # context (10 million of them for a 5,000-test suite).
+                for context in set().union(*by_line.values()):
+                    pairs[context][raw] = _NO_LINES
+                continue
+            for line, contexts in by_line.items():
                 for context in contexts:
                     pairs[context].setdefault(raw, set()).add(line)
         try:

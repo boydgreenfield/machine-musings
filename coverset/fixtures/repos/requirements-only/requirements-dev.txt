@@ -1,0 +1,4 @@
+-r requirements.txt
+--index-url https://example.invalid/simple
+pytest>=8.0  # the runner
+-e .

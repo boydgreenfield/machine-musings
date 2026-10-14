@@ -1,0 +1,53 @@
+{% from "_macros.html" import test_link %}
+{#- Redundant: equivalence groups, dominated tests and the covering set's keeps and drops. Every
+    list here is "candidates": coverage cannot see what a test asserts. -#}
+{% set t = view.totals %}
+<p class="eco-caveat" role="note"><strong>Candidates, not verdicts.</strong> {{ view.caveat }}</p>
+
+<section class="panel" id="eco-minimal" aria-labelledby="eco-minimal-h">
+  <div class="panel-head"><h2 id="eco-minimal-h">Minimal set</h2><span class="aside">a duration-weighted greedy cover of every line, arc and input shape, pruned so no kept test can go</span></div>
+  <p class="eco-split">
+    <span><strong>Keeps {{ minimal.keep|length }}</strong> of {{ view.tests|length }} tests ({{ minimal.keep_ms|ms }})</span>
+    <span><strong>Drops {{ minimal.drop|length }}</strong> removable candidates ({{ minimal.drop_ms|ms }} of {{ t.total_duration_ms|ms }})</span>
+    {% if minimal.uncompared %}<span>{{ minimal.uncompared|length }} with no production fact (never dropped)</span>{% endif %}
+  </p>
+  {% if minimal.drop %}<p><a class="btn secondary" href="{{ url_for('economy.deselect', rid=repo.id, run=run.id) }}" download>Download the drops as pytest arguments</a> <span class="muted">then run <code>pytest @coverset-deselect-{{ run.id }}.txt</code> (pytest 8.2+): one <code>--deselect=</code> per line</span></p>{% endif %}
+  <div class="grid-2">
+    <details class="eco-keepdrop" open>
+      <summary>Drops: removable candidates <span class="muted">{{ minimal.drop|length }}, slowest first</span></summary>
+      {% if minimal.drop %}
+      <ol class="eco-list">{% for r in minimal.drop %}<li>{{ test_link(repo.id, r.nodeid, run.id) }} <span class="muted">{{ r.duration_ms|ms }}{% if r.dominated_by %} · subset of another test{% elif r.group_id %} · same flow as another test{% endif %}</span></li>{% endfor %}</ol>
+      {% else %}<p class="empty">Every test covers something the others do not.</p>{% endif %}
+    </details>
+    <details class="eco-keepdrop">
+      <summary>Keeps <span class="muted">{{ minimal.keep|length }}, by test id</span></summary>
+      <ol class="eco-list">{% for r in minimal.keep %}<li>{{ test_link(repo.id, r.nodeid, run.id) }} <span class="muted">{{ r.unique_facts }} unique fact{{ '' if r.unique_facts == 1 else 's' }} · {{ r.duration_ms|ms }}</span></li>{% endfor %}</ol>
+    </details>
+  </div>
+</section>
+
+<section class="panel" id="eco-groups" aria-labelledby="eco-groups-h">
+  <div class="panel-head"><h2 id="eco-groups-h">Identical flows</h2><span class="aside">{{ redundancy.groups|length }} group{{ '' if redundancy.groups|length == 1 else 's' }}: same lines, arcs and input shapes · largest first</span></div>
+  {% if redundancy.groups %}
+  <div class="eco-groups">
+  {% for g in redundancy.groups %}
+    <article class="eco-group">
+      <h3>{{ g.nodeids|length }} tests, one flow <span class="muted">{{ g.duration_ms|ms }} together</span></h3>
+      <ul class="eco-list">{% for n in g.nodeids %}<li>{{ test_link(repo.id, n, run.id) }}{% if n == g.keep %} <span class="badge eco-keep">kept</span>{% else %} <span class="badge eco-flag-removable">candidate</span>{% endif %}</li>{% endfor %}</ul>
+    </article>
+  {% endfor %}
+  </div>
+  {% else %}<p class="empty">No two tests have exactly the same facts.</p>{% endif %}
+</section>
+
+<section class="panel" id="eco-dominated" aria-labelledby="eco-dominated-h">
+  <div class="panel-head"><h2 id="eco-dominated-h">Covered entirely by another test</h2><span class="aside">{{ redundancy.dominated|length }}: every fact of the first is in the second, which is at most 2× slower</span></div>
+  {% if redundancy.dominated %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Test</th><th>Duplicates the flow of</th></tr></thead>
+    <tbody>{% for test, by in redundancy.dominated %}<tr><td class="nodeid">{{ test_link(repo.id, test, run.id) }}</td><td class="nodeid">{{ test_link(repo.id, by, run.id) }}</td></tr>{% endfor %}</tbody>
+  </table>
+  </div>
+  {% else %}<p class="empty">No test's facts are a strict subset of another's.</p>{% endif %}
+</section>

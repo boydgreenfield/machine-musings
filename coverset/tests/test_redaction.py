@@ -38,14 +38,13 @@ def test_long_installation_token_masked() -> None:
 
 
 @pytest.mark.parametrize(
-    "secret",
-    [
-        random_token("ghp_", 40),
-        random_token("github_pat_", 93),
-        "sk-ant-api03-" + random_token("", 90),
-    ],
+    "shape",
+    # Ids must be stable across pytest-xdist workers, so the random part is generated inside the test.
+    [("ghp_", 40), ("github_pat_", 93), ("sk-ant-api03-", 103)],
+    ids=["ghp", "github_pat", "sk-ant"],
 )
-def test_known_token_shapes_masked(secret: str) -> None:
+def test_known_token_shapes_masked(shape: tuple[str, int]) -> None:
+    secret = random_token(*shape)
     out = redact(f"key={secret};")
     assert secret not in out
     assert REDACTED in out

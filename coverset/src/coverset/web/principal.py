@@ -60,6 +60,18 @@ class Principal:
     def is_public(self) -> bool:
         return self.kind == "public"
 
+    @property
+    def is_user(self) -> bool:
+        """True for a person signed in through GitHub (not a token acting for them)."""
+        return self.kind == "user"
+
+    @property
+    def visible_repo_ids_known(self) -> list[int]:
+        """Repository ids this principal may read, from what it carries (admins: unknown, all)."""
+        if self.bound_repo_id is not None:
+            return [self.bound_repo_id]
+        return [rid for rid in self.repo_permissions if self.can(rid, "read")]
+
     def repo_permission(self, repo_id: int) -> str | None:
         """The permission this principal holds on ``repo_id`` (None = cannot see it)."""
         if self.instance_admin:
@@ -86,6 +98,8 @@ class Principal:
 
 PUBLIC = Principal(kind="public", label="public")
 ADMIN = Principal(kind="admin", label="admin token", instance_admin=True)
+OPEN = Principal(kind="admin", label="local operator", instance_admin=True)
+"""Open mode (no admin token, loopback bind): everyone who can reach the socket is the operator."""
 
 
 def current_principal() -> Principal:
@@ -107,7 +121,9 @@ def require_repo(repo_id: int, want: Permission = "read") -> Principal:
     principal = current_principal()
     permission = principal.repo_permission(repo_id)
     if permission is None:
-        raise NotFound()
+        # The same words as a repository that does not exist (``pages.get_repo``), so the two
+        # answers differ only in the id the caller already knows.
+        raise NotFound(f"There is no repository with id {repo_id}.")
     if not permission_at_least(permission, want):
         raise Forbidden()
     return principal

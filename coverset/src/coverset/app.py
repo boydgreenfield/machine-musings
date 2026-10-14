@@ -7,13 +7,14 @@ import os
 import secrets
 from pathlib import Path
 
-from quart import Quart, Response, jsonify, request
+from quart import Quart, Response, jsonify, request, session
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from coverset.config import Settings, get_settings, secure_data_dirs
 from coverset.db.session import Database, init_db
 from coverset.logging import configure_logging
 from coverset.web import register_blueprints
+from coverset.web.proxy import ProxyHeadersMiddleware
 
 MAX_CONTENT_LENGTH = 25 * 1024 * 1024
 """Largest accepted request body (webhook payloads are capped well below this by GitHub)."""
@@ -29,6 +30,9 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
 }
 """Set on every response, including errors and static files."""
+
+HSTS_HEADER = "max-age=31536000"
+"""``Strict-Transport-Security`` value sent when ``COVERSET_PUBLIC_URL`` is https (one year, this host only)."""
 
 SECRET_KEY_FILE = "secret_key"
 _SESSION_KEY_LABEL = b"coverset-session-key\0"
@@ -63,6 +67,12 @@ def create_app(settings: Settings | None = None) -> Quart:
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=settings.public_url.startswith("https://"),
     )
+    if settings.trust_proxy:
+        # Client address and scheme from the nearest proxy's X-Forwarded-For/-Proto (web/proxy.py).
+        app.asgi_app = ProxyHeadersMiddleware.for_environment(app.asgi_app)  # type: ignore[method-assign]
+    security_headers = dict(SECURITY_HEADERS)
+    if settings.public_url.startswith("https://"):
+        security_headers["Strict-Transport-Security"] = HSTS_HEADER
 
     @app.before_serving
     async def _startup() -> None:
@@ -82,13 +92,14 @@ def create_app(settings: Settings | None = None) -> Quart:
 
     @app.after_request
     async def _security_headers(response: Response) -> Response:
-        response.headers.update(SECURITY_HEADERS)
+        response.headers.update(security_headers)
         return response
 
     for code in (404, 405, 413):
         app.register_error_handler(code, _http_error)
 
     register_blueprints(app)
+    install_response_caching(app)
     if settings.env != "test":
         # The dispatcher that turns queued runs into executions; tests drive runs explicitly.
         from coverset.orchestrator.queue import install_run_queue
@@ -224,11 +235,20 @@ async def _http_error(error: HTTPException) -> HTTPException | tuple[Response, i
 
 
 def _secret_key(settings: Settings) -> str:
-    """The session-signing key: derived from the admin token, else a random key kept in data_dir.
+    """The session-signing key: derived from ``COVERSET_SECRET_KEY`` and the admin token when the key
+    is set, else from the admin token, else a random key kept in data_dir.
 
     Deriving from the token means rotating ``COVERSET_ADMIN_TOKEN`` invalidates every login cookie,
-    while the cookie signature never reveals the token itself.
+    while the cookie signature never reveals the token itself. An explicit secret key keeps that
+    property (the token is still mixed in) and adds one: the key no longer depends on a file in one
+    machine's data dir, so a rebuilt container or several replicas behind one URL accept the same
+    cookies, and rotating the key alone also signs everyone out.
     """
+    if settings.secret_key is not None and settings.secret_key.get_secret_value():
+        material = _SESSION_KEY_LABEL + settings.secret_key.get_secret_value().encode() + b"\0"
+        if settings.admin_token is not None:
+            material += settings.admin_token.get_secret_value().encode()
+        return hashlib.sha256(material).hexdigest()
     if settings.admin_token is not None:
         token = settings.admin_token.get_secret_value().encode()
         return hashlib.sha256(_SESSION_KEY_LABEL + token).hexdigest()
@@ -249,3 +269,155 @@ def _persistent_random_key(path: Path) -> str:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(key)
     return key
+
+
+# -- static caching and compression -------------------------------------------------------------------
+
+STATIC_IMMUTABLE = "public, max-age=31536000, immutable"
+"""``Cache-Control`` of a static file requested at its current content version (``?v=``)."""
+STATIC_REVALIDATE = "no-cache"
+"""``Cache-Control`` of a static file requested without (or with a stale) version: revalidate with
+the ETag each time, so a deploy is picked up at once."""
+COMPRESSIBLE = frozenset(
+    {
+        "text/html",
+        "text/css",
+        "text/plain",
+        "application/javascript",
+        "text/javascript",
+        "image/svg+xml",
+        "application/json",
+    }
+)
+"""Response types :func:`install_response_caching` gzips (never ``text/event-stream``: SSE streams)."""
+GZIP_MIN_BYTES = 1024
+GZIP_LEVEL = 3
+"""zlib level of dynamic pages: 10x smaller HTML for 6 ms on a 3 MB treemap page (level 6 is 7 %
+smaller and 3x slower); static files are compressed once at level 9 and kept."""
+_GZIP_THREAD_BYTES = 256 * 1024
+GZIP_FETCH_SITES = frozenset({"same-origin", "none"})
+"""``Sec-Fetch-Site`` values whose dynamic responses may be gzipped (BREACH; see
+:func:`install_response_caching`)."""
+
+
+def install_response_caching(app: Quart) -> None:
+    """Version static URLs by content and gzip text responses.
+
+    ``url_for('static', filename=...)`` gets ``?v=<12 hex digits of the file's SHA-256>`` (an
+    ``url_defaults`` hook, so no template changes), and a static response requested at the file's
+    current version is ``immutable`` for a year; any other static request revalidates with its
+    ETag. HTML, CSS, JavaScript, SVG and JSON bodies over 1 KiB are gzipped when the client accepts
+    it (Hypercorn does not compress), dynamic ones at level 3, static ones once at level 9 and
+    cached by path and mtime. Streamed bodies (the SSE event stream), ranges, 304s and responses
+    that already carry a ``Content-Encoding`` pass through untouched.
+
+    BREACH: every page carries the session's fixed CSRF token (``<body hx-headers>``) and many
+    reflect query input, so a compressed page's length could leak the token to a network observer
+    who makes the victim's browser request it with chosen input. Dynamic responses are therefore
+    compressed only for requests the browser marks ``Sec-Fetch-Site: same-origin`` or ``none``
+    (the app's own navigation, htmx requests, a typed URL or bookmark), which an attacker's page
+    cannot issue; a request from another site gets the identity encoding. A client that sends no
+    ``Sec-Fetch-Site`` (an old browser, curl, the CLI) gets gzip only when the body does not contain
+    its session's CSRF token. Static files hold no secret and are always compressed.
+    """
+    import asyncio
+    import gzip
+    import threading
+
+    from quart.wrappers.response import DataBody, FileBody
+    from werkzeug.security import safe_join
+
+    static_dir = Path(app.static_folder or "")
+    versions: dict[str, tuple[int, int, str]] = {}
+    packed: dict[str, tuple[int, int, bytes]] = {}
+    lock = threading.Lock()
+
+    def version(filename: str) -> str | None:
+        joined = safe_join(str(static_dir), filename)
+        if joined is None:
+            return None
+        try:
+            st = os.stat(joined)
+        except OSError:
+            return None
+        with lock:
+            found = versions.get(filename)
+        if found is not None and found[:2] == (st.st_mtime_ns, st.st_size):
+            return found[2]
+        digest = hashlib.sha256(Path(joined).read_bytes()).hexdigest()[:12]
+        with lock:
+            versions[filename] = (st.st_mtime_ns, st.st_size, digest)
+        return digest
+
+    @app.url_defaults
+    def _version_static(endpoint: str, values: dict[str, object]) -> None:
+        filename = values.get("filename")
+        if endpoint == "static" and isinstance(filename, str) and "v" not in values:
+            found = version(filename)
+            if found is not None:
+                values["v"] = found
+
+    def accepts_gzip() -> bool:
+        return request.accept_encodings["gzip"] > 0
+
+    def breach_safe(body: bytes) -> bool:
+        site = request.headers.get("Sec-Fetch-Site")
+        if site is not None:
+            return site.strip().lower() in GZIP_FETCH_SITES
+        from coverset.web.auth import SESSION_CSRF
+
+        token = session.get(SESSION_CSRF)
+        return not isinstance(token, str) or not token or token.encode() not in body
+
+    async def compressed_static(filename: str, body: bytes) -> bytes:
+        joined = safe_join(str(static_dir), filename)
+        st = os.stat(joined) if joined is not None else None
+        key = (st.st_mtime_ns, st.st_size) if st is not None else (0, len(body))
+        with lock:
+            found = packed.get(filename)
+        if found is not None and found[:2] == key:
+            return found[2]
+        data = await asyncio.to_thread(gzip.compress, body, 9, mtime=0)
+        with lock:
+            packed[filename] = (*key, data)
+        return data
+
+    @app.after_request
+    async def _cache_and_compress(response: Response) -> Response:
+        is_static = request.endpoint == "static"
+        if is_static and response.status_code in (200, 304):
+            filename = (request.view_args or {}).get("filename")
+            wanted = request.args.get("v")
+            current = version(filename) if isinstance(filename, str) else None
+            response.headers["Cache-Control"] = (
+                STATIC_IMMUTABLE if wanted is not None and wanted == current else STATIC_REVALIDATE
+            )
+            response.headers.pop("Expires", None)
+        if (
+            response.status_code != 200
+            or response.mimetype not in COMPRESSIBLE
+            or "Content-Encoding" in response.headers
+            or not isinstance(response.response, DataBody | FileBody)
+            or not accepts_gzip()
+        ):
+            return response
+        body = await response.get_data()
+        if len(body) < GZIP_MIN_BYTES:
+            return response
+        if not is_static:
+            response.vary.add("Sec-Fetch-Site")  # the encoding depends on it (BREACH)
+            if not breach_safe(body):
+                return response
+        if is_static:
+            data = await compressed_static(str((request.view_args or {}).get("filename")), body)
+            etag, weak = response.get_etag()
+            if etag:
+                response.set_etag(etag, weak=True)  # one ETag for both encodings, compared weakly
+        elif len(body) >= _GZIP_THREAD_BYTES:
+            data = await asyncio.to_thread(gzip.compress, body, GZIP_LEVEL, mtime=0)
+        else:
+            data = gzip.compress(body, GZIP_LEVEL, mtime=0)
+        response.set_data(data)
+        response.headers["Content-Encoding"] = "gzip"
+        response.vary.add("Accept-Encoding")
+        return response

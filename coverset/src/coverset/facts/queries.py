@@ -23,6 +23,7 @@ import numpy as np
 import pyarrow as pa
 
 from coverset.analysis.shapes import example_sort_key
+from coverset.facts import cache
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.facts.store import FactsStore
@@ -50,12 +51,14 @@ __all__ = [
     "class_changes",
     "function_history",
     "function_input_cov",
+    "has_compact_layout",
     "ingest_record",
     "line_tests",
     "patch_coverage",
     "run_inventory",
     "run_summary",
     "shapes_for_function",
+    "summary_is_fresh",
     "test_history",
     "test_shapes",
     "test_touched",
@@ -78,21 +81,31 @@ def _query(
     tables: Sequence[str],
     register: Mapping[str, pa.Table] | None = None,
 ) -> pa.Table:
-    """Run one statement on a fresh connection; retried once if a shard was replaced mid-query."""
+    """Run one statement on a cursor of the scope's cached connection (:meth:`FactsStore.lease`);
+    retried once if a shard was replaced mid-query (the retry's lease sees the new stamp and
+    rebuilds the views)."""
 
     def execute() -> pa.Table:
-        con = store.connect(repo_id=repo_id, run_id=run_id, run_ids=run_ids, tables=tables)
-        try:
+        with store.lease(repo_id=repo_id, run_id=run_id, run_ids=run_ids, tables=tables) as con:
             for name, table in (register or {}).items():
                 con.register(name, table)
             return con.execute(sql, params).to_arrow_table()
-        finally:
-            con.close()
 
     try:
         return execute()
     except duckdb.IOException:
         return execute()
+
+
+def _memo[T](
+    store: FactsStore, name: str, args: tuple[Any, ...], repo_id: int, run_ids: Sequence[str], compute: Any
+) -> T:
+    """``compute()`` memoised per process under the stamps of ``run_ids``
+    (:data:`coverset.facts.cache.RESULTS`): a run's files never change in place, so the result
+    holds until an ingest, a finalize or a gc changes one of them (see :mod:`coverset.facts.cache`)."""
+    stamp = store.stamp(repo_id=repo_id, run_ids=run_ids)
+    key = (str(store.root), name, repo_id, tuple(run_ids), args)
+    return cache.RESULTS.get_or_compute(key, stamp, compute)  # type: ignore[no-any-return]
 
 
 # -- patch coverage ------------------------------------------------------------------------------
@@ -266,8 +279,8 @@ class TreeNode:
     def_line: int | None = None
 
 
-_TREEMAP_SQL = f"""
-WITH paths AS (
+_TREE_LEAVES_CTE = f"""
+paths AS (
     SELECT file_id, any_value(path) AS path FROM files GROUP BY file_id
 ), st AS (
     SELECT file_id, any_value(statements) AS statements FROM file_static GROUP BY file_id
@@ -294,14 +307,34 @@ WITH paths AS (
     SELECT st.file_id, NULL, 0, 0 FROM st
     WHERE st.file_id NOT IN (SELECT file_id FROM leaf)
 )
+"""
+"""The treemap's leaves ``all_leaves(file_id, func_key, statements, covered)`` from ``test_lines``:
+each statement goes to the innermost callable whose body holds it, else to the file's module leaf
+(``func_key`` null); callables with no statement of their own and files with none are kept. Also
+written once per run at finalize as the ``tree_leaf`` table (:mod:`coverset.facts.aggregates`)."""
+
+_TREEMAP_SELECT = f"""
 SELECT p.path, l.func_key, fn.qualname, fn.def_line, l.statements, l.covered,
        fic.blocks_expected, fic.blocks_observed
 FROM all_leaves l
 JOIN paths p USING (file_id)
-LEFT JOIN fn ON fn.func_key = l.func_key
+LEFT JOIN (
+    SELECT DISTINCT func_key, qualname, def_line FROM functions WHERE kind IN {CALLABLE_KINDS!r}
+) fn ON fn.func_key = l.func_key
 LEFT JOIN func_input_cov fic ON fic.func_key = l.func_key
 ORDER BY p.path, fn.def_line NULLS FIRST, fn.qualname
 """
+
+_TREEMAP_SQL = f"WITH {_TREE_LEAVES_CTE}{_TREEMAP_SELECT}"
+
+_TREEMAP_FROM_LEAVES_SQL = f"""
+WITH paths AS (
+    SELECT file_id, any_value(path) AS path FROM files GROUP BY file_id
+), all_leaves AS (
+    SELECT file_id, func_key, statements, covered FROM tree_leaf
+)
+{_TREEMAP_SELECT}"""
+"""The treemap over the run's stored ``tree_leaf`` (no ``test_lines`` scan)."""
 
 
 @dataclass(slots=True)
@@ -323,22 +356,13 @@ class _Acc:
         return self.observed / self.expected if self.expected else None
 
 
-def treemap(store: FactsStore, repo_id: int, run_id: str) -> list[TreeNode]:
-    """Treemap nodes in pre-order (each directory, then its files, each file then its leaves).
-
-    Area is statements: every statement belongs to the innermost function or method whose body
-    ``[body_start, end_line]`` contains it, else to the file's ``<module>`` leaf. Def and
-    decorator lines run at import time, so like coverage.py's own function regions they belong to
-    the enclosing scope, and a function no test calls shows no covered statement. ``input_cov`` is
-    observed ÷ expected input classes (None when nothing is expected, e.g. never called).
-    """
-    rows = _query(
-        store,
-        _TREEMAP_SQL,
-        repo_id=repo_id,
-        run_id=run_id,
-        tables=("files", "file_static", "test_lines", "functions", "func_input_cov"),
-    ).to_pylist()
+def _treemap(store: FactsStore, repo_id: int, run_id: str) -> list[TreeNode]:
+    """Uncached :func:`treemap` (from the stored ``tree_leaf`` when the run has it)."""
+    if summary_is_fresh(store, repo_id, run_id, "tree_leaf"):
+        sql, tables = _TREEMAP_FROM_LEAVES_SQL, ("files", "tree_leaf", "functions", "func_input_cov")
+    else:
+        sql, tables = _TREEMAP_SQL, ("files", "file_static", "test_lines", "functions", "func_input_cov")
+    rows = _query(store, sql, repo_id=repo_id, run_id=run_id, tables=tables).to_pylist()
     files: dict[str, _Acc] = defaultdict(_Acc)
     dirs: dict[str, _Acc] = defaultdict(_Acc)
     leaves: dict[str, list[TreeNode]] = defaultdict(list)
@@ -377,6 +401,18 @@ def treemap(store: FactsStore, repo_id: int, run_id: str) -> list[TreeNode]:
         nodes.append(TreeNode(path, "file", acc.statements, acc.covered, acc.input_cov))
         nodes.extend(leaves[path])
     return nodes
+
+
+def treemap(store: FactsStore, repo_id: int, run_id: str) -> list[TreeNode]:
+    """Treemap nodes in pre-order (each directory, then its files, each file then its leaves).
+
+    Area is statements: every statement belongs to the innermost function or method whose body
+    ``[body_start, end_line]`` contains it, else to the file's ``<module>`` leaf. Def and
+    decorator lines run at import time, so like coverage.py's own function regions they belong to
+    the enclosing scope, and a function no test calls shows no covered statement. ``input_cov`` is
+    observed ÷ expected input classes (None when nothing is expected, e.g. never called).
+    """
+    return _memo(store, "treemap", (), repo_id, (run_id,), lambda: _treemap(store, repo_id, run_id))
 
 
 # -- shapes --------------------------------------------------------------------------------------
@@ -591,8 +627,8 @@ FROM runs_dim r
 _TOTALS = ("files", "statements", "covered", "branches", "branches_covered", "partial_branches")
 
 
-def run_summary(store: FactsStore, repo_id: int, run_id: str) -> RunSummary | None:
-    """Headline facts of a run, or None when the run has no facts."""
+def _run_summary(store: FactsStore, repo_id: int, run_id: str) -> RunSummary | None:
+    """Uncached :func:`run_summary`."""
     rows = _query(
         store,
         _SUMMARY_SQL,
@@ -623,6 +659,11 @@ def run_summary(store: FactsStore, repo_id: int, run_id: str) -> RunSummary | No
         percent=100.0 * hits / lines if finalized and lines else None,
         **totals,
     )
+
+
+def run_summary(store: FactsStore, repo_id: int, run_id: str) -> RunSummary | None:
+    """Headline facts of a run, or None when the run has no facts."""
+    return _memo(store, "run_summary", (), repo_id, (run_id,), lambda: _run_summary(store, repo_id, run_id))
 
 
 # -- prior run -----------------------------------------------------------------------------------
@@ -824,23 +865,58 @@ ORDER BY p.path, fn.def_line NULLS FIRST, o.line
 """
 
 
-def test_touched(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[TouchedFile]:
-    """What ``nodeid`` ran in a run: per file (sorted by path) the lines, the statement count and
-    the functions it called (in ``def_line`` order) with the body lines it ran in each.
+_TOUCHED_FROM_BITS_SQL = _TOUCHED_SQL.replace(
+    "SELECT DISTINCT tl.file_id, tl.line FROM test_lines tl JOIN t USING (test_id)",
+    "SELECT DISTINCT file_id, line FROM test_hits",
+)
+""":data:`_TOUCHED_SQL` over ``test_hits(file_id, line)``, the test's lines decoded from
+``test_file_bits`` (registered on the cursor) instead of a scan of ``test_lines``."""
 
-    Lines come from ``test_lines`` (the test's own contexts, never ``<import>``), joined to
-    ``files`` for paths, ``file_static`` for statements and ``functions`` for bodies. A test whose
-    coverage another shard recorded first (``tests_dim.has_lines = false``) still resolves: the
-    lines are stored under the same ``test_id``.
-    """
-    rows = _query(
-        store,
-        _TOUCHED_SQL,
-        {"nodeid": nodeid},
-        repo_id=repo_id,
-        run_id=run_id,
-        tables=("tests_dim", "files", "file_static", "test_lines", "functions"),
-    ).to_pylist()
+_TEST_BITS_SQL = f"""
+WITH {_TEST_ID_CTE}
+SELECT b.test_id, b.file_id, b.n_lines, b.bits FROM test_file_bits b JOIN t USING (test_id)
+"""
+
+
+def has_compact_layout(store: FactsStore, repo_id: int, run_id: str) -> bool:
+    """Whether every committed shard of the run has ``test_file_bits`` next to ``test_lines``."""
+    visible = store._visible(repo_id, run_id, ("test_lines", "test_file_bits"))
+    shards = {f.name.split(".", 2)[1] for f in visible["test_lines"]}
+    return bool(shards) and shards == {f.name.split(".", 2)[1] for f in visible["test_file_bits"]}
+
+
+def _test_touched(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[TouchedFile]:
+    """Uncached :func:`test_touched` (from the compact layout when the run has it)."""
+    if has_compact_layout(store, repo_id, run_id):
+        from coverset.facts.convert import bitsets_to_lines
+
+        bits = _query(
+            store,
+            _TEST_BITS_SQL,
+            {"nodeid": nodeid},
+            repo_id=repo_id,
+            run_id=run_id,
+            tables=("tests_dim", "test_file_bits"),
+        )
+        _tests, file_ids, lines = bitsets_to_lines(bits)
+        rows = _query(
+            store,
+            _TOUCHED_FROM_BITS_SQL,
+            {"nodeid": nodeid},
+            repo_id=repo_id,
+            run_id=run_id,
+            tables=("tests_dim", "files", "file_static", "functions"),
+            register={"test_hits": pa.table({"file_id": file_ids, "line": lines})},
+        ).to_pylist()
+    else:
+        rows = _query(
+            store,
+            _TOUCHED_SQL,
+            {"nodeid": nodeid},
+            repo_id=repo_id,
+            run_id=run_id,
+            tables=("tests_dim", "files", "file_static", "test_lines", "functions"),
+        ).to_pylist()
     by_path: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_path[row["path"]].append(row)
@@ -880,6 +956,25 @@ def test_touched(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> l
     return out
 
 
+def test_touched(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[TouchedFile]:
+    """What ``nodeid`` ran in a run: per file (sorted by path) the lines, the statement count and
+    the functions it called (in ``def_line`` order) with the body lines it ran in each.
+
+    Lines come from ``test_lines`` (the test's own contexts, never ``<import>``), joined to
+    ``files`` for paths, ``file_static`` for statements and ``functions`` for bodies. A test whose
+    coverage another shard recorded first (``tests_dim.has_lines = false``) still resolves: the
+    lines are stored under the same ``test_id``.
+    """
+    return _memo(
+        store,
+        "test_touched",
+        (nodeid,),
+        repo_id,
+        (run_id,),
+        lambda: _test_touched(store, repo_id, run_id, nodeid),
+    )
+
+
 _TEST_SHAPES_SQL = f"""
 WITH {_TEST_ID_CTE}, sh AS (
     SELECT shape_id, any_value(shape_key) AS shape_key FROM shapes GROUP BY shape_id
@@ -905,16 +1000,8 @@ ORDER BY path, line, cs.param, sh.shape_key, cs.caller_kind, cs.caller_key
 """
 
 
-def test_shapes(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[ShapeObs]:
-    """The run's ``call_shapes`` observations made while ``nodeid`` ran (its id is in ``test_ids``,
-    or it is the direct caller), as :class:`~coverset.lang.base.ShapeObs`.
-
-    ``func`` is the region triple ``(path, qualname, def_line)`` from ``functions`` (else the
-    tracer's triple from ``func_sampling``), so it maps back to a ``func_key`` through the run's
-    regions. ``samples`` counts every test of the row, not only this one: a row is aggregated per
-    ``(function, parameter, shape, caller)``. Functions without a known triple are left out, as on
-    the function page.
-    """
+def _test_shapes(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[ShapeObs]:
+    """Uncached :func:`test_shapes`."""
     rows = _query(
         store,
         _TEST_SHAPES_SQL,
@@ -950,6 +1037,26 @@ def test_shapes(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> li
             )
         )
     return out
+
+
+def test_shapes(store: FactsStore, repo_id: int, run_id: str, nodeid: str) -> list[ShapeObs]:
+    """The run's ``call_shapes`` observations made while ``nodeid`` ran (its id is in ``test_ids``,
+    or it is the direct caller), as :class:`~coverset.lang.base.ShapeObs`.
+
+    ``func`` is the region triple ``(path, qualname, def_line)`` from ``functions`` (else the
+    tracer's triple from ``func_sampling``), so it maps back to a ``func_key`` through the run's
+    regions. ``samples`` counts every test of the row, not only this one: a row is aggregated per
+    ``(function, parameter, shape, caller)``. Functions without a known triple are left out, as on
+    the function page.
+    """
+    return _memo(
+        store,
+        "test_shapes",
+        (nodeid,),
+        repo_id,
+        (run_id,),
+        lambda: _test_shapes(store, repo_id, run_id, nodeid),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1253,15 +1360,21 @@ def _baseline_runs(
     def scan(run_ids: Sequence[str] | None) -> list[str]:
         if run_ids is not None and not run_ids:
             return []
-        rows = _query(
-            store,
-            _BASELINE_RUNS_SQL,
-            params,
-            repo_id=repo_id,
-            run_ids=run_ids,
-            tables=("runs_dim",),
-        )
-        return [str(r) for r in rows.column("run_id").to_pylist()]
+
+        def read() -> list[str]:
+            rows = _query(
+                store,
+                _BASELINE_RUNS_SQL,
+                params,
+                repo_id=repo_id,
+                run_ids=run_ids,
+                tables=("runs_dim",),
+            )
+            return [str(r) for r in rows.column("run_id").to_pylist()]
+
+        if run_ids is None:  # every run of the repo: the scope itself may change, read it
+            return read()
+        return _memo(store, "baseline_runs", (branch, params["last_n"], until), repo_id, run_ids, read)
 
     if candidates is not None:
         picked = list(dict.fromkeys(candidates))
@@ -1291,14 +1404,18 @@ def baseline_trend(
     runs = _baseline_runs(store, repo_id, branch, last_n, candidates=candidates)
     if not runs:
         return []
-    rows = _query(
-        store,
-        _BASELINE_TREND_SQL,
-        repo_id=repo_id,
-        run_ids=runs,
-        tables=("runs_dim", "file_cov", "functions", "func_input_cov", "tests_dim"),
-    ).to_pylist()
-    return [BaselinePoint(**{**row, "created_at": _utc(row["created_at"])}) for row in rows]
+
+    def points() -> list[BaselinePoint]:
+        rows = _query(
+            store,
+            _BASELINE_TREND_SQL,
+            repo_id=repo_id,
+            run_ids=runs,
+            tables=("runs_dim", "file_cov", "functions", "func_input_cov", "tests_dim"),
+        ).to_pylist()
+        return [BaselinePoint(**{**row, "created_at": _utc(row["created_at"])}) for row in rows]
+
+    return _memo(store, "baseline_trend", (), repo_id, runs, points)
 
 
 _BODY_LINES_CTE = """
@@ -1332,6 +1449,48 @@ fnf AS (
 """CTEs that turn ``fn(run_id, func_key, file_id, def_line, body_start, end_line)`` into
 ``body(run_id, func_key, statements, covered, lines, covered_lines)`` by the function page's rule
 (``RunFacts.body_coverage``)."""
+
+_BODY_SUMMARY_CTE = """
+body AS (
+    SELECT run_id, func_key, statements, covered, lines, covered_lines FROM func_body
+)
+"""
+""":data:`_BODY_LINES_CTE`'s ``body`` read from the runs' stored ``func_body`` summaries."""
+
+
+SUMMARY_SOURCES = ("test_lines", "functions", "file_static", "files")
+"""The tables the per-run summaries (:mod:`coverset.facts.aggregates`) are computed from."""
+
+
+def summary_is_fresh(store: FactsStore, repo_id: int, run_id: str, name: str) -> bool:
+    """Whether the run has the summary table ``name`` and it was written after every file it was
+    computed from (one directory listing and a few ``stat`` calls).
+
+    In the store's own life cycle a summary never outlives its sources (an ingest drops it, the
+    next finalize writes it after them), so this only guards facts edited out of band, a restored
+    backup or a hand-repaired file: a stale summary is ignored and the query reads ``test_lines``.
+    """
+    visible = store._visible(repo_id, run_id, (name, *SUMMARY_SOURCES))  # one listing for all of them
+    if not visible[name]:
+        return False
+    try:
+        written = min(f.stat().st_mtime_ns for f in visible[name])
+        newest = max((f.stat().st_mtime_ns for table in SUMMARY_SOURCES for f in visible[table]), default=0)
+    except FileNotFoundError:  # superseded while looking: read the sources this time
+        return False
+    return newest <= written
+
+
+def _with_body(
+    store: FactsStore, repo_id: int, run_ids: Sequence[str], sql: str, tables: tuple[str, ...]
+) -> tuple[str, tuple[str, ...]]:
+    """``sql`` and its ``tables`` with the ``body`` CTE read from ``func_body`` when every run in
+    scope has that summary (written at finalize, :mod:`coverset.facts.aggregates`), else as given
+    (computed from ``test_lines``: a run finalized before the summaries existed)."""
+    if run_ids and all(summary_is_fresh(store, repo_id, run, "func_body") for run in run_ids):
+        kept = tuple(t for t in tables if t not in ("file_static", "test_lines"))
+        return sql.replace(_BODY_LINES_CTE, _BODY_SUMMARY_CTE), (*kept, "func_body")
+    return sql, tables
 
 
 def _missing_classes(value: str | None) -> tuple[str, ...]:
@@ -1428,13 +1587,29 @@ def function_history(
     runs = _baseline_runs(store, repo_id, branch, last_n, until=until, candidates=candidates)
     if not runs:
         return []
-    rows = _query(
+    return _memo(
         store,
+        "function_history",
+        (func_key,),
+        repo_id,
+        runs,
+        lambda: _history_points(store, repo_id, runs, func_key),
+    )
+
+
+def _history_points(
+    store: FactsStore, repo_id: int, runs: Sequence[str], func_key: str
+) -> list[FunctionPoint]:
+    """The points of :func:`function_history` for the picked ``runs``."""
+    sql, tables = _with_body(
+        store,
+        repo_id,
+        runs,
         _FUNCTION_HISTORY_SQL,
-        {"func_key": func_key},
-        repo_id=repo_id,
-        run_ids=runs,
-        tables=("runs_dim", "functions", "func_input_cov", "file_static", "test_lines"),
+        ("runs_dim", "functions", "func_input_cov", "file_static", "test_lines"),
+    )
+    rows = _query(
+        store, sql, {"func_key": func_key}, repo_id=repo_id, run_ids=runs, tables=tables
     ).to_pylist()
     return [
         FunctionPoint(
@@ -1553,24 +1728,24 @@ ORDER BY c.path, c.def_line, c.qualname
 """
 
 
-def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: str) -> list[ClassChange]:
-    """Per function present in both runs, the input classes lost and gained and the body lines
-    newly uncovered from ``prior_run_id`` to ``run_id`` (only functions where something changed),
-    by path and def line.
-
-    Functions are matched by ``func_key``, else by ``(path, qualname)`` (the lowest prior ordinal)
-    among the functions the key left unmatched; new and deleted functions are not listed. See
-    :class:`ClassChange` for what "lost" can and cannot tell from the stored facts.
-    """
+def _class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: str) -> list[ClassChange]:
+    """Uncached :func:`class_changes`."""
     if run_id == prior_run_id:
         return []
+    sql, tables = _with_body(
+        store,
+        repo_id,
+        [run_id, prior_run_id],
+        _CLASS_CHANGES_SQL,
+        ("functions", "func_input_cov", "file_static", "test_lines"),
+    )
     rows = _query(
         store,
-        _CLASS_CHANGES_SQL,
+        sql,
         {"run_id": run_id, "prior_run_id": prior_run_id},
         repo_id=repo_id,
         run_ids=[run_id, prior_run_id],
-        tables=("functions", "func_input_cov", "file_static", "test_lines"),
+        tables=tables,
     ).to_pylist()
     out: list[ClassChange] = []
     for row in rows:
@@ -1634,6 +1809,25 @@ def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: st
     return out
 
 
+def class_changes(store: FactsStore, repo_id: int, run_id: str, prior_run_id: str) -> list[ClassChange]:
+    """Per function present in both runs, the input classes lost and gained and the body lines
+    newly uncovered from ``prior_run_id`` to ``run_id`` (only functions where something changed),
+    by path and def line.
+
+    Functions are matched by ``func_key``, else by ``(path, qualname)`` (the lowest prior ordinal)
+    among the functions the key left unmatched; new and deleted functions are not listed. See
+    :class:`ClassChange` for what "lost" can and cannot tell from the stored facts.
+    """
+    return _memo(
+        store,
+        "class_changes",
+        (),
+        repo_id,
+        (run_id, prior_run_id),
+        lambda: _class_changes(store, repo_id, run_id, prior_run_id),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GapRow:
     """A called function with input classes no test passed in (the overview's "largest gaps")."""
@@ -1676,17 +1870,13 @@ LIMIT $limit
 """
 
 
-def top_gaps(store: FactsStore, repo_id: int, run_id: str, limit: int = 10) -> list[GapRow]:
-    """The ``limit`` called functions (some test ran their body) with the most expected input
-    classes never observed in the run, most first (then larger bodies, then path and name), with
-    the body's line percentage (the function page's rule) and the missing class names."""
+def _top_gaps(store: FactsStore, repo_id: int, run_id: str, limit: int = 10) -> list[GapRow]:
+    """Uncached :func:`top_gaps`."""
+    sql, tables = _with_body(
+        store, repo_id, [run_id], _TOP_GAPS_SQL, ("functions", "func_input_cov", "file_static", "test_lines")
+    )
     rows = _query(
-        store,
-        _TOP_GAPS_SQL,
-        {"limit": max(0, limit)},
-        repo_id=repo_id,
-        run_id=run_id,
-        tables=("functions", "func_input_cov", "file_static", "test_lines"),
+        store, sql, {"limit": max(0, limit)}, repo_id=repo_id, run_id=run_id, tables=tables
     ).to_pylist()
     return [
         GapRow(
@@ -1703,3 +1893,12 @@ def top_gaps(store: FactsStore, repo_id: int, run_id: str, limit: int = 10) -> l
         )
         for row in rows
     ]
+
+
+def top_gaps(store: FactsStore, repo_id: int, run_id: str, limit: int = 10) -> list[GapRow]:
+    """The ``limit`` called functions (some test ran their body) with the most expected input
+    classes never observed in the run, most first (then larger bodies, then path and name), with
+    the body's line percentage (the function page's rule) and the missing class names."""
+    return _memo(
+        store, "top_gaps", (limit,), repo_id, (run_id,), lambda: _top_gaps(store, repo_id, run_id, limit)
+    )

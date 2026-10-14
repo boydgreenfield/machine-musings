@@ -39,6 +39,7 @@ from coverset.web.context import app_db
 from coverset.web.facts_view import ParamReach, RunFacts, param_reach, reached_classes, test_file
 from coverset.web.loaders import default_run, facts_for, invariant_rows, read_source, require_run, store
 from coverset.web.pages import get_repo, render_page
+from coverset.web.principal import require_repo
 from coverset.web.render.flow import FlowNode, TestCall, render_test_flow
 from coverset.web.render.html import mark_bidi
 from coverset.web.render.shapegrid import render_strip
@@ -236,6 +237,7 @@ def _share(obs: ShapeObs) -> int:
 async def _resolve(rid: int, test_id: int) -> tuple[Any, TestCase, Run | None]:
     if rid > MAX_DB_ID or test_id > MAX_DB_ID:
         raise NotFound("There is no such test.")
+    require_repo(rid)
     repo = await get_repo(rid)
     async with app_db().session() as session:
         case = await session.get(TestCase, test_id)
@@ -251,6 +253,7 @@ async def by_nodeid(rid: int) -> Response:
     """Redirect a nodeid (``?nodeid=``, keeping ``?run=``) to its test page."""
     if rid > MAX_DB_ID:
         raise NotFound("There is no such repository.")
+    require_repo(rid)
     repo = await get_repo(rid)
     nodeid = request.args.get("nodeid", "")
     if not nodeid or len(nodeid) > MAX_NODEID_CHARS:

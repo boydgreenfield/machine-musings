@@ -21,7 +21,7 @@
 <div class="detail-grid detail">
   <div>
     <section class="panel">
-      <h3>Body with coverage <span class="muted">· <a href="{{ link(entry.page) }}#L{{ fn.region.def_line }}">open in the file</a></span></h3>
+      <h3>Body with coverage <span class="muted">· <a href="{{ link(entry.page) }}#L{{ fn.region.def_line }}" data-keep-view>open in the file</a></span> <button type="button" class="hl-toggle" data-highlight-toggle aria-pressed="false" title="Paint every measured line, or only what never ran or took one branch (key h)"><span class="hl-label hl-all">Highlight: all lines</span><span class="hl-label hl-missing">Highlight: missing only</span></button></h3>
       {% if hunk is not none %}<div class="src-frame">{{ hunk }}</div>{% else %}<p class="empty">The source of this function is not available.</p>{% endif %}
     </section>
     <section class="panel">

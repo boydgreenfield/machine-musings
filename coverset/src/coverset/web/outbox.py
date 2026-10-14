@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from coverset.db.models import ForgeCall, Repo
 from coverset.web.context import app_db
 from coverset.web.pages import parse_int, render_page
+from coverset.web.principal import require_instance_admin
 from coverset.web.render.markdown import render_sticky
 
 bp = Blueprint("outbox", __name__)
@@ -53,7 +54,8 @@ def _view(call: ForgeCall) -> dict[str, Any]:
 
 @bp.get("/forge/outbox")
 async def outbox() -> Response:
-    """The newest forge calls first; ``?method=`` filters, ``?page=`` pages."""
+    """The newest forge calls first; ``?method=`` filters, ``?page=`` pages (instance admins only)."""
+    require_instance_admin()
     page = parse_int(request.args.get("page"), default=1, minimum=1) or 1
     method = request.args.get("method") or None
     async with app_db().session() as session:

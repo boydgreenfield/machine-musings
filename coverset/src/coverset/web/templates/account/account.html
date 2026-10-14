@@ -1,0 +1,90 @@
+{% extends layout %}
+{% block title %}Account{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('dashboard.index') }}">coverset</a> / account</div>
+<div class="page-head"><h1>Account</h1></div>
+
+<section class="panel account-identity" aria-labelledby="who">
+  <h2 id="who">Who you are</h2>
+  {% if user %}
+  <div class="account-card">
+    <span class="account-avatar big" aria-hidden="true">{{ user.login[:1]|upper }}</span>
+    <dl class="facts-dl">
+      <dt>Login</dt><dd><strong>@{{ user.login }}</strong>{% if user.name %} · {{ user.name }}{% endif %}</dd>
+      <dt>Signed in</dt><dd>{% if principal.kind == 'token' %}with an API token ({{ principal.label }}){% else %}through GitHub{% endif %}</dd>
+      <dt>Role</dt><dd>{% if user.role == 'admin' %}<span class="badge">instance admin</span> sees and changes every repository{% else %}member: the repositories GitHub grants you{% endif %}</dd>
+      {% if principal.kind == 'token' %}<dt>Scopes</dt><dd>{% for s in principal.scopes|sort %}<code>{{ s }}</code>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</dd>{% endif %}
+      <dt>Last sign-in</dt><dd>{{ user.last_login_at|stamp }}</dd>
+    </dl>
+  </div>
+  {% else %}
+  <p>{{ principal.label }}{% if principal.instance_admin %}: instance admin (every repository, every setting){% endif %}.</p>
+  {% if principal.label == 'local operator' %}<p class="muted">Open mode: no admin token is configured, so every caller on this machine is the operator.</p>{% endif %}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="repos">
+  <div class="panel-head"><h2 id="repos">Repositories</h2>
+    {% if synced_at %}<span class="aside">checked {{ synced_at|ago }}</span>{% endif %}
+  </div>
+  {% if refreshed == 'ok' %}<p role="status">Repository access refreshed from GitHub.</p>{% elif refreshed == 'failed' %}<p role="alert">GitHub could not be asked right now; the last known access stands and is retried every 10 minutes. If GitHub has stopped accepting coverset's authorization for your account, your access here is cleared and you are asked to sign in again.</p>{% endif %}
+  {% if repos %}
+  <div class="table-scroll"><table>
+    <thead><tr><th>Repository</th><th>Permission</th><th>Checked</th></tr></thead>
+    <tbody>
+    {% for item in repos %}
+    <tr>
+      <td><a href="{{ url_for('repos.repo', rid=item.repo.id) }}">{{ item.repo.full_name }}</a></td>
+      <td><span class="perm perm-{{ item.permission }}">{{ item.permission }}</span></td>
+      <td>{% if item.checked_at %}{{ item.checked_at|ago }}{% else %}<span class="muted">instance admin</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% elif principal.instance_admin %}
+  <p class="empty">No repositories yet.</p>
+  {% else %}
+  <p class="empty">GitHub grants you none of the repositories this coverset watches. Ask for access on GitHub, then refresh.</p>
+  {% endif %}
+  {% if can_refresh %}
+  <form method="post" action="{{ url_for('account.account_refresh') }}" class="account-actions">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn secondary" type="submit">Refresh from GitHub</button>
+    <span class="muted">Access is re-read every 10 minutes while you use coverset; this asks now.</span>
+  </form>
+  {% endif %}
+</section>
+
+{% if user %}
+<section class="panel" aria-labelledby="sessions">
+  <h2 id="sessions">Sessions</h2>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Started</th><th>Last seen</th><th>From</th><th>Browser</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead>
+    <tbody>
+    {% for item in sessions %}
+    <tr{% if item.current %} class="is-current"{% endif %}>
+      <td>{{ item.row.created_at|stamp }}{% if item.current %} <span class="badge">this session</span>{% endif %}</td>
+      <td>{{ item.row.last_seen_at|ago }}</td>
+      <td><code>{{ item.row.ip or '–' }}</code></td>
+      <td class="account-ua">{{ item.row.user_agent or '–' }}</td>
+      <td>{{ item.row.expires_at|stamp }}</td>
+      <td class="account-action">
+        <form method="post" action="{{ url_for('account.revoke_session', session_id=item.row.id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn secondary" type="submit">{% if item.current %}Sign out{% else %}Revoke{% endif %}</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="empty">No browser sessions (you are using a token).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+<section class="panel" aria-labelledby="tokens">
+  <h2 id="tokens">API tokens</h2>
+  <p>Personal tokens act as you within their scopes; repository tokens let a CI job upload bundles for one repository. Manage them under <a href="/settings/tokens">Settings → Tokens</a>, or with <code>coverset users tokens</code> on the server.</p>
+</section>
+{% endblock %}

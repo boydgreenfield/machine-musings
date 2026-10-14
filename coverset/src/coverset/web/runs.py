@@ -11,10 +11,10 @@ from quart import Blueprint, Response, request, stream_with_context, url_for
 from werkzeug.exceptions import NotFound
 
 from coverset.web.api import RUN_ID_PARAM, SEQ_PARAM
-from coverset.web.auth import is_admin
 from coverset.web.context import app_db
 from coverset.web.loaders import run_counts
 from coverset.web.pages import render_page
+from coverset.web.principal import current_principal, require_repo
 from coverset.web.run_view import TERMINAL, build_state, load_bundle, load_events, order_rows, regions_context
 from coverset.web.runstate import RunState
 from coverset.web.sse import page_stream, parse_speed
@@ -45,6 +45,7 @@ async def run_page(run_id: str) -> Response:
         bundle = await load_bundle(session, run_id)
         if bundle is None:
             raise NotFound()
+        require_repo(bundle.run.repo_id)
         events = await load_events(session, run_id)
         _order, results = await order_rows(session, bundle.run)
         counts = (await run_counts(session, [run_id])).get(run_id, {})
@@ -68,7 +69,7 @@ async def run_page(run_id: str) -> Response:
         stream_url=stream_url,
         speed=speed,
         freeze=freeze,
-        can_approve=is_admin() and run.status == "awaiting_approval",
+        can_approve=current_principal().can(run.repo_id, "write") and run.status == "awaiting_approval",
         has_events=bool(events),
     )
 
@@ -82,6 +83,7 @@ async def run_events(run_id: str) -> Response:
         bundle = await load_bundle(session, run_id)
     if bundle is None:
         raise NotFound()
+    require_repo(bundle.run.repo_id)
     replay = request.args.get("replay") == "1"
     after_raw = request.headers.get("Last-Event-ID") or request.args.get("after") or "0"
     after = int(after_raw) if SEQ_PARAM.fullmatch(after_raw) else 0

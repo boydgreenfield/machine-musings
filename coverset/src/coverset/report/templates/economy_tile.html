@@ -1,0 +1,5 @@
+{#- The index's Economy tile (report/economy.py): one line, linked to economy.html. -#}
+<a class="changes-tile economy-tile" href="{{ link('economy.html') }}" data-economy-tile>
+  <strong>Test economy:</strong> <span data-economy-summary>{{ economy.summary }}</span>
+  <span class="muted">· minimal set {{ economy.totals.minimal_set_size }} of {{ economy.totals.tests }} tests{% if economy.totals.untested_functions %} · {{ economy.totals.untested_functions|plural('function') }} no test ran{% endif %}</span>
+</a>

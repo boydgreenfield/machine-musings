@@ -20,3 +20,6 @@ secrets/
 .hypothesis
 .ruff_cache
 .coverset/
+# deployment settings and secrets (deploy/compose.yml, deploy/fly, deploy/aws)
+deploy/**/*.env
+!deploy/**/*.env.example

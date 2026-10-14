@@ -12,6 +12,7 @@ from coverset.db.models import PullRequest, Repo, Run, TestCase
 from coverset.web.context import app_db, app_settings
 from coverset.web.loaders import run_counts
 from coverset.web.pages import render_page
+from coverset.web.principal import visible_repo_ids
 from coverset.web.render.timeline import milestones
 
 bp = Blueprint("dashboard", __name__)
@@ -37,31 +38,40 @@ async def index() -> Response:
     """Repos, live runs, recent runs and a few numbers."""
     async with app_db().session() as session:
         repos = list(await session.scalars(select(Repo).order_by(Repo.full_name)))
+        rids = visible_repo_ids([r.id for r in repos])  # everything below is scoped to these
+        repos = [r for r in repos if r.id in rids]
         live = list(
             await session.scalars(
-                select(Run).where(Run.status.in_(LIVE_STATUSES)).order_by(Run.created_at.desc()).limit(10)
+                select(Run)
+                .where(Run.status.in_(LIVE_STATUSES), Run.repo_id.in_(rids))
+                .order_by(Run.created_at.desc())
+                .limit(10)
             )
         )
         recent = list(
             await session.scalars(
                 select(Run)
-                .where(Run.status.not_in(LIVE_STATUSES))
+                .where(Run.status.not_in(LIVE_STATUSES), Run.repo_id.in_(rids))
                 .order_by(Run.created_at.desc())
                 .limit(RECENT_RUNS)
             )
         )
-        prs = {pr.id: pr for pr in await session.scalars(select(PullRequest))}
+        prs = {pr.id: pr for pr in await session.scalars(select(PullRequest).where(PullRequest.repo_id.in_(rids)))}
         counts = await run_counts(session, [r.id for r in live + recent])
-        total_runs = await session.scalar(select(func.count()).select_from(Run)) or 0
-        tests = await session.scalar(select(func.count()).select_from(TestCase)) or 0
+        total_runs = await session.scalar(select(func.count()).select_from(Run).where(Run.repo_id.in_(rids))) or 0
+        tests = await session.scalar(select(func.count()).select_from(TestCase).where(TestCase.repo_id.in_(rids))) or 0
         per_repo = dict(
-            (await session.execute(select(Run.repo_id, func.count()).group_by(Run.repo_id))).all()
+            (
+                await session.execute(
+                    select(Run.repo_id, func.count()).where(Run.repo_id.in_(rids)).group_by(Run.repo_id)
+                )
+            ).all()
         )
         open_prs = dict(
             (
                 await session.execute(
                     select(PullRequest.repo_id, func.count())
-                    .where(PullRequest.state == "open")
+                    .where(PullRequest.state == "open", PullRequest.repo_id.in_(rids))
                     .group_by(PullRequest.repo_id)
                 )
             ).all()

@@ -18,7 +18,14 @@
  *   merges the tests of one caller, and can re-attribute an observation whose caller turns out
  *   not to be measured to its test exactly.
  * * Everything is wrapped so the recorder never throws into user code; failures are counted.
+ * * Concurrent tests (`test.concurrent`, `describe.concurrent`, `sequence.concurrent`) interleave
+ *   at every `await`, so one "current test" would hand a test's calls to whichever test started
+ *   last. For those tests the setup file also enters the test id into an `AsyncLocalStorage`,
+ *   whose store follows each test's own async continuations: while more than one test is active
+ *   the store says whose call it is. Sequential tests never touch the storage (it is created on
+ *   the first concurrent test, so a suite without one pays nothing for it).
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { types as utilTypes } from "node:util";
 
 import { classToken, constructorOf, PROXY_TOKEN, setClassNamer, shapeKey } from "./features.js";
@@ -105,6 +112,10 @@ export class Recorder {
   private readonly funcs: FuncState[] = [];
   private agg = new Map<string, Aggregate>();
   private test: string | null = null;
+  /** Tests between their `beforeEach` and `afterEach`: more than one only while concurrent tests overlap. */
+  private readonly active: string[] = [];
+  /** Which test an async continuation belongs to; created by the first concurrent test. */
+  private als: AsyncLocalStorage<string> | undefined;
   private readonly classes = new WeakMap<Function, string>();
   private stackSt: FuncState[] = [];
   private stackCaller: Caller[] = [];
@@ -115,14 +126,50 @@ export class Recorder {
     setClassNamer((ctor) => this.classes.get(ctor));
   }
 
-  /** Attribute subsequent calls to the Vitest task `taskId` (null between tests). */
+  /** Attribute subsequent calls to the Vitest task `taskId` (null between tests); forgets every other active test. */
   setTest(taskId: string | null): void {
     this.test = taskId;
     this.depth = 0;
+    this.active.length = 0;
+    if (taskId !== null) this.active.push(taskId);
   }
 
+  /**
+   * A test starts (its `beforeEach`). A `concurrent` one also enters its id into the async-local
+   * store, so its calls stay its own while other tests run between its awaits.
+   */
+  beginTest(taskId: string, concurrent: boolean): void {
+    if (concurrent) {
+      try {
+        (this.als ??= new AsyncLocalStorage<string>()).enterWith(taskId);
+      } catch {
+        this.errors++;
+      }
+    }
+    if (!concurrent) this.active.length = 0; // a sequential test never overlaps: drop stale ids
+    if (this.active.length === 0) this.depth = 0;
+    if (!this.active.includes(taskId)) this.active.push(taskId);
+    this.test = taskId;
+  }
+
+  /** A test ends (its `afterEach`); the latest test still active, if any, becomes the fallback. */
+  endTest(taskId: string): void {
+    const at = this.active.indexOf(taskId);
+    if (at >= 0) this.active.splice(at, 1);
+    this.test = this.active.length ? this.active[this.active.length - 1]! : null;
+    if (this.active.length === 0) this.depth = 0;
+  }
+
+  /** How many tests are between their `beforeEach` and `afterEach` right now. */
+  get activeTests(): number {
+    return this.active.length;
+  }
+
+  /** The test a call made now belongs to: the async-local one while tests overlap, else the only one. */
   get currentTest(): string | null {
-    return this.test;
+    if (this.active.length <= 1) return this.test;
+    const store = this.als?.getStore();
+    return store !== undefined && this.active.includes(store) ? store : this.test;
   }
 
   private lookup(fileId: string, index: number, qualname: string, line: number, spec: string, flags: number): FuncState {
@@ -229,7 +276,8 @@ export class Recorder {
 
   private sample(st: FuncState, args: unknown[], self: unknown, caller: Caller): void {
     st.calls++;
-    if (this.test !== null) st.tests.add(this.test);
+    const test = this.currentTest;
+    if (test !== null) st.tests.add(test);
     let fresh = false;
     for (let i = 0; i < st.params.length; i++) {
       try {
@@ -296,7 +344,7 @@ export class Recorder {
     value: unknown,
     enumSpec: EnumSpec | undefined,
   ): boolean {
-    const test = this.test;
+    const test = this.currentTest;
     if (test !== null) {
       const callerKey = caller === null ? "t" + test : `f${caller.uid}\0${test}`;
       const key = `${st.uid}\0${param}\0${shape}\0${callerKey}`;

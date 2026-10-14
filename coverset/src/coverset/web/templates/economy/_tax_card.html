@@ -1,0 +1,43 @@
+{% from "_macros.html" import test_link %}
+{#- The PR test tax card: the PR page (from the verdict's summary_json.test_tax, else the pr-tax
+    fragment) and the Economy overview of a PR run. `tax` is a TestTaxLine or its stored dict. -#}
+{%- set ratio = (tax.tax / tax.threshold) if tax.threshold else 0 -%}
+{%- set frac = ([ratio, 2.0]|min) / 2.0 -%}
+<section class="panel eco-tax{{ ' is-flagged' if tax.flagged }}" id="test-tax" aria-labelledby="test-tax-h" data-flagged="{{ 'true' if tax.flagged else 'false' }}">
+  <div class="panel-head">
+    <h2 id="test-tax-h">Test tax</h2>
+    {% if not tax.statements_measured %}<span class="status s-neutral">not measured</span>
+    {% elif tax.flagged %}<span class="status s-fail">over threshold</span>
+    {% else %}<span class="status s-pass">within threshold</span>{% endif %}
+    <span class="aside"><a href="{{ url_for('economy.economy_page', rid=repo.id, run=run.id) }}">economy of this run</a></span>
+  </div>
+  <p class="eco-tax-line">
+    {% if tax.statements_measured %}<strong data-added>{{ tax.added_statements }} test statement{{ '' if tax.added_statements == 1 else 's' }}</strong> added{% else %}Test statements not measured (the base's test files were not read);{% endif %}
+    for <strong data-lines>{{ tax.newly_covered_lines }}</strong> newly covered line{{ '' if tax.newly_covered_lines == 1 else 's' }}{% if tax.new_classes %} and <strong data-classes>{{ tax.new_classes }}</strong> input class{{ '' if tax.new_classes == 1 else 'es' }}{% endif %}{% if tax.removed_statements %} <span class="muted">· {{ tax.removed_statements }} removed</span>{% endif %}
+  </p>
+  {% if tax.statements_measured %}
+  <div class="eco-meter-row">
+    <svg class="eco-meter" viewBox="0 0 240 12" role="img" aria-label="{{ '%.1f'|format(tax.tax) }} statements per newly covered fact against a threshold of {{ '%g'|format(tax.threshold) }}"><rect class="eco-meter-track" width="240" height="12" rx="6"/><rect class="eco-meter-fill" width="{{ '%.1f'|format(frac * 240) }}" height="12" rx="6"/><line class="eco-meter-mark" x1="120" x2="120" y1="0" y2="12"/></svg>
+    <span><strong>{{ '%.1f'|format(tax.tax) }}</strong> statements per newly covered fact · threshold {{ '%g'|format(tax.threshold) }}{% if ratio > 2 %} <span class="muted">(bar capped at 2× the threshold)</span>{% endif %}</span>
+  </div>
+  {% endif %}
+  <p class="muted">A newly covered line counts 1, a new input class 3.{% if not tax.base_exact %} Compared with an earlier run, not the base commit's.{% endif %} {{ tax.new_tests }} new test{{ '' if tax.new_tests == 1 else 's' }} in this run.</p>
+  {% if tax.lowest_leverage or tax.duplicates %}
+  <div class="grid-2 eco-tax-lists">
+    <div>
+      <h3>New tests with the lowest leverage</h3>
+      {% if tax.lowest_leverage %}
+      <ul class="eco-list">{% for t in tax.lowest_leverage %}<li>{{ test_link(repo.id, t.nodeid, run.id) }} <span class="muted">leverage {{ t.leverage|leverage }} · {{ t.unique_facts }} unique fact{{ '' if t.unique_facts == 1 else 's' }}{% if t.statements is not none %} · {{ t.statements }} statement{{ '' if t.statements == 1 else 's' }}{% endif %}</span></li>{% endfor %}</ul>
+      {% else %}<p class="empty">No new test was measured.</p>{% endif %}
+    </div>
+    <div>
+      <h3>New tests that duplicate existing flows{% if tax.duplicate_count %} <span class="muted">{{ tax.duplicate_count }}</span>{% endif %}</h3>
+      {% if tax.duplicates %}
+      <ul class="eco-list">{% for t in tax.duplicates %}<li>{{ test_link(repo.id, t.nodeid, run.id) }} <span class="badge">{{ 'same flow as' if t.how == 'same flow' else 'covered entirely by' }}</span> {{ test_link(repo.id, t.duplicates, run.id) }}</li>{% endfor %}</ul>
+      {% if tax.duplicate_count > tax.duplicates|length %}<p class="muted">… and {{ tax.duplicate_count - tax.duplicates|length }} more on the economy page.</p>{% endif %}
+      <p class="muted">Candidates only: coverage cannot see what a test asserts.</p>
+      {% else %}<p class="empty">No new test repeats an existing test's flow.</p>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+</section>

@@ -1,0 +1,57 @@
+# coverset + Caddy (automatic HTTPS) on one VM. docs/deploy.md, deploy/aws/README.md.
+#
+#   cd deploy && cp coverset.env.example coverset.env   # fill in the admin token, URL, Modal token
+#   COVERSET_DOMAIN=coverset.example.com docker compose up -d --build
+#
+# Caddy terminates TLS (Let's Encrypt for a real domain; `COVERSET_CADDY_TLS="tls internal"` for a
+# self-signed certificate on an IP or a test name) and proxies to coverset, which trusts the
+# X-Forwarded-For/-Proto that Caddy sets (COVERSET_TRUST_PROXY=true). Only Caddy publishes ports.
+name: coverset
+
+services:
+  coverset:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: coverset:latest
+    env_file: ${COVERSET_ENV_FILE:-coverset.env}
+    environment:
+      COVERSET_BIND: 0.0.0.0:8000
+      COVERSET_DATA_DIR: /data
+      COVERSET_TRUST_PROXY: "true"
+    volumes:
+      # The data dir (SQLite, Parquet facts, git mirrors, .env and the App key written by /setup).
+      # On a VM point COVERSET_DATA_PATH at the attached disk (deploy/aws/user-data.sh: /srv/coverset/data,
+      # owned by uid 10001).
+      - ${COVERSET_DATA_PATH:-coverset-data}:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 30s   # serve drains requests (10 s) and the warm pool before exiting
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+
+  caddy:
+    image: caddy:2.10.2
+    depends_on:
+      coverset:
+        condition: service_healthy
+    environment:
+      COVERSET_DOMAIN: ${COVERSET_DOMAIN:?set COVERSET_DOMAIN to the public host name}
+      COVERSET_CADDY_TLS: ${COVERSET_CADDY_TLS:-}
+    ports:
+      - "${COVERSET_HTTP_PORT:-80}:80"
+      - "${COVERSET_HTTPS_PORT:-443}:443"
+      - "${COVERSET_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  coverset-data:
+  caddy-data:
+  caddy-config:

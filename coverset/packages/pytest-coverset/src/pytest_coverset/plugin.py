@@ -21,6 +21,12 @@ aborts the test run: errors while recording a result or emitting an event go to 
 
 With ``--coverset-neutral`` (or ``COVERSET_NEUTRAL=1``) the language-neutral bundle is written as
 well, on every path that writes the Python bundle (:mod:`pytest_coverset.neutral`).
+
+pytest-xdist (``-n N``): the process that distributes the tests (the controller) measures nothing
+itself; each worker runs the whole plugin into ``<out>/workers/<gw>/`` and the controller merges
+those directories into one bundle at the end (:mod:`pytest_coverset.parallel`). Whether a run is
+distributed is known for certain only once xdist has configured itself, so a run that asks for
+workers defers its start from ``pytest_load_initial_conftests`` to ``pytest_configure``.
 """
 
 from __future__ import annotations
@@ -82,12 +88,19 @@ from pytest_coverset.redact import ReprMode
 from pytest_coverset.shapes import FULL_TRACE_CAP, ShapeTracer, TargetSpec, read_full_trace_file
 
 SESSION_PLUGIN = "coverset-session"
+WORKER_PLUGIN = "coverset-xdist-worker"
 ORDERING_PLUGIN = "coverset-ordering"
 STOP_REASON = "coverset: stop requested"
 SIGTERM_REASON = "coverset: SIGTERM received"
 INVARIANT_MARKER = "invariant(id): link this test to the invariant `id` declared in invariants.yaml"
 ENV_SWITCH = pytest.StashKey[bool]()
 """Whether ``COVERSET=1`` was in the environment (read, and removed, once per config)."""
+DEFERRED = pytest.StashKey[bool]()
+"""Instrumentation was wanted but its start waits for ``pytest_configure`` (xdist may distribute)."""
+DEFERRED_NONCE = pytest.StashKey[str | None]()
+"""The event nonce of a deferred run, removed from the environment before conftest files load."""
+WORKER_TOKEN = pytest.StashKey[Any]()
+"""This process is an xdist worker of an instrumented run: its :class:`parallel.WorkerToken`."""
 
 
 def _positive_int(text: str) -> int:
@@ -196,6 +209,10 @@ class Options:
     neutral: bool = False
     local: bool = False
     """``--coverset``: defaults came from the project, and a summary line is printed at the end."""
+    worker: str | None = None
+    """The xdist worker id (``gw0``) when this process is a worker of an instrumented run."""
+    worker_events: bool = False
+    """A worker writes its events to ``events.jsonl`` in its directory (the controller streams them)."""
 
     @classmethod
     def from_namespace(cls, ns: Any, *, local: bool = False, rootdir: Path | None = None) -> Options:
@@ -253,13 +270,25 @@ class CoversetSession:
             NeutralWriter(options.out_dir, self.repo_root, self.start_cwd) if options.neutral else None
         )
         self.coverage = CoverageContext(options.out_dir, options.sources)
+        if options.worker is not None:
+            # The controller merges a dead worker's data file: commit each finished test's lines.
+            self.coverage.commit_interval_s = 0.0
         self.tracer: ShapeTracer | None = None
         self.full_trace: tuple[str, ...] = ()
         # Events are for the orchestrator, which always sets a nonce and never uses --coverset: a
         # local run, or one without a nonce, discards them (the nonce leaves the environment anyway).
         nonce = os.environ.pop(NONCE_ENV, None)
-        stream = None if nonce and not options.local else DISCARD
+        stream: Any = None if nonce and not options.local else DISCARD
+        if options.worker is not None:
+            stream = (
+                (options.out_dir / "events.jsonl").open("w", encoding="utf-8")
+                if options.worker_events
+                else DISCARD
+            )
         self.events = EventWriter(nonce=nonce or "-", stream=stream, mid_line=self._terminal_mid_line)
+        self._rel_paths: dict[str, str | None] = {}
+        self.phase_seconds: dict[str, float] = {}
+        """Wall time of each finalisation step (``meta.timings.finalize``)."""
         self.warnings: list[str] = []
         """Advice for the developer (``meta.warnings``, and the summary line with ``--coverset``)."""
         self.results = ResultsLog(options.out_dir)
@@ -352,8 +381,17 @@ class CoversetSession:
             text, truncated = truncate_utf8(report.longreprtext)
             self.collect_errors.append({"nodeid": report.nodeid, "longrepr": text, "truncated": truncated})
 
+    def _rel(self, path: Any) -> str | None:
+        """``norm_path`` of a test file, cached per session (two ``realpath`` calls per test otherwise)."""
+        key = os.fspath(path)
+        try:
+            return self._rel_paths[key]
+        except KeyError:
+            rel = self._rel_paths[key] = norm_path(key, self.repo_root)
+            return rel
+
     def pytest_collection_finish(self, session: pytest.Session) -> None:
-        self.collected = [describe_item(item, self.repo_root) for item in session.items]
+        self.collected = [describe_item(item, self.repo_root, self._rel(item.path)) for item in session.items]
         self._emit("collected", count=len(self.collected), errors=len(self.collect_errors))
 
     @pytest.hookimpl(wrapper=True)
@@ -403,7 +441,10 @@ class CoversetSession:
     ) -> Generator[None, Any, Any]:
         report = yield
         if call.excinfo is not None and report.failed:
-            self._exc_types[(item.nodeid, call.when)] = exception_name(call.excinfo.type)
+            name = self._exc_types[(item.nodeid, call.when)] = exception_name(call.excinfo.type)
+            if self.options.worker is not None:
+                # Travels with the report to the xdist controller, which folds results for events.
+                report.coverset_exc = name
         return report
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
@@ -431,12 +472,13 @@ class CoversetSession:
         exc_types = {when: name for (nodeid, when), name in self._exc_types.items() if nodeid == item.nodeid}
         for when in exc_types:
             del self._exc_types[(item.nodeid, when)]
-        rel = norm_path(item.path, self.repo_root)
+        rel = self._rel(item.path)
         result = fold_reports(item.nodeid, rel or item.location[0], reports, exc_types, self.repo_root)
         # The event does not depend on the file write: a failed write is an error in meta.json,
         # while the row stays in memory for the bundle and the runner still sees the result.
         self._attempt(f"results.jsonl {item.nodeid}", lambda: self.results.add(result))
-        self._emit("test", **result.as_dict())
+        if self.events.enabled:
+            self._emit("test", **result.as_dict())
         if result.outcome in ("failed", "error"):
             self._attempt("coverage flush", self.coverage.flush)
 
@@ -453,33 +495,37 @@ class CoversetSession:
             return
         self.finalized = True
         out = self.options.out_dir
-        if self.tracer is not None:
-            self.tracer.stop()
-        self._attempt("coverage save", self.coverage.stop)
-        self._attempt("coverage json", self.coverage.write_json)
-        self._attempt("coverage paths", self._repository_paths)
-        if self.tracer is not None:
-            self._attempt("shapes", lambda: self.tracer.write(out / SHAPES_FILE))  # type: ignore[union-attr]
-        else:
-            self._attempt("shapes", lambda: write_empty_shapes(out / SHAPES_FILE))
+        self._measurements()
         self.results.close()
         counts = self.results.counts(len(self.collected))
+        started = time.perf_counter()
         for name, exc in write_static_files(out, self.collected, self.collect_errors, self.results.results):
             self._record_error(name, exc)
+        self.phase_seconds["static_files"] = time.perf_counter() - started
         self._note_tracer_loss()
         self._attempt("warnings", self._note_unmeasured_sources)
+        if self.options.worker is not None:
+            # A worker's directory is raw material for the controller's merge, not a bundle: no
+            # tarball, no neutral export, no summary line.
+            self._attempt("meta", lambda: write_json(out / META_FILE, self._meta(exit_code, counts)))
+            return
         neutral = self.neutral
         meta = self._meta(exit_code, counts)
         # The Python bundle is complete (meta.json, then bundle.tar.gz) before the neutral export
         # starts, so an interrupt during the export never costs it; meta.json is rewritten with
         # the export's outcome afterwards.
         self._attempt("meta", lambda: write_json(out / META_FILE, meta))
+        started = time.perf_counter()
         try:
             path, digest, size = make_tarball(out)
         except Exception as exc:
             self._record_error("tarball", exc)
         else:
             self._emit("bundle_written", path=str(path), sha256=digest, bytes=size)
+        finally:
+            self.phase_seconds["tarball"] = time.perf_counter() - started
+            # Only the meta.json that the neutral export rewrites can still say what packing took.
+            meta["timings"]["finalize"]["tarball"] = round(self.phase_seconds["tarball"], 6)
         try:
             if neutral is not None:
                 neutral.name_prefix = self._name_prefix()
@@ -490,6 +536,32 @@ class CoversetSession:
         finally:
             if self.options.local:
                 self._attempt("summary", self._print_summary)
+
+    def _measurements(self) -> None:
+        """Stop measuring and write ``coverage.sqlite``, ``coverage.json`` and ``shapes.jsonl.gz``.
+
+        A worker keeps coverage.py's own file names and writes no ``coverage.json``: the controller
+        reports and renames once, on the merged data.
+        """
+        out = self.options.out_dir
+        if self.tracer is not None:
+            self.tracer.stop()
+        self._timed("coverage save", self.coverage.stop)
+        if self.options.worker is None:
+            self._timed("coverage json", self.coverage.write_json)
+            self._timed("coverage paths", self._repository_paths)
+        if self.tracer is not None:
+            self._timed("shapes", lambda: self.tracer.write(out / SHAPES_FILE))  # type: ignore[union-attr]
+        else:
+            self._timed("shapes", lambda: write_empty_shapes(out / SHAPES_FILE))
+
+    def _timed(self, label: str, action: Callable[[], object]) -> bool:
+        """:meth:`_attempt` that also records the step's wall time in :attr:`phase_seconds`."""
+        started = time.perf_counter()
+        try:
+            return self._attempt(label, action)
+        finally:
+            self.phase_seconds[label.replace(" ", "_")] = time.perf_counter() - started
 
     def _repository_paths(self) -> None:
         """Make every ``coverage.json``/``coverage.sqlite`` file name repository-relative."""
@@ -672,8 +744,18 @@ class CoversetSession:
                 "session_wall_s": round(time.perf_counter() - self.started, 6),
                 "tracer_callback_s": round(tracer.callback_seconds, 6) if tracer is not None else 0.0,
                 "tracer_events": tracer.events_seen if tracer is not None else 0,
+                "context_switches": self.coverage.switches,
+                "context_switch_s": round(self.coverage.switch_seconds, 6),
+                "finalize": {k: round(v, 6) for k, v in self.phase_seconds.items()},
             },
+            "xdist": self._xdist_meta(),
         }
+
+    def _xdist_meta(self) -> dict[str, Any] | None:
+        """``meta.xdist``: None for an undistributed run; a worker's id and working directory."""
+        if self.options.worker is None:
+            return None
+        return {"role": "worker", "worker": self.options.worker, "cwd_abs": self.start_cwd}
 
     def shutdown(self) -> None:
         """Release the tool id, restore the SIGTERM handler and stop coverage. Idempotent."""
@@ -682,6 +764,7 @@ class CoversetSession:
             self.tracer.close()
         self.coverage.stop()
         self.results.close()
+        self.events.close()
 
 
 def _local(config: pytest.Config, namespace: Any) -> bool:
@@ -701,25 +784,75 @@ def _wanted(config: pytest.Config, namespace: Any) -> bool:
     return bool(getattr(namespace, "coverset_out", None)) or local
 
 
-def _start_session(config: pytest.Config, namespace: Any) -> None:
+def _worker_token(config: pytest.Config) -> Any:
+    """``(token, worker id)`` when this process is a worker of an instrumented xdist run, else None.
+
+    The environment variable is removed on the first look (once per config), so the tests' own
+    subprocesses never inherit it.
+    """
+    if WORKER_TOKEN not in config.stash:
+        from pytest_coverset.parallel import WorkerToken
+
+        config.stash[WORKER_TOKEN] = WorkerToken.pop()
+    return config.stash[WORKER_TOKEN]
+
+
+def _may_distribute(namespace: Any) -> bool:
+    """Before xdist configured itself: could this run be distributed (``-n N``, ``--tx``)?"""
+    if getattr(namespace, "collectonly", False):
+        return False
+    workers = getattr(namespace, "numprocesses", None)
+    if workers not in (None, 0, "0"):
+        return True
+    return bool(getattr(namespace, "tx", None)) and getattr(namespace, "dist", "no") != "no"
+
+
+def _start_session(config: pytest.Config, namespace: Any, *, early: bool) -> None:
+    """Start the session this process needs: an xdist worker's, a controller's or a serial one.
+
+    Early (before conftest files load) a run that may be distributed only marks itself deferred:
+    whether xdist really distributes is known in ``pytest_configure``, and a controller must not
+    measure anything.
+    """
     if config.pluginmanager.has_plugin(SESSION_PLUGIN):
         return
-    _refuse_xdist(namespace)
-    options = Options.from_namespace(namespace, local=_local(config, namespace), rootdir=config.rootpath)
-    session = CoversetSession(config, options)
+    local = _local(config, namespace)
+    worker = _worker_token(config)
+    if worker is not None:
+        from pytest_coverset.parallel import WorkerFinisher, worker_options
+
+        token, worker_id = worker
+        options = Options.from_namespace(namespace, local=token.local or local, rootdir=config.rootpath)
+        session = CoversetSession(config, worker_options(options, token, worker_id))
+        session.start()
+        config.pluginmanager.register(session, SESSION_PLUGIN)
+        config.pluginmanager.register(WorkerFinisher(session), WORKER_PLUGIN)
+        return
+    if not _wanted(config, namespace):
+        return
+    if early and _may_distribute(namespace):
+        config.stash[DEFERRED] = True
+        # Hidden from conftest files now, as in a serial run; the controller reads it back below.
+        config.stash[DEFERRED_NONCE] = os.environ.pop(NONCE_ENV, None)
+        return
+    deferred_nonce = config.stash.get(DEFERRED_NONCE, None)
+    if deferred_nonce is not None:
+        os.environ[NONCE_ENV] = deferred_nonce  # taken again at once by the session
+        config.stash[DEFERRED_NONCE] = None
+    options = Options.from_namespace(namespace, local=local, rootdir=config.rootpath)
+    if not early and _distributes(config):
+        from pytest_coverset.parallel import XdistController
+
+        session = XdistController(config, options)
+    else:
+        session = CoversetSession(config, options)
     session.start()
     config.pluginmanager.register(session, SESSION_PLUGIN)
 
 
-def _refuse_xdist(namespace: Any) -> None:
-    """``--coverset-out`` with xdist workers would write an empty bundle: refuse it up front."""
-    workers = getattr(namespace, "numprocesses", None)
-    if workers not in (None, 0, "0"):
-        raise pytest.UsageError(
-            f"--coverset-out cannot be combined with pytest-xdist (-n {workers}): per-test coverage, "
-            "shapes and results are recorded in this process only. Run with -n 0 "
-            "(coverset shards the suite across workers itself)."
-        )
+def _distributes(config: pytest.Config) -> bool:
+    """xdist registered its distributed session: this process is the controller, tests run elsewhere."""
+    return config.pluginmanager.has_plugin("dsession")
 
 
 @pytest.hookimpl(wrapper=True, specname="pytest_load_initial_conftests")
@@ -732,9 +865,10 @@ def pytest_load_initial_conftests_guard(
     except BaseException as exc:
         namespace = early_config.known_args_namespace
         session = early_config.pluginmanager.get_plugin(SESSION_PLUGIN)
-        if isinstance(session, CoversetSession) and not (
-            getattr(namespace, "help", False) or getattr(namespace, "version", False)
-        ):
+        asked_for_help = getattr(namespace, "help", False) or getattr(namespace, "version", False)
+        if session is None and early_config.stash.get(DEFERRED, False) and not asked_for_help:
+            session = _deferred_session(early_config, namespace)
+        if isinstance(session, CoversetSession) and not asked_for_help:
             code = (
                 pytest.ExitCode.USAGE_ERROR
                 if isinstance(exc, (pytest.UsageError, ImportError))
@@ -746,22 +880,44 @@ def pytest_load_initial_conftests_guard(
         raise
 
 
+def _deferred_session(config: pytest.Config, namespace: Any) -> CoversetSession | None:
+    """A serial session for a deferred run that failed before ``pytest_configure`` (so it can abort)."""
+    try:
+        options = Options.from_namespace(namespace, local=_local(config, namespace), rootdir=config.rootpath)
+        session = CoversetSession(config, options)
+    except Exception:
+        return None
+    config.pluginmanager.register(session, SESSION_PLUGIN)
+    return session
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_load_initial_conftests(
     early_config: pytest.Config, parser: pytest.Parser, args: list[str]
 ) -> None:
     """Start instrumentation before conftest files are imported, so their imports are measured."""
-    namespace = early_config.known_args_namespace
-    if _wanted(early_config, namespace):
-        _start_session(early_config, namespace)
+    _start_session(early_config, early_config.known_args_namespace, early=True)
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
-    """Register the invariant marker; enable ordering and (if not yet started) instrumentation."""
+    """Register the invariant marker; enable ordering and (if not yet started) instrumentation.
+
+    It runs after xdist's own ``pytest_configure``, which decides whether the run is distributed.
+    A session started early as a serial one in a run xdist does distribute (``-n`` given in a way
+    the early look missed) is replaced by a controller: tests do not run in this process.
+    """
     config.addinivalue_line("markers", INVARIANT_MARKER)
-    if _wanted(config, config.option):
-        _refuse_xdist(config.option)
-        _start_session(config, config.option)
+    session = config.pluginmanager.get_plugin(SESSION_PLUGIN)
+    if (
+        isinstance(session, CoversetSession)
+        and session.options.worker is None
+        and type(session) is CoversetSession
+        and _distributes(config)
+    ):
+        session.shutdown()
+        config.pluginmanager.unregister(session, SESSION_PLUGIN)
+    _start_session(config, config.option, early=False)
     scores_file = config.option.coverset_scores
     if scores_file and not config.pluginmanager.has_plugin(ORDERING_PLUGIN):
         try:
@@ -784,6 +940,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
             session._attempt("finalize", lambda: session.finalize(int(pytest.ExitCode.USAGE_ERROR)))
         session.shutdown()
         config.pluginmanager.unregister(session, SESSION_PLUGIN)
+    finisher = config.pluginmanager.get_plugin(WORKER_PLUGIN)
+    if finisher is not None:
+        config.pluginmanager.unregister(finisher, WORKER_PLUGIN)
     ordering = config.pluginmanager.get_plugin(ORDERING_PLUGIN)
     if ordering is not None:
         config.pluginmanager.unregister(ordering, ORDERING_PLUGIN)

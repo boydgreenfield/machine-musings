@@ -73,6 +73,12 @@ class EnvSpec:
     plugin_wheel: Path | None
     source_root: str
     env_hash: str
+    env_source: str = "uv.lock"
+    """Where the requirements came from: ``uv.lock``, ``requirements``, ``poetry``, ``pipenv``,
+    ``pyproject`` or ``setup`` (``coverset.lang.python_env``)."""
+    install: str = "none"
+    """How the project itself is installed: ``none`` (imported from ``PYTHONPATH`` only),
+    ``editable`` or ``wheel`` (at trusted-snapshot time; see ``coverset.lang.python_env``)."""
 
 
 type Catalogue = Callable[[list[ShapeObs]], Mapping[str, InputCov]]

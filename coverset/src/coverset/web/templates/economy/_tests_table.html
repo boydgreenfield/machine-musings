@@ -1,0 +1,47 @@
+{% from "_macros.html" import test_link %}
+{#- The leverage table (also the tests fragment). Each header links to the page sorted by it (the
+    current column again flips the direction) and, with htmx, fetches only this table. -#}
+<section class="panel eco-table" id="eco-tests" aria-labelledby="eco-tests-h">
+  <div class="panel-head"><h2 id="eco-tests-h">{% if only %}{{ filters[only][0]|capitalize }}{% else %}Every test{% endif %}</h2><span class="aside">{{ rows|length }} of {{ rows_total }} · sorted by {{ sort_label|lower }}, {{ 'highest' if descending else 'lowest' }} first</span></div>
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="eco-tests-table">
+    <thead><tr>
+      {% for key, label, numeric in columns %}
+      {%- set active = key == sort -%}
+      {%- set next_rev = (not reverse) if active else False -%}
+      {%- set params = {'tab': 'leverage', 'sort': key if key != 'leverage' else None, 'dir': 'rev' if next_rev else None, 'only': only, 'limit': 'all' if limit is none else None} -%}
+      <th{% if numeric %} class="num"{% endif %}{% if active %} aria-sort="{{ 'descending' if descending else 'ascending' }}"{% endif %}><a class="eco-sort" href="{{ page_url(**params) }}" hx-get="{{ fragment_url(**params) }}" hx-target="#eco-tests" hx-swap="outerHTML" hx-push-url="{{ page_url(**params) }}">{{ label }}{% if active %}<span class="eco-arrow" aria-hidden="true">{{ ' ↓' if descending else ' ↑' }}</span>{% endif %}</a></th>
+      {% endfor %}
+      <th>Flags</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr{% if r.removable %} class="is-removable"{% endif %}>
+        <td class="nodeid">{{ test_link(repo.id, r.nodeid, run.id) }}</td>
+        <td class="num">{% if r.statements is none %}<span class="muted" title="{{ r.reason or 'not measured' }}">n/m</span>{% else %}{{ r.statements }}{% if r.helper_statements %} <span class="muted" title="statements of the helpers and fixtures it reaches">+{{ r.helper_statements }}</span>{% endif %}{% endif %}</td>
+        <td class="num">{% if r.asserts is none %}<span class="muted">–</span>{% else %}{{ r.asserts }}{% if r.helper_asserts %} <span class="muted">+{{ r.helper_asserts }}</span>{% endif %}{% endif %}</td>
+        <td class="num" title="{{ r.unique_lines }} unique lines, {{ r.unique_arcs }} arcs, {{ r.unique_classes }} input classes (of {{ r.lines }} lines, {{ r.arcs }} arcs, {{ r.classes }} classes)">{{ r.unique_facts }}</td>
+        <td class="num">{{ r.leverage|leverage }}</td>
+        <td class="num">{% if r.cost_per_fact_ms is none %}<span class="muted" title="{{ 'no unique fact' if r.unique_facts == 0 else 'no duration' }}">{{ '∞' if r.unique_facts == 0 and r.duration_ms else '–' }}</span>{% else %}{{ r.cost_per_fact_ms|ms }}{% endif %}</td>
+        <td class="num">{{ r.duration_ms|ms }}</td>
+        <td class="eco-flags">
+          {%- if r.removable %}<span class="badge eco-flag-removable" title="{{ view.caveat }}">candidate</span> {% endif -%}
+          {%- if r.group_id %}<span class="badge" title="identical lines, arcs and input shapes to another test (group {{ r.group_id }})">same flow</span> {% endif -%}
+          {%- if r.dominated_by %}<span class="badge" title="covered entirely by {{ r.dominated_by }}">subset</span> {% endif -%}
+          {%- if r.assertion_free %}<span class="badge eco-flag-warn">no assert</span> {% endif -%}
+          {%- if r.stale %}<span class="badge eco-flag-warn" title="every function it covers changed since its test file last did">stale</span> {% endif -%}
+          {%- if r.empty %}<span class="badge" title="no production line, arc or input class">no facts</span> {% endif -%}
+          {%- if not r.measured %}<span class="badge" title="{{ r.reason or '' }}">not measured</span> {% endif -%}
+          {%- if r.cases > 1 %}<span class="muted">{{ r.cases }} cases</span>{% endif -%}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if rows|length < rows_total %}<p><a href="{{ page_url(tab='leverage', sort=sort if sort != 'leverage' else None, dir='rev' if reverse else None, only=only, limit='all') }}">Show all {{ rows_total }} tests</a></p>{% endif %}
+  {% else %}
+  <p class="empty">No test matches this filter.</p>
+  {% endif %}
+</section>

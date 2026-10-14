@@ -3,12 +3,15 @@
 Pages (all relative links, so the directory works from ``file://`` and from any static host):
 
 ``index.html``
-    totals, the treemap (Gap and Lines), the file table, functions with never-exercised input
-    classes, every test.
+    totals, the treemap (Gap and Lines, drawn with thin module-level code in the ordered layout;
+    up to :data:`MAP_VARIANTS_MAX_LEAVES` tiles also the full and hidden module weights as inert
+    ``<template>`` variants the M key swaps in), the file table, functions with never-exercised
+    input classes, every test.
 ``files/<path>.html``
     the source through :func:`~coverset.web.render.source.render_source` (the pages' renderer),
-    covering-test counts that open the line's tests, inlay chips, shape grids (key ``i``) and the
-    test lens (dim what the selected test did not run). Unsafe paths get hashed names.
+    covering-test counts that open the line's tests, inlay chips, shape grids (key ``i``), the
+    highlight toggle (key ``h``) and the test lens (dim what the selected test did not run; its menu
+    is built from the data block on first use). Unsafe paths get hashed names.
 ``functions/<func_key>.html``
     signature, body with coverage, shape grid, flow ribbon, covering tests, input classes with
     examples or Hypothesis strategies, the sampling note.
@@ -21,6 +24,10 @@ Pages (all relative links, so the directory works from ``file://`` and from any 
     what this run gained or lost against the base (:mod:`coverset.report.compare`): totals, lines
     newly uncovered or covered per file, input classes lost or gained per function, tests added,
     removed, with another outcome or slower; the file pages mark those lines in the gutter.
+
+The pages share the live pages' header, page structure and keys; the footer says "static report
+built <date> from <origin>" (:func:`built_date`). The view settings (``?highlight=``, ``?mode=``,
+``?modules=``, else the reader's localStorage) are applied by ``report.js`` before first paint.
 
 Every value from the bundle is untrusted: it reaches markup only through Jinja autoescaping or the
 ``coverset.web.render`` helpers (inside :func:`~coverset.web.render.html.relative_hrefs`, so the
@@ -41,6 +48,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -54,6 +62,7 @@ from coverset.facts.queries import TreeNode
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion
 from coverset.report.compare import SLOWER_FACTOR, SLOWER_MIN_S, Comparison, compare
+from coverset.report.economy import EconomyView, report_economy, write_economy_page
 from coverset.report.facts import NO_RESULT, NOT_RUN, BundleFacts, ReportInput, TestInfo
 from coverset.report.output import (
     PageNames,
@@ -78,7 +87,14 @@ from coverset.web.render.source import (
     branch_counts,
     render_source,
 )
-from coverset.web.render.treemap import build_tree, render_legend, render_treemap
+from coverset.web.render.treemap import (
+    MODULE_WEIGHTS,
+    MODULE_WHY,
+    build_tree,
+    render_legend,
+    render_treemap,
+    weigh_modules,
+)
 
 __all__ = ["BuildResult", "build_report"]
 
@@ -100,9 +116,26 @@ MAX_LINE_LINKS = 120
 """The Changes page links at most this many lines per file and kind (then "and N more")."""
 MAX_CHANGE_ROWS = 500
 """The Changes page lists at most this many rows per table (then "+N more")."""
+MAP_MODES = ("gap", "lines")
+MAP_WEIGHT = "thin"
+"""The module weight the index's maps are drawn with (``view.map_module_weight``'s default)."""
+MAP_VARIANTS_MAX_LEAVES = 1500
+"""Up to this many function tiles the index also ships the ``full`` and ``hidden`` maps (inert
+``<template>`` elements the M key swaps in); a larger report ships the thin maps only, since each
+variant of a map with thousands of tiles adds megabytes."""
 _LINE_HEAD = re.compile(r'<div class="(ln[^"]*)" id="L(\d+)" data-line="\2"><span class="gd"></span>')
 OUTCOME_ORDER = ("failed", "error", "xpassed", "passed", "xfailed", "skipped", NO_RESULT, NOT_RUN)
 _OUTCOME_RANK = {name: i for i, name in enumerate(OUTCOME_ORDER)}
+
+
+def built_date() -> str:
+    """The date the footer says the report was built: ``SOURCE_DATE_EPOCH`` when it is set (the
+    reproducible-builds convention, for byte-identical rebuilds on another day), else today (UTC).
+    A date, not a time, so rebuilding the same facts the same day writes the same bytes."""
+    epoch = os.environ.get("SOURCE_DATE_EPOCH", "")
+    if epoch.isdigit():
+        return datetime.fromtimestamp(int(epoch), UTC).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def outcome_rank(outcome: str | None) -> int:
@@ -322,6 +355,7 @@ def build_report(inp: ReportInput, out: Path, *, base: ReportInput | None = None
                 builder.changes = compare(
                     base, inp, now_views={fn.region.func_key: fn.view for fn in builder.functions}
                 )
+            builder.economy = report_economy(inp, base)  # economy.html (report/economy.py)
             if isinstance(inp.facts, BundleFacts):
                 inp.facts.release_line_table()  # the pages read only what collect() kept
             # the facts and views live until the end: keep the collector from rescanning them
@@ -361,6 +395,9 @@ class _Builder:
         self.functions: list[FnEntry] = []
         self.tests: dict[str, TestEntry] = {}
         self.changes: Comparison | None = None
+        self.economy: EconomyView | None = None
+        self.built = built_date()
+        """The footer's "static report built <date>" (:func:`built_date`)."""
         self.sources = SourceCache()
         """Each source is lexed once: its file page and its functions' pages are written in a row."""
         self._strips: _Recent[Markup] = _Recent(MEMO_SIZE)
@@ -432,6 +469,8 @@ class _Builder:
             origin=self.inp.origin,
             notice=self.inp.notice,
             changes=self.changes,
+            economy=self.economy,
+            built=self.built,
             link=lambda target: _rel(page, target),
             **context,
         )
@@ -488,6 +527,8 @@ class _Builder:
         if self.changes is not None:
             self.changes_page(self.changes)
             counts["changes"] = 1
+        if self.economy is not None:
+            counts["economy"] = write_economy_page(self, self.economy)
         return counts
 
     def search_index(self) -> str:
@@ -616,19 +657,31 @@ class _Builder:
             target = file_pages.get(item.path)
             return target or "#files"
 
-        maps = {
-            mode: render_treemap(
-                tree,
-                mode=mode,
+        def draw(mode: str, weight: str) -> Markup:
+            what = "gap" if mode == "gap" else "line coverage"
+            return render_treemap(
+                weighed[weight],
+                mode=mode,  # type: ignore[arg-type]
                 width=1240.0,
                 height=520.0,
                 leaf_url=leaf_url,
                 dir_url=dir_url,
-                label=f"Treemap of statements by function ({'gap' if mode == 'gap' else 'line coverage'})",
+                label=f"Treemap of statements by function ({what})",
+                module_weight=weight,  # type: ignore[arg-type]
             )
-            for mode in ("gap", "lines")
+
+        leaves = len(self.functions) + len(self.files)  # function tiles plus at most one module tile a file
+        variants = leaves <= MAP_VARIANTS_MAX_LEAVES
+        weights = MODULE_WEIGHTS if variants else (MAP_WEIGHT,)
+        weighed = {w: weigh_modules(tree, w) for w in weights}  # type: ignore[arg-type]
+        maps = {mode: draw(mode, MAP_WEIGHT) for mode in MAP_MODES}
+        map_variants = {
+            (mode, weight): draw(mode, weight)
+            for mode in MAP_MODES
+            for weight in weights
+            if weight != MAP_WEIGHT
         }
-        legends = {mode: render_legend(mode) for mode in ("gap", "lines")}
+        legends = {(mode, w): render_legend(mode, w) for mode in MAP_MODES for w in weights}  # type: ignore[arg-type]
         gaps = sorted(
             (f for f in self.functions if f.hollow),
             key=lambda f: (-f.hollow, f.region.path, f.region.def_line),
@@ -644,6 +697,11 @@ class _Builder:
             totals=self.totals(),
             files=list(self.files.values()),
             maps=maps,
+            map_variants=map_variants,
+            map_leaves=leaves,
+            module_weight=MAP_WEIGHT,
+            module_weights=MODULE_WEIGHTS,
+            module_why=MODULE_WHY,
             legends=legends,
             gaps=gaps,
             tests=tests,

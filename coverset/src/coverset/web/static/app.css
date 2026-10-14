@@ -693,3 +693,71 @@ svg.spark { display: block; overflow: visible; font-family: var(--font); flex: n
   .ov-grid { grid-template-columns: 1fr; }
   .dash-trend { white-space: normal; }
 }
+
+/* -- view settings, keys and the speed of long pages ---------------------------------------- */
+/* view.highlight: the stylesheet keys on data-highlight (on <html>, set before first paint by
+   app.js / report.js, and on .src-frame when the server chose the mode), so both modes share one
+   markup and the toggle flips one attribute. */
+.ln.gap { border-left: 6px solid var(--miss); background: color-mix(in srgb, var(--miss-tint) 55%, var(--surface)); }
+.ln.gap .gn { padding-right: 6px; color: color-mix(in srgb, var(--muted) 75%, var(--surface)); }
+[data-highlight="missing"] .ln.run { border-left-color: color-mix(in srgb, var(--ran) 28%, transparent); }
+[data-highlight="missing"] .ln.run .gt { color: var(--muted); }
+[data-highlight="missing"] .ln.exc { opacity: 0.6; }
+[data-highlight="missing"] .lg-ran { fill: color-mix(in srgb, var(--ran) 28%, transparent); }
+/* the toggle shows both labels in one grid cell (only one visible), so its width never changes */
+.hl-toggle {
+  display: inline-grid; align-items: center; font: inherit; font-size: 0.82rem; color: var(--ink-2);
+  background: var(--surface); border: 1px solid var(--rule-strong); border-radius: 5px; padding: 1px 8px; cursor: pointer;
+}
+.hl-toggle > .hl-label { grid-area: 1 / 1; white-space: nowrap; }
+.hl-toggle > .hl-missing, [data-highlight="missing"] .hl-toggle > .hl-all { visibility: hidden; }
+[data-highlight="missing"] .hl-toggle > .hl-missing { visibility: visible; }
+[data-highlight="missing"] .hl-toggle { border-color: var(--miss); color: var(--miss-ink); }
+.hl-toggle kbd { margin-left: 4px; }
+/* key "." hides the inlay chips under def lines (the shape grid's summary row) */
+[data-chips="off"] .inlay { display: none; }
+
+/* treemap: module-level code drawn smaller than its statements (view.map_module_weight = thin) */
+.tm-reduced { stroke: var(--ink-2); stroke-width: 1.1; stroke-dasharray: 3 2; }
+.tm-module.tm-reduced { fill: var(--surface-2); }
+.legend .lg-module { cursor: help; text-decoration: underline dotted var(--rule-strong); text-underline-offset: 3px; }
+.map-note { font-size: 0.85rem; }
+.map-tools .seg-label { font-size: 0.82rem; color: var(--muted); margin-right: -10px; }
+
+/* the keys dialog: one table per kind of page; rows of keys the current page has no use for are
+   hidden by the script when the dialog opens */
+dialog#keys-help { max-width: 600px; max-height: min(86vh, 760px); }
+dialog#keys-help h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 12px 0 4px; }
+dialog#keys-help td { padding: 3px 8px; }
+dialog#keys-help .keys-note { font-size: 0.82rem; color: var(--muted); margin: 10px 0 8px; }
+.key-chord {
+  position: fixed; right: 16px; bottom: 16px; z-index: 30; padding: 6px 12px; border-radius: 6px;
+  background: var(--ink); color: var(--surface); font-size: 0.85rem; box-shadow: 0 6px 20px rgb(0 0 0 / 0.2);
+}
+.key-chord kbd { background: transparent; color: inherit; border-color: color-mix(in srgb, var(--surface) 50%, transparent); }
+
+/* a small filter box (file list, tests): "/" focuses it */
+.filter-box { display: block; padding: 0 8px 6px; }
+.filter-box input {
+  width: 100%; font: inherit; font-size: 0.82rem; padding: 3px 8px; border-radius: 5px;
+  border: 1px solid var(--rule-strong); background: var(--surface-2); color: var(--ink);
+}
+.filter-box input:focus { background: var(--surface); }
+.file-list a[hidden], .key-chord[hidden] { display: none; }
+
+/* "static report" vs "coverset serve": which one you are looking at, in the header and the footer */
+.brand-tag { font-size: 0.7rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--rule-strong); border-radius: 3px; padding: 0 5px; margin-left: 2px; }
+footer .where { color: var(--ink-2); }
+
+/* speed: long pages skip the style, layout and paint of what is off screen. A source line is one
+   20 px row (contain-intrinsic-size keeps the scroll height exact before a line is first painted,
+   so j/k and #L anchors land where they should); the sticky def lines stay real so they can stick.
+   Table rows are left alone (skipped rows would let column widths change while scrolling); a page
+   marks whole panels below the fold .lazy-panel instead. */
+.src-lines .ln:not(.fn-head, .src-w) { content-visibility: auto; contain-intrinsic-size: auto 0px auto var(--line-h); }
+/* the widest line's invisible copy (render/source.py _width_line) sets the block's width from the
+   first paint, so the placeholder width of off-screen lines can be 0 and never moves the scroll width */
+.ln.src-w { height: 0; min-height: 0; visibility: hidden; border-left-width: 6px; user-select: none; pointer-events: none; }
+.ln.src-w .src { padding-right: calc(12px + 1ch); } /* slack for the sub-pixel widths of the real line's token spans */
+.lazy-panel { content-visibility: auto; contain-intrinsic-size: auto 900px; }
+.theme-toggle { min-width: 9.5em; text-align: center; }

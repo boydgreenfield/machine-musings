@@ -4,6 +4,9 @@
 guard, so each view authorizes its caller itself (:func:`authorize_repo`):
 
 * admin callers (open mode, admin bearer or login cookie) see everything;
+* a signed-in user or a ``cst_`` token the access guard resolved reads the repositories it may
+  read (``user`` access, treated like admin for reading); a ``cst_`` bearer bound elsewhere is a
+  404, one the guard rejected a 401;
 * a bearer that is not the admin token must be a GitHub Actions OIDC token whose
   ``repository_id`` and ``repository_owner_id`` match the repo (else 401 invalid / 404 mismatch);
 * without a token, only repos recorded ``private=false`` from a verified webhook answer, limited to
@@ -52,10 +55,12 @@ from coverset.orchestrator import enqueue_run
 from coverset.orchestrator.intake import Followup, IntakeResult, apply_forge_followups, approve_awaiting_run
 from coverset.web.auth import current_auth, is_admin
 from coverset.web.context import app_db, app_settings
+from coverset.web.principal import Principal, current_principal, require_repo, set_principal
+from coverset.web.tokens import looks_like_token
 
 bp = Blueprint("api", __name__)
 
-Access = Literal["admin", "oidc", "public"]
+Access = Literal["admin", "user", "oidc", "public"]
 
 WEBHOOK_FORGES = ("github", "fake")
 """Repos created by verified webhooks; only these can be public or OIDC-bound."""
@@ -256,8 +261,17 @@ async def authorize_repo(repo: Repo | None, *, bucket: Bucket = "verdict") -> Ac
         if repo is None:
             raise ApiError(404, "not_found")
         return "admin"
+    principal = current_principal()
+    if repo is not None and principal.can(repo.id, "read"):
+        return "user"
     token = _bearer()
     if token is not None:
+        if looks_like_token(token):
+            # A cst_ bearer the guard resolved but that cannot read this repository, or one the
+            # guard rejected (a public route still reaches the view as ``public``).
+            if principal.kind == "token":
+                raise ApiError(404, "not_found")
+            raise ApiError(401, "invalid_token")
         _charge(_bearer_limiter())
         settings = app_settings()
         kwargs: dict[str, Any] = {"audience": settings.oidc_audience}
@@ -276,6 +290,8 @@ async def authorize_repo(repo: Repo | None, *, bucket: Bucket = "verdict") -> Ac
         )
         if not bound:
             raise ApiError(404, "not_found")
+        assert repo is not None
+        set_principal(Principal(kind="oidc", label=f"actions job of {repo.full_name}", bound_repo_id=repo.id))
         return "oidc"
     _charge(_poll_limiter() if bucket == "poll" else _limiter())
     if repo is None or repo.private or repo.forge not in WEBHOOK_FORGES:
@@ -578,14 +594,15 @@ async def _sse_events(
 
 @bp.post("/runs/<run_id>/approve")
 async def approve_run(run_id: str) -> Response | tuple[Response, int]:
-    """Admin approval of an untrusted run (the token-mode stand-in for the Approve run button).
+    """Approval of an untrusted run (the token-mode stand-in for the Approve run button).
 
-    Not a public route, so the access guard already requires admin access: an admin bearer, or the
-    login cookie (or open mode on loopback) plus the CSRF token (header or ``csrf_token`` form
-    field). The run is queued with the network blocked, the pending "coverset: awaiting approval"
-    status or check is resolved, and the run is handed to the queue.
+    Not a public route, so the access guard already requires credentials (plus the CSRF token for
+    cookie sessions and open mode); the caller must then hold ``write`` on the run's repository
+    (:func:`~coverset.web.principal.require_repo`: 404 when they cannot see it). The run is queued
+    with the network blocked, the pending "coverset: awaiting approval" status or check is
+    resolved, the approval is audited, and the run is handed to the queue.
     """
-    if not is_admin():
+    if current_principal().is_public:
         raise Unauthorized()
     if not RUN_ID_PARAM.fullmatch(run_id):
         raise ApiError(404, "not_found")
@@ -595,10 +612,23 @@ async def approve_run(run_id: str) -> Response | tuple[Response, int]:
         run = await session.get(Run, run_id)
         if run is None:
             raise ApiError(404, "not_found")
+        principal = require_repo(run.repo_id, "write")
         if run.status != "awaiting_approval":
             raise ApiError(409, "not_awaiting_approval")
-        approver = "coverset admin" if current_auth() != "open" else "local operator"
+        if current_auth() == "open":
+            approver = "local operator"
+        elif principal.kind == "admin":
+            approver = "coverset admin"
+        else:
+            approver = principal.label
         status = await approve_awaiting_run(session, settings, run_id, approver, via="admin")
+        if status is not None:
+            from coverset.web.audit import record_audit
+
+            record_audit(
+                session, principal, "approve", target_kind="run", target_id=run_id, repo_id=run.repo_id
+            )
+            await session.commit()
     if status is None:
         raise ApiError(409, "not_awaiting_approval")
     result = IntakeResult("created", run_id=run_id, followups=(Followup("approved", run_id),))

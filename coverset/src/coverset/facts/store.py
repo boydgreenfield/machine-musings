@@ -14,12 +14,19 @@ An attempt's files become visible only once ``ingest_log`` records that attempt 
 half-way through an ingest never mixes two bundles. Files are immutable once written (zstd,
 dictionary encoding, atomic replace), so any number of processes can query while one ingests: there
 is no DuckDB file. Writers of one run serialise on :meth:`FactsStore.run_lock`.
+
+Readers that query often (the web pages, :mod:`coverset.facts.queries`) take a cursor of a cached
+connection with :meth:`FactsStore.lease` instead of building views per query: the cache
+(:mod:`coverset.facts.cache`) is keyed by the stamps of the runs in scope, so a commit, a finalize
+or a gc is seen by the next lease. Every connection gets the bounded ``memory_limit`` and thread
+count of :func:`~coverset.facts.cache.memory_limit` and :func:`~coverset.facts.cache.threads`.
 """
 
 from __future__ import annotations
 
 import fcntl
 import functools
+import os
 import re
 import shutil
 import uuid
@@ -31,16 +38,27 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from coverset.facts import cache
 from coverset.facts.atomic import atomic_write
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import ATTEMPT_TABLES, RUN_TABLES, SCHEMAS, TABLES
 
-__all__ = ["FactsStore", "SqlNotAllowed", "conform"]
+__all__ = ["COMPACT_ENV", "FactsStore", "SqlNotAllowed", "compact_layout", "conform"]
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HIVE_TYPES = "{'repo': BIGINT, 'run': VARCHAR}"
 _LOCK_FILE = ".lock"
 _LOG = "ingest_log"
+
+
+COMPACT_ENV = "COVERSET_FACTS_COMPACT"
+"""Set to ``1`` to write the compact layout ``test_file_bits`` (one numbits bitset per test and
+file) next to ``test_lines`` at ingest; readers use it wherever every shard of a run has it."""
+
+
+def compact_layout() -> bool:
+    """Whether ingest writes ``test_file_bits`` (:data:`COMPACT_ENV`; off by default in v1)."""
+    return os.environ.get(COMPACT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class SqlNotAllowed(ValueError):
@@ -332,7 +350,8 @@ class FactsStore:
         connections cheap. Extension autoload/autoinstall is off, file access is limited to the
         facts directory and the configuration is locked. The connection itself can still write
         inside the facts directory (``COPY ... TO``): run user-supplied SQL through
-        :meth:`query`, which accepts only a single SELECT.
+        :meth:`query`, which accepts only a single SELECT. A scoped connection may read files only
+        under the repo's directory (or the runs' directories), never another repository's.
         """
         wanted = TABLES if tables is None else tuple(tables)
         if unknown := set(wanted) - set(TABLES):
@@ -342,9 +361,10 @@ class FactsStore:
             config={"autoinstall_known_extensions": False, "autoload_known_extensions": False}
         )
         try:
-            root = str(self.root.resolve())
-            con.execute("SET allowed_directories = ?", [[root + "/"]])
+            con.execute("SET allowed_directories = ?", [self._allowed(repo_id, run_id, run_ids)])
             con.execute("SET enable_external_access = false")
+            con.execute(f"SET memory_limit = '{cache.memory_limit()}'")
+            con.execute(f"SET threads = {cache.threads()}")
             files: dict[str, list[Path]] = {table: [] for table in wanted}
             for repo, run in scope:
                 for table, visible in self._visible(repo, run, wanted).items():
@@ -356,6 +376,60 @@ class FactsStore:
             con.close()
             raise
         return con
+
+    def stamp(
+        self, *, repo_id: int | None = None, run_id: str | None = None, run_ids: Sequence[str] | None = None
+    ) -> tuple[tuple[int, str, cache.RunStamp], ...]:
+        """The stamps of every run in scope (see :mod:`coverset.facts.cache`): equal stamps mean
+        every file a reader of the scope could see is byte-for-byte the same."""
+        return tuple(
+            (repo, run, cache.run_stamp(self.run_dir(repo, run)))
+            for repo, run in self._scope(repo_id, run_id, run_ids)
+        )
+
+    @contextmanager
+    def lease(
+        self,
+        *,
+        repo_id: int | None = None,
+        run_id: str | None = None,
+        run_ids: Sequence[str] | None = None,
+        tables: Iterable[str] | None = None,
+    ) -> Iterator[duckdb.DuckDBPyConnection]:
+        """A cursor of the cached connection for this scope (:meth:`connect`'s views), closed on exit.
+
+        The connection is rebuilt when any run in scope changed since it was built (its stamp
+        differs), so a reader never sees a superseded attempt for longer than one query that was
+        already running. Use it like a connection: it can execute, register Arrow tables (visible
+        to this cursor only) and close; it cannot change the locked configuration.
+        """
+        wanted = TABLES if tables is None else tuple(tables)
+        stamp = self.stamp(repo_id=repo_id, run_id=run_id, run_ids=run_ids)  # before building: never stale
+        # The allowed directories are part of the key: two scopes with the same runs (two run-less
+        # repos, or the unscoped and the repo scope of a one-repo store) must not share a
+        # connection, or one would read with the other's file access.
+        allowed = tuple(self._allowed(repo_id, run_id, run_ids))
+        key = cache.scope_key(self.root.resolve(), [(repo, run) for repo, run, _ in stamp], (wanted, allowed))
+        cursor = cache.CONNECTIONS.lease(
+            key, stamp, lambda: self.connect(repo_id=repo_id, run_id=run_id, run_ids=run_ids, tables=wanted)
+        )
+        try:
+            yield cursor
+        finally:
+            cursor.close()
+
+    def _allowed(self, repo_id: int | None, run_id: str | None, run_ids: Sequence[str] | None) -> list[str]:
+        """The directories a connection may read: the facts root when it spans every repo, else
+        only the repo's directory (a scoped connection, and the user SQL run on it, can never
+        ``read_parquet`` another repository's files), else only the runs in scope."""
+        if repo_id is None:
+            return [str(self.root.resolve()) + "/"]
+        if run_id is None and run_ids is None:
+            return [str(self.repo_dir(repo_id).resolve()) + "/"]
+        runs = [run_id] if run_id is not None else list(dict.fromkeys(run_ids or ()))
+        return [str(self.run_dir(repo_id, run).resolve()) + "/" for run in runs] or [
+            str(self.repo_dir(repo_id).resolve()) + "/"
+        ]
 
     def query(
         self,
@@ -370,14 +444,11 @@ class FactsStore:
         Raises :class:`SqlNotAllowed` for anything but exactly one SELECT statement, so ad-hoc SQL
         can neither write files (``COPY``) nor change the connection.
         """
-        con = self.connect(repo_id=repo_id, run_id=run_id)
-        try:
+        with self.lease(repo_id=repo_id, run_id=run_id) as con:
             statements = con.extract_statements(sql)
             if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
                 raise SqlNotAllowed("only a single SELECT statement is allowed")
             return con.execute(statements[0], params or ()).to_arrow_table()
-        finally:
-            con.close()
 
     def _create_view(self, con: duckdb.DuckDBPyConnection, table: str, files: list[Path]) -> None:
         if files:
@@ -391,8 +462,12 @@ class FactsStore:
                 f"repo AS repo_id, run AS run_id FROM {source}"
             )
             return
+        # A real (empty) table, not a registered Arrow object: registrations are local to one
+        # connection, and leased cursors of a cached connection must see this view too.
         empty = f"_empty_{table}"
-        con.register(empty, SCHEMAS[table].empty_table())
+        con.register(f"{empty}_arrow", SCHEMAS[table].empty_table())
+        con.execute(f"CREATE TABLE {empty} AS SELECT * FROM {empty}_arrow")
+        con.unregister(f"{empty}_arrow")
         con.execute(
             f"CREATE VIEW {table} AS SELECT *, NULL::BIGINT AS repo_id, NULL::VARCHAR AS run_id FROM {empty}"
         )

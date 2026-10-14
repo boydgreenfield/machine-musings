@@ -69,7 +69,7 @@ from coverset.forge.base import (
     repo_ref_from_model,
 )
 from coverset.forge.markdown import md_text
-from coverset.forge.registry import effective_untrusted_pr_policy
+from coverset.settings_scopes import Policy, effective_policy
 
 log = logging.getLogger(__name__)
 
@@ -246,9 +246,9 @@ class _Intake:
     def _initial_status(self) -> RunStatus:
         return _initial_status(self.settings)
 
-    @property
-    def _policy(self) -> str:
-        return effective_untrusted_pr_policy(self.settings)
+    async def _policy(self, repo: Repo) -> Policy:
+        """The repository's scoped policy: repo > org > instance > ``COVERSET_*`` (docs/settings.md)."""
+        return await effective_policy(self.session, repo, self.settings)
 
     async def _upsert_repo(self, ref: RepoRef, *, authoritative: bool = True) -> Repo:
         """Insert or refresh the repo identified by ``(forge, repository.id)``.
@@ -348,11 +348,12 @@ class _Intake:
         pull = event.pull
         repo = await self._upsert_repo(event.repo)
         pr = await self._upsert_pull(repo, pull)
-        if pull.draft and not self.settings.run_drafts:
-            return _ignored("draft pull request (COVERSET_RUN_DRAFTS=false)", repo.id)
-        policy = self._policy
+        scoped = await self._policy(repo)
+        if pull.draft and not scoped.run_drafts:
+            return _ignored("draft pull request (policy.run_drafts / COVERSET_RUN_DRAFTS is off)", repo.id)
+        policy = scoped.untrusted_pr_policy
         if not pull.trusted and policy == "skip":
-            return _ignored("untrusted pull request skipped (COVERSET_UNTRUSTED_PR_POLICY=skip)", repo.id)
+            return _ignored("untrusted pull request skipped (policy.untrusted_pr_policy=skip)", repo.id)
         duplicate = await self._duplicate(repo.id, pull.head_sha, "pull_request")
         if duplicate is not None:
             return IntakeResult(
@@ -445,7 +446,11 @@ class _Intake:
             return IntakeResult(
                 "duplicate", run_id=prior.id, repo_id=repo.id, reason=f"run is {prior.status}"
             )
-        needs_approval = not prior.trusted and prior.approved_by is None and self._policy == "approve"
+        needs_approval = (
+            not prior.trusted
+            and prior.approved_by is None
+            and (await self._policy(repo)).untrusted_pr_policy == "approve"
+        )
         status: RunStatus = "awaiting_approval" if needs_approval else self._initial_status()
         run = await self._new_run(
             repo,

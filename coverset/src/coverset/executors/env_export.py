@@ -1,9 +1,14 @@
 """Environment export shared by every executor: the plugin wheel and the :class:`EnvSpec`.
 
-An environment is the target repo's locked third-party requirements (``uv export``, done by the
-language adapter) plus the pytest-coverset wheel, on one Python version. Its identity is
+An environment is the target repo's pinned third-party requirements (from ``uv.lock``, requirement
+files, ``poetry.lock``, ``Pipfile.lock`` or static metadata: :mod:`coverset.lang.python_env`, called
+by the language adapter) plus the pytest-coverset wheel, on one Python version. Its identity is
 ``env_hash = sha256(requirements.txt \\0 python \\0 sha256(wheel))``, so a lockfile change, a Python
-bump or a plugin change each produce a new environment, and anything else reuses the cached one.
+bump or a plugin change each produce a new environment, and anything else reuses the cached one. The
+requirements text also records what is installed from the checkout (``# coverset-local:`` lines and
+the build backend when the project itself is installed), so those are part of the identity too;
+:attr:`EnvSpec.env_source` and :attr:`EnvSpec.install` say where it came from and how the project
+gets in.
 
 The wheel is built once per plugin source tree: ``uv build --wheel packages/pytest-coverset`` into
 ``~/.cache/coverset/wheels/<source hash>/``, under an exclusive file lock and an atomic rename, and
@@ -118,8 +123,8 @@ def build_env_spec(
 ) -> EnvSpec:
     """The :class:`EnvSpec` of the checkout at ``checkout_dir`` with ``plugin_wheel`` installed.
 
-    ``cfg`` may override ``python``; the adapter exports the requirements (``uv export``) and hashes
-    the environment.
+    ``cfg`` may override ``python``; the adapter resolves the requirements (``uv export``, a lock
+    conversion or ``uv pip compile``; see :mod:`coverset.lang.python_env`) and hashes the environment.
     """
     values = dict(cfg)
     if plugin_wheel is not None:

@@ -12,6 +12,7 @@
   <span class="muted">· base {{ changes.base_origin }}{% if changes.base_only %} · {{ changes.base_only|length|plural('test') }} of the base did not run here{% endif %}</span>
 </a>
 {% endif %}
+{% if economy %}{% include "economy_tile.html" %}{% endif %}
 <div class="stats totals">
   <div class="stat" data-stat="statements"><div class="value">{{ totals.statements }}</div><div class="label">statements</div></div>
   <div class="stat" data-stat="run"><div class="value">{{ totals.run_pct|pct }}</div><div class="label">lines run · {{ totals.run }} of {{ totals.statements }}, {{ totals.missed }} never ran</div></div>
@@ -25,22 +26,31 @@
 <section class="panel" id="map">
   <div class="panel-head"><h2>Coverage map</h2><span class="aside">area = statements; click a function to open its source</span></div>
   <div class="map-tools">
-    <span class="seg" role="group" aria-label="Colour by">
+    <span class="seg" role="group" aria-label="Colour by (key m)">
       <button type="button" data-map="gap" aria-pressed="true">Gap</button><button type="button" data-map="lines" aria-pressed="false">Lines</button>
     </span>
-    <span class="map-legend" data-map-legend="gap">{{ legends.gap }}</span>
-    <span class="map-legend" data-map-legend="lines" hidden>{{ legends.lines }}</span>
+    {% if map_variants %}
+    <span class="seg-label" id="modules-label">module-level code</span>
+    <span class="seg" role="group" aria-labelledby="modules-label" title="{{ module_why }} (key M)">
+      {% for w in module_weights %}<button type="button" data-map-modules="{{ w }}" aria-pressed="{{ 'true' if w == module_weight else 'false' }}">{{ {'full': 'Full', 'thin': 'Thin', 'hidden': 'Hidden'}[w] }}</button>{% endfor %}
+    </span>
+    {% endif %}
+    {% for (mode, weight), legend in legends.items() %}<span class="map-legend" data-map-legend="{{ mode }}" data-map-weight="{{ weight }}"{% if mode != 'gap' or weight != module_weight %} hidden{% endif %}>{{ legend }}</span>
+    {% endfor %}
   </div>
-  <p class="muted" data-map-legend="gap">Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes; outlined tiles are module-level code.</p>
+  <p class="muted" data-map-legend="gap">Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes.</p>
   <p class="muted" data-map-legend="lines" hidden>Share of each function's statements that some test ran.</p>
+  <p class="muted map-note" data-module-note>Dashed tiles are module-level code, drawn at most a tenth of their file's function statements{% if map_variants %} (Full and Hidden switch that){% endif %}: {{ module_why|lower }}{% if not map_variants %} This report has {{ map_leaves }} tiles, so it ships the thin map only.{% endif %}</p>
   <div data-tm-box>
     <p class="tm-status" data-tm-status aria-hidden="true"><span class="tm-status-idle">hover a tile</span></p>
     <div class="map-view" data-map-view="gap">{{ maps.gap }}</div>
     <div class="map-view" data-map-view="lines" hidden>{{ maps.lines }}</div>
   </div>
+  {% for (mode, weight), svg in map_variants.items() %}<template class="map-variant" data-map-variant="{{ mode }}:{{ weight }}">{{ svg }}</template>
+  {% endfor %}
 </section>
 
-<section class="panel" id="files">
+<section class="panel lazy-panel" id="files">
   <div class="panel-head"><h2>Files</h2><span class="aside">click a column to sort</span></div>
   <div class="table-scroll">
   <table class="sortable file-table">
@@ -70,7 +80,7 @@
   </div>
 </section>
 
-<section class="panel" id="gaps">
+<section class="panel lazy-panel" id="gaps">
   <div class="panel-head"><h2>Input classes no test passed in</h2><span class="aside">functions whose tests never tried some expected kind of input, most first</span></div>
   {% if gaps %}
   <div class="table-scroll">
@@ -91,7 +101,7 @@
   {% else %}<p class="empty">Every called function's tests passed in every expected input class.</p>{% endif %}
 </section>
 
-<section class="panel" id="tests">
+<section class="panel lazy-panel" id="tests">
   <div class="panel-head"><h2>Tests</h2><span class="aside">failures first; click a column to sort</span></div>
   <div class="table-scroll">
   <table class="sortable tests-table">

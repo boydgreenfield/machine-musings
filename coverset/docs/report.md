@@ -52,7 +52,9 @@ coverset report --run run_01M4P5Q4AJ0HJVV6MTJW890P24 [--repo coverset-demo/ledge
 
 The command prints the path of `index.html` on stdout (the page counts go to stderr), so
 `open "$(coverset report .coverset)"` works too. Regenerating with the same inputs writes
-byte-identical files.
+byte-identical files on the same day (UTC), or on any day with `SOURCE_DATE_EPOCH` set: the footer
+carries the build date, which is `SOURCE_DATE_EPOCH` when it is set (the reproducible-builds
+convention), else today.
 
 The output directory must be new, empty, or a previous report's: every report writes a
 `.coverset-report` marker file at its top, and only a directory holding that marker is replaced.
@@ -68,7 +70,7 @@ and the command prints the same line on stderr; the coverage itself is all there
 
 | Page | Contents |
 |---|---|
-| `index.html` | Totals (statements, lines run, branches taken, partial lines, functions and how many a test called, functions with input classes never exercised, tests by outcome); the treemap in **Gap** mode with a **Lines** toggle (the map's encoding, see [ui.md](ui.md#the-data-flow-overlay)) and the hover line above it (muted "hover a tile" until a tile is hovered or focused, then its path, qualname, statements, lines %, input classes or "never called by a test", from the tile's `data-info`); the file table, sortable by every column (statements, run %, never ran, partial, tests touching the file, gap = line % minus input-class %); the functions whose tests never passed in some expected class; every test with its outcome, duration, files touched and its failure message (expand it). |
+| `index.html` | Totals (statements, lines run, branches taken, partial lines, functions and how many a test called, functions with input classes never exercised, tests by outcome); the treemap in **Gap** mode with a **Lines** toggle and a module-level code switch (the map's encoding, see [ui.md](ui.md#the-data-flow-overlay); its settings [below](#view-settings)) and the hover line above it (muted "hover a tile" until a tile is hovered or focused, then its path, qualname, statements, lines %, input classes or "never called by a test", from the tile's `data-info`); the file table, sortable by every column (statements, run %, never ran, partial, tests touching the file, gap = line % minus input-class %); the functions whose tests never passed in some expected class; every test with its outcome, duration, files touched and its failure message (expand it). |
 | `files/<path>.html` | The summary line in the bar (`lines 28.5% (294 of 1030) · branches 61.2% (30 of 49) · input classes 12 of 68 (17.6%) · gap 11 pts · 1 test`, the live source view's; branches left out without any, "no input classes" and no gap when the file's called functions expect none). The source through the same renderer as the live source view, with its syntax colours (Python for `.py`/`.pyi`, the TypeScript and JavaScript lexers for the Vitest reporter's `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` sources, else plain text; muted, under the coverage cues, see [ui.md](ui.md#the-source-view)): blue = ran, vermilion = never ran, dotted yellow = took one branch only (with "never jumped to line N"), a multi-line statement painted as one block (its continuation lines share its first line's bar with a lighter tint, no count and no note), inlay chips under each `def` (filled = observed with its sampled calls, dashed = never exercised). The number in the gutter is how many tests ran the line; click it (or press `t`) for the list, each linking to its test page. Press `i` for the function's shape grid and its input-class table. The **data-flow lens** is above the code. |
 | `functions/<key>.html` | The signature with its annotations (or the bundle's declared types), the body with line and branch coverage, the shape grid, the flow ribbon from test files through in-repo callers to parameters, the covering tests with their outcomes, every input class with its redacted example and the tests that passed it in, or for a missing class its Hypothesis strategy with a Copy button, a suggested Hypothesis test, and the sampling note. |
 | `tests/<hash>.html` | One test: outcome, duration, failure message, the files it ran (statements it ran of each, linking to the file with the lens on this test), the functions it ran with body lines, and per parameter two strips: the input classes this test passed in next to the function's never-exercised ones, and the function's whole picture. |
@@ -205,21 +207,80 @@ strips for the inputs, the lens for the lines.
 
 ## Keys
 
-| Key | Action |
-|---|---|
-| `j` / `k` | Next / previous line that never ran or took only one branch (continuation lines of a multi-line statement are skipped) |
-| `n` / `N` | Next / previous function with an input class no test passed in |
-| `t` | Tests that ran the current line (again to close) |
-| `i` | Show or hide the current function's shape grid |
-| `[` / `]` | Previous / next file |
-| `/` | Search files, functions and tests (arrows and Enter to pick, Escape to leave) |
-| `?` | Keys help |
+The live pages' keys ([ui.md](ui.md#keys)), from a table in `report.js` that mirrors `app.js`'s
+(`tests/web/test_keys_table.py` checks that the help dialog, this table and both scripts agree; the
+report has no run, economy or invariants page, so it has no `r`, `g e` or `g i`). `?` lists only the
+keys of the page it was opened on.
 
-Keys are ignored while typing in a field and with Ctrl, Alt or Cmd held. Clicking a square of a
-shape grid highlights its row in the input-class table under it. The theme button cycles auto →
-light → dark (stored in `localStorage`, key `coverset-theme`); colours come from the pages'
-stylesheet (`light-dark()` tokens, Okabe-Ito coverage colours, filled vs hollow dashed squares, the
-muted `--syn-*` syntax colours; `report.css` adds the rule that drops them on lines the lens dims).
+| Key | Where | Action |
+|---|---|---|
+| `?` | everywhere | Keys help: the keys of this page |
+| `Esc` | everywhere | Close the help, the tests popover, the search results or the go-to hint |
+| `/` | everywhere | Search files, functions and tests (arrows and Enter to pick, Escape to leave) |
+| `g o` | everywhere | Go to the overview |
+| `g t` | everywhere | Go to the tests table |
+| `g m` | everywhere | Go to the coverage map |
+| `j` / `k` | file and function pages | Next / previous line that never ran or took only one branch (continuation lines of a multi-line statement are skipped) |
+| `n` / `N` | file and function pages | Next / previous function with an input class no test passed in |
+| `t` | file and function pages | Tests that ran the current line (again to close) |
+| `i` | file and function pages | Show or hide the current function's shape grid |
+| `h` | file and function pages | Highlight every measured line, or only what never ran or took one branch |
+| `.` | file and function pages | Show or hide the input-class chips under def lines |
+| `[` / `]` | file pages | Previous / next file |
+| `m` | overview | Next map colour mode: Gap, Lines |
+| `M` | overview | Next module-level code weight: full, thin, hidden |
+
+Keys are ignored while typing in a field and with Ctrl, Alt or Cmd held. A file page's file list has a
+filter box (Enter opens the first match, Escape clears it). Clicking a square of a shape grid
+highlights its row in the input-class table under it. The theme button cycles auto → light → dark
+(stored in `localStorage`, key `coverset-theme`); colours come from the pages' stylesheet
+(`light-dark()` tokens, Okabe-Ito coverage colours, filled vs hollow dashed squares, the muted
+`--syn-*` syntax colours; `report.css` adds the rule that drops them on lines the lens dims).
+
+## View settings
+
+The report paints coverage with the live pages' view settings ([ui.md](ui.md#view-settings)), with
+no server in between: `report.js`, a synchronous script in the head, reads the page's own query
+parameters, else the reader's choice in this browser (`localStorage`), else the default, and sets
+the result on `<html>` before the body is parsed (no flash of the other mode).
+
+| Setting | Values (default first) | Query parameter | Key |
+|---|---|---|---|
+| Highlight (`view.highlight`) | `all`, `missing` | `?highlight=` on a file or function page | `h`, or the "Highlight" button in the source bar |
+| Map mode (`view.map_mode`) | `gap`, `lines` | `?mode=` on `index.html` | `m`, or the Gap / Lines switch |
+| Module-level code (`view.map_module_weight`) | `thin`, `full`, `hidden` | `?modules=` on `index.html` | `M`, or the Full / Thin / Hidden switch |
+
+`missing` drops the blue bar of executed lines to a faint gutter mark and keeps the vermilion and
+dotted-yellow treatment; in both modes the blank and comment lines inside a never-run block are
+painted as part of it, so a miss reads as a region ([ui.md](ui.md#missing-coverage-as-regions)).
+Toggling adds `?highlight=` to the links the page built (the file list, previous / next file) and
+to the address, so the next page paints the same even from `file://` where a browser may keep no
+storage. The overview's maps are drawn **thin** (module-level code at most a tenth of its file's
+functions, dashed, see [ui.md](ui.md#module-level-code-on-the-map)) and in the ordered layout; up to
+1,500 function tiles the index also ships the **full** and **hidden** maps as inert `<template>`
+elements that `M` swaps in (each is parsed only when shown), and above that it ships the thin maps
+only and says so, since each extra map of a large repository adds megabytes.
+
+## One product, two places
+
+The report and the live pages share their stylesheet (`report.css` is `app.css` plus the report's
+own rules), their renderers (`coverset.web.render`), their header (the mark, then Overview, Map,
+Files, Tests, Changes, About; the live pages add the repository nav and the account menu), their
+page structure (crumbs, a head with the meta line, panels) and their keys. Each says which one it is:
+the header's mark carries a small "REPORT" tag, and the footer reads "static report built
+2026-10-14 from bundle .coverset" (the build date is `SOURCE_DATE_EPOCH` when it is set, else today
+in UTC, so a rebuild of the same facts the same day writes the same bytes) where the live pages say
+"coverset serve · live pages from the control plane".
+
+## Speed
+
+Every source line skips its style, layout and paint until it is near the viewport (`content-
+visibility: auto` with an exact 20 px intrinsic height, so anchors land and the scroll height never
+jumps), the index's file, gap and test panels do the same as wholes, the lens menu is built from the
+data block the first time it is used, and every listener is delegated. On a real 4,015-function
+code base: a 2,205-line file reaches DOMContentLoaded in 80 ms (120 ms before), the 1,623-line file
+4,261 tests touch in 75 ms (185 ms), the 11 MB index in 239 ms (602 ms), with no task over 50 ms
+and no layout shift ([ui.md](ui.md#speed) has the method).
 
 ## How it is built, and what it trusts
 

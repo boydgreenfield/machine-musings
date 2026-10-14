@@ -2,7 +2,7 @@
 
 :func:`generate` makes one; :func:`verify` looks a raw token up (constant-time on the hash) and
 returns the live row or None. Scopes: ``read`` (pages and the read API), ``write`` (approve,
-rerun, quarantine, settings the user may change), ``upload`` (``POST /v1/bundles`` for the
+quarantine, settings the user may change), ``upload`` (``POST /v1/bundles`` for the
 token's repository), ``admin`` (everything the user could do). The raw token is shown once and
 never logged: the redactor masks ``cst_`` strings.
 """
@@ -19,7 +19,7 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coverset.db.models import ApiToken
+from coverset.db.models import ApiToken, TokenKind
 
 TOKEN_PATTERN: Final = re.compile(r"^cst_([A-Za-z0-9]{8})_([A-Za-z0-9_-]{32,})$")
 """``cst_<8 chars prefix>_<secret>``; the redactor uses ``cst_[A-Za-z0-9_-]{8,}`` to mask it."""
@@ -73,3 +73,45 @@ async def verify(session: AsyncSession, raw: str, *, now: datetime) -> ApiToken 
             return None
         return row
     return None
+
+
+async def create(
+    session: AsyncSession,
+    *,
+    name: str,
+    kind: TokenKind,
+    scopes: list[str],
+    now: datetime,
+    user_id: int | None = None,
+    repo_id: int | None = None,
+    expires_at: datetime | None = None,
+) -> tuple[str, ApiToken]:
+    """Insert an ``api_tokens`` row and return ``(raw_token, row)``; the caller commits.
+
+    A ``repo`` token needs ``repo_id`` and acts on that repository alone; a ``personal`` token needs
+    ``user_id`` and acts as that user. The raw token exists only in the return value.
+    """
+    cleaned = check_scopes(scopes)
+    if not cleaned:
+        raise ValueError("a token needs at least one scope")
+    if kind == "repo" and repo_id is None:
+        raise ValueError("a repository token needs a repository")
+    if kind == "personal" and user_id is None:
+        raise ValueError("a personal token needs a user")
+    if not name.strip():
+        raise ValueError("a token needs a name")
+    raw, prefix, digest = generate()
+    row = ApiToken(
+        token_hash=digest,
+        prefix=prefix,
+        name=name.strip()[:255],
+        kind=kind,
+        user_id=user_id,
+        repo_id=repo_id,
+        scopes=cleaned,
+        created_at=now,
+        expires_at=expires_at,
+    )
+    session.add(row)
+    await session.flush()
+    return raw, row

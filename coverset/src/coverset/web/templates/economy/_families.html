@@ -1,0 +1,25 @@
+{% from "_macros.html" import test_link %}
+{#- Families: parametrize cases against the distinct flows they exercise. -#}
+<section class="panel" id="eco-families" aria-labelledby="eco-families-h">
+  <div class="panel-head"><h2 id="eco-families-h">Parametrized families</h2><span class="aside">{{ view.families|length }} famil{{ 'y' if view.families|length == 1 else 'ies' }} · most redundant cases first</span></div>
+  <p class="muted">A flow is the set of input classes a case passes into the functions it reaches; a signature is its full set of lines, arcs and input shapes. Twelve cases with three flows exercise three behaviours. Cases whose calls were not sampled count by signature instead.</p>
+  {% if view.families %}
+  <div class="table-scroll">
+  <table class="eco-families-table">
+    <thead><tr><th>Family</th><th class="num">Cases</th><th class="num">Distinct flows</th><th class="num">Distinct signatures</th><th class="num">Redundant cases</th><th>Cases</th></tr></thead>
+    <tbody>
+    {% for f in view.families %}
+      <tr{% if f.redundant_cases %} class="is-collapsible"{% endif %}>
+        <td class="nodeid">{{ f.family|nodeid }}</td>
+        <td class="num">{{ f.cases }}</td>
+        <td class="num">{{ f.distinct_flows if f.distinct_flows is not none else '–' }}</td>
+        <td class="num">{{ f.distinct_signatures }}</td>
+        <td class="num">{% if f.redundant_cases %}<strong>{{ f.redundant_cases }}</strong>{% else %}0{% endif %}</td>
+        <td><details><summary>{{ f.case_ids|length }} case{{ '' if f.case_ids|length == 1 else 's' }}</summary><ul class="eco-list">{% for c in f.case_ids %}<li>{{ test_link(repo.id, c, run.id) }}</li>{% endfor %}</ul></details></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="empty">This run has no parametrized test.</p>{% endif %}
+</section>

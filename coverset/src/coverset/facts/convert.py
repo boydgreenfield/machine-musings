@@ -53,6 +53,7 @@ from typing import Any, get_args
 from urllib.parse import quote
 
 import numpy as np
+import pyarrow as pa
 
 from coverset.facts.untrusted import (
     BundleError,
@@ -81,7 +82,9 @@ __all__ = [
     "BundleLimits",
     "extract_bundle",
     "first_lines",
+    "bitsets_to_lines",
     "is_shape_key",
+    "lines_to_bitsets",
     "numbits_to_lines",
     "read_python_bundle",
     "tracer_mismatch",
@@ -137,6 +140,79 @@ def numbits_to_lines(numbits: bytes) -> np.ndarray:
     return np.flatnonzero(bits)
 
 
+def lines_to_bitsets(test_id: np.ndarray, file_id: np.ndarray, line: np.ndarray) -> pa.Table:
+    """The compact layout of ``test_lines`` rows: one row per (test, file) with the lines as a
+    bitset in coverage.py's numbits format (line ``n`` is bit ``n % 8`` of byte ``n // 8``,
+    :func:`numbits_to_lines` decodes one), sorted by ``(test_id, file_id)``.
+
+    Built without a Python loop: rows are grouped by a combined key, each group gets
+    ``max(line) // 8 + 1`` bytes of one flat buffer, each byte is the OR of its run of bits and
+    the binary column is assembled from the offsets and that buffer. ``n_lines`` is the group's
+    distinct line count. Lines must be positive (``test_lines`` holds statement first lines).
+    """
+    schema = pa.schema(
+        [("test_id", pa.int32()), ("file_id", pa.int32()), ("n_lines", pa.int32()), ("bits", pa.binary())]
+    )
+    if line.size == 0:
+        return schema.empty_table()
+    key = (test_id.astype(np.int64) << 32) | file_id.astype(np.int64)
+    order = np.lexsort((line, key))
+    key, lines = key[order], line[order].astype(np.int64)
+    fresh = np.ones(key.size, dtype=bool)
+    fresh[1:] = (key[1:] != key[:-1]) | (lines[1:] != lines[:-1])
+    key, lines = key[fresh], lines[fresh]
+    starts = np.flatnonzero(np.concatenate(([True], key[1:] != key[:-1])))
+    stops = np.concatenate((starts[1:], [key.size]))
+    widths = np.maximum.reduceat(lines, starts) // 8 + 1
+    offsets = np.concatenate(([0], np.cumsum(widths)))
+    flat = np.zeros(int(offsets[-1]), dtype=np.uint8)
+    group = np.repeat(np.arange(starts.size), stops - starts)
+    # Byte positions never decrease (groups in order, lines ascending within one), so the bits of
+    # one byte are a contiguous run: OR each run once instead of np.bitwise_or.at per cell (10x).
+    position = offsets[group] + lines // 8
+    runs = np.flatnonzero(np.concatenate(([True], position[1:] != position[:-1])))
+    flat[position[runs]] = np.bitwise_or.reduceat((1 << (lines % 8)).astype(np.uint8), runs)
+    if offsets[-1] < 2**31:
+        bits = pa.BinaryArray.from_buffers(
+            pa.binary(), int(starts.size), [None, pa.py_buffer(offsets.astype(np.int32)), pa.py_buffer(flat)]
+        )
+    else:  # over 2 GiB of bitsets in one shard: let Arrow chunk it
+        bits = pa.array(
+            [flat[a:b].tobytes() for a, b in zip(offsets[:-1], offsets[1:], strict=True)], pa.binary()
+        )
+    first = key[starts]
+    return pa.Table.from_arrays(
+        [
+            pa.array((first >> 32).astype(np.int32)),
+            pa.array((first & 0xFFFFFFFF).astype(np.int32)),
+            pa.array((stops - starts).astype(np.int32)),
+            bits,
+        ],
+        schema=schema,
+    )
+
+
+def bitsets_to_lines(table: pa.Table) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(test_id, file_id, line)`` arrays of a :func:`lines_to_bitsets` table (in its row order,
+    lines ascending within a row): every bitset is unpacked at once from the column's buffer."""
+    if table.num_rows == 0:
+        empty = np.empty(0, dtype=np.int32)
+        return empty, empty, empty
+    column = table.column("bits").combine_chunks()
+    if column.offset or column.null_count:
+        column = pa.array(column.to_pylist(), pa.binary())
+    offsets = np.frombuffer(column.buffers()[1], dtype=np.int32)[: len(column) + 1].astype(np.int64)
+    data = np.frombuffer(column.buffers()[2], dtype=np.uint8)[offsets[0] : offsets[-1]]
+    offsets -= offsets[0]
+    bits = np.unpackbits(data, bitorder="little")
+    set_bits = np.flatnonzero(bits)
+    row = np.searchsorted(offsets * 8, set_bits, side="right") - 1
+    line = (set_bits - offsets[row] * 8).astype(np.int32)
+    tests = table.column("test_id").to_numpy().astype(np.int32)
+    files = table.column("file_id").to_numpy().astype(np.int32)
+    return tests[row], files[row], line
+
+
 def is_shape_key(value: object) -> bool:
     """Whether ``value`` is a canonical Addendum B shape key: a type token, then sorted features."""
     if not isinstance(value, str) or not 0 < len(value) <= _MAX_NAME_CHARS or not value.isprintable():
@@ -175,14 +251,18 @@ class _Anchors:
         return cls(anchors, np.isin(anchors, stmts))
 
     def map(self, lines: np.ndarray) -> np.ndarray:
+        return np.unique(self.map_all(lines))
+
+    def map_all(self, lines: np.ndarray) -> np.ndarray:
+        """Each of ``lines`` mapped to its statement's first line (same order, not deduplicated)."""
         if self.lines.size == 0 or lines.size == 0:
-            return np.unique(lines)
+            return lines
         index = np.searchsorted(self.lines, lines, side="right") - 1
         inside = index >= 0
         hit = inside & self.is_statement[np.where(inside, index, 0)]
         mapped = lines.copy()
         mapped[hit] = self.lines[index[hit]]
-        return np.unique(mapped)
+        return mapped
 
 
 @dataclass(slots=True)
@@ -667,11 +747,14 @@ class _CoverageDb:
             self._keep(contexts[context_id], files[file_id], lines)
 
     def _arc_lines(self, files: dict[int, str], contexts: dict[int, str]) -> None:
-        """Executed lines from arcs (their positive endpoints), one SQL row per (file, context).
+        """Executed lines from arcs (their positive endpoints), one SQL row per file.
 
-        Grouping in SQLite (``group_concat``, along the arc table's unique index) avoids the
-        sort of a ``UNION ... ORDER BY`` over every endpoint and one Python tuple per arc: on a
-        15M-arc bundle this read takes a few seconds instead of half a minute.
+        SQLite concatenates each file's context ids and endpoints (``group_concat`` along the arc
+        table's unique ``(file_id, context_id, ...)`` index, no sort), and the per-test lines of the
+        whole file are then decoded, deduplicated and mapped to statement first lines as arrays
+        (:meth:`_keep_file`): a 3.2M-arc bundle with 115,000 (test, file) pairs converts in about
+        1.8 s instead of 4.7 s, because the Python work is per file and per stored tuple, not per
+        numpy call per pair.
         """
         valid = self._arc_filter()
         (total,) = self.con.execute("SELECT count(*) FROM arc").fetchone()
@@ -681,20 +764,61 @@ class _CoverageDb:
                 cap="max_coverage_cells",
                 value=total,
             )
+        known = np.fromiter(contexts, dtype=np.int64, count=len(contexts))
         kept = 0
-        for context_id, file_id, count, froms, tos in self.con.execute(
-            "SELECT context_id, file_id, count(*), group_concat(fromno), group_concat(tono) "
-            f"FROM arc WHERE {valid} GROUP BY file_id, context_id"
+        for file_id, count, context_ids, froms, tos in self.con.execute(
+            "SELECT file_id, count(*), group_concat(context_id), group_concat(fromno), group_concat(tono) "
+            f"FROM arc WHERE {valid} GROUP BY file_id"
         ):
             kept += count
-            if file_id not in files or context_id not in contexts:
+            if file_id not in files:
                 continue
+            cids = _int_list(context_ids)
             ends = np.concatenate((_int_list(froms), _int_list(tos)))
-            lines = np.unique(ends[ends > 0])
-            self._add_cells(lines.size)
-            self._keep(contexts[context_id], files[file_id], lines)
+            if cids.size * 2 != ends.size:  # a concatenation that does not line up: skip the file
+                self.reader.stats["coverage.bad_arcs"] += int(count)
+                continue
+            cids = np.concatenate((cids, cids))
+            positive = (ends > 0) & (cids >= -(2**31)) & (cids < 2**31)  # ids a key can hold
+            pairs = np.unique((cids[positive] << 32) | ends[positive])
+            pair_cids = pairs >> 32
+            pairs = pairs[np.isin(pair_cids, known)]
+            self._add_cells(int(pairs.size))
+            self._keep_file(files[file_id], pairs >> 32, pairs & 0xFFFFFFFF, contexts)
         if total > kept:
             self.reader.stats["coverage.bad_arcs"] += total - kept
+
+    def _keep_file(self, path: str, cids: np.ndarray, lines: np.ndarray, contexts: dict[int, str]) -> None:
+        """:meth:`_keep` for every context of one file at once (``cids[i]`` ran raw line
+        ``lines[i]``): the same filtering, first-line mapping and counting, as arrays."""
+        inside = (lines > 0) & (lines <= self.limits.max_line_number)
+        cids, lines = cids[inside], lines[inside]
+        facts = self._static.get(path)
+        if facts is not None:
+            if path not in self._anchors:
+                self._anchors[path] = _Anchors.of(facts.statements, facts.excluded)
+            lines = self._anchors[path].map_all(lines)
+        pairs = np.unique((cids << 32) | lines)
+        cids, lines = pairs >> 32, pairs & 0xFFFFFFFF
+        if facts is not None and path in self.reader.measured_lengths:
+            beyond = lines > facts.n_lines
+            if beyond.any():
+                self.reader.stats["coverage.lines_beyond_file"] += int(beyond.sum())
+                cids, lines = cids[~beyond], lines[~beyond]
+        if not lines.size:
+            return
+        starts = np.flatnonzero(np.concatenate(([True], cids[1:] != cids[:-1])))
+        stops = np.concatenate((starts[1:], [cids.size]))
+        for cid, a, b in zip(cids[starts].tolist(), starts.tolist(), stops.tolist(), strict=True):
+            nodeid = contexts.get(cid)
+            if nodeid is None:
+                continue
+            chunk = lines[a:b]
+            by_path = self.coverage[nodeid]
+            earlier = by_path.get(path)
+            if earlier is not None:  # also in line_bits: the union, as _keep does
+                chunk = np.union1d(np.asarray(earlier, dtype=np.int64), chunk)
+            by_path[path] = self._tuple(chunk)
 
     def _run_arcs(self, files: dict[int, str]) -> dict[str, tuple[tuple[int, int], ...]]:
         """Executed arcs per file (union over contexts), used only without ``coverage.json``."""

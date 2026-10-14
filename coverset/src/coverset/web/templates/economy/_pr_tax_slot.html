@@ -1,0 +1,13 @@
+{#- The PR page's "Test tax" slot (included by pr.html). A PR run with a base shows the tax the
+    verdict stored (summary_json.test_tax: the same numbers as the sticky comment); a completed run
+    whose summary predates it fetches the card from the stored economy instead. -#}
+{%- if run and run.pr_id and run.base_sha -%}
+{%- set _stored = (summary or {}).get('test_tax') if summary is mapping else none -%}
+{%- if _stored -%}
+{% with tax = _stored %}{% include "economy/_tax_card.html" %}{% endwith %}
+{%- elif run.status == 'completed' -%}
+<section class="panel eco-tax eco-tax-pending" id="test-tax" hx-get="{{ url_for('economy.pr_tax', rid=repo.id, run=run.id) }}" hx-trigger="load" hx-swap="outerHTML">
+  <p class="muted">Test tax: <a href="{{ url_for('economy.economy_page', rid=repo.id, run=run.id) }}">see the economy of this run</a></p>
+</section>
+{%- endif -%}
+{%- endif -%}

@@ -46,7 +46,8 @@ svg.pbar { width: 56px; height: 6px; vertical-align: 1px; margin-right: 4px; }
 .sources-notice { margin: 0 0 14px; padding: 8px 14px; border: 1px solid var(--rule-strong); border-left: 4px solid var(--fail); border-radius: 5px; background: var(--surface-2); font-size: 0.9rem; }
 
 .lens-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 14px; border-bottom: 1px solid var(--rule); font-size: 0.86rem; color: var(--ink-2); }
-.lens-bar select { font: inherit; font-size: 0.84rem; max-width: min(720px, 100%); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink); }
+.lens-bar select { font: inherit; font-size: 0.84rem; width: min(720px, 100%); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink); }
+/* the options arrive when the menu is first used: a fixed width keeps the bar from moving then */
 .lens-bar.is-active { background: var(--ran-tint); }
 .lens-on .ln[data-line]:not(.lens-hit) { opacity: 0.32; }
 .lens-on .ln[data-line]:not(.lens-hit).fn-head { opacity: 0.6; }

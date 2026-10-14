@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,15 @@ from report_helpers import DemoData, FixtureRun
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PROJECT = ROOT / "packages" / "pytest-coverset" / "tests" / "fixture_project"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _pinned_build_date() -> Iterator[None]:
+    """Pin the footer's build date for the whole session, so a report built by a session fixture and
+    one built inside a test compare byte for byte even when the run straddles midnight UTC."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SOURCE_DATE_EPOCH", "1767225600")
+        yield
 
 
 @pytest.fixture(scope="session")

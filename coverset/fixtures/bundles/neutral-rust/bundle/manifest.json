@@ -1,0 +1,51 @@
+{
+ "format": "coverset-neutral",
+ "version": 1,
+ "language": "rust",
+ "producer": {
+  "name": "coverset-rust",
+  "version": "0.1.0"
+ },
+ "created_at": "2026-10-13T12:00:00Z",
+ "shard": null,
+ "meta": {
+  "runner": "nextest",
+  "runner_version": "0.9.148",
+  "rustc": "1.98.1",
+  "coverage": "llvm source-based (-C instrument-coverage), one process and one profile per test",
+  "arcs": "none: stable rustc records no branch coverage, and per-test arcs are not built (v1)",
+  "shapes": "none: the #[coverset::trace] shape tracer is designed, not built (docs/rust.md)",
+  "jobs": 16,
+  "timings_s": {
+   "build_and_list": 0.786,
+   "run": 0.149,
+   "export_tests": 0.053,
+   "export_merged": 0.049,
+   "convert": 0.018,
+   "total": 1.099
+  },
+  "llvm_functions": {
+   "regions": 12,
+   "instrumented": 12,
+   "not_instrumented": [],
+   "monomorphised": {
+    "src/intervals.rs::largest": 2
+   },
+   "in_binaries": {
+    "src/durations.rs::parse_duration": 2,
+    "src/durations.rs::unit_seconds": 2,
+    "src/emailcheck.rs::validate_email": 2,
+    "src/error.rs::<LedgerError as fmt::Display>::fmt": 1,
+    "src/intervals.rs::largest": 1,
+    "src/intervals.rs::merge_intervals": 2,
+    "src/money.rs::Ledger::balance": 2,
+    "src/money.rs::Ledger::new": 2,
+    "src/money.rs::Ledger::post": 2,
+    "src/money.rs::Ledger::transfer": 2,
+    "src/money.rs::allocate_cents": 2,
+    "src/money.rs::format_cents": 2
+   },
+   "unexplained": []
+  }
+ }
+}

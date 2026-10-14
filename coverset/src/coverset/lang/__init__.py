@@ -110,6 +110,10 @@ def adapter_for_language(language: str) -> LanguageAdapter:
         from coverset.lang.python import PythonAdapter
 
         return PythonAdapter()
+    if language == "rust":  # a NeutralAdapter that also indexes Rust sources (lang/rust.py)
+        from coverset.lang.rust import RustAdapter
+
+        return RustAdapter()
     from coverset.lang.neutral import NEUTRAL_LANGUAGES, NeutralAdapter
 
     if language in NEUTRAL_LANGUAGES:
@@ -117,3 +121,14 @@ def adapter_for_language(language: str) -> LanguageAdapter:
     from coverset.facts.untrusted import BundleError
 
     raise BundleError(f"no language adapter for {language!r}")
+
+
+def _register_rust() -> None:
+    """``rust`` bundles are neutral bundles, so code that checks ``NEUTRAL_LANGUAGES`` (the upload
+    path) accepts a Rust manifest; :func:`adapter_for_language` still answers ``RustAdapter``."""
+    from coverset.lang.neutral import register_language
+
+    register_language("rust")
+
+
+_register_rust()

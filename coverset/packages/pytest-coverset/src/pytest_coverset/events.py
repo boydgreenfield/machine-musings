@@ -17,6 +17,7 @@ developer's terminal shows the test run and ``--coverset``'s one summary line, n
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -77,10 +78,16 @@ class EventWriter:
         self._mid_line = mid_line
         self.last_emit = time.monotonic()
 
+    @property
+    def enabled(self) -> bool:
+        """False when events are discarded (a caller can skip building their payloads)."""
+        return self._stream is not DISCARD
+
     def emit(self, kind: str, **payload: Any) -> None:
         """Write one event line and flush."""
         stream = self._stream if self._stream is not None else sys.__stdout__
-        if stream is None:
+        if stream is None or stream is DISCARD:  # nobody listens: skip the JSON encoding as well
+            self.last_emit = time.monotonic()
             return
         record = {"kind": kind, "t": round(time.time(), 6), **payload}
         line = self._prefix + json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
@@ -89,6 +96,13 @@ class EventWriter:
         stream.write(line)
         stream.flush()
         self.last_emit = time.monotonic()
+
+    def close(self) -> None:
+        """Close the stream when it is a file this writer was given (a worker's ``events.jsonl``)."""
+        stream = self._stream
+        if stream is not None and stream is not DISCARD and stream is not sys.__stdout__:
+            with contextlib.suppress(Exception):
+                stream.close()
 
     def heartbeat_due(self, now: float | None = None) -> bool:
         """True when no event was written for :data:`HEARTBEAT_INTERVAL_S` seconds."""

@@ -77,6 +77,7 @@ from coverset.orchestrator.bundles import IngestOutcome, merge_sampling
 from coverset.orchestrator.repos import read_blob
 
 if TYPE_CHECKING:
+    from coverset.forge.comment import TestTaxLine
     from coverset.orchestrator.planner import RunPlan
 
 __all__ = [
@@ -138,6 +139,8 @@ class RunReport:
     observations: dict[str, list[ShapeObs]] = field(default_factory=dict)
     """Shape observations by ``func_key`` (the same functions)."""
     notes: list[str] = field(default_factory=list)
+    test_tax: TestTaxLine | None = None
+    """The PR test tax (PR runs with a base run; :func:`_test_tax`)."""
 
 
 def t0_of(run: Run) -> datetime:
@@ -245,7 +248,28 @@ async def build_report(
     report.invariants_changed = tuple(await _invariant_changes(plan, run))
     report.function_rows = tuple(_function_rows(report.patch, report.input_cov, by_target))
     report.missing = tuple(_missing_classes(interest, report.input_cov))
+    report.test_tax = await _test_tax(session, settings, store, run)
     return report
+
+
+async def _test_tax(
+    session: AsyncSession, settings: Settings, store: FactsStore, run: Run
+) -> TestTaxLine | None:
+    """The PR test tax of a PR run, from the economy ``finalize_run`` just wrote, re-flagged against
+    the repository's ``policy.test_tax_threshold`` (docs/economy.md). None for other runs, runs
+    without a base run, and on any failure: the tax is advisory and never fails a verdict."""
+    if run.pr_id is None or not run.base_sha:
+        return None
+    try:
+        from coverset.report.economy import tax_line
+        from coverset.settings_scopes import effective_policy
+
+        repo = await session.get(Repo, run.repo_id)
+        threshold = (await effective_policy(session, repo, settings)).test_tax_threshold if repo else None
+        return await asyncio.to_thread(tax_line, store, run.repo_id, run.id, threshold=threshold)
+    except Exception:  # never let the economy fail a verdict
+        log.warning("the test tax of run %s could not be read", run.id, exc_info=True)
+        return None
 
 
 def _input_coverage(
@@ -603,7 +627,10 @@ async def _ai_review(
         return None, {}
     try:
         repo = await session.get(Repo, run.repo_id)
-        client = get_review_client(settings, repo_enabled=bool(repo and repo.ai_review_enabled))
+        from coverset.settings_scopes import effective_policy  # policy.ai_review (docs/settings.md)
+
+        enabled = repo is not None and (await effective_policy(session, repo, settings)).ai_review
+        client = get_review_client(settings, repo_enabled=enabled)
         if client is None:
             return "off", {}
         keys = [c.region.func_key for c in changed if c.region is not None]
@@ -723,7 +750,7 @@ def build_summary(
         first_failure_s = round((datetime.fromisoformat(first) - t0_of(run)).total_seconds(), 3)
     patch = report.patch if report is not None else None
     title = _title(conclusion, reason, failure_rows, len(collect_errors), states, patch)
-    return VerdictSummary(
+    summary = VerdictSummary(
         conclusion=conclusion,  # type: ignore[arg-type]
         title=title,
         reason=reason,
@@ -744,6 +771,9 @@ def build_summary(
         ai_source=report.ai_source if report is not None else None,
         tests_total=len(plan.collected) if plan is not None else None,
     )
+    from coverset.forge.comment import with_test_tax
+
+    return with_test_tax(summary, report.test_tax if report is not None else None)
 
 
 def _title(
@@ -828,7 +858,9 @@ def summary_from_json(data: Mapping[str, Any]) -> VerdictSummary:
     values["invariants"] = tuple(InvariantRow(**i) for i in values.get("invariants", ()))
     values["invariants_changed"] = tuple(InvariantRow(**i) for i in values.get("invariants_changed", ()))
     values["failures"] = tuple(FailureRow(**f) for f in values.get("failures", ()))
-    return VerdictSummary(**values)
+    from coverset.forge.comment import TestTaxLine, with_test_tax
+
+    return with_test_tax(VerdictSummary(**values), TestTaxLine.from_json(data.get("test_tax")))
 
 
 def _function_row(row: Mapping[str, Any]) -> FunctionRow:

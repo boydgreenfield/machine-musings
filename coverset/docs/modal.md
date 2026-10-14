@@ -206,8 +206,9 @@ Images and snapshots are not sandboxes. Snapshot images expire on Modal's side a
 days). Env images do not, and Modal has no API to delete an image: `coverset modal images` lists the
 ones built through this data dir (it reads `<data_dir>/modal/images.json`; other data dirs keep
 their own) with their last use and flags those unused for 30 days for manual deletion from the
-dashboard. Nothing else is created: no Secrets, no Volumes, no deployed functions (only the empty
-`coverset-runner` app record).
+dashboard. The executor creates nothing else: no Secrets, no Volumes, no deployed functions (only the
+empty `coverset-runner` app record). Serving the control plane itself from Modal is separate and
+opt-in: [Serving the control plane on Modal](#serving-the-control-plane-on-modal).
 
 To check by hand that nothing is left running:
 
@@ -294,3 +295,41 @@ after the sandbox is requested; coverset reports the failed result 6.0 s after t
 and confirms it (failure plus retry) at 7.3 s, with planning, collection and the retry included,
 while file order on the same sandbox would reach the test after an estimated 7.9 s. With a suite this
 small, start-up dominates; the bench-suite rows show where the time goes on a larger one.
+
+## Serving the control plane on Modal
+
+The executor above needs no deployment, but the control plane can live on Modal too:
+`deploy/modal/coverset_web.py` defines the App `coverset-web` (environment `coverset`) with one
+`@modal.asgi_app` function, `web`, that returns `create_app()`. It runs exactly one container
+(`min_containers=1`, `max_containers=1`, `@modal.concurrent(max_inputs=256)`, 24 h per-request
+timeout, 0.5 core and 1 GiB reserved: about $0.76 a day), mounts the Volume `coverset-data` at
+`/data` and reads the Secret `coverset-web`. From inside that container the Modal client is
+authenticated by the runtime, so the dispatcher creates shard sandboxes in `coverset-runner` with no
+token stored anywhere; a run queued there on 2026-10-13 built its env image and passed 97 tests.
+
+```sh
+uv run modal secret create coverset-web --from-dotenv <file> -e coverset   # ADMIN_TOKEN, SECRET_KEY, PUBLIC_URL, ...
+uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py
+uv run modal app logs coverset-web -e coverset
+uv run modal app stop coverset-web -e coverset
+```
+
+What was checked against the platform (details and numbers in [deploy.md](deploy.md)):
+
+* **ASGI lifespan works.** Modal runs the lifespan when the container starts, so Quart's
+  `before_serving` hooks migrate the database and start the dispatcher, gc, reaper and warm-pool
+  maintainer; `after_serving` runs when the container stops (the pool is drained, a final database
+  backup is taken).
+* **The 150 s limit does not cut streams.** Modal documents a 150 s maximum for web requests (a
+  303 redirect after that); streamed responses are not covered by it in practice: SSE streams of
+  210 s and 330 s (with 110 s of silence) and a 216 s coverset run-page stream completed with HTTP
+  200. The earlier reason not to serve the UI from Modal is gone.
+* **SQLite stays off the Volume.** Volumes have no distributed locking and refuse hard links; WAL
+  SQLite runs on one but 26x slower per commit. The live database is on container-local disk,
+  restored from `/data/backup/` at start and copied back with SQLite's backup API every 60 s when it
+  changed and at shutdown (recovery point 60 s on a crash).
+* **Client address.** Modal's runtime puts the caller's address and `https` in the ASGI scope and
+  drops client-sent `X-Forwarded-For`, so `COVERSET_TRUST_PROXY` stays `false` there.
+* **Deploy with `--strategy recreate`.** A rolling deploy waits forever for a second container
+  slot that `max_containers=1` never grants.
+

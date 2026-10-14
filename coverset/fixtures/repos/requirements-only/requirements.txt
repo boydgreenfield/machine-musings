@@ -1,0 +1,2 @@
+# runtime dependencies
+attrs>=23.1

@@ -279,7 +279,7 @@ The `pairs` and `order` families are expected from the annotation `list[tuple[in
 
 ## Limits
 
-- **A hollow square means "never observed", not "buggy".** Many missing classes are inputs the function is right to reject or never receives in production. The grid points at where to look.
+- **A hollow square means "never observed", not "buggy".** Many missing classes are inputs the function is right to reject or never receives in production. The grid points at where to look. Production can say which: `coverset-probe` records the same shape keys in a running service (categorical only, k-anonymous, about 0.1 µs per observed call), and `coverset flows gaps` lists the classes production passes in that no test does, ranked by call volume, with these same Hypothesis hints. See [production-flows.md](production-flows.md).
 - **Shapes are sampled.** Outside the full-trace list, a function stops being sampled after 64 calls with no new shape or 2,048 calls. Missing classes of a capped function say "not observed in N sampled calls", never "never exercised".
 - **Classes are heuristics.** The email and quantity rules are patterns, not parsers. `multi-label-domain` knows 39 two-level public suffixes, not the full public suffix list. A string longer than 2,048 characters gets no kind.
 - **Each-choice only.** The catalogue counts each class once per parameter; it does not track combinations across parameters (a negative total with a zero weight).

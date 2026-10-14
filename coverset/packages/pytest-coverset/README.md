@@ -1,6 +1,6 @@
 # pytest-coverset
 
-The in-sandbox half of [coverset](../../README.md): a pytest plugin that records per-test coverage, the shapes of the arguments each function received, runs tests in the order the control plane asks for, and streams results as JSON lines. It also ships `coverset-ci wait`, a stdlib-only command for CI jobs that want to wait for a coverset verdict.
+The in-sandbox half of [coverset](../../README.md): a pytest plugin that records per-test coverage, the shapes of the arguments each function received, runs tests in the order the control plane asks for, and streams results as JSON lines. It also ships `coverset-ci`, stdlib-only commands for CI jobs: `wait` for a coverset verdict, and `upload` to send this plugin's bundle to coverset (upload mode).
 
 Python 3.12+ (the shape tracer uses `sys.monitoring`); dependencies: `coverage` and `pytest`.
 
@@ -41,9 +41,13 @@ Installing the plugin changes nothing about a normal run except registering the 
 | `--coverset-shape-settle N` | 64 | consecutive calls with no new shape before sampling stops |
 | `--coverset-full-trace-cap N` | 100000 | safety cap on sampled calls per full-trace function (recorded as `truncated`, `cap: "full"`) |
 
-Every option takes `--opt value` or `--opt=value`. Scripts that pass paths outside the repository should use the `=` form: pytest looks for its ini file before plugins register their options, so a separate path word can move the rootdir and drop the repo's pytest configuration. `--coverset-out` with pytest-xdist workers (`-n 2`, `-n auto`) is a usage error, and so are Python below 3.12 and an output directory that is a symlink, lies below a symlink inside the repository, or is a file.
+Every option takes `--opt value` or `--opt=value`. Scripts that pass paths outside the repository should use the `=` form: pytest looks for its ini file before plugins register their options, so a separate path word can move the rootdir and drop the repo's pytest configuration. Python below 3.12, an output directory that is a symlink, lies below a symlink inside the repository, or is a file, and remote pytest-xdist workers (`--tx ssh=...`, `socket=...`, `//chdir=`, `--rsyncdir`) are usage errors.
 
 Coverage uses the ctrace core with one dynamic context per test whose name is exactly the nodeid (no static context is prefixed, so `|` in parametrize ids needs no special parsing); the `''` context holds imports and collection. A foreign `sys.settrace` function at start is a usage error; a tracer lost later (a test calling `sys.settrace(None)`, or pytest-cov started without `--no-cov`) is recorded as `tracer_lost_at`/`tracer_losses` in `meta.json` and re-installed when possible. coverage.py's own warnings (for example a `--coverset-source` package the shard never imports) are captured into `meta.json` `coverage_warnings` instead of raised, so target repos that run with `-W error` or `filterwarnings = error` are unaffected, and an error while recording a result or emitting an event goes to `meta.json` `errors` instead of aborting the run. A conftest that fails to import still yields a bundle and a `done` event with exit code 4.
+
+## Parallel runs (pytest-xdist)
+
+`pytest --coverset -n 8` (or `--coverset-out DIR -n auto`) works: every worker runs the whole plugin into `DIR/workers/<gw>/`, and the process that distributes the tests merges those directories into the one bundle a serial run would write (coverage data combined with every per-test context kept, then `coverage.json` and repository paths once; results, collection and shapes merged; the neutral export from the merged files). On the plugin's fixture project the merged bundle equals the serial one, file by file (`tests/test_xdist.py`, with `--dist load` and `--dist loadfile`). `meta.json` `xdist` lists the workers (tests, exit code, wall time) and the merge time; the worker directories are removed after a clean merge and kept when a worker crashed or anything else went wrong (a crashed worker's test is kept as xdist reports it, `failed`; the tests it finished before keep their coverage, since a worker commits its data at every test switch). `DIR/workers/` is removed only when coverset made it (it carries a `.coverset-xdist` marker); a `workers/` directory of your own in the output directory, such as a `workers` package under `--coverset-out=.`, is a usage error and is left alone. Use `--dist loadfile` when module- or class-scoped fixtures are heavy: it keeps a file's tests on one worker, so each fixture is set up once and its lines go to the test that set it up, as in a serial run. Each worker samples shapes on its own, so a hot function can be sampled up to N times the per-session cap (`calls` is "sampled calls" either way). Only local workers are supported. The coverset runner never passes `-n`: it shards across sandboxes instead.
 
 ## Stopping
 
@@ -86,6 +90,14 @@ coverset-ci wait --server URL --repo-id N --sha SHA [--timeout 1800] [--poll-int
 ```
 
 Exit codes: 0 success, 1 failure, 2 interrupted, cancelled, timed out or neutral, 3 network/server/auth error after retries, 5 no tests.
+
+```
+coverset-ci upload --server URL [--repo OWNER/NAME] [--sha SHA] [--base SHA] [--branch NAME] [--pr N]
+                   [--dir .coverset] [--token TOKEN | --oidc] [--audience AUD] [--with-sources]
+                   [--label NAME] [--shards N] [--timeout 300] [--max-bytes N] [--wait]
+```
+
+Upload mode ([coverset's docs/upload.md](../../docs/upload.md)): after `pytest --coverset`, send `.coverset/` to coverset's `POST /v1/bundles`. The command packs `bundle.tar.gz`, the neutral bundle and `meta.json` into one reproducible gzipped tar. With `--with-sources` it adds the measured files that git tracks, under `sources/`. It then streams the archive with chunked encoding. The bearer is `--token` or `COVERSET_TOKEN` (a repository token with the `upload` scope). Without one, inside GitHub Actions with `id-token: write`, the command requests an OIDC token itself, with the server URL (or `--audience`) as its audience. In Actions, `--repo`, `--sha`, `--base`, `--pr` and `--branch` default from the environment. For pull requests they come from the event payload, so the head SHA is used, never the merge commit. Give each matrix leg its own `--label` (the default, `GITHUB_JOB`, is the job id and therefore the same for every leg, so `--shards N` is refused without an explicit `--label` or `COVERSET_LABEL`); the server merges the labels into one run. A connection the server drops while the archive is still being sent (its size cap tripped before a 413 could be read) is tried once more and then reported as such, with exit 3. The command prints the run URL. With `--wait` it follows the run and exits with its verdict. Exit codes: 0 accepted (with `--wait`: passed), 1 failed (`--wait`), 2 usage or local problem, or timed out, 3 server unreachable or upload refused, 5 no tests (`--wait`).
 
 ## Overhead
 

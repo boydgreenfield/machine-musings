@@ -1,12 +1,19 @@
 /* coverset report: behaviour of the static pages (no inline scripts, works from file://).
-   - theme toggle (auto / light / dark) persisted in localStorage, applied before first paint
+   - theme toggle (auto / light / dark) and the view settings (highlight mode, inlay chips, map mode
+     and module weight), applied before first paint: ?highlight= / ?mode= / ?modules= in the page's
+     URL win, else the reader's own choice from localStorage, else the default (the live pages put
+     the scoped settings between the two; a static page has none)
    - the line-tests popover, built from the page's JSON data block (#report-data)
-   - the data-flow lens: dim the lines the selected test did not run (#lens=<test hash> preselects)
+   - the data-flow lens: dim the lines the selected test did not run (#lens=<test hash> preselects);
+     its options are built from the data block when the menu is first used
    - shape grids under def lines (key i) and the grid cell -> input-class row link
-   - treemap Gap / Lines toggle, the status line above it (a tile's data-info on hover and focus),
-     sortable tables, search over files / functions / tests
-   - keys: j/k n/N t i [ ] / ? (j/k skip the continuation lines of a multi-line statement)
-   - document.body.dataset.ready = "1" once all of the above is initialised (screenshots) */
+   - treemap Gap / Lines toggle and module weight (inert <template> variants swapped in), the status
+     line above it (a tile's data-info on hover and focus), sortable tables, search over files /
+     functions / tests, filter boxes (input[data-filter])
+   - keys, from one table (KEYS) that mirrors app.js's: the help dialog lists the same keys and
+     shows the rows that apply to the page (tests/web/test_keys_table.py checks both scripts)
+   - document.body.dataset.ready = "1" once all of the above is initialised (screenshots)
+   Every listener is delegated from document: no per-line or per-tile handler. */
 (function () {
   "use strict";
 
@@ -34,6 +41,56 @@
   }
 
   applyTheme(storedTheme());
+
+  var HIGHLIGHT_KEY = "coverset-highlight";
+  var HIGHLIGHTS = ["all", "missing"];
+  var CHIPS_KEY = "coverset-chips";
+  var MAP_KEY = "coverset-map";
+  var MAP_MODES = ["gap", "lines"];
+  var WEIGHTS = ["full", "thin", "hidden"];
+  var html = document.documentElement;
+
+  function load(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function save(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (e) {
+      /* storage blocked (or file:// without it): the choice still applies to this page */
+    }
+  }
+
+  function param(name) {
+    var match = new RegExp("[?&]" + name + "=([^&#]*)").exec(window.location.search || "");
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function savedMap() {
+    try {
+      return JSON.parse(load(MAP_KEY) || "{}") || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function pick(value, stored, choices, fallback) {
+    if (choices.indexOf(value) >= 0) return value;
+    return choices.indexOf(stored) >= 0 ? stored : fallback;
+  }
+
+  var view = {
+    highlight: pick(param("highlight"), load(HIGHLIGHT_KEY), HIGHLIGHTS, "all"),
+    mode: pick(param("mode"), savedMap().mode, MAP_MODES, "gap"),
+    modules: pick(param("modules"), savedMap().modules, WEIGHTS, "thin")
+  };
+  html.setAttribute("data-highlight", view.highlight);
+  if (load(CHIPS_KEY) === "off") html.setAttribute("data-chips", "off");
 
   var data = null;
   var lineIndex = {};
@@ -128,6 +185,35 @@
   }
 
   // -- the data-flow lens -----------------------------------------------------------------------
+  var lineNodes = null;
+
+  function lineMap() {
+    // data-line -> its block, and statement line -> its continuation lines (built once)
+    if (lineNodes) return lineNodes;
+    lineNodes = { line: {}, cont: {} };
+    Array.prototype.forEach.call(document.querySelectorAll(".src-lines .ln[data-line]"), function (line) {
+      lineNodes.line[line.getAttribute("data-line")] = line;
+      var first = line.getAttribute("data-first");
+      if (first) (lineNodes.cont[first] = lineNodes.cont[first] || []).push(line);
+    });
+    return lineNodes;
+  }
+
+  function fillLens(select) {
+    // the menu's options, from the data block, the first time it is used
+    if (!select || select.getAttribute("data-filled") || !data || !data.tests) return;
+    var fragment = document.createDocumentFragment();
+    data.tests.forEach(function (test, index) {
+      var n = (test[3] || []).length;
+      var option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = test[0] + " · " + (test[1] || "not run") + " · " + n + (n === 1 ? " line" : " lines");
+      fragment.appendChild(option);
+    });
+    select.appendChild(fragment);
+    select.setAttribute("data-filled", "1");
+  }
+
   function applyLens(index) {
     var shell = document.querySelector(".src-lines");
     var select = document.getElementById("lens");
@@ -145,21 +231,25 @@
       return;
     }
     var test = data.tests[index];
+    var map = lineMap();
     var hits = 0;
     (test[3] || []).forEach(function (n) {
-      var line = shell.querySelector('.ln[data-line="' + n + '"]');
+      var line = map.line[n];
       if (line) {
         line.classList.add("lens-hit");
         hits += 1;
       }
       // the continuation lines of a multi-line statement follow its first line
-      Array.prototype.forEach.call(shell.querySelectorAll('.ln.cont[data-first="' + n + '"]'), function (cont) {
+      (map.cont[n] || []).forEach(function (cont) {
         cont.classList.add("lens-hit");
       });
     });
     shell.classList.add("lens-on");
     if (bar) bar.classList.add("is-active");
-    if (select) select.value = String(index);
+    if (select) {
+      fillLens(select);
+      select.value = String(index);
+    }
     if (note) note.textContent = test[0] + " ran " + hits + (hits === 1 ? " line" : " lines") + " here; the rest is dimmed.";
   }
 
@@ -238,10 +328,15 @@
       var target = document.getElementById(window.location.hash.slice(1));
       if (target && all.indexOf(target) >= 0) return all.indexOf(target);
     }
-    for (var i = 0; i < all.length; i++) {
-      if (all[i].getBoundingClientRect().top >= 80) return i - 1;
+    // the first line whose top is below the viewport top (a binary search: lines are in order)
+    var lo = 0;
+    var hi = all.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (all[mid].getBoundingClientRect().top >= 80) hi = mid;
+      else lo = mid + 1;
     }
-    return -1;
+    return lo < all.length ? lo - 1 : -1;
   }
 
   function step(selector, direction) {
@@ -405,14 +500,184 @@
     });
   }
 
-  function showMap(mode) {
+  // -- the map: colour mode (m) and module weight (M) -------------------------------------------
+  function showMap(mode, modules) {
+    if (MAP_MODES.indexOf(mode) < 0) mode = "gap";
+    if (!document.querySelector('[data-map-modules="' + modules + '"]')) modules = "thin";
+    // swap in the module-weight variant: the drawn maps go back to inert templates, so each
+    // variant is parsed once and never kept live twice
+    Array.prototype.forEach.call(document.querySelectorAll("[data-map-view]"), function (box) {
+      var which = box.getAttribute("data-map-view");
+      var shown = box.getAttribute("data-modules") || "thin";
+      if (shown !== modules) {
+        var want = document.querySelector('template[data-map-variant="' + which + ":" + modules + '"]');
+        if (want) {
+          var stash = document.querySelector('template[data-map-variant="' + which + ":" + shown + '"]');
+          if (!stash) {
+            stash = document.createElement("template");
+            stash.className = "map-variant";
+            stash.setAttribute("data-map-variant", which + ":" + shown);
+            while (box.firstChild) stash.content.appendChild(box.firstChild);
+            box.parentNode.appendChild(stash);
+          }
+          box.replaceChildren(want.content.cloneNode(true));
+          box.setAttribute("data-modules", modules);
+        }
+      }
+      box.hidden = which !== mode;
+    });
     Array.prototype.forEach.call(document.querySelectorAll("[data-map]"), function (button) {
       button.setAttribute("aria-pressed", button.getAttribute("data-map") === mode ? "true" : "false");
     });
-    Array.prototype.forEach.call(document.querySelectorAll("[data-map-view], [data-map-legend]"), function (node) {
-      var which = node.getAttribute("data-map-view") || node.getAttribute("data-map-legend");
-      node.hidden = which !== mode;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-map-modules]"), function (button) {
+      button.setAttribute("aria-pressed", button.getAttribute("data-map-modules") === modules ? "true" : "false");
     });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-map-legend]"), function (node) {
+      var weight = node.getAttribute("data-map-weight");
+      node.hidden = node.getAttribute("data-map-legend") !== mode || (weight !== null && weight !== modules);
+    });
+    view.mode = mode;
+    view.modules = modules;
+  }
+
+  function chooseMap(mode, modules) {
+    showMap(mode, modules);
+    save(MAP_KEY, JSON.stringify({ mode: view.mode, modules: view.modules }));
+  }
+
+  function cycleMap(attribute) {
+    var buttons = Array.prototype.slice.call(document.querySelectorAll("button[" + attribute + "]"));
+    if (!buttons.length) return;
+    var at = 0;
+    buttons.forEach(function (button, i) {
+      if (button.getAttribute("aria-pressed") === "true") at = i;
+    });
+    var next = buttons[(at + 1) % buttons.length].getAttribute(attribute);
+    if (attribute === "data-map") chooseMap(next, view.modules);
+    else chooseMap(view.mode, next);
+  }
+
+  // -- highlight mode (h) and inlay chips (.) ------------------------------------------------------
+  function withParam(href, name, value) {
+    // set one query parameter of a relative or absolute link, keeping it as it was otherwise
+    var hash = "";
+    var at = href.indexOf("#");
+    if (at >= 0) {
+      hash = href.slice(at);
+      href = href.slice(0, at);
+    }
+    var q = href.indexOf("?");
+    var base = q >= 0 ? href.slice(0, q) : href;
+    var parts = (q >= 0 ? href.slice(q + 1) : "").split("&").filter(function (part) {
+      return part && part.split("=")[0] !== name;
+    });
+    parts.push(name + "=" + encodeURIComponent(value));
+    return base + "?" + parts.join("&") + hash;
+  }
+
+  function keepView(value) {
+    // the links this page builds carry the mode, so the next page paints it too
+    Array.prototype.forEach.call(document.querySelectorAll("a[data-keep-view]"), function (link) {
+      link.setAttribute("href", withParam(link.getAttribute("href"), "highlight", value));
+    });
+  }
+
+  function setHighlight(value) {
+    view.highlight = value;
+    html.setAttribute("data-highlight", value);
+    Array.prototype.forEach.call(document.querySelectorAll("[data-highlight-toggle]"), function (button) {
+      button.setAttribute("aria-pressed", value === "missing" ? "true" : "false");
+    });
+    keepView(value);
+    if (window.history && window.history.replaceState) {
+      try {
+        window.history.replaceState(null, "", withParam(window.location.href, "highlight", value));
+      } catch (e) {
+        /* file:// may refuse; the links carry it */
+      }
+    }
+  }
+
+  function toggleHighlight() {
+    var next = view.highlight === "missing" ? "all" : "missing";
+    save(HIGHLIGHT_KEY, next);
+    setHighlight(next);
+  }
+
+  function toggleChips() {
+    var off = html.getAttribute("data-chips") !== "off";
+    if (off) html.setAttribute("data-chips", "off");
+    else html.removeAttribute("data-chips");
+    save(CHIPS_KEY, off ? "off" : "on");
+  }
+
+  // -- go to (g then a letter), filter boxes --------------------------------------------------------
+  var chord = null;
+
+  function goTarget(letter) {
+    var nodes = document.querySelectorAll('[data-go="' + letter + '"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var link = nodes[i].matches("a[href]") ? nodes[i] : nodes[i].querySelector("a[href]");
+      if (link) return link;
+    }
+    return null;
+  }
+
+  function go(letter) {
+    var link = goTarget(letter);
+    if (link) window.location.assign(link.href);
+  }
+
+  function chordHint(show) {
+    var hint = document.getElementById("key-chord");
+    if (!show) {
+      if (hint) hint.hidden = true;
+      return;
+    }
+    if (!hint) {
+      hint = el("div", "key-chord");
+      hint.id = "key-chord";
+      hint.setAttribute("role", "status");
+      document.body.appendChild(hint);
+    }
+    var names = [];
+    Array.prototype.forEach.call(document.querySelectorAll("[data-go]"), function (node) {
+      var letter = node.getAttribute("data-go");
+      if (goTarget(letter) && names.indexOf(letter) < 0) names.push(letter);
+    });
+    hint.textContent = "g … " + names.join(" ");
+    hint.hidden = false;
+  }
+
+  function endChord() {
+    if (chord !== null) window.clearTimeout(chord);
+    chord = null;
+    chordHint(false);
+  }
+
+  function filterList(input) {
+    var words = (input.value || "").toLowerCase().split(/\s+/).filter(Boolean);
+    var items = document.querySelectorAll(input.getAttribute("data-filter"));
+    var shown = 0;
+    Array.prototype.forEach.call(items, function (item) {
+      var text = (item.getAttribute("data-filter-text") || item.textContent || "").toLowerCase();
+      var hit = words.every(function (word) {
+        return text.indexOf(word) >= 0;
+      });
+      item.hidden = !hit;
+      if (hit) shown += 1;
+    });
+    var count = input.getAttribute("data-filter-count");
+    var note = count ? document.querySelector(count) : null;
+    if (note) note.textContent = words.length ? shown + " of " + items.length : "";
+  }
+
+  function focusSearch() {
+    var box = document.getElementById("search") || document.querySelector("input[data-filter]");
+    if (!box) return false;
+    box.focus();
+    if (box.select) box.select();
+    return true;
   }
 
   function copyText(button) {
@@ -445,7 +710,7 @@
     else fallback();
   }
 
-  // -- events -------------------------------------------------------------------------------------
+  // -- the keys -------------------------------------------------------------------------------------
   function typing(event) {
     var target = event.target;
     if (!target || !target.closest) return false;
@@ -453,10 +718,71 @@
       !(target.matches && target.matches("dialog"));
   }
 
+  // scope: where a key applies; the help dialog's rows carry the same data-scope (app.js has the
+  // same table for the live pages)
+  var SCOPES = {
+    any: function () { return true; },
+    source: function () { return !!document.querySelector(".src-lines"); },
+    files: function () { return !!document.querySelector("a[data-key-nav]"); },
+    map: function () { return !!document.querySelector("button[data-map]"); },
+    modules: function () { return !!document.querySelector("button[data-map-modules]"); },
+    search: function () { return !!(document.getElementById("search") || document.querySelector("input[data-filter]")); },
+    go: function () { return !!document.querySelector("[data-go]"); }
+  };
+
+  function openHelp() {
+    var dialog = document.getElementById("keys-help");
+    if (!dialog || !dialog.showModal) return false;
+    Array.prototype.forEach.call(dialog.querySelectorAll("[data-scope]"), function (row) {
+      var test = SCOPES[row.getAttribute("data-scope")];
+      var letter = row.getAttribute("data-go-row");
+      row.hidden = !(test ? test() : true) || (letter ? !goTarget(letter) : false);
+    });
+    Array.prototype.forEach.call(dialog.querySelectorAll("table"), function (table) {
+      var empty = !table.querySelector("tr:not([hidden])");
+      table.hidden = empty;
+      var head = table.previousElementSibling;
+      if (head && head.tagName === "H3") head.hidden = empty;
+    });
+    dialog.showModal();
+    return true;
+  }
+
+  function dismiss() {
+    endChord();
+    var popover = document.getElementById("line-tests");
+    if (popover && popover.matches && popover.matches(":popover-open")) popover.hidePopover();
+    var results = document.getElementById("search-results");
+    if (results) results.hidden = true;
+    return false; // Escape keeps its native work too (closing a dialog)
+  }
+
+  var KEYS = {
+    "?": { scope: "any", run: openHelp },
+    "Escape": { scope: "any", run: dismiss },
+    "/": { scope: "search", run: focusSearch },
+    "g": { scope: "go", run: function () { chord = window.setTimeout(endChord, 1500); chordHint(true); } },
+    "j": { scope: "source", run: function () { step(".ln.mis:not(.cont), .ln.par:not(.cont)", 1); } },
+    "k": { scope: "source", run: function () { step(".ln.mis:not(.cont), .ln.par:not(.cont)", -1); } },
+    "n": { scope: "source", run: function () { stepFunction(1); } },
+    "N": { scope: "source", run: function () { stepFunction(-1); } },
+    "t": { scope: "source", run: toggleTests },
+    "i": { scope: "source", run: toggleGrid },
+    "h": { scope: "source", run: toggleHighlight },
+    ".": { scope: "source", run: toggleChips },
+    "[": { scope: "files", run: function () { follow("prev"); } },
+    "]": { scope: "files", run: function () { follow("next"); } },
+    "m": { scope: "map", run: function () { cycleMap("data-map"); } },
+    "M": { scope: "modules", run: function () { cycleMap("data-map-modules"); } }
+  };
+  // after "g": overview, tests, map (the report has no economy or invariants pages)
+  var GO_KEYS = ["o", "t", "m"];
+
   document.addEventListener("keydown", function (event) {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     var key = event.key;
-    if (event.target && event.target.id === "search") {
+    var target = event.target;
+    if (target && target.id === "search") {
       if (key === "ArrowDown") { moveSelection(1); event.preventDefault(); }
       else if (key === "ArrowUp") { moveSelection(-1); event.preventDefault(); }
       else if (key === "Enter") {
@@ -464,37 +790,46 @@
         var pick = list && (list.querySelector('li[aria-selected="true"] a') || list.querySelector("li a"));
         if (pick) { window.location.assign(pick.href); event.preventDefault(); }
       } else if (key === "Escape") {
-        event.target.value = "";
+        target.value = "";
         renderSearch();
-        event.target.blur();
+        target.blur();
+      }
+      return;
+    }
+    if (target && target.matches && target.matches("input[data-filter]")) {
+      if (key === "Escape") {
+        target.value = "";
+        filterList(target);
+        target.blur();
+      } else if (key === "Enter") {
+        var first = Array.prototype.find.call(document.querySelectorAll(target.getAttribute("data-filter")), function (item) {
+          return !item.hidden;
+        });
+        var link = first && (first.matches("a[href]") ? first : first.querySelector("a[href]"));
+        if (link) {
+          event.preventDefault();
+          window.location.assign(link.href);
+        }
       }
       return;
     }
     if (typing(event)) return;
-    if ((key === "Enter" || key === " ") && event.target && event.target.matches &&
-        event.target.matches('[role="button"].sg-cell')) {
+    if ((key === "Enter" || key === " ") && target && target.matches && target.matches('[role="button"].sg-cell')) {
       event.preventDefault();
-      showCell(event.target);
+      showCell(target);
       return;
     }
-    var handled = true;
-    if (key === "?") {
-      var dialog = document.getElementById("keys-help");
-      if (dialog && dialog.showModal) dialog.showModal();
-    } else if (key === "/") {
-      var input = document.getElementById("search");
-      if (input) input.focus();
-    } else if (key === "[") follow("prev");
-    else if (key === "]") follow("next");
-    else if (!document.querySelector(".src-lines")) handled = false;
-    else if (key === "j") step(".ln.mis:not(.cont), .ln.par:not(.cont)", 1);
-    else if (key === "k") step(".ln.mis:not(.cont), .ln.par:not(.cont)", -1);
-    else if (key === "n") stepFunction(1);
-    else if (key === "N") stepFunction(-1);
-    else if (key === "t") toggleTests();
-    else if (key === "i") toggleGrid();
-    else handled = false;
-    if (handled) event.preventDefault();
+    if (chord !== null) {
+      endChord();
+      if (GO_KEYS.indexOf(key) >= 0) {
+        event.preventDefault();
+        go(key);
+        return;
+      }
+    }
+    var binding = Object.prototype.hasOwnProperty.call(KEYS, key) ? KEYS[key] : null;
+    if (!binding || !SCOPES[binding.scope]()) return;
+    if (binding.run() !== false) event.preventDefault();
   });
 
   document.addEventListener("click", function (event) {
@@ -502,20 +837,19 @@
     if (!target || !target.closest) return;
     if (target.closest("#theme-toggle")) {
       var next = THEMES[(THEMES.indexOf(storedTheme()) + 1) % THEMES.length];
-      try {
-        window.localStorage.setItem(THEME_KEY, next);
-      } catch (e) {
-        /* storage blocked: the theme still applies for this page */
-      }
+      save(THEME_KEY, next);
       applyTheme(next);
       return;
     }
+    if (target.closest("[data-highlight-toggle]")) { toggleHighlight(); return; }
     var copy = target.closest("button.copy[data-copy-target]");
     if (copy) { copyText(copy); return; }
     var sorter = target.closest("table.sortable th button[data-sort]");
     if (sorter) { sortTable(sorter); return; }
-    var map = target.closest("[data-map]");
-    if (map) { showMap(map.getAttribute("data-map")); return; }
+    var map = target.closest("button[data-map]");
+    if (map) { chooseMap(map.getAttribute("data-map"), view.modules); return; }
+    var weight = target.closest("button[data-map-modules]");
+    if (weight) { chooseMap(view.mode, weight.getAttribute("data-map-modules")); return; }
     var cell = target.closest(".sg-cell");
     if (cell) { showCell(cell); return; }
     var gutter = target.closest("button.gt");
@@ -578,12 +912,22 @@
   }, true);
 
   document.addEventListener("input", function (event) {
-    if (event.target && event.target.id === "search") renderSearch();
+    var target = event.target;
+    if (!target) return;
+    if (target.id === "search") renderSearch();
+    else if (target.matches && target.matches("input[data-filter]")) filterList(target);
   });
 
   document.addEventListener("change", function (event) {
     if (event.target && event.target.id === "lens") applyLens(event.target.value);
   });
+
+  // the lens menu gets its options just before it opens (mouse, touch or keyboard focus)
+  function primeLens(event) {
+    if (event.target && event.target.id === "lens") fillLens(event.target);
+  }
+  document.addEventListener("pointerdown", primeLens, true);
+  document.addEventListener("focusin", primeLens);
 
   window.addEventListener("hashchange", lensFromHash);
 
@@ -595,6 +939,13 @@
     if (window.location.hash && window.location.hash.indexOf("lens=") < 0) {
       var target = document.getElementById(window.location.hash.slice(1));
       if (target && target.classList.contains("ln")) setCurrent(target, false);
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-highlight-toggle]"), function (button) {
+      button.setAttribute("aria-pressed", view.highlight === "missing" ? "true" : "false");
+    });
+    if (param("highlight")) keepView(view.highlight);
+    if (document.querySelector("[data-map-view]") && (view.mode !== "gap" || view.modules !== "thin")) {
+      showMap(view.mode, view.modules);
     }
     document.body.dataset.ready = "1";
   });

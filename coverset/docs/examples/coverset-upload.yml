@@ -1,0 +1,49 @@
+# Upload mode: the tests run in this workflow; coverset turns the bundle into the PR's verdict.
+# Copy to .github/workflows/tests.yml and replace <owner>/<repo>@<sha> (the repository that holds
+# coverset, pinned to a commit) and the server URL. See docs/upload.md.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write # the upload proves which repository it comes from with the job's OIDC token
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The PR head, not GitHub's temporary merge commit: coverage line numbers must match the
+          # commit the upload names.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e . pytest # your project's own test dependencies
+      - uses: <owner>/<repo>/coverset/src/coverset/forge/gha/upload@<sha>
+        with:
+          server: https://coverset.example.com
+          package: git+https://github.com/<owner>/<repo>@<sha>#subdirectory=coverset/packages/pytest-coverset
+          label: py${{ matrix.python }} # one shard per matrix job; coverset merges them into one run
+          shards: 2 # the verdict waits until both are in
+          args: -q
+
+# Without the composite action, the same in three lines (OIDC is picked up automatically; note that
+# here the test step can also see the job's OIDC request variables):
+#
+#      - run: python -m pip install "git+https://github.com/<owner>/<repo>@<sha>#subdirectory=coverset/packages/pytest-coverset"
+#      - run: python -m pytest --coverset
+#      - if: always()
+#        run: coverset-ci upload --server https://coverset.example.com --with-sources
+#
+# With a repository token instead of OIDC (a coverset repo token with the upload scope, stored as a
+# secret), add `env: {COVERSET_TOKEN: "${{ secrets.COVERSET_TOKEN }}"}` to the upload step, or
+# `token: ${{ secrets.COVERSET_TOKEN }}` to the action.

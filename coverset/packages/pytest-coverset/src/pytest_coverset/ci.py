@@ -1,5 +1,7 @@
 """``coverset-ci wait``: block a CI job on a coverset verdict and replay its results pytest-style.
 
+(``coverset-ci upload``, upload mode's command, lives in :mod:`pytest_coverset.ci_upload`.)
+
 The command never creates runs. It resolves the run for ``(repo_id, sha)`` through ``GET /v1/verdict``
 (404 means "not there yet": keep polling until the timeout), streams ``/v1/runs/<id>/events`` as
 ``text/event-stream`` (reconnecting with ``Last-Event-ID``) and falls back to JSON polling
@@ -362,7 +364,9 @@ def _json_or_none(text: str) -> Any:
 
 def build_parser() -> argparse.ArgumentParser:
     """The ``coverset-ci`` argument parser."""
-    parser = argparse.ArgumentParser(prog="coverset-ci", description="Wait for a coverset verdict from CI.")
+    parser = argparse.ArgumentParser(
+        prog="coverset-ci", description="Wait for a coverset verdict, or upload a bundle, from CI."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     wait = commands.add_parser("wait", help="block until the coverset run for a commit reaches a verdict")
     wait.add_argument("--server", required=True, help="coverset base URL, e.g. https://coverset.example.com")
@@ -376,6 +380,9 @@ def build_parser() -> argparse.ArgumentParser:
     wait.add_argument(
         "--token-env", metavar="NAME", help="environment variable holding a bearer (OIDC) token"
     )
+    from pytest_coverset.ci_upload import add_parser as add_upload_parser
+
+    add_upload_parser(commands)
     return parser
 
 
@@ -383,6 +390,10 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None) -> int
     """Console entry point; returns the process exit code."""
     args = build_parser().parse_args(argv)
     stream = out if out is not None else sys.stdout
+    if args.command == "upload":
+        from pytest_coverset.ci_upload import run_upload
+
+        return run_upload(args, out=stream)
     token = os.environ.get(args.token_env) if args.token_env else None
     client = ApiClient(args.server, token=token or None, deadline=time.monotonic() + args.timeout)
     waiter = Waiter(client, repo_id=args.repo_id, sha=args.sha, poll_interval=args.poll_interval, out=stream)

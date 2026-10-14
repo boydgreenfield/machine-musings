@@ -19,9 +19,9 @@ from datetime import datetime
 from typing import Any
 
 from markupsafe import Markup
-from quart import Blueprint, Response, redirect, request, url_for
+from quart import Blueprint, Response, g, redirect, request, url_for
 from sqlalchemy import func, select
-from werkzeug.exceptions import Forbidden, NotFound
+from werkzeug.exceptions import NotFound
 
 from coverset.ai.review import SOURCE_LABELS
 from coverset.db.models import Invariant, InvariantResult, PullRequest, Repo, Run, TestCase, TestStats
@@ -35,7 +35,7 @@ from coverset.facts.queries import (
 from coverset.forge.comment import missing_counts
 from coverset.orchestrator.repos import mirror_path
 from coverset.orchestrator.verdict import summary_from_json
-from coverset.web.auth import is_admin
+from coverset.web.audit import record_audit
 from coverset.web.context import app_db, app_settings
 from coverset.web.detail import build_cards, card_detail
 from coverset.web.facts_view import run_facts
@@ -51,15 +51,25 @@ from coverset.web.loaders import (
 )
 from coverset.web.pages import MAX_DB_ID, get_repo, render_page
 from coverset.web.pr_view import analyse_diff
+from coverset.web.principal import current_principal, require_repo
 from coverset.web.render.sparkline import SparkSeries, render_sparkline
 from coverset.web.render.treemap import (
+    ALGORITHMS,
+    MAP_COOKIE,
     MODES,
+    MODULE_WEIGHTS,
+    MODULE_WHY,
     Rect,
     TreeItem,
+    anchor_to,
     build_tree,
+    explicit_view_prefs,
     layout,
+    reader_map_choice,
     render_legend,
     render_treemap,
+    resolve_view,
+    weigh_modules,
 )
 from coverset.web.run_view import order_rows
 
@@ -68,6 +78,27 @@ bp = Blueprint("repos", __name__)
 HISTORY_RUNS = 12
 TOP_GAPS = 8
 THUMB_W, THUMB_H = 520, 220
+
+
+async def request_view_prefs() -> dict[str, Any]:
+    """The scoped settings' view preferences someone actually chose for this request
+    (:func:`~coverset.web.render.treemap.explicit_view_prefs` of the settings layer's
+    ``view_prefs``): ``user > repo > org > instance``. Values left at their built-in default are
+    left out, so the reader's own choice in this browser (localStorage, applied by the page's
+    script) still comes before the default. Read once per request; a page never breaks over its view
+    settings."""
+    found = g.get("_coverset_view_choices")
+    if found is None:
+        prefs: Any = None
+        try:
+            from coverset.web.settings_pages import request_view_prefs as settings_view_prefs
+
+            prefs = await settings_view_prefs()
+        except Exception:  # noqa: BLE001 - no settings layer (or no database): the defaults
+            prefs = None
+        found = explicit_view_prefs(prefs)
+        g._coverset_view_choices = found
+    return found
 
 
 def trend_sparklines(points: list[BaselinePoint], *, width: int = 220, label: str = "") -> dict[str, Markup]:
@@ -177,6 +208,7 @@ def _merged(parent: TreeItem, items: list[TreeItem]) -> TreeItem:
         covered=sum(i.covered for i in items),
         input_cov=input_cov,
         file=parent.path if noun == "files" else (items[0].file or parent.path),
+        weight=float(sum(i.size for i in items)),
     )
 
 
@@ -202,8 +234,10 @@ def _overview_facts(rid: int, branch: str, candidates: list[str] | None = None) 
     }
 
 
-async def repo_overview(repo_row: Repo) -> dict[str, Any] | None:
-    """The repo page's overview section (see the module docstring), or None without a baseline."""
+async def repo_overview(repo_row: Repo, module_weight: str = "thin") -> dict[str, Any] | None:
+    """The repo page's overview section (see the module docstring), or None without a baseline.
+    The Gap thumbnail weighs module-level code like the map (``view.map_module_weight``)."""
+    weight = module_weight if module_weight in MODULE_WEIGHTS else "thin"
     candidates = await baseline_candidates(repo_row.id, repo_row.default_branch, HISTORY_RUNS)
     found = await asyncio.to_thread(_overview_facts, repo_row.id, repo_row.default_branch, candidates)
     if found is None:
@@ -220,13 +254,14 @@ async def repo_overview(repo_row: Repo) -> dict[str, Any] | None:
         return url_for("repos.map_page", rid=rid, run=run_id, path=item.file)
 
     thumb = render_treemap(
-        thumbnail_tree(build_tree(found["nodes"]), THUMB_W, THUMB_H),
+        thumbnail_tree(weigh_modules(build_tree(found["nodes"]), weight), THUMB_W, THUMB_H),  # type: ignore[arg-type]
         mode="gap",
         width=THUMB_W,
         height=THUMB_H,
         leaf_url=leaf_url,
         dir_url=dir_url,
         label=f"Gap treemap of {repo_row.full_name} (thumbnail; each tile opens the coverage map)",
+        module_weight=weight,  # type: ignore[arg-type]
     )
     trend = found["trend"]
     return {
@@ -235,7 +270,7 @@ async def repo_overview(repo_row: Repo) -> dict[str, Any] | None:
         "map_url": map_url,
         "thumb": thumb,
         "sparks": trend_sparklines(trend, label=f"{repo_row.default_branch} baselines"),
-        "legend": render_legend("gap"),
+        "legend": render_legend("gap", weight),  # type: ignore[arg-type]
         "first": trend[0],
         "span": trend_span(trend[0].created_at, trend[-1].created_at, len(trend)),
     }
@@ -270,6 +305,7 @@ async def _dashboard_trends() -> dict[str, Any]:
 @bp.get("/repos/<int:rid>")
 async def repo(rid: int) -> Response:
     """PRs with their latest run, default-branch baselines and links to the repo's views."""
+    require_repo(rid)
     repo_row = await get_repo(rid)
     async with app_db().session() as session:
         prs = list(
@@ -291,7 +327,15 @@ async def repo(rid: int) -> Response:
         tests = await session.scalar(
             select(func.count()).select_from(TestCase).where(TestCase.repo_id == rid)
         )
-    overview = await repo_overview(repo_row)
+    modules, _ = resolve_view(
+        "map_module_weight",
+        request.args.get("modules"),
+        await request_view_prefs(),
+        MODULE_WEIGHTS,
+        "thin",
+        reader_map_choice(request.cookies.get(MAP_COOKIE)).get("map_module_weight"),
+    )
+    overview = await repo_overview(repo_row, modules)
     return await render_page(
         "repo.html",
         overview=overview,
@@ -310,6 +354,7 @@ async def run_coverage(run_id: str) -> Response:
     """A PR run's coverage lives on its PR page; other runs go to their run page."""
     async with app_db().session() as session:
         run = await require_run(session, run_id)
+        require_repo(run.repo_id)
         pr = await session.get(PullRequest, run.pr_id) if run.pr_id is not None else None
     if pr is None:
         return redirect(url_for("runs.run_page", run_id=run.id), code=302)
@@ -317,6 +362,7 @@ async def run_coverage(run_id: str) -> Response:
 
 
 async def _pr(rid: int, n: int) -> tuple[Any, PullRequest, Run | None]:
+    require_repo(rid)
     repo_row = await get_repo(rid)
     async with app_db().session() as session:
         pr = await session.scalar(
@@ -437,22 +483,50 @@ async def pr_card(rid: int, n: int, func_key: str) -> Response:
 @bp.get("/repos/<int:rid>/map")
 async def map_page(rid: int) -> Response:
     """The treemap (Gap mode by default) with a ranked table of the largest gaps."""
+    require_repo(rid)
     repo_row = await get_repo(rid)
-    mode = request.args.get("mode", "gap")
-    if mode not in MODES:
-        mode = "gap"
+    prefs = await request_view_prefs()
+    reader = reader_map_choice(request.cookies.get(MAP_COOKIE))
+    mode, mode_from = resolve_view(
+        "map_mode", request.args.get("mode"), prefs, MODES, "gap", reader.get("map_mode")
+    )
+    modules, modules_from = resolve_view(
+        "map_module_weight",
+        request.args.get("modules"),
+        prefs,
+        MODULE_WEIGHTS,
+        "thin",
+        reader.get("map_module_weight"),
+    )
+    algorithm = request.args.get("layout") if request.args.get("layout") in ALGORITHMS else "ordered"
+    # the view parameters the page's own links keep (the mode is always in them)
+    keep = {k: str(request.args.get(k)) for k in ("modules", "layout")}
+    keep = {k: v for k, v in keep.items() if v in (MODULE_WEIGHTS if k == "modules" else ALGORITHMS)}
+    map_view = {"mode": mode, "mode_from": mode_from, "modules": modules, "modules_from": modules_from}
     async with app_db().session() as session:
         wanted = request.args.get("run")
         run = await require_run(session, wanted, rid) if wanted else await default_run(session, repo_row)
+        baseline = await default_run(session, repo_row) if run is not None and run.pr_id is not None else None
     if run is None:
-        return await render_page("map.html", repo=repo_row, run=None, mode=mode)
+        return await render_page("map.html", repo=repo_row, run=None, mode=mode, map_view=map_view)
     facts = await facts_for(run)
     nodes = await asyncio.to_thread(facts.treemap_nodes) if facts.exists else []
     root = request.args.get("path") or None
     known = {node.path for node in nodes}
     if root is not None and root not in known:
         root = None
-    tree = build_tree(nodes, root=root)
+    tree = weigh_modules(build_tree(nodes, root=root), modules)  # type: ignore[arg-type]
+    frame_from = None
+    if baseline is not None and baseline.id != run.id:
+        # a PR run in its baseline's frame: the same rectangles, the PR's colours
+        base_facts = await facts_for(baseline)
+        if base_facts.exists:
+            base_nodes = await asyncio.to_thread(base_facts.treemap_nodes)
+            frame_root = root if root is None or root in {n.path for n in base_nodes} else None
+            if root is None or frame_root is not None:
+                frame = weigh_modules(build_tree(base_nodes, root=frame_root), modules)  # type: ignore[arg-type]
+                tree, differs = anchor_to(tree, frame)
+                frame_from = baseline if differs else None
 
     def leaf_url(item: Any) -> str:
         anchor = f"#L{item.def_line}" if item.def_line else ""
@@ -461,10 +535,16 @@ async def map_page(rid: int) -> Response:
     def dir_url(item: Any) -> str:
         if item.kind == "file":
             return url_for("files.source", rid=rid, path=item.path, run=run.id)
-        return url_for("repos.map_page", rid=rid, mode=mode, path=item.path, run=run.id)
+        return url_for("repos.map_page", rid=rid, mode=mode, path=item.path, run=run.id, **keep)
 
     svg = render_treemap(
-        tree, mode=mode, leaf_url=leaf_url, dir_url=dir_url, label=f"Treemap of {repo_row.full_name}"
+        tree,
+        mode=mode,  # type: ignore[arg-type]
+        leaf_url=leaf_url,
+        dir_url=dir_url,
+        label=f"Treemap of {repo_row.full_name}",
+        module_weight=modules,  # type: ignore[arg-type]
+        algorithm=algorithm,  # type: ignore[arg-type]
     )
     leaves = [
         n for n in nodes if n.kind == "function" and n.statements and (not root or n.path.startswith(root))
@@ -481,7 +561,13 @@ async def map_page(rid: int) -> Response:
         mode=mode,
         modes=MODES,
         svg=svg,
-        legend=render_legend(mode),
+        legend=render_legend(mode, modules),  # type: ignore[arg-type]
+        module_weights=MODULE_WEIGHTS,
+        modules=modules,
+        module_why=MODULE_WHY,
+        keep=keep,
+        map_view=map_view,
+        frame_from=frame_from,
         gaps=gaps[:MAX_GAP_ROWS],
         gaps_total=len(gaps),
         never_called=never_called,
@@ -558,6 +644,7 @@ async def _test_rows(rid: int, test_id: int | None = None) -> list[dict[str, Any
 @bp.get("/repos/<int:rid>/tests")
 async def tests_page(rid: int) -> Response:
     """Every test with fail rate, flakiness, durations and the quarantine toggle."""
+    require_repo(rid)
     repo_row = await get_repo(rid)
     rows = await _test_rows(rid)
     sort = request.args.get("sort", "risk")
@@ -575,14 +662,15 @@ async def tests_page(rid: int) -> Response:
                 r["nodeid"],
             )
         )
-    return await render_page("tests.html", repo=repo_row, rows=rows, sort=sort, can_quarantine=is_admin())
+    return await render_page(
+        "tests.html", repo=repo_row, rows=rows, sort=sort, can_quarantine=current_principal().can(rid, "write")
+    )
 
 
 @bp.post("/repos/<int:rid>/tests/<int:test_id>/quarantine")
 async def toggle_quarantine(rid: int, test_id: int) -> Response:
-    """Flip a test's quarantine flag (admin only; the access guard has checked the CSRF token)."""
-    if not is_admin():
-        raise Forbidden()
+    """Flip a test's quarantine flag (needs ``write`` on the repo; the guard checked the CSRF token)."""
+    principal = require_repo(rid, "write")
     async with app_db().session() as session:
         case = await session.get(TestCase, test_id)
         if case is None or case.repo_id != rid:
@@ -590,6 +678,10 @@ async def toggle_quarantine(rid: int, test_id: int) -> Response:
         form = await request.form
         wanted = form.get("quarantined")
         case.quarantined = (wanted == "1") if wanted in ("0", "1") else not case.quarantined
+        record_audit(
+            session, principal, "quarantine", target_kind="test", target_id=test_id, repo_id=rid,
+            details={"quarantined": case.quarantined},
+        )
         await session.commit()
         quarantined = await session.scalar(
             select(func.count()).select_from(TestCase).where(TestCase.repo_id == rid, TestCase.quarantined)
@@ -611,6 +703,7 @@ async def toggle_quarantine(rid: int, test_id: int) -> Response:
 @bp.get("/repos/<int:rid>/invariants")
 async def invariants_page(rid: int) -> Response:
     """Invariants with status history and coverage lens; ``?run=`` compares a PR run with its base."""
+    require_repo(rid)
     repo_row = await get_repo(rid)
     async with app_db().session() as session:
         specs = list(

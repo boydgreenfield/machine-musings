@@ -1,0 +1,161 @@
+{% extends "layout.html" %}
+{% from "_macros.html" import test_ref %}
+{% macro tref(nodeid) %}{% set page_of = test_link(nodeid) %}{{ test_ref(nodeid, link(page_of) if page_of else none) }}{% endmacro %}
+{% block title %}Test economy{% endblock %}
+{% block main %}
+{#- The static report's Economy page (report/economy.py write_economy_page): the live Economy
+    page's five sections on one page, from the bundle and its sources. -#}
+<link rel="stylesheet" href="{{ link(stylesheet) }}">
+{% set t = view.totals %}
+<div class="page-head">
+  <h1>Test economy</h1>
+  <p class="meta"><span>{{ origin }}</span><span>{{ t.tests|plural('test') }}</span><span>{{ ms(t.total_duration_ms) }} of test time</span></p>
+</div>
+<nav class="seg eco-tabs" aria-label="Economy sections"><a href="#eco-tiles">Overview</a><a href="#eco-tests">Leverage</a><a href="#eco-minimal">Redundant</a><a href="#eco-families">Families</a><a href="#eco-functions">Functions</a></nav>
+{% if view.notes %}
+<details class="eco-notes-strip" id="eco-notes">
+  <summary><span class="badge">not measured</span> {{ view.notes|length }} part{{ '' if view.notes|length == 1 else 's' }} of this economy could not be measured</summary>
+  <ul class="eco-notes">{% for note in view.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+</details>
+{% endif %}
+
+<div class="stats eco-tiles" id="eco-tiles">
+  <div class="stat" data-stat="tests"><div class="value">{{ t.tests }}</div><div class="label">tests · {{ t.measured_tests }} measured from source</div></div>
+  <div class="stat" data-stat="leverage"><div class="value">{{ lev(median) }}</div><div class="label">median leverage · {{ t.unique_facts }} unique facts in all</div></div>
+  <div class="stat" data-stat="statements"><div class="value">{{ t.statements }}</div><div class="label">test statements · +{{ t.helper_statements }} in helpers · {{ t.asserts }} assertions</div></div>
+  <div class="stat" data-stat="minimal"><div class="value">{{ t.minimal_set_size }} <span class="of">/ {{ t.tests }}</span></div><div class="label">tests keep every fact · {{ ms(t.minimal_set_duration_ms) }} of {{ ms(t.total_duration_ms) }}</div></div>
+  <div class="stat{{ ' eco-warn' if t.removable_candidates }}" data-stat="removable"><div class="value">{{ t.removable_candidates }}</div><div class="label">removable candidates · {{ ms(t.removable_duration_ms) }} · cover nothing the others miss</div></div>
+  <div class="stat" data-stat="groups"><div class="value">{{ t.equivalence_groups }}</div><div class="label">groups of identical flows · {{ t.tests_in_groups }} tests · {{ t.dominated }} dominated</div></div>
+  <div class="stat" data-stat="families"><div class="value">{{ t.collapsible_families }} <span class="of">/ {{ t.families }}</span></div><div class="label">parametrized families repeat a flow · {{ t.redundant_cases }} redundant cases</div></div>
+  <div class="stat{{ ' eco-warn' if t.assertion_free }}" data-stat="assertion-free"><div class="value">{{ t.assertion_free }}</div><div class="label">tests with no assertion</div></div>
+  <div class="stat" data-stat="indirect"><div class="value">{{ t.indirect_only_functions }}</div><div class="label">functions only ever tested indirectly</div></div>
+  <div class="stat{{ ' eco-warn' if t.untested_functions }}" data-stat="untested"><div class="value">{{ t.untested_functions }} <span class="of">/ {{ t.functions }}</span></div><div class="label">functions no test ran</div></div>
+  <div class="stat{{ ' eco-warn' if t.handlers_unexercised }}" data-stat="handlers"><div class="value">{% if t.handlers_total is none %}n/m{% else %}{{ t.handlers_unexercised }} <span class="of">/ {{ t.handlers_total }}</span>{% endif %}</div><div class="label">exception handlers no test ran</div></div>
+  <div class="stat{{ ' eco-warn' if t.stale_tests }}" data-stat="stale"><div class="value">{% if t.stale_tests is none %}n/m{% else %}{{ t.stale_tests }}{% endif %}</div><div class="label">stale tests · every function they cover changed since they did</div></div>
+</div>
+
+{% if tax_line %}
+{% set x = tax_line %}
+<section class="panel eco-tax{{ ' is-flagged' if x.flagged }}" id="test-tax" data-flagged="{{ 'true' if x.flagged else 'false' }}">
+  <div class="panel-head"><h2>Test tax</h2>{% if not x.statements_measured %}<span class="status s-neutral">statements not measured</span>{% elif x.flagged %}<span class="status s-fail">over threshold</span>{% else %}<span class="status s-pass">within threshold</span>{% endif %}<span class="aside">{% if view.run_id == 'bundle' %}against the --compare base{% else %}against run {{ view.tax.base_run_id if view.tax else '' }}{% if view.tax and not view.tax.base_exact %} (not the base commit's){% endif %}{% endif %}</span></div>
+  <p class="eco-tax-line">{% if x.statements_measured %}<strong>{{ x.added_statements|plural('test statement') }}</strong> added{% else %}Test statements not measured (the base's own test files were not read: <code>coverset tests tax --base-ref</code> reads them);{% endif %} for <strong>{{ x.newly_covered_lines }}</strong> newly covered line{{ '' if x.newly_covered_lines == 1 else 's' }}{% if x.new_classes %} and <strong>{{ x.new_classes }}</strong> input class{{ '' if x.new_classes == 1 else 'es' }}{% endif %}</p>
+  {% if x.statements_measured %}<p>{{ '%.1f'|format(x.tax) }} statements per newly covered fact · threshold {{ '%g'|format(x.threshold) }}</p>{% endif %}
+  <p class="muted">{{ x.new_tests|plural('new test') }}{% if x.duplicate_count %} · {{ x.duplicate_count }} repeat an existing test's flow{% endif %}</p>
+  {% if findings.lowest %}<h3>New tests with the lowest leverage</h3><ul class="eco-list">{% for r in findings.lowest %}<li>{{ tref(r.nodeid) }} <span class="muted">leverage {{ lev(r.leverage) }} · {{ r.unique_facts }} unique · {{ r.statements|plural('statement') if r.statements is not none else 'statements n/m' }}</span></li>{% endfor %}</ul>{% endif %}
+  {% if findings.duplicates %}<h3>New tests that duplicate existing flows</h3><ul class="eco-list">{% for d in findings.duplicates[:20] %}<li>{{ tref(d.test.nodeid) }} <span class="badge">{{ 'same flow as' if d.how == 'same flow' else 'covered entirely by' }}</span> {{ tref(d.of) }}</li>{% endfor %}</ul>{% endif %}
+</section>
+{% endif %}
+
+<div class="grid-2 eco-overview">
+  <section class="panel">
+    <div class="panel-head"><h2>Leverage</h2><span class="aside">median {{ lev(median) }} · tests per bin</span></div>
+    <div class="eco-hist-box">{{ histogram }}</div>
+    <p class="muted">Leverage is unique facts per test statement (its own plus its helpers'). A test at 0 covers nothing another test does not; low leverage is normal for a second test of a function, so read the extremes.</p>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Biggest tests that add nothing alone</h2><span class="aside">no unique fact, most statements first</span></div>
+    {% if zero_big %}
+    <table class="eco-compact">
+      <thead><tr><th>Test</th><th class="num">Statements</th><th class="num">Asserts</th></tr></thead>
+      <tbody>{% for r in zero_big %}<tr><td class="nodeid">{{ tref(r.nodeid) }}</td><td class="num">{{ r.statements }}{% if r.helper_statements %} <span class="muted">+{{ r.helper_statements }}</span>{% endif %}</td><td class="num">{{ r.asserts if r.asserts is not none else '–' }}</td></tr>{% endfor %}</tbody>
+    </table>
+    <p class="muted">{{ view.caveat }}</p>
+    {% else %}<p class="empty">Every measured test covers something no other test does.</p>{% endif %}
+  </section>
+</div>
+
+<section class="panel lazy-panel" id="eco-tests">
+  <div class="panel-head"><h2>Every test</h2><span class="aside">{% if rows|length < rows_total %}the {{ rows|length }} lowest-leverage of {{ rows_total }}{% else %}{{ rows_total }}{% endif %} · lowest leverage first; click a column to sort</span></div>
+  <div class="table-scroll">
+  <table class="sortable eco-tests-table">
+    <thead><tr>
+      <th><button type="button" data-sort="text">Test</button></th>
+      <th class="num"><button type="button" data-sort="num">Statements</button></th>
+      <th class="num"><button type="button" data-sort="num">Asserts</button></th>
+      <th class="num"><button type="button" data-sort="num">Unique facts</button></th>
+      <th class="num"><button type="button" data-sort="num">Leverage</button></th>
+      <th class="num"><button type="button" data-sort="num">Cost / fact</button></th>
+      <th class="num"><button type="button" data-sort="num">Duration</button></th>
+      <th>Flags</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr{% if r.removable %} class="is-removable"{% endif %}>
+        <td class="nodeid" data-value="{{ r.nodeid }}">{{ tref(r.nodeid) }}</td>
+        <td class="num" data-value="{{ r.statements if r.statements is not none else -1 }}">{% if r.statements is none %}<span class="muted" title="{{ r.reason or 'not measured' }}">n/m</span>{% else %}{{ r.statements }}{% if r.helper_statements %} <span class="muted">+{{ r.helper_statements }}</span>{% endif %}{% endif %}</td>
+        <td class="num" data-value="{{ r.asserts if r.asserts is not none else -1 }}">{{ r.asserts if r.asserts is not none else '–' }}</td>
+        <td class="num" data-value="{{ r.unique_facts }}" title="{{ r.unique_lines }} unique lines, {{ r.unique_arcs }} arcs, {{ r.unique_classes }} input classes">{{ r.unique_facts }}</td>
+        <td class="num" data-value="{{ '%.4f'|format(r.leverage) if r.leverage is not none else -1 }}">{{ lev(r.leverage) }}</td>
+        <td class="num" data-value="{{ '%.3f'|format(r.cost_per_fact_ms) if r.cost_per_fact_ms is not none else -1 }}">{{ ms(r.cost_per_fact_ms) if r.cost_per_fact_ms is not none else ('∞' if r.unique_facts == 0 and r.duration_ms else '–') }}</td>
+        <td class="num" data-value="{{ '%.3f'|format(r.duration_ms) if r.duration_ms is not none else -1 }}">{{ ms(r.duration_ms) }}</td>
+        <td class="eco-flags">
+          {%- if r.removable %}<span class="badge eco-flag-removable">candidate</span> {% endif -%}
+          {%- if r.group_id %}<span class="badge">same flow</span> {% endif -%}
+          {%- if r.dominated_by %}<span class="badge" title="covered entirely by {{ r.dominated_by }}">subset</span> {% endif -%}
+          {%- if r.assertion_free %}<span class="badge eco-flag-warn">no assert</span> {% endif -%}
+          {%- if r.stale %}<span class="badge eco-flag-warn">stale</span> {% endif -%}
+          {%- if r.empty %}<span class="badge">no facts</span> {% endif -%}
+          {%- if not r.measured %}<span class="badge" title="{{ r.reason or '' }}">not measured</span>{% endif -%}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<p class="eco-caveat" role="note"><strong>Candidates, not verdicts.</strong> {{ view.caveat }}</p>
+<section class="panel" id="eco-minimal">
+  <div class="panel-head"><h2>Minimal set</h2><span class="aside">a duration-weighted greedy cover of every line, arc and input shape, pruned so no kept test can go</span></div>
+  <p class="eco-split"><span><strong>Keeps {{ minimal.keep|length }}</strong> of {{ view.tests|length }} tests ({{ ms(minimal.keep_ms) }})</span><span><strong>Drops {{ minimal.drop|length }}</strong> removable candidates ({{ ms(minimal.drop_ms) }})</span>{% if minimal.uncompared %}<span>{{ minimal.uncompared|length }} with no production fact (never dropped)</span>{% endif %}</p>
+  {% if minimal.drop %}<p><a class="btn secondary" href="{{ link(deselect) }}" download data-deselect>Download the drops as pytest arguments</a> <span class="muted">then run <code>pytest @{{ deselect }}</code> (pytest 8.2+)</span></p>{% endif %}
+  <div class="grid-2">
+    <details class="eco-keepdrop" open><summary>Drops: removable candidates <span class="muted">{{ minimal.drop|length }}, slowest first</span></summary>
+      {% if minimal.drop %}<ol class="eco-list">{% for r in minimal.drop %}<li>{{ tref(r.nodeid) }} <span class="muted">{{ ms(r.duration_ms) }}</span></li>{% endfor %}</ol>{% else %}<p class="empty">Every test covers something the others do not.</p>{% endif %}
+    </details>
+    <details class="eco-keepdrop"><summary>Keeps <span class="muted">{{ minimal.keep|length }}</span></summary>
+      <ol class="eco-list">{% for r in minimal.keep %}<li>{{ tref(r.nodeid) }} <span class="muted">{{ r.unique_facts }} unique · {{ ms(r.duration_ms) }}</span></li>{% endfor %}</ol>
+    </details>
+  </div>
+</section>
+
+<div class="grid-2">
+<section class="panel" id="eco-groups">
+  <div class="panel-head"><h2>Identical flows</h2><span class="aside">{{ redundancy.groups|length }} group{{ '' if redundancy.groups|length == 1 else 's' }}</span></div>
+  {% if redundancy.groups %}<div class="eco-groups">{% for g in redundancy.groups %}<article class="eco-group"><h3>{{ g.nodeids|length }} tests, one flow</h3><ul class="eco-list">{% for n in g.nodeids %}<li>{{ tref(n) }}{% if n == g.keep %} <span class="badge eco-keep">kept</span>{% else %} <span class="badge eco-flag-removable">candidate</span>{% endif %}</li>{% endfor %}</ul></article>{% endfor %}</div>
+  {% else %}<p class="empty">No two tests have exactly the same facts.</p>{% endif %}
+</section>
+<section class="panel" id="eco-dominated">
+  <div class="panel-head"><h2>Covered entirely by another test</h2><span class="aside">{{ redundancy.dominated|length }}</span></div>
+  {% if redundancy.dominated %}<ul class="eco-list">{% for test, by in redundancy.dominated %}<li>{{ tref(test) }} <span class="muted">by</span> {{ tref(by) }}</li>{% endfor %}</ul>
+  {% else %}<p class="empty">No test's facts are a strict subset of another's.</p>{% endif %}
+</section>
+</div>
+
+<section class="panel" id="eco-families">
+  <div class="panel-head"><h2>Parametrized families</h2><span class="aside">cases against distinct input-class flows · most redundant first</span></div>
+  {% if view.families %}
+  <div class="table-scroll"><table class="eco-families-table">
+    <thead><tr><th>Family</th><th class="num">Cases</th><th class="num">Distinct flows</th><th class="num">Distinct signatures</th><th class="num">Redundant cases</th></tr></thead>
+    <tbody>{% for f in view.families %}<tr{% if f.redundant_cases %} class="is-collapsible"{% endif %}><td class="nodeid">{{ f.family|nodeid }}</td><td class="num">{{ f.cases }}</td><td class="num">{{ f.distinct_flows if f.distinct_flows is not none else '–' }}</td><td class="num">{{ f.distinct_signatures }}</td><td class="num">{% if f.redundant_cases %}<strong>{{ f.redundant_cases }}</strong>{% else %}0{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">This run has no parametrized test.</p>{% endif %}
+</section>
+
+<section class="panel" id="eco-functions">
+  <div class="panel-head"><h2>Functions</h2><span class="aside">tested only indirectly, never, or never on the error path</span></div>
+  <h3>Exception handlers no test ran</h3>
+  {% if t.handlers_total is none %}<p class="empty">Not measured: the production sources were not read.</p>
+  {% elif handlers %}<ul class="eco-list">{% for f in handlers %}{% for h in f.handlers %}<li><code>{{ f.qualname }}</code> {% if file_page(f.path) %}<a href="{{ link(file_page(f.path)) }}#L{{ h.line }}">{{ f.path }}:{{ h.line }}</a>{% else %}<span class="muted">{{ f.path }}:{{ h.line }}</span>{% endif %} catches {% for name in h.types %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</li>{% endfor %}{% endfor %}</ul>
+  {% else %}<p class="empty">Every exception handler ran under some test (or at import).</p>{% endif %}
+  <div class="grid-2">
+    <div><h3>Only tested indirectly <span class="muted">{{ indirect|length }}</span></h3>
+      {% if indirect %}<ul class="eco-list">{% for f in indirect %}<li>{% if fn_page(f.func_key) %}<a href="{{ link(fn_page(f.func_key)) }}"><code>{{ f.qualname }}</code></a>{% else %}<code>{{ f.qualname }}</code>{% endif %} <span class="muted">{{ f.path }} · {{ f.indirect_tests|plural('test') }}</span></li>{% endfor %}</ul>
+      {% else %}<p class="empty">Every observed function is called directly by some test.</p>{% endif %}</div>
+    <div><h3>Untested <span class="muted">{{ untested|length }}</span></h3>
+      {% if untested %}<ul class="eco-list">{% for f in untested %}<li>{% if fn_page(f.func_key) %}<a href="{{ link(fn_page(f.func_key)) }}"><code>{{ f.qualname }}</code></a>{% else %}<code>{{ f.qualname }}</code>{% endif %} <span class="muted">{{ f.path }}</span></li>{% endfor %}</ul>
+      {% else %}<p class="empty">Every function ran under some test.</p>{% endif %}</div>
+  </div>
+</section>
+<p class="muted eco-foot">Unique facts = unique lines × {{ view.weights.get('line', 1) }} + unique branch arcs × {{ view.weights.get('arc', 1) }} + unique input classes × {{ view.weights.get('class', 3) }}. Arcs are inferred per test from the run's branches. Definitions and caveats: docs/economy.md in the coverset repository.</p>
+{% endblock %}

@@ -1,0 +1,55 @@
+{% extends layout %}
+{% from "_macros.html" import run_name %}
+{% block title %}Economy · {{ repo.full_name }}{% endblock %}
+{% block main %}
+{#- The Economy page (web/economy.py): one run's test economy in five sections. Every number was
+    computed at finalize_run (docs/economy.md); this template only formats. -#}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / economy</div>
+<div class="page-head">
+  <h1>Test economy</h1>
+  {% if run %}
+  <p class="meta">
+    <span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r"><code>{{ run.head_sha|sha }}</code></a> · {{ run_name(run, prs) }}</span>
+    {% if run.pr_id and prs.get(run.pr_id) %}<span><a href="{{ url_for('repos.pr_page', rid=repo.id, n=prs[run.pr_id].number, run=run.id) }}">PR page</a></span>{% endif %}
+    {% if view and view.totals %}<span>{{ view.totals.tests }} tests · {{ view.totals.total_duration_ms|ms }}</span>{% endif %}
+    <span>{{ run.created_at|ago }}</span>
+  </p>
+  {% endif %}
+</div>
+
+{% if recent|length > 1 %}
+<details class="eco-runs">
+  <summary>Other runs <span class="muted">{{ recent|length }} most recent</span></summary>
+  <ul>{% for r in recent %}<li><a href="{{ url_for('economy.economy_page', rid=repo.id, run=r.id, tab=tab) }}"{% if run and r.id == run.id %} aria-current="page"{% endif %}><code>{{ r.head_sha|sha }}</code></a> {{ run_name(r, prs) }} <span class="muted">{{ r.created_at|ago }}</span></li>{% endfor %}</ul>
+</details>
+{% endif %}
+
+{% if not run %}
+<section class="panel"><p class="empty">{{ repo.full_name }} has no completed run yet.</p></section>
+{% elif not view or not view.totals %}
+<section class="panel" id="eco-missing">
+  <h2>No test economy for this run</h2>
+  <p>The economy is computed when a run's facts are finalized. {% if not view %}This run has none: it finished before the economy existed, or its facts were never finalized.{% else %}It was not computed:{% endif %}</p>
+  {% if view and view.notes %}<ul class="eco-notes">{% for note in view.notes %}<li>{{ note }}</li>{% endfor %}</ul>{% endif %}
+</section>
+{% else %}
+{% set t = view.totals %}
+<nav class="seg eco-tabs" aria-label="Economy sections">
+  {% for key, label in tabs %}<a href="{{ page_url(tab=key if key != 'overview' else None) }}" aria-current="{{ 'true' if tab == key else 'false' }}">{{ label }}</a>{% endfor %}
+</nav>
+{% if view.notes %}
+<details class="eco-notes-strip" id="eco-notes">
+  <summary><span class="badge">not measured</span> {{ view.notes|length }} part{{ '' if view.notes|length == 1 else 's' }} of this economy could not be measured</summary>
+  <ul class="eco-notes">{% for note in view.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+</details>
+{% endif %}
+
+{% if tab == 'overview' %}{% include "economy/_overview.html" %}
+{% elif tab == 'leverage' %}{% include "economy/_leverage.html" %}
+{% elif tab == 'redundant' %}{% include "economy/_redundant.html" %}
+{% elif tab == 'families' %}{% include "economy/_families.html" %}
+{% elif tab == 'functions' %}{% include "economy/_functions.html" %}
+{% endif %}
+<p class="muted eco-foot">Unique facts = unique lines × {{ view.weights.get('line', 1) }} + unique branch arcs × {{ view.weights.get('arc', 1) }} + unique input classes × {{ view.weights.get('class', 3) }}; leverage = unique facts per test statement (its own plus its helpers'). Computed when the run finished{% if view.computed_ms is not none %}, in {{ view.computed_ms|ms }}{% endif %}. Definitions and caveats: docs/economy.md.</p>
+{% endif %}
+{% endblock %}

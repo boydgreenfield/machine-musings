@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -32,10 +33,12 @@ import numpy as np
 import pyarrow as pa
 
 from coverset.analysis.shapes import cap_hits
-from coverset.facts.convert import tracer_mismatch
+from coverset.facts.aggregates import compute_summaries, write_summaries
+from coverset.facts.convert import lines_to_bitsets, tracer_mismatch
 from coverset.facts.dictionary import RepoDictionary
-from coverset.facts.schema import CALLABLE_KINDS, SCHEMAS
-from coverset.facts.store import FactsStore, conform
+from coverset.facts.economy import EconomyInputs, write_economy
+from coverset.facts.schema import CALLABLE_KINDS, ECONOMY_TABLES, SCHEMAS, SUMMARY_TABLES
+from coverset.facts.store import FactsStore, compact_layout, conform
 from coverset.facts.untrusted import BundleError, safe_rel_path
 from coverset.lang.base import (
     IMPORT_CONTEXT,
@@ -59,7 +62,7 @@ __all__ = [
     "record_shard_failure",
 ]
 
-_AGGREGATE_TABLES = ("file_cov", "func_input_cov")
+_AGGREGATE_TABLES = ("file_cov", "func_input_cov", *ECONOMY_TABLES, *SUMMARY_TABLES)
 _INT32 = 2**31 - 1
 _INT64 = 2**63 - 1
 
@@ -135,34 +138,64 @@ class _FuncResolver:
 class _LineIndex:
     """This shard's ``test_lines`` as numpy arrays sorted by (file_id, line, test_id).
 
-    Tests in ``skip`` (coverage already recorded by another shard) contribute no lines.
+    Tests in ``skip`` (coverage already recorded by another shard) contribute no lines. The arrays
+    are built without a Python loop per cell or per (test, file) array: the line tuples are read
+    by one ``np.fromiter`` and the ids are repeated per tuple (0.57 s down to 0.1 s for the real
+    5,099-test bundle's 2.1 million cells), and :meth:`tests_in` looks a file's rows up in an index
+    built once instead of binary-searching every row with a dtype conversion per call (2,700
+    calls: 0.6 s down to milliseconds).
     """
 
     def __init__(self, bundle: NeutralBundle, ids: RepoDictionary, skip: set[str]) -> None:
-        tests, files, lines = [], [], []
+        chunks: list[Sequence[int]] = []
+        lengths: list[int] = []
+        file_ids: list[int] = []
+        test_ids: list[int] = []
         for nodeid, by_path in bundle.coverage.items():
             if nodeid in skip:
                 continue
             test_id = ids.test_id(nodeid)
             for path, executed in by_path.items():
-                arr = np.asarray(executed, dtype=np.int32)
-                lines.append(arr)
-                files.append(np.full(arr.size, ids.file_id(path), dtype=np.int32))
-                tests.append(np.full(arr.size, test_id, dtype=np.int32))
-        empty = np.empty(0, dtype=np.int32)
-        test_arr = np.concatenate(tests) if tests else empty
-        file_arr = np.concatenate(files) if files else empty
-        line_arr = np.concatenate(lines) if lines else empty
+                chunks.append(executed)
+                lengths.append(len(executed))
+                file_ids.append(ids.file_id(path))
+                test_ids.append(test_id)
+        total = sum(lengths)
+        line_arr = np.fromiter(itertools.chain.from_iterable(chunks), dtype=np.int32, count=total)
+        counts = np.asarray(lengths, dtype=np.int64)
+        file_arr = np.repeat(np.asarray(file_ids, dtype=np.int32), counts)
+        test_arr = np.repeat(np.asarray(test_ids, dtype=np.int32), counts)
+        del chunks
         order = np.lexsort((test_arr, line_arr, file_arr))
-        self.test_id = test_arr[order]
-        self.file_id = file_arr[order]
-        self.line = line_arr[order]
+        test_arr, file_arr, line_arr = test_arr[order], file_arr[order], line_arr[order]
+        if test_arr.size > 1:  # a (test, file, line) cell is stored once (facts/aggregates.py relies on it)
+            keep = np.ones(test_arr.size, dtype=bool)
+            keep[1:] = (np.diff(file_arr) != 0) | (np.diff(line_arr) != 0) | (np.diff(test_arr) != 0)
+            if not keep.all():
+                test_arr, file_arr, line_arr = test_arr[keep], file_arr[keep], line_arr[keep]
+        self.test_id = test_arr
+        self.file_id = file_arr
+        self.line = line_arr
+        self._bounds: dict[int, tuple[int, int]] | None = None
+
+    def _rows_of(self, file_id: int) -> tuple[int, int]:
+        """``(start, stop)`` of ``file_id``'s rows (an index built on first use)."""
+        if self._bounds is None:
+            files = self.file_id
+            bounds: dict[int, tuple[int, int]] = {}
+            if files.size:
+                starts = np.concatenate(([0], np.flatnonzero(np.diff(files)) + 1))
+                stops = np.concatenate((starts[1:], [files.size]))
+                for f, a, b in zip(files[starts].tolist(), starts.tolist(), stops.tolist(), strict=True):
+                    bounds[int(f)] = (int(a), int(b))
+            self._bounds = bounds
+        return self._bounds.get(file_id, (0, 0))
 
     def tests_in(self, file_id: int, start: int, end: int) -> set[int]:
         """Test ids (``<import>`` excluded) with a line of ``file_id`` in ``[start, end]``."""
-        lo, hi = np.searchsorted(self.file_id, [file_id, file_id + 1])
+        lo, hi = self._rows_of(file_id)
         lines = self.line[lo:hi]
-        a, b = np.searchsorted(lines, [start, end + 1])
+        a, b = np.searchsorted(lines, np.asarray([start, end + 1], dtype=np.int64))
         found = set(self.test_id[lo + a : lo + b].tolist())
         found.discard(0)
         return found
@@ -583,6 +616,8 @@ def _prepare(
     resolver = _FuncResolver(functions)
     index = _LineIndex(bundle, ids, skip)
     tables = _shard_rows(ctx, shard_id, bundle, ids, resolver, index, test_files, skip)
+    if compact_layout():  # COVERSET_FACTS_COMPACT: also the per-(test, file) bitsets (docs/data-model.md)
+        tables["test_file_bits"] = lines_to_bitsets(index.test_id, index.file_id, index.line)
     if functions:
         tables["functions"] = _functions_table(ctx, functions, ids, language, types)
     return _conform_all(tables), resolver, skip, int(index.line.size)
@@ -725,7 +760,12 @@ def _input_cov_columns(
 
 
 def finalize_run(
-    store: FactsStore, ctx: RunContext, *, expected_shards: int, catalogue: Catalogue | None = None
+    store: FactsStore,
+    ctx: RunContext,
+    *,
+    expected_shards: int,
+    catalogue: Catalogue | None = None,
+    economy: EconomyInputs | None = None,
 ) -> FinalizeResult:
     """Compute ``file_cov`` and ``func_input_cov`` and record completeness in ``runs_dim``.
 
@@ -733,16 +773,20 @@ def finalize_run(
     of them has an ``ok`` latest attempt (extra shard ids, e.g. a re-run under a new id, neither
     count nor block completeness). Without a ``catalogue`` the input-class columns of
     ``func_input_cov`` stay null and only ``tests_called``, ``tests_sampled`` and
-    ``tests_truncated`` are filled.
+    ``tests_truncated`` are filled. The test-economy tables are written last
+    (:func:`coverset.facts.economy.write_economy`, sources from ``economy.history`` or the git
+    mirror beside the store); a failure there is logged and noted, never raised.
     """
     with store.run_lock(ctx.repo_id, ctx.run_id):
         con = store.connect(repo_id=ctx.repo_id, run_id=ctx.run_id)
         try:
             file_cov = con.execute(_FILE_COV_SQL).to_arrow_table()
             called = con.execute(_FUNC_CALLED_SQL).to_arrow_table()
+            summaries = compute_summaries(con)  # func_body, tree_leaf, line_hits (facts/aggregates.py)
         finally:
             con.close()
         store.write_table(ctx.repo_id, ctx.run_id, "file_cov", file_cov)
+        write_summaries(store, ctx.repo_id, ctx.run_id, summaries)
         func_keys = called.column("func_key").to_pylist()
         input_cov = called
         for name, values in _input_cov_columns(store, ctx, func_keys, catalogue).items():
@@ -751,6 +795,7 @@ def finalize_run(
             )
         store.write_table(ctx.repo_id, ctx.run_id, "func_input_cov", input_cov)
         ingested = _write_runs_dim(store, ctx, expected=expected_shards, finalized=True)
+        write_economy(store, ctx, economy)  # the test-economy tables; never raises (docs/economy.md)
     return FinalizeResult(
         run_id=ctx.run_id,
         expected_shards=expected_shards,

@@ -1,0 +1,143 @@
+# coverset upload: run pytest with --coverset in this job and send the bundle to coverset.
+#
+# Upload mode (docs/upload.md): the tests keep running here; coverset ingests the bundle, computes
+# patch coverage, input-class gaps and invariants, and posts the sticky comment and check run.
+#
+# Usage:
+#   permissions:
+#     contents: read
+#     id-token: write      # lets the upload prove which repository it comes from (no secret needed)
+#   steps:
+#     - uses: actions/checkout@v4
+#       with:
+#         ref: ${{ github.event.pull_request.head.sha || github.sha }}   # the PR head, not the merge commit
+#     - uses: actions/setup-python@v5
+#       with: {python-version: "3.13"}
+#     - run: pip install -r requirements-dev.txt     # your project's own test dependencies
+#     - uses: <owner>/<repo>/coverset/src/coverset/forge/gha/upload@<sha>
+#       with:
+#         server: https://coverset.example.com
+#         package: git+https://github.com/<owner>/<repo>@<sha>#subdirectory=coverset/packages/pytest-coverset
+#         label: py${{ matrix.python }}   # in a matrix: one distinct label per leg (GITHUB_JOB is the same for all)
+#         shards: 2                       # ... and how many legs upload, so the verdict waits for all
+name: coverset upload
+description: Run pytest with coverset's plugin here and upload the bundle to coverset (upload mode).
+inputs:
+  server:
+    description: Base URL of the coverset control plane (COVERSET_PUBLIC_URL).
+    required: true
+  package:
+    description: >-
+      pip requirement that provides pytest-coverset and coverset-ci. Required, with no default:
+      the name pytest-coverset is not published on PyPI, so a bare name would install whoever
+      registers it there. Use a VCS URL pinned to a commit
+      (git+https://github.com/<owner>/<repo>@<sha>#subdirectory=coverset/packages/pytest-coverset),
+      or a path inside the checkout.
+    required: true
+  token:
+    description: >-
+      A coverset repository token with the upload scope (pass a secret). Empty: authenticate with
+      the job's GitHub OIDC token instead (needs `permissions: id-token: write`).
+    required: false
+    default: ""
+  args:
+    description: Extra pytest arguments, split on whitespace (no shell quoting).
+    required: false
+    default: ""
+  working-directory:
+    description: Where to run pytest (the directory holding pyproject.toml).
+    required: false
+    default: "."
+  with-sources:
+    description: Also upload the measured, git-tracked source files ("true" or "false").
+    required: false
+    default: "true"
+  wait:
+    description: >-
+      "true": wait for coverset's verdict and exit with it (1 when it fails). "false": exit with
+      pytest's own code, and only warn when the upload fails.
+    required: false
+    default: "false"
+  label:
+    description: >-
+      Shard name. Set a distinct one per matrix leg: the default, the job id (GITHUB_JOB), is the
+      same for every leg of a matrix job. Required when shards is set.
+    required: false
+    default: ""
+  shards:
+    description: >-
+      How many labels upload for this commit (the verdict waits for all of them). Needs label.
+    required: false
+    default: ""
+  audience:
+    description: OIDC audience coverset expects (COVERSET_OIDC_AUDIENCE; default the server URL).
+    required: false
+    default: ""
+  timeout:
+    description: Seconds the upload (and, with wait, the verdict) may take.
+    required: false
+    default: "300"
+runs:
+  using: composite
+  steps:
+    - name: Install pytest-coverset
+      shell: bash
+      env:
+        COVERSET_CI_PACKAGE: ${{ inputs.package }}
+      # Composite actions do not enforce `required`, so check here. The install and the tests run
+      # with the OIDC request variables removed: neither a build backend nor the code under test can
+      # mint tokens for this job.
+      run: |
+        set -euo pipefail
+        if [ -z "${COVERSET_CI_PACKAGE}" ]; then
+          echo "::error::coverset: set the 'package' input (a pinned git URL of pytest-coverset; see docs/upload.md)"
+          exit 2
+        fi
+        env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+          python -m pip install --quiet --disable-pip-version-check "${COVERSET_CI_PACKAGE}"
+    - name: Test and upload to coverset
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        COVERSET_SERVER: ${{ inputs.server }}
+        COVERSET_TOKEN: ${{ inputs.token }}
+        COVERSET_PYTEST_ARGS: ${{ inputs.args }}
+        COVERSET_WITH_SOURCES: ${{ inputs.with-sources }}
+        COVERSET_WAIT: ${{ inputs.wait }}
+        COVERSET_LABEL: ${{ inputs.label }}
+        COVERSET_SHARDS: ${{ inputs.shards }}
+        COVERSET_AUDIENCE: ${{ inputs.audience || inputs.server }}
+        COVERSET_TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -uo pipefail
+        if [ -n "${COVERSET_SHARDS}" ] && [ -z "${COVERSET_LABEL}" ]; then
+          echo "::error::coverset: set 'label' per matrix job when 'shards' is set (the job id is the same for every leg)"
+          exit 2
+        fi
+        read -r -a pytest_args <<< "${COVERSET_PYTEST_ARGS}"
+        # The code under test never sees the OIDC request variables or the upload token.
+        env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u COVERSET_TOKEN \
+          python -m pytest --coverset "${pytest_args[@]}"
+        tests=$?
+        args=(upload --server "${COVERSET_SERVER}" --timeout "${COVERSET_TIMEOUT}")
+        [ "${COVERSET_WITH_SOURCES}" = "true" ] && args+=(--with-sources)
+        [ "${COVERSET_WAIT}" = "true" ] && args+=(--wait)
+        [ -n "${COVERSET_SHARDS}" ] && args+=(--shards "${COVERSET_SHARDS}")
+        if [ -z "${COVERSET_TOKEN}" ]; then
+          unset COVERSET_TOKEN
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::warning::coverset: no token and no OIDC (add 'permissions: id-token: write'); skipping the upload"
+            exit "${tests}"
+          fi
+        fi
+        coverset-ci "${args[@]}"
+        uploaded=$?
+        if [ "${COVERSET_WAIT}" = "true" ]; then
+          # The verdict decides; a failed upload (3) or timeout (2) fails the job too.
+          if [ "${uploaded}" -ne 0 ]; then exit "${uploaded}"; fi
+          exit "${tests}"
+        fi
+        if [ "${uploaded}" -ne 0 ]; then
+          echo "::warning::coverset: the upload failed (exit ${uploaded}); the tests' result stands"
+        fi
+        exit "${tests}"

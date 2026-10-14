@@ -40,6 +40,17 @@ What the plugin changes, and what it does not:
 * Values are never looked into beyond own data properties and intrinsic iterators: no getter,
   `toString` or proxy trap runs.
 
+## Parallel runs
+
+Any pool works and nothing needs to run single-threaded: each Vitest worker spools to its own file
+and the reporter merges them, so the default `forks` pool, `--pool=threads` and
+`--no-file-parallelism` give the same bundle. Concurrent tests inside one file (`test.concurrent`,
+`describe.concurrent`, `sequence.concurrent`) share the worker's Istanbul counters: while they
+overlap, each gets every line that ran (a superset of its own; shapes stay exact through
+`AsyncLocalStorage`), the run prints one warning, and `manifest.meta` counts `concurrent_tests` and
+`overlapping_tests`. `vitest --run --maxConcurrency=1` makes their lines exact. Details in
+[docs/typescript.md](../../docs/typescript.md#parallelism).
+
 ## Layout
 
 | File | Role |
@@ -47,7 +58,7 @@ What the plugin changes, and what it does not:
 | `src/plugin.ts` | `coversetPlugin()`: the Vite plugin (instruments measured sources, puts the setup file first, wraps Istanbul's instrumenter) |
 | `src/instrument.ts` | the source transform: the `__cs$E`/`__cs$L` helpers and their calls, Istanbul ignore hints, enum constants |
 | `src/regions.ts` | function regions (qualnames, ordinals, lines), shared by the plugin and the reporter |
-| `src/setup.ts` | `coversetSetup`: per-test counter diffs and the worker's spool |
+| `src/setup.ts` | `coversetSetup`: per-test counter diffs (a delta goes to every active test while concurrent tests overlap) and the worker's spool |
 | `src/counters.ts`, `src/branches.ts` | Istanbul counters → original lines and branch arcs |
 | `src/recorder.ts` | the shape recorder (`globalThis.__coverset__`): adaptive cap, callers, receivers |
 | `src/features.ts`, `src/redact.ts` | shape keys and redacted examples (ports of `pytest_coverset`'s) |

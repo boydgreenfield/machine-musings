@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coverset.dev/schema/prod-flows/v1.json",
+  "title": "prod-flows v1: one export window of coverset-probe (shape keys and counts, never values)",
+  "type": "object",
+  "required": [
+    "version",
+    "kind",
+    "service",
+    "env",
+    "window",
+    "funcs",
+    "rows"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "coverset.prod-flows"
+    },
+    "service": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "env": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "release": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    },
+    "window": {
+      "type": "object",
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "probe": {
+      "type": "object",
+      "maxProperties": 64
+    },
+    "funcs": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "required": [
+          "module",
+          "qualname"
+        ],
+        "properties": {
+          "module": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "qualname": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000000
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "calls": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000000000
+          },
+          "sampled": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000000000
+          },
+          "capped": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "rows": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {
+        "type": "object",
+        "required": [
+          "f",
+          "p",
+          "s",
+          "calls"
+        ],
+        "properties": {
+          "f": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000000
+          },
+          "p": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "s": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "calls": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000000000.0
+          },
+          "traces": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000000000
+          },
+          "k_ok": {
+            "type": "boolean"
+          },
+          "callers": {
+            "type": "object",
+            "maxProperties": 16,
+            "propertyNames": {
+              "pattern": "^([0-9a-f]{16}|<external>|<other>)$"
+            },
+            "additionalProperties": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000000000000.0
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "calls": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {
+        "type": "object",
+        "required": [
+          "f",
+          "v",
+          "calls"
+        ],
+        "properties": {
+          "f": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000000
+          },
+          "v": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "calls": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000000000.0
+          },
+          "traces": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000000000
+          },
+          "k_ok": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "flows": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {
+        "type": "object",
+        "required": [
+          "fs"
+        ],
+        "properties": {
+          "fs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1024,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000000
+            }
+          },
+          "traces": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000000000
+          },
+          "k_ok": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

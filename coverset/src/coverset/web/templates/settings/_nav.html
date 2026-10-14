@@ -1,0 +1,29 @@
+{# Settings sub-navigation: what this principal may configure (built by settings_pages._settings_nav). #}
+{% set here = request.endpoint or '' %}
+{% set args = request.view_args or {} %}
+<nav class="settings-nav" aria-label="Settings">
+  {% if settings_nav.preferences or settings_nav.tokens %}
+  <h2 class="settings-nav-head">Account</h2>
+  <ul>
+    {% if settings_nav.preferences %}<li><a href="{{ url_for('settings_pages.account_settings') }}"{% if here == 'settings_pages.account_settings' %} aria-current="page"{% endif %}>Your preferences</a></li>{% endif %}
+    {% if settings_nav.tokens %}<li><a href="{{ url_for('settings_pages.tokens_page') }}"{% if here in ('settings_pages.tokens_page', 'settings_pages.create_token', 'settings_pages.revoke_token') %} aria-current="page"{% endif %}>API tokens</a></li>{% endif %}
+  </ul>
+  {% endif %}
+  {% if settings_nav.admin %}
+  <h2 class="settings-nav-head">Instance</h2>
+  <ul>
+    <li><a href="{{ url_for('settings_pages.instance_settings') }}"{% if here == 'settings_pages.instance_settings' %} aria-current="page"{% endif %}>All repositories</a></li>
+    {% for org in settings_nav.orgs %}
+    <li><a href="{{ url_for('settings_pages.org_settings', owner=org) }}"{% if here == 'settings_pages.org_settings' and (args.owner or '')|lower == org %} aria-current="page"{% endif %}>Organization <span class="mono">{{ org }}</span></a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if settings_nav.repos %}
+  <h2 class="settings-nav-head">Repositories</h2>
+  <ul>
+    {% for r in settings_nav.repos %}
+    <li><a href="{{ url_for('settings_pages.repo_settings', rid=r.id) }}"{% if here == 'settings_pages.repo_settings' and args.rid == r.id %} aria-current="page"{% endif %}><span class="mono">{{ r.full_name }}</span></a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</nav>

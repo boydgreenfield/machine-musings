@@ -1,5 +1,5 @@
 """Fix-pass regressions: option forms, argument lifetimes, surrogates, tracer loss, early exits,
-xdist, receivers, callers, code-object retention and the full-trace cap. Every run is a subprocess."""
+receivers, callers, code-object retention and the full-trace cap. Every run is a subprocess."""
 
 from __future__ import annotations
 
@@ -349,28 +349,7 @@ def test_python_below_3_12_is_a_clear_usage_error() -> None:
     assert proc.stdout.startswith("USAGE pytest-coverset needs Python 3.12 or later")
 
 
-# MINOR 10: xdist ---------------------------------------------------------------------------------
-
-FAKE_XDIST = """
-def pytest_addoption(parser):
-    # pytest-xdist's own registration (`_addoption` is how a plugin may claim a lowercase short option)
-    parser.getgroup("xdist")._addoption("-n", "--numprocesses", dest="numprocesses", default=None)
-"""
-
-
-@pytest.mark.parametrize(("workers", "expected"), [("2", 4), ("auto", 4), ("0", 0)])
-def test_xdist_workers_are_refused(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, workers: str, expected: int
-) -> None:
-    pytester.makepyfile(fakexdist=FAKE_XDIST, test_one="def test_one():\n    pass\n")
-    monkeypatch.setenv("PYTHONPATH", str(pytester.path))
-    result = pytester.runpytest_subprocess(
-        "-p", "fakexdist", f"--numprocesses={workers}", "--coverset-out", "out", "test_one.py"
-    )
-    assert result.ret == expected
-    if expected:
-        assert "cannot be combined with pytest-xdist" in result.stderr.str()
-        assert not (pytester.path / "out").exists()
+# MINOR 10: xdist is supported now: test_xdist.py --------------------------------------------
 
 
 # MINOR 6 + 7: receivers and callers --------------------------------------------------------------
