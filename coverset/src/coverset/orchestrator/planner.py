@@ -63,7 +63,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import func, insert, select
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.analysis.cover import CoverSet, change_covering_set
@@ -143,6 +143,20 @@ DEFAULT_MEDIAN_S = UNKNOWN_DURATION_S
 
 WRITE_ATTEMPTS = 5
 WRITE_RETRY_DELAY_S = 0.2
+RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
+"""Postgres errors that mean "run the transaction again": a serialization failure and a detected
+deadlock. Postgres rolls the victim back, so a retry of the whole unit of work is the documented
+remedy. (A statement timeout, 57014, is not retried: repeating it would just time out again.)"""
+
+
+def is_retryable(exc: BaseException) -> bool:
+    """Whether ``exc`` is a transient database failure worth one more attempt: SQLite's busy or
+    locked error (``OperationalError``), or a Postgres deadlock or serialization failure, which
+    SQLAlchemy's asyncpg dialect raises as a plain ``DBAPIError`` carrying the SQLSTATE."""
+    if isinstance(exc, OperationalError):
+        return True
+    return isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) in RETRYABLE_SQLSTATES
+
 
 type EnvSpecBuilder = Callable[[Path, CoversetConfig], EnvSpec]
 type Work[T] = Callable[[AsyncSession], Awaitable[T]]
@@ -158,7 +172,8 @@ async def run_transaction[T](
     attempts: int = WRITE_ATTEMPTS,
     delay_s: float = WRITE_RETRY_DELAY_S,
 ) -> T:
-    """Run ``work(session)`` and commit, retrying with backoff while the database is busy.
+    """Run ``work(session)`` and commit, retrying with backoff while the database is busy (SQLite)
+    or the transaction lost a deadlock or a serialization conflict (Postgres; :func:`is_retryable`).
 
     ``work`` must be safe to repeat: a failed attempt is rolled back before the next one.
     """
@@ -168,8 +183,8 @@ async def run_transaction[T](
                 result = await work(session)
                 await session.commit()
                 return result
-        except OperationalError:
-            if attempt == attempts:
+        except DBAPIError as exc:
+            if attempt == attempts or not is_retryable(exc):
                 raise
             log.warning("database busy (attempt %d of %d); retrying", attempt, attempts)
             await asyncio.sleep(delay_s * 2 ** (attempt - 1))

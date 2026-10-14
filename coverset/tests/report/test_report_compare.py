@@ -400,7 +400,7 @@ def pr1_vs_main(demo: DemoData, tmp_path_factory: pytest.TempPathFactory) -> tup
 
 
 def test_demo_pr1_against_main(pr1_vs_main: tuple[Path, object], demo: DemoData) -> None:
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
     from coverset.web.facts_view import run_facts
 
     out, c = pr1_vs_main
@@ -414,7 +414,7 @@ def test_demo_pr1_against_main(pr1_vs_main: tuple[Path, object], demo: DemoData)
     assert len(refund) == 1 and refund[0].status == "new" and refund[0].path == "src/ledger/billing/refund.py"
     assert [f.path for f in c.files if f.status == "added"] == ["src/ledger/billing/refund.py"]  # type: ignore[attr-defined]
     # nothing is reported lost that was not: check against the facts store directly
-    store = FactsStore(demo.settings.facts_dir)  # type: ignore[attr-defined]
+    store = facts_store(demo.settings)  # type: ignore[arg-type]
     base = run_facts(store, demo.repo_id, demo.main_run)
     now = run_facts(store, demo.repo_id, demo.pr1_run)
     really_lost = {
@@ -445,6 +445,7 @@ def test_demo_cli_compare_run(demo: DemoData, tmp_path: Path, monkeypatch: pytes
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COVERSET_DATA_DIR", str(settings.data_dir))  # type: ignore[attr-defined]
     monkeypatch.setenv("COVERSET_DATABASE_URL", str(settings.database_url))  # type: ignore[attr-defined]
+    monkeypatch.setenv("COVERSET_BLOB_URL", str(settings.blob_url))  # type: ignore[attr-defined]  # "" = files
     runner = CliRunner()
     result = runner.invoke(
         _cli(),

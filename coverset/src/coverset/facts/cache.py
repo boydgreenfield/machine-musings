@@ -34,6 +34,14 @@ object of its own, so each knob is read through :func:`setting`: the value the a
 ``Settings.cache_overrides()``), else the process environment, else the default. The same registry
 serves the web's and the agent's cache knobs (``COVERSET_RUN_FACTS_*``, ``COVERSET_SOURCE_CACHE_MB``,
 ``COVERSET_AGENT_CONTEXTS``) and ``COVERSET_FACTS_COMPACT`` (:func:`compact_layout`).
+
+The object-store knobs live here too, because the facts layer has to find them in an ingest worker
+process that has no settings object, only the overrides its job carried: ``COVERSET_BLOB_URL`` and
+``COVERSET_CACHE_DIR`` (:data:`BLOB_URL_ENV`, :data:`CACHE_DIR_ENV`; ``Settings.cache_overrides()``
+includes both when a blob URL is set, which is how :class:`~coverset.facts.store.FactsStore` built
+from a bare path finds its bucket), ``COVERSET_CACHE_MAX_GB`` (:func:`cache_max_bytes`, the bound of
+the local cache in front of the object store, default 10) and ``COVERSET_BLOB_SYNC_S``
+(:func:`sync_interval`, how often a reader re-checks a run's manifest, default 5 s).
 """
 
 from __future__ import annotations
@@ -50,19 +58,25 @@ from typing import Any
 import duckdb
 
 __all__ = [
+    "BLOB_URL_ENV",
+    "CACHE_DIR_ENV",
+    "CACHE_MAX_GB_ENV",
     "CONNECTIONS",
     "RESULTS",
+    "SYNC_INTERVAL_ENV",
     "CacheStats",
     "ConnectionCache",
     "ResultCache",
     "RunStamp",
     "compact_layout",
+    "cache_max_bytes",
     "configure",
     "memory_limit",
     "override",
     "run_stamp",
     "scope_key",
     "setting",
+    "sync_interval",
     "threads",
 ]
 
@@ -117,6 +131,36 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
         return max(minimum, int(raw)) if raw.strip() else default
     except ValueError:
         return default
+
+
+BLOB_URL_ENV = "COVERSET_BLOB_URL"
+"""Where facts, uploads and uploaded sources live (empty: files under the data directory)."""
+CACHE_DIR_ENV = "COVERSET_CACHE_DIR"
+"""The disposable local cache in front of the object store (facts runs, sources, mirrors)."""
+CACHE_MAX_GB_ENV = "COVERSET_CACHE_MAX_GB"
+"""The cache's bound in GB (decimal, 10 by default): gc and start-up evict beyond it."""
+SYNC_INTERVAL_ENV = "COVERSET_BLOB_SYNC_S"
+"""Seconds between two checks of one run's manifest by a reader (5 by default; 0 checks every time)."""
+
+
+def cache_max_bytes() -> int:
+    """The local cache's bound in bytes (``COVERSET_CACHE_MAX_GB``; fractions allowed, default 10)."""
+    raw = setting(CACHE_MAX_GB_ENV).strip()
+    try:
+        gb = float(raw) if raw else 10.0
+    except ValueError:
+        gb = 10.0
+    return int(max(0.0, gb) * 1_000_000_000) if gb == gb else 10_000_000_000  # NaN: the default
+
+
+def sync_interval() -> float:
+    """Seconds a reader trusts a run's last manifest check (``COVERSET_BLOB_SYNC_S``, default 5)."""
+    raw = setting(SYNC_INTERVAL_ENV).strip()
+    try:
+        value = float(raw) if raw else 5.0
+    except ValueError:
+        return 5.0
+    return value if 0.0 <= value < 86400.0 else 5.0
 
 
 def memory_limit() -> str:

@@ -234,6 +234,13 @@ class Settings(BaseSettings):
 
     fake_now: datetime | None = None
     skip_migrations: bool = False
+    migrate_on_start: bool = True
+    """``coverset serve`` migrates the database to head before it serves (``COVERSET_MIGRATE_ON_START``,
+    what a container does at start). Every replica may: on Postgres the migration holds an advisory
+    lock (``coverset:migrate``), so concurrent starts run one after the other and the later ones find
+    the schema at head. False is for migrating once per deploy in a release step (Fly's
+    ``release_command``, an ECS one-off task); it also leaves the app's own startup migration off
+    (docs/deploy.md, "Migrations on deploy")."""
     dev_login: bool = False
     """Offer "Sign in as a local user" on the login page (``COVERSET_DEV_LOGIN``). Only honoured with
     ``COVERSET_ENV=dev``, open mode (no admin token), a loopback bind, a private public URL and the
@@ -290,7 +297,9 @@ class Settings(BaseSettings):
         if self.database_url.startswith(("postgresql://", "postgres://")):
             # Normalise the common form to the async driver so hosted-Postgres URLs paste straight in.
             self.database_url = "postgresql+asyncpg://" + self.database_url.split("://", 1)[1]
-        if self.database_url.startswith("postgresql+") and not self.database_url.startswith("postgresql+asyncpg://"):
+        if self.database_url.startswith("postgresql+") and not self.database_url.startswith(
+            "postgresql+asyncpg://"
+        ):
             raise ValueError("COVERSET_DATABASE_URL must use the asyncpg driver (postgresql+asyncpg://...)")
         if self.blob_url and not self.blob_url.startswith("s3://"):
             raise ValueError("COVERSET_BLOB_URL must be empty (local files) or an s3://bucket[/prefix] URL")
@@ -383,8 +392,9 @@ class Settings(BaseSettings):
 
     @property
     def mirrors_dir(self) -> Path:
-        """Bare git mirrors, one per repo: ``<data_dir>/mirrors/<repo_id>.git``."""
-        return self.data_dir / "mirrors"
+        """Bare git mirrors, one per repo: ``<data_dir>/mirrors/<repo_id>.git``; with an object store
+        ``<cache_dir>/mirrors`` (disposable: a missing mirror costs one clone, docs/object-store.md)."""
+        return (self.cache_dir or self.data_dir if self.blob_url else self.data_dir) / "mirrors"
 
     @property
     def hosted(self) -> bool:
@@ -394,8 +404,9 @@ class Settings(BaseSettings):
 
     @property
     def facts_dir(self) -> Path:
-        """Immutable Parquet facts: ``<data_dir>/facts/repo=<id>/run=<id>/...``."""
-        return self.data_dir / "facts"
+        """Immutable Parquet facts: ``<data_dir>/facts/repo=<id>/run=<id>/...``; with an object store
+        the local cache of the bucket's ``facts/`` (``<cache_dir>/facts``, docs/object-store.md)."""
+        return (self.cache_dir or self.data_dir if self.blob_url else self.data_dir) / "facts"
 
     @property
     def runs_dir(self) -> Path:
@@ -410,6 +421,8 @@ class Settings(BaseSettings):
             value = getattr(self, name)
             if value is not None:
                 out[env_name] = ("1" if value else "0") if isinstance(value, bool) else str(value)
+        if self.blob_url:  # an ingest worker process finds the bucket its facts dir caches from these
+            out.update(COVERSET_BLOB_URL=self.blob_url, COVERSET_CACHE_DIR=str(self.cache_dir))
         return out
 
     def now(self) -> datetime:

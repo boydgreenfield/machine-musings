@@ -40,6 +40,7 @@ def _write_table(store: FactsStore, run_id: str, table: str = "file_cov") -> Non
 def test_a_new_facts_object_for_an_unchanged_run_hits_the_cache(tmp_path: Path, calls: list[Any]) -> None:
     store = FactsStore(tmp_path / "facts")
     _write_table(store, "run-1")
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")  # tmp_path stands in for the mirror
     first = analyse_diff(tmp_path, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
     again = analyse_diff(tmp_path, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
     assert first is again and len(calls) == 1
@@ -84,3 +85,37 @@ def test_facts_without_a_store_are_not_cached(tmp_path: Path, calls: list[Any]) 
     analyse_diff(tmp_path, None, HEAD, Storeless())
     analyse_diff(tmp_path, None, HEAD, Storeless())
     assert len(calls) == 2
+
+
+def test_an_analysis_without_the_mirror_is_not_cached(tmp_path: Path, calls: list[Any]) -> None:
+    """A replica whose cache lost the mirror renders the PR page while the mirror is cloned again
+    (object store): that page's empty analysis must not outlive the clone."""
+    store = FactsStore(tmp_path / "facts")
+    _write_table(store, "run-1")
+    mirror = tmp_path / "mirrors" / "1.git"
+    analyse_diff(mirror, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
+    analyse_diff(mirror, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
+    assert len(calls) == 2, "recomputed while the mirror is missing"
+    mirror.mkdir(parents=True)
+    (mirror / "HEAD").write_text("ref: refs/heads/main\n")  # the restore finished
+    first = analyse_diff(mirror, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
+    assert analyse_diff(mirror, "b" * 40, HEAD, RunFacts(store, 1, "run-1")) is first and len(calls) == 3
+
+
+def test_an_analysis_git_failed_is_not_cached(
+    tmp_path: Path, calls: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit the mirror has not fetched yet fails ``git diff``; the next request tries again."""
+    store = FactsStore(tmp_path / "facts")
+    _write_table(store, "run-1")
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
+    failing: list[str] = []
+
+    def analyse(mirror: Path, base: str | None, head: str, facts: RunFacts) -> DiffAnalysis:
+        failing.append(head)
+        return DiffAnalysis(base=base, head=head, error="bad object")
+
+    monkeypatch.setattr(pr_view, "_analyse", analyse)
+    for _ in range(2):
+        assert analyse_diff(tmp_path, "b" * 40, HEAD, RunFacts(store, 1, "run-1")).error == "bad object"
+    assert len(failing) == 2

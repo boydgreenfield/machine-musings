@@ -25,6 +25,7 @@ Three caches keep warm pages fast (docs/data-model.md, "Caches"):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 import threading
@@ -54,11 +55,11 @@ from coverset.db.models import (
 )
 from coverset.facts.cache import override, run_stamp
 from coverset.facts.queries import summary_is_fresh
-from coverset.facts.store import FactsStore
+from coverset.facts.store import FactsStore, facts_store
 from coverset.lang.base import FuncSampling, FunctionRegion, ShapeObs
 from coverset.orchestrator.repos import RepoError, mirror_path, read_blobs
 from coverset.web.api import RUN_ID_PARAM
-from coverset.web.context import app_settings
+from coverset.web.context import app_db, app_settings
 from coverset.web.facts_view import FunctionView, RunFacts
 from coverset.web.render.source import LineFacts, SourceCache
 
@@ -67,6 +68,7 @@ __all__ = [
     "cached_run_facts",
     "clear_caches",
     "default_run",
+    "diff_mirror",
     "facts_for",
     "findings_for_run",
     "invariant_rows",
@@ -84,12 +86,47 @@ BASELINE_TRIGGERS = ("baseline", "push")
 
 def store() -> FactsStore:
     """The app's facts store."""
-    return FactsStore(app_settings().facts_dir)
+    return facts_store(app_settings())
 
 
 async def facts_for(run: Run) -> RunFacts:
     """The (cached) facts of ``run``: an :class:`IndexedRunFacts` (see the module docstring)."""
+    _restore_mirror_later(run.repo_id)  # object store: a replica without the mirror clones it
     return await asyncio.to_thread(cached_run_facts, store(), run.repo_id, run.id)
+
+
+def _restore_mirror_later(repo_id: int) -> asyncio.Task[Path | None] | None:
+    if not app_settings().blob_url:  # the local default: a mirror is state, nothing to restore
+        return None
+    from quart import current_app
+
+    from coverset.forge.registry import forge_for_app
+    from coverset.orchestrator.repos import schedule_mirror_restore
+
+    return schedule_mirror_restore(app_settings(), repo_id, db=app_db(), forge=forge_for_app(current_app))
+
+
+MIRROR_WAIT_S = 10.0
+"""How long a PR page waits for a lost mirror to be cloned again before rendering without its diff."""
+
+
+async def diff_mirror(repo_id: int) -> Path:
+    """The repository's mirror for a page's diff analysis (``pr_view.analyse_diff``).
+
+    With an object store a fresh replica (or one whose cache evicted the mirror) has none yet:
+    :func:`facts_for` has started the clone, and this waits for it up to :data:`MIRROR_WAIT_S`, so
+    the first PR page of a new replica shows its changed functions instead of an empty diff. A
+    clone that takes longer keeps running; the page renders without the diff (which is not cached)
+    and the next request has it. The local default returns the path at once.
+    """
+    mirror = mirror_path(app_settings(), repo_id)
+    if (mirror / "HEAD").is_file():
+        return mirror
+    task = _restore_mirror_later(repo_id)
+    if task is not None:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), MIRROR_WAIT_S)
+    return mirror
 
 
 # -- run facts ---------------------------------------------------------------------------------------
@@ -815,6 +852,13 @@ async def read_source(run: Run, path: str, facts: RunFacts) -> str | None:
         return None
     mirror = mirror_path(app_settings(), run.repo_id)
     text = None
+    if app_settings().blob_url and not (mirror / "HEAD").is_file():  # an evicted or never-cloned mirror
+        from quart import current_app
+
+        from coverset.forge.registry import forge_for_app
+        from coverset.orchestrator.repos import restore_mirror
+
+        await restore_mirror(app_settings(), run.repo_id, db=app_db(), forge=forge_for_app(current_app))
     if (mirror / "HEAD").is_file():
         measured = list(facts.statics) if len(facts.statics) <= PREFETCH_MAX_PATHS else []
         try:
@@ -822,11 +866,10 @@ async def read_source(run: Run, path: str, facts: RunFacts) -> str | None:
         except (RepoError, ValueError):  # ValueError: a batch reply read_blobs cannot parse
             text = None
     if text is None:  # upload mode: sources sent with `coverset-ci upload --with-sources`
-        from coverset.facts.sources import read_source as read_uploaded
+        from coverset.facts.sources import source_store
 
-        blob = await asyncio.to_thread(
-            read_uploaded, app_settings().data_dir, run.repo_id, run.head_sha, path
-        )
+        # Local files, or the object store through its cache (a miss fetches the one object).
+        blob = await asyncio.to_thread(source_store(app_settings()).read, run.repo_id, run.head_sha, path)
         text = blob.decode("utf-8", "replace") if blob is not None else None
     return text
 

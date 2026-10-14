@@ -25,6 +25,17 @@ from ``before_serving``. At boot, runs a previous process left behind are handle
   on the app's upload worker, which concludes a run whose pass the restart cut off.
 
 Without a web app, the CLI uses :meth:`RunDispatcher.run_once` and :meth:`RunDispatcher.drain`.
+
+Several replicas on one Postgres (``app.extensions["leader"]``, :mod:`coverset.db.leader`): only the
+holder of the leader lease dispatches (:func:`lead_dispatch`). Its boot handling then abandons only
+queued runs created before this process started (later ones were queued by a live replica and are
+dispatched) and, among ``running`` runs claimed by a ``serve`` on this host, only those whose pid is
+gone (a live one is another replica, or the previous leader finishing its runs); every
+:data:`SWEEP_S` it abandons ``running`` runs whose heartbeat is stale, since a replica that died
+mid-run is not followed by a boot of its own on this database. Any replica may
+enqueue: the leader polls every :data:`POLL_S`, so a run queued through a follower starts within
+about two seconds. When the lease is lost the loop stops; runs in flight keep their claims and
+heartbeats.
 """
 
 from __future__ import annotations
@@ -34,7 +45,7 @@ import contextlib
 import logging
 import os
 import socket
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -49,6 +60,8 @@ log = logging.getLogger(__name__)
 
 RUN_QUEUE_EXTENSION = "run_queue"
 POLL_S = 2.0
+SWEEP_S = 60.0
+"""How often the lease holder looks for ``running`` runs whose executor died (:meth:`RunDispatcher.sweep_stale`)."""
 STALE_HEARTBEAT_S = 300.0
 """A ``running`` run whose heartbeat is older than this has lost its executor."""
 _COPIED_FIELDS = (
@@ -96,8 +109,14 @@ class RunDispatcher:
 
     # -- lifecycle --------------------------------------------------------------------------------
 
-    def _executor_gone(self, run: Run) -> bool:
-        """Whether a ``running`` run has nobody executing it any more (see the module docstring)."""
+    def _executor_gone(self, run: Run, *, shared: bool = False) -> bool:
+        """Whether a ``running`` run has nobody executing it any more (see the module docstring).
+
+        ``shared`` is the leader-lease path (several replicas on one Postgres): a ``serve`` on this
+        host whose pid is alive is then another replica, or the previous leader still executing its
+        runs after a transient loss of the lease, not an earlier incarnation of this process, so its
+        runs are kept; only a dead pid, no claimant or a stale heartbeat counts.
+        """
         now = self.ctx.settings.now()
         heartbeat = run.heartbeat_at
         if heartbeat is not None and now - heartbeat > timedelta(seconds=STALE_HEARTBEAT_S):
@@ -113,14 +132,15 @@ class RunDispatcher:
         if host != (socket.gethostname()[:64] or "localhost"):
             return heartbeat is None and now - run.created_at > timedelta(seconds=STALE_HEARTBEAT_S)
         mine = self.ctx.claimant.split("@", 1)[0]
-        if role == "serve" and mine == "serve":
-            return True  # an earlier serve of this host: one dispatcher per database
+        if role == "serve" and mine == "serve" and not shared:
+            return True  # an earlier serve of this host: one dispatcher per SQLite database
         return not pid_text.isdigit() or not _pid_alive(int(pid_text))
 
-    async def on_boot(self) -> list[str]:
+    async def on_boot(self, *, created_before: datetime | None = None) -> list[str]:
         """Abandon (or re-queue) runs a previous process left behind; returns the ids touched.
 
-        Upload runs are never touched (see the module docstring).
+        Upload runs are never touched (see the module docstring). With ``created_before`` (the
+        leader-lease path), a queued run created at or after it is left queued.
         """
         requeue = self.ctx.settings.requeue_on_boot
         touched: list[str] = []
@@ -131,7 +151,9 @@ class RunDispatcher:
                 )
             )
         for run in leftovers:
-            if run.status == "running" and not self._executor_gone(run):
+            if run.status == "running" and not self._executor_gone(run, shared=created_before is not None):
+                continue
+            if run.status == "queued" and created_before is not None and run.created_at >= created_before:
                 continue
             if run.status == "queued" and requeue:
                 touched.append(run.id)  # nothing was planned yet: it simply stays queued
@@ -182,8 +204,42 @@ class RunDispatcher:
     async def start(self) -> None:
         """Handle leftovers from a previous process, then start the dispatch loop."""
         await self.on_boot()
+        self.start_loop()
+
+    def start_loop(self) -> None:
+        """Start the dispatch loop (no boot handling); a running loop is left alone."""
         if self._loop_task is None:
             self._loop_task = asyncio.get_running_loop().create_task(self._loop())
+
+    async def pause(self) -> None:
+        """Stop the dispatch loop only: runs in flight keep executing (the leader lease was lost)."""
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            await asyncio.gather(self._loop_task, return_exceptions=True)
+            self._loop_task = None
+
+    async def sweep_stale(self) -> list[str]:
+        """Abandon (or re-queue) ``running`` runs, not executing here, whose heartbeat is older than
+        :data:`STALE_HEARTBEAT_S`: their executor died without a boot of its own to notice."""
+        cutoff = self.ctx.settings.now() - timedelta(seconds=STALE_HEARTBEAT_S)
+        async with self.ctx.db.session() as session:
+            stale = list(
+                await session.scalars(
+                    select(Run.id).where(
+                        Run.status == "running", Run.trigger != "upload", Run.heartbeat_at < cutoff
+                    )
+                )
+            )
+        touched = []
+        requeue = self.ctx.settings.requeue_on_boot
+        for run_id in stale:
+            if run_id in self.active:
+                continue
+            await run_transaction(
+                self.ctx.db, lambda session, rid=run_id: self._abandon(session, rid, requeue)
+            )
+            touched.append(run_id)
+        return touched
 
     async def stop(self) -> None:
         """Stop dispatching and cancel the runs in flight (they end as ``running`` → abandoned at boot)."""
@@ -371,14 +427,54 @@ def install_run_queue(app: Any, *, ctx: OrchestratorContext | None = None) -> Ru
 
     @app.before_serving
     async def _start_run_queue() -> None:
-        await dispatcher.start()
-        await resume_upload_runs(app)
+        from coverset.db.leader import LEADER_EXTENSION, run_while_leader
+
+        lease = app.extensions.get(LEADER_EXTENSION)
+        if lease is None or not lease.exclusive:  # SQLite: one process per database, as always
+            await dispatcher.start()
+            await resume_upload_runs(app)
+            return
+        booted_at = context.settings.now()
+        app.add_background_task(
+            run_while_leader,
+            lease,
+            lambda: lead_dispatch(app, dispatcher, booted_at),
+            app.shutdown_event,
+            label="run dispatcher",
+        )
 
     @app.after_serving
     async def _stop_run_queue() -> None:
         await dispatcher.stop()
 
     return dispatcher
+
+
+async def lead_dispatch(
+    app: Any, dispatcher: RunDispatcher, booted_at: datetime, *, sweep_s: float = SWEEP_S
+) -> None:
+    """The dispatcher while this process holds the leader lease (cancelled when it is lost).
+
+    Boot handling for runs older than this process, the upload runs' resume pass, the dispatch
+    loop, and a sweep for stale ``running`` runs every ``sweep_s``; on cancellation only the loop
+    stops (:meth:`RunDispatcher.pause`). The boot handling is not guarded on purpose: if it fails
+    (the Postgres blip that moved the lease is still going on, or an event of a run being abandoned
+    collides with one the old leader is still writing), this raises and
+    :func:`~coverset.db.leader.run_while_leader` starts it again a few seconds later, from the boot
+    handling, which skips the runs already dealt with.
+    """
+    try:
+        await dispatcher.on_boot(created_before=booted_at)
+        await resume_upload_runs(app)
+        dispatcher.start_loop()
+        while True:
+            await asyncio.sleep(sweep_s)
+            try:
+                await dispatcher.sweep_stale()
+            except Exception:
+                log.exception("sweeping stale runs failed")
+    finally:
+        await dispatcher.pause()
 
 
 async def resume_upload_runs(app: Any) -> list[str]:

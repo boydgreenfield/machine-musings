@@ -6,6 +6,15 @@
 # Caddy terminates TLS (Let's Encrypt for a real domain; `COVERSET_CADDY_TLS="tls internal"` for a
 # self-signed certificate on an IP or a test name) and proxies to coverset, which trusts the
 # X-Forwarded-For/-Proto that Caddy sets (COVERSET_TRUST_PROXY=true). Only Caddy publishes ports.
+#
+# The "hosted" profile adds Postgres 17 and MinIO (S3-compatible) on the same VM, so coverset keeps
+# its state the way a hosted deployment does and its own container is disposable:
+#
+#   cp services.env.example services.env                # POSTGRES_PASSWORD, MINIO_ROOT_USER/PASSWORD
+#   # in coverset.env: COVERSET_DATABASE_URL, COVERSET_BLOB_URL, AWS_ACCESS_KEY_ID/SECRET (see the example)
+#   COMPOSE_PROFILES=hosted COVERSET_DOMAIN=coverset.example.com docker compose up -d --build
+#
+# Without the profile the two services do not exist and coverset uses SQLite + files under /data.
 name: coverset
 
 services:
@@ -24,6 +33,14 @@ services:
       # On a VM point COVERSET_DATA_PATH at the attached disk (deploy/aws/user-data.sh: /srv/coverset/data,
       # owned by uid 10001).
       - ${COVERSET_DATA_PATH:-coverset-data}:/data
+    depends_on:
+      # Only with the "hosted" profile (required: false: absent services are fine without it).
+      postgres:
+        condition: service_healthy
+        required: false
+      minio-init:
+        condition: service_completed_successfully
+        required: false
     expose:
       - "8000"
     restart: unless-stopped
@@ -51,7 +68,92 @@ services:
       - caddy-config:/config
     restart: unless-stopped
 
+  # --- profile "hosted": the state services --------------------------------------------------------
+  postgres:
+    profiles: ["hosted"]
+    image: postgres:17
+    env_file:
+      # POSTGRES_PASSWORD (and nothing else of coverset's settings).
+      - path: ${COVERSET_SERVICES_ENV_FILE:-services.env}
+        required: false
+    environment:
+      POSTGRES_USER: coverset
+      POSTGRES_DB: coverset
+    volumes:
+      # On a VM, COVERSET_PG_DATA_PATH puts it on the attached disk (deploy/aws/user-data.sh does).
+      - ${COVERSET_PG_DATA_PATH:-coverset-postgres}:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coverset -d coverset"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    stop_grace_period: 60s   # a clean shutdown checkpoint instead of crash recovery on the next start
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+
+  # MinIO built by Chainguard: MinIO no longer publishes minio/minio or minio/mc images that pull
+  # anonymously (deploy/dev-compose.yml uses the same image).
+  minio:
+    profiles: ["hosted"]
+    image: cgr.dev/chainguard/minio:latest
+    command: ["server", "/data"]
+    user: "0:0"   # named volumes are root-owned; the image's default user cannot write them
+    env_file:
+      # MINIO_ROOT_USER, MINIO_ROOT_PASSWORD (coverset uses them as AWS_ACCESS_KEY_ID/SECRET).
+      - path: ${COVERSET_SERVICES_ENV_FILE:-services.env}
+        required: false
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
+    volumes:
+      - ${COVERSET_MINIO_DATA_PATH:-coverset-minio}:/data
+    expose:
+      - "9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
+
+  # One-shot: create the bucket, turn versioning on and expire noncurrent versions after
+  # COVERSET_MINIO_NONCURRENT_DAYS (default 30), then exit 0. Every step is idempotent: `ilm import`
+  # replaces the bucket's whole lifecycle configuration with this one rule. Without the rule a
+  # versioned bucket keeps every object gc, purge or a manifest rewrite deletes, so retention would
+  # free no disk on a VM whose disk Postgres shares (docs/deploy.md, "Backups").
+  minio-init:
+    profiles: ["hosted"]
+    image: cgr.dev/chainguard/minio:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file:
+      - path: ${COVERSET_SERVICES_ENV_FILE:-services.env}
+        required: false
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
+      COVERSET_BUCKET: ${COVERSET_BUCKET:-coverset}
+      COVERSET_MINIO_NONCURRENT_DAYS: ${COVERSET_MINIO_NONCURRENT_DAYS:-30}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        mc alias set vm http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "vm/$$COVERSET_BUCKET" &&
+        mc version enable "vm/$$COVERSET_BUCKET" &&
+        printf '{"Rules":[{"ID":"coverset-noncurrent","Status":"Enabled","Filter":{"Prefix":""},"NoncurrentVersionExpiration":{"NoncurrentDays":%s}}]}' "$$COVERSET_MINIO_NONCURRENT_DAYS" |
+        mc ilm import "vm/$$COVERSET_BUCKET"
+    restart: "no"
+
 volumes:
   coverset-data:
   caddy-data:
   caddy-config:
+  coverset-postgres:
+  coverset-minio:

@@ -6,7 +6,6 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
-import sqlite3
 from typing import Any
 from urllib.parse import unquote_plus
 
@@ -15,7 +14,6 @@ from quart import Quart
 from quart.typing import TestClientProtocol as Client
 from web_helpers import HX, Demo, assert_csp_clean
 
-from coverset.facts.store import FactsStore
 from coverset.report.economy import FILTERS, deselect_args, view_from_store
 from coverset.web.economy import DEFAULT_LIMIT, TABS, clear_cache
 
@@ -24,7 +22,7 @@ from coverset.web.economy import DEFAULT_LIMIT, TABS, clear_cache
 def settings_overrides(demo: Demo, admin_token: str, request: pytest.FixtureRequest) -> dict[str, Any]:
     """The demo data; tests that sign a user in (they request ``signed_in``) also set an admin
     token, so the instance is no longer in open mode."""
-    values: dict[str, Any] = {"data_dir": demo.data_dir, "database_url": demo.db_url}
+    values: dict[str, Any] = demo.overrides()
     if "signed_in" in request.fixturenames:
         values["admin_token"] = admin_token
     return values
@@ -41,7 +39,7 @@ def _fresh_views() -> None:
 
 
 def _view(demo: Demo, run_id: str) -> Any:
-    view = view_from_store(FactsStore(demo.data_dir / "facts"), demo.repo_id, run_id)
+    view = view_from_store(demo.facts(), demo.repo_id, run_id)
     assert view is not None and view.totals is not None
     return view
 
@@ -179,20 +177,11 @@ async def test_a_member_without_access_gets_404_and_a_reader_gets_the_page(
 
 
 def _summary(demo: Demo, run_id: str) -> dict[str, Any]:
-    con = sqlite3.connect(demo.db_url.split("///", 1)[1])
-    try:
-        return json.loads(con.execute("SELECT summary_json FROM runs WHERE id = ?", (run_id,)).fetchone()[0])
-    finally:
-        con.close()
+    return json.loads(demo.rows("SELECT summary_json FROM runs WHERE id = :id", {"id": run_id})[0][0])
 
 
 def _set_summary(demo: Demo, run_id: str, data: dict[str, Any]) -> None:
-    con = sqlite3.connect(demo.db_url.split("///", 1)[1])
-    try:
-        con.execute("UPDATE runs SET summary_json = ? WHERE id = ?", (json.dumps(data), run_id))
-        con.commit()
-    finally:
-        con.close()
+    demo.rows("UPDATE runs SET summary_json = :data WHERE id = :id", {"data": json.dumps(data), "id": run_id})
 
 
 async def test_the_pr_page_shows_the_verdicts_test_tax(client: Client, demo: Demo) -> None:

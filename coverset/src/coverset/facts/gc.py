@@ -10,6 +10,16 @@ Upload mode keeps two more things on disk, removed by the same retention passes
 <sha>/`` (:func:`remove_sources`, once no remaining run of the repository has that head commit),
 and an upload run's shard archives, ``<runs_dir>/<run_id>/upload/`` (:func:`remove_upload_dirs`,
 when the run expires). ``coverset repo purge`` removes the repository's whole sources directory.
+
+Over an object store the same passes delete objects as well as files: :func:`expire_runs` goes
+through :meth:`FactsStore.delete_run <coverset.facts.store.FactsStore.delete_run>` (manifest first,
+then the run's prefix, then the cached copy), the sources through
+:meth:`SourceStore.remove <coverset.facts.sources.SourceStore.remove>` and the upload archives
+through :func:`coverset.storage.uploads.remove_uploads`; :func:`purge_repo_files` is ``repo purge``'s
+whole file side. A run's age is read from its manifest (one small GET per candidate run: the
+manifest carries ``runs_dim.created_at``), so a gc pass never downloads a run's files; a manifest
+without it (a run that never got a ``runs_dim`` row) falls back to the manifest's own modification
+time, and a run this host is still writing (no manifest yet) to the local files, as before.
 """
 
 from __future__ import annotations
@@ -19,23 +29,47 @@ import shutil
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from coverset.facts.store import FactsStore
 
-__all__ = ["expire_runs", "remove_sources", "remove_upload_dirs"]
+if TYPE_CHECKING:
+    from coverset.config import Settings
+
+__all__ = ["expire_runs", "purge_repo_files", "remove_sources", "remove_upload_dirs"]
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
+def _parse(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def _created_at(store: FactsStore, repo_id: int, run_id: str) -> datetime:
+    if store.remote:
+        manifest = store.remote_manifest(repo_id, run_id)
+        if manifest is not None:
+            created = _parse(manifest.get("created_at"))
+            if created is not None:
+                return created
+            if "runs_dim.parquet" not in (manifest.get("files") or {}):
+                modified = store.run_modified(repo_id, run_id)
+                return modified if modified is not None else datetime.fromtimestamp(0, tz=UTC)
+            # A manifest from before created_at was recorded: read the row (this pulls the run).
     runs_dim = store.read_table(repo_id, run_id, "runs_dim")
     if runs_dim.num_rows:
         created = runs_dim.column("created_at")[0].as_py()
         if created is not None:
             return created if created.tzinfo else created.replace(tzinfo=UTC)
-    mtime = store.run_dir(repo_id, run_id).stat().st_mtime
-    return datetime.fromtimestamp(mtime, tz=UTC)
+    modified = store.run_modified(repo_id, run_id)
+    return modified if modified is not None else datetime.fromtimestamp(0, tz=UTC)
 
 
 def expire_runs(
@@ -102,3 +136,25 @@ def remove_upload_dirs(runs_dir: Path, run_ids: Iterable[str], *, dry_run: bool 
                 run_dir.rmdir()
         removed.append(run_id)
     return removed
+
+
+def purge_repo_files(settings: Settings, repo_id: int, run_ids: Iterable[str]) -> None:
+    """Everything ``coverset repo purge`` deletes besides rows: the repository's facts (objects and
+    cached copies), its mirror, its uploaded sources, its upload archives and its runs' upload
+    directories under the runs directory."""
+    from coverset.facts.sources import source_store
+    from coverset.facts.store import facts_store
+    from coverset.orchestrator.repos import mirror_path
+    from coverset.storage import remote_store
+    from coverset.storage.uploads import purge_uploads
+
+    store = facts_store(settings)
+    if store.blobs is not None:
+        store.blobs.delete_prefix(f"facts/repo={int(repo_id)}/")
+    shutil.rmtree(store.repo_dir(repo_id), ignore_errors=True)
+    shutil.rmtree(mirror_path(settings, repo_id), ignore_errors=True)
+    source_store(settings).purge(repo_id)
+    blobs = remote_store(settings)
+    if blobs is not None:
+        purge_uploads(blobs, repo_id)
+    remove_upload_dirs(settings.runs_dir, run_ids)

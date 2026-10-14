@@ -40,6 +40,8 @@ from coverset.forge.oidc import ISSUER
 from coverset.orchestrator.bundles import IngestPool
 from coverset.orchestrator.runner import OrchestratorContext
 from coverset.orchestrator.upload import NO_DIFF_REASON
+from coverset.storage import remote_store
+from coverset.storage.uploads import upload_key
 from coverset.web import tokens
 from coverset.web.api import JWK_CLIENT_EXTENSION
 from coverset.web.uploads import upload_worker
@@ -496,11 +498,11 @@ async def test_sources_are_stored_only_for_files_the_bundle_lists(
     response = await client.post("/v1/bundles", headers=headers(token), data=archive)
     assert response.status_code == 202
     await settle(app)
-    data_dir = app.extensions["settings"].data_dir
-    stored = source_store.list_sources(data_dir, repo.id, SHA)
+    sources = source_store.source_store(app.extensions["settings"])  # local files, or the bucket
+    stored = sources.list(repo.id, SHA)
     assert "src/ledger/durations/parse.py" in stored and "pyproject.toml" in stored
     assert ".env" not in stored and "src/ledger/not_measured.txt" not in stored
-    root = source_store.commit_dir(data_dir, repo.id, SHA)
+    root = sources.checkout(repo.id, SHA)  # the data dir's own copy, or the cache's
     assert oct(root.stat().st_mode & 0o777) == "0o700"
     assert oct((root / "src/ledger/durations/parse.py").stat().st_mode & 0o777) == "0o600"
     # The source view falls back to the store when there is no mirror.
@@ -639,16 +641,25 @@ async def test_a_pass_that_missed_a_new_shard_writes_nothing_final(
     await _register(app, repo, make_archive(bundle_dir, python=False), "b", tmp_path)
     async with db.session() as session:
         assert not await stale.current(session, run_id)
-    # A shard registered but not on disk yet holds the verdict back without failing the run.
+    # A shard registered but not on disk yet holds the verdict back without failing the run. With an
+    # object store the pass would restore it from its archive, so that is parked too: the moment
+    # between registering a shard and archiving it.
     moved = shard_dir(app.extensions["settings"], run_id, 1)
     parked = tmp_path / "parked"
     moved.rename(parked)
+    blobs = remote_store(app.extensions["settings"])
+    archive = upload_key(repo.id, SHA, "b")
+    parked_archive = blobs.get_bytes(archive)[0] if blobs is not None else b""
+    if blobs is not None:
+        blobs.delete([archive])
     await process_run(ctx, run_id)
     async with db.session() as session:
         run = await session.get(Run, run_id)
         assert run is not None and (run.status, run.verdict) == ("running", None)
     assert forge.calls_named("upsert_pr_comment") == [] and forge.calls_named("set_commit_status") == []
     parked.rename(moved)
+    if blobs is not None:
+        blobs.put_bytes(archive, parked_archive)
     await process_run(ctx, run_id)
     async with db.session() as session:
         run = await session.get(Run, run_id)

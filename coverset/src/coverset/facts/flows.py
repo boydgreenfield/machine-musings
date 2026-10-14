@@ -542,6 +542,7 @@ def _prod_lock(store: FactsStore, repo_id: int) -> Iterator[None]:
 
 def _batch_dirs(store: FactsStore, repo_id: int, service: str | None = None) -> list[Path]:
     root = prod_dir(store, repo_id)
+    store.pull_batches(root, marker="prod_windows.parquet")  # object store: whole batches, cached
     if not root.is_dir():
         return []
     found: list[Path] = []
@@ -740,6 +741,7 @@ def _write_batch(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    store.push_tree(final, last="prod_windows.parquet")  # object store: the marker table goes last
     return final
 
 
@@ -898,9 +900,7 @@ def prune_windows(
             if ends and max(ends) < cutoff:
                 doomed.append(batch)
                 if not dry_run:
-                    hidden = batch.with_name(f".deleting-{uuid.uuid4().hex}")
-                    batch.rename(hidden)
-                    shutil.rmtree(hidden)
+                    store.remove_tree(batch)  # objects first, then the (hidden-renamed) directory
     return doomed
 
 

@@ -421,11 +421,11 @@ class StoreBackend:
         default_repo: str | None = None,
         default_run: str | None = None,
     ) -> None:
-        from coverset.facts.store import FactsStore
+        from coverset.facts.store import facts_store
 
         self.settings = settings
         self.db = db
-        self.store = FactsStore(settings.facts_dir)
+        self.store = facts_store(settings)
         self._authorize = authorize
         self._visible = visible
         self.default_repo = default_repo

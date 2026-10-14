@@ -34,7 +34,7 @@ pytestmark = pytest.mark.security
 
 @pytest.fixture
 def settings_overrides(demo: Demo, admin_token: str) -> dict[str, Any]:
-    return {"data_dir": demo.data_dir, "database_url": demo.db_url, "admin_token": admin_token}
+    return {**demo.overrides(), "admin_token": admin_token}
 
 
 async def make_token(

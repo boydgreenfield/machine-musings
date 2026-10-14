@@ -5,7 +5,7 @@ What to do, in order, to take coverset from this branch to running on real repos
 ## 0. Where things stand
 
 - Branch `boyd/testing` holds everything, pushed to `origin`. The round-5 changes are in one checkpoint commit ("Round 5: ...") plus the integration commits after it; `git log --oneline -15` lists them.
-- A control plane is already **running on Modal**: `https://boydgreenfield-coverset--coverset-web.us-east.modal.run` (App `coverset-web`, environment `coverset`, one always-on container, data on the Volume `coverset-data`, secrets in the Secret `coverset-web`). It costs about $0.76 a day while idle. The admin token is in `~/.config/coverset/modal-web-admin-token` (mode 600; it is not in the repository and was rotated once overnight). The deployment runs the code that was on disk when it was built; redeploy from the committed branch before pointing a GitHub App at it (step 2).
+- A control plane is already **running on Modal** in the first night's shape (SQLite on the container's disk, backed up to a Volume); section 1 moves it to Postgres + a bucket, the hosted shape now: `https://boydgreenfield-coverset--coverset-web.us-east.modal.run` (App `coverset-web`, environment `coverset`, one always-on container, data on the Volume `coverset-data`, secrets in the Secret `coverset-web`). It costs about $0.76 a day while idle. The admin token is in `~/.config/coverset/modal-web-admin-token` (mode 600; it is not in the repository and was rotated once overnight). The deployment runs the code that was on disk when it was built; redeploy from the committed branch before pointing a GitHub App at it (step 2).
 - The deployment already holds a test repository (`local/ledger2`) with a 97-test run that executed in Modal sandboxes from inside the web container, so the executor path works from there without a Modal token.
 - Locally, `uv run coverset dev` seeds the demo and serves with reload; `make check` is the fast gate and `make test` the whole suite. `docs/dev.md` is the developer guide.
 - The test suite: `uv run pytest -q -n 6 -p no:cacheprovider` (the whole control plane), `make test-plugin-312` (the plugin on Python 3.12), `make test-vitest` (the Vitest reporter).
@@ -18,22 +18,80 @@ uv run modal app stop coverset-web -e coverset              # stop it (the Volum
 
 ## 1. Choose where it runs
 
-| | Modal (running now) | Fly.io | A VM (AWS Lightsail or EC2) |
-|---|---|---|---|
-| Set-up | done | `deploy/fly/README.md`: `fly launch --no-deploy`, a volume, secrets, `fly deploy` | `deploy/aws/README.md`: `user-data.sh` installs Docker and Caddy, runs `deploy/compose.yml` |
-| Cost | about $0.76/day | about $8/month | about $12/month (Lightsail) |
-| Persistence | SQLite on the container's disk, backed up to the Volume every 60 s when changed and on shutdown; facts and mirrors on the Volume | a volume at `/data` | an EBS volume at `/data` |
-| Recovery point on a crash | 60 s | none (local disk) | none (local disk) |
-| Modal token for the executor | not needed | `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | the same |
-| Verified overnight | live: health, sign-in, a replayed webhook, a 97-test run in sandboxes, SSE streams of 210 s and 330 s | not deployed (no account); `fly.toml` checked against the docs | not deployed (no AWS access); `user-data.sh` dry-run in an Ubuntu container |
+**Postgres + an S3-compatible bucket is the hosted shape now.** With `COVERSET_DATABASE_URL`
+(Postgres) and `COVERSET_BLOB_URL` (a bucket) set, nothing on the container's disk has to survive a
+restart, so any platform that runs a container works, a redeploy loses no run, fact or setting
+(only the reaper's sandbox tag; docs/deploy.md, "Scaling"), and a second
+replica can share the database (the leader lease keeps the dispatcher, reaper and gc in one). SQLite
+plus files stays the zero-service default for laptops, the demo, and a tunnel demo. The Modal
+deployment running now is still the SQLite-on-a-Volume shape from the first night.
 
-Keep Modal for today. Two rules learned the hard way: redeploy with `--strategy recreate` (a rolling deploy deadlocks with one container, which cost 25 minutes of downtime overnight), and deploy from a clean checkout (the Modal client refuses a build whose files change mid-upload).
+**What you provide:**
+
+1. **A Postgres URL**, direct or session mode (not a transaction pooler: no Neon `-pooler` host, not
+   Supabase's port 6543). Neon, RDS, Fly Managed Postgres, Supabase direct, Railway or Render all work;
+   `postgresql://user:pass@host/db?sslmode=require` pastes in as it is.
+2. **A bucket** on AWS S3, Cloudflare R2, Tigris or MinIO, with an access key limited to it (or a
+   role on AWS): `COVERSET_BLOB_URL=s3://<bucket>/coverset?endpoint_url=<endpoint>&region=<region>`
+   plus `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. Turn object versioning on.
+
+**Check them before anything depends on them** (from this checkout, about a minute; it seeds the
+demo repository into them, and `--clean-only` removes it again):
+
+```sh
+COVERSET_DATABASE_URL='postgresql://...' COVERSET_BLOB_URL='s3://...' \
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... uv run python scripts/smoke_hosted.py
+```
+
+Every row should be PASS: its data dir, migrate, the demo, serve, four pages, an upload, the run's
+keys in the bucket, its rows in Postgres. It works in its own `data/smoke-hosted/<digest>` (never
+the laptop's `data/`) and refuses a database that already holds `coverset-demo/ledger` it did not
+make, so give it a fresh database (or the new production one before first use).
+
+| | Modal, hosted mode | Fly.io | AWS: ECS Fargate + RDS + S3 | One VM (Lightsail) with compose |
+|---|---|---|---|---|
+| Set-up | Secret with the two URLs and the bucket keys, then `COVERSET_WEB_STATE=hosted modal deploy` (below) | `deploy/fly/README.md`: no volume, Tigris + Managed Postgres or Neon | `docs/deploy.md`: task definition and IAM policy in `deploy/aws/` | `deploy/aws/user-data.sh` with `COVERSET_STATE=hosted`: Postgres and MinIO on the VM |
+| Cost (control plane) | about $23/month (inside the Starter credit) + the database | about $10-45/month | about $50/month | $24/month (4 GB) |
+| Modal token for the executor | not needed | `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | the same, in Secrets Manager | the same |
+| Verified | the mode switch with `modal` stubbed (`tests/test_deploy_hosted.py`); not deployed | config only | config only | compose file parsed; not run on a VM |
+
+The quickest real hosted deployment from where things stand is Modal in hosted mode: the Secret
+gains four values and the deploy gains one variable.
+
+```sh
+# Recreate the Secret with ALL its keys (it is replaced, not merged): the existing ones from your
+# password manager plus the database and bucket.
+uv run modal secret create coverset-web --force -e coverset \
+  COVERSET_ADMIN_TOKEN=... COVERSET_SECRET_KEY=... COVERSET_PUBLIC_URL=https://boydgreenfield-coverset--coverset-web.us-east.modal.run \
+  COVERSET_TRUST_PROXY=false COVERSET_EXECUTOR=modal COVERSET_ENV=prod \
+  COVERSET_DATABASE_URL='postgresql://...' COVERSET_BLOB_URL='s3://...' \
+  AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+COVERSET_WEB_STATE=hosted uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py
+uv run modal container list -e coverset
+uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && coverset deploy check'   # database, object store, cache dir, state: hosted
+```
+
+The new container starts on the empty Postgres database (it migrates before it serves), so the
+test repository and its run from the Volume are not there. To carry them over, run `coverset db
+copy --to '<postgres url>'` in the old container before switching (`modal container exec`), and move
+the facts with the object store's tools (`docs/object-store.md`). Nothing on the Volume is deleted:
+redeploying without `COVERSET_WEB_STATE` (and the old Secret) goes back.
+
+To keep the Volume shape for today instead, nothing changes:
 
 ```sh
 uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py   # about 23 s of downtime after the command returns
 ```
 
-`docs/deploy.md` has the measurements, proxy and cookie rules, backups, secret rotation and a troubleshooting list.
+Two rules learned the hard way hold in both modes: redeploy a one-container app with `--strategy
+recreate` (a rolling deploy deadlocks with one container, which cost 25 minutes of downtime the
+first night), and deploy from a clean checkout (the Modal client refuses a build whose files change
+mid-upload).
+
+`docs/deploy.md` has the requirements table, every recipe, migrations on deploy, secrets, backups,
+scaling, costs and a troubleshooting list that includes the Postgres and S3 failure modes.
+`docs/dev.md` ("Hosted-like development") runs the same Postgres + MinIO shape on this laptop with
+`make dev-hosted`, and `coverset dev --tunnel` prints the ngrok recipe for a demo from it.
 
 ## 2. Create the GitHub App
 
@@ -42,10 +100,10 @@ Everything below happens in the browser against the deployed URL. No GitHub obje
 1. Redeploy from the committed branch (the command above) so the deployment has tonight's fixes.
 2. Open `<url>/login` and sign in with the admin token.
 3. Open `<url>/setup`. For an organization's repositories use `<url>/setup?org=<org>`; for your own repositories use the plain page. Press **Create the GitHub App**. GitHub shows the manifest (private App, minimal permissions: checks write, contents read, pull requests write, issues write, metadata read; events: pull_request, push, check_suite, check_run, installation; the webhook URL, the setup callback and the sign-in callback are all derived from `COVERSET_PUBLIC_URL`). Confirm.
-4. GitHub redirects back; coverset writes the App id, client id, client secret and webhook secret to `/data/.env` and the private key to `/data/secrets/github-app.pem` on the Volume, and sets `COVERSET_ALLOWED_OWNERS` to the App's owner when none is configured.
+4. GitHub redirects back; coverset writes the App id, client id, client secret and webhook secret to `.env` and the private key to `secrets/github-app.pem` in its working directory, and sets `COVERSET_ALLOWED_OWNERS` to the App's owner when none is configured. In the Volume shape that is `/data` on the Volume and persists. **In the hosted shape it is the container's disk: copy the values into the Secret now** (`modal container exec --no-pty <id> -- cat /root/coverset-data/.env /root/coverset-data/secrets/github-app.pem`), the key as `COVERSET_GITHUB_APP_PRIVATE_KEY` (PEM text; the module writes it back to the key path at every start), then recreate the Secret with all its keys.
 5. Restart so the settings are re-read: `uv run modal container list -e coverset`, then `uv run modal container stop -y <id>` (14 s), or the redeploy command.
 6. Install the App on the repositories you want (the success page links to the installation page). Add more owners later by adding `COVERSET_ALLOWED_OWNERS=a,b` to `/data/.env` on the Volume or to the Secret (`modal secret create coverset-web --force --from-dotenv <file> -e coverset`, keeping the existing admin token and secret key), then restart.
-7. Check: `uv run modal container exec --no-pty <id> -- sh -c 'cd /data && coverset deploy check'`. Every row should be PASS once the App exists.
+7. Check: `uv run modal container exec --no-pty <id> -- sh -c 'cd /data && coverset deploy check'` (hosted shape: `cd /root/coverset-data`). Every row should be PASS once the App exists.
 
 Then sign in with GitHub: set `COVERSET_ADMINS=<your GitHub login>` in the Secret (or `/data/.env`), restart, open `<url>/login` in a private window, press **Sign in with GitHub**. `/account` lists your repositories with their permissions; `/audit` shows the log. Collaborators sign in the same way and see exactly what GitHub lets them see. `docs/auth.md` has the details; `docs/github.md` the webhook side.
 
@@ -103,6 +161,7 @@ Cost guards for the Modal executor: `COVERSET_MODAL_DAILY_BUDGET_USD` (5.00) and
 | A run says "budget exhausted" | the daily budget in the Secret; `coverset modal reap --all` after an interrupted run |
 | Pages are slow after an ingest | the first hit after a new run is cold (about 1 s); the caches are bounded by `COVERSET_RUN_FACTS_MB` and `COVERSET_FACTS_CACHE_ENTRIES` |
 | Sign-in fails with "state" errors | the callback URL on the App must be `<public url>/auth/github/callback`; the manifest sets it for new Apps |
+| `deploy check` fails the database or object store row | `docs/deploy.md` troubleshooting: the driver scheme, a transaction pooler, a bucket region, clock skew, missing conditional writes |
 | Anything else | `coverset deploy check`, `/audit`, `uv run modal app logs coverset-web -e coverset`, `docs/deploy.md` troubleshooting |
 
 ## 7. What landed overnight

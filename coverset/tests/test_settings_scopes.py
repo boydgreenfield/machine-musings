@@ -512,6 +512,7 @@ async def _purge(db: Database, repo_id: int) -> None:
         await session.commit()
 
 
+@pytest.mark.sqlite_only  # Postgres sequences never hand out a deleted id again
 async def test_orphaned_repo_rows_never_reach_the_next_repository_with_that_id(
     db: Database, settings: Settings
 ) -> None:

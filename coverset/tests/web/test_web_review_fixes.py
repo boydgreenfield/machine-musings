@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -279,11 +278,7 @@ async def test_replay_pins_a_failure_only_after_replaying_it(client: Client, dem
 
 
 async def test_frozen_replay_after_the_verdict_shows_fail(client: Client, demo: Demo) -> None:
-    con = sqlite3.connect(demo.db_url.removeprefix("sqlite+aiosqlite:///"))
-    try:
-        (timeline,) = con.execute("SELECT timeline FROM runs WHERE id = ?", (demo.pr1_run,)).fetchone()
-    finally:
-        con.close()
+    ((timeline,),) = demo.rows("SELECT timeline FROM runs WHERE id = :id", {"id": demo.pr1_run})
     marks = json.loads(timeline)
     origin = datetime.fromisoformat(marks.get("webhook_received") or marks["queued"])
     freeze = (datetime.fromisoformat(marks["verdict"]) - origin).total_seconds() + 0.1

@@ -85,6 +85,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coverset.analysis.cover import CoverSet
 from coverset.analysis.diff import GitDiffError
 from coverset.config import Settings
+from coverset.db.leader import transaction_lock
 from coverset.db.models import InvariantResult as InvariantResultModel
 from coverset.db.models import PullRequest, Repo, Run, RunEvent, Shard, TestAttempt, TestResult
 from coverset.executors.base import EnvRef, Resources
@@ -132,6 +133,8 @@ from coverset.orchestrator.verdict import (
     persist_verdict,
     post_summary,
 )
+from coverset.storage import remote_store
+from coverset.storage.uploads import archive_upload, restore_upload
 from coverset_model.catalogue import Catalogue as TypeCatalogue
 
 __all__ = [
@@ -384,6 +387,8 @@ async def register_upload(
     digest = meta.archive_sha256[:SHA256_PREFIX_CHARS]
 
     async def work(session: AsyncSession) -> tuple[Registration, Path | None]:
+        # The caller's lock is per process; on Postgres, replicas serialise here too (no-op on SQLite).
+        await transaction_lock(session, f"upload:{meta.repo_id}:{meta.head_sha}")
         run = await _reusable_run(session, meta)
         created = run is None
         if created:
@@ -457,6 +462,8 @@ async def register_upload(
     registration, target = await run_transaction(db, work)
     if target is not None:
         await asyncio.to_thread(_move_into_place, unpacked.root, target, meta)
+        if (blobs := remote_store(settings)) is not None:  # any replica's pass can restore it from there
+            await asyncio.to_thread(archive_upload, blobs, meta.repo_id, meta.head_sha, meta.label, target)
     return registration
 
 
@@ -591,12 +598,35 @@ async def _head(ctx: OrchestratorContext, run: Run, repo: Repo, shard_dirs: Sequ
             return _Head(checkout, paths, mirror, True, "mirror", owns_checkout=True)
         except (RepoError, GitDiffError, OSError) as exc:
             log.info("upload run %s: head %s not in the mirror (%s)", run.id, run.head_sha[:12], exc)
-    stored = source_store.commit_dir(settings.data_dir, repo.id, run.head_sha)
-    if source_store.has_sources(settings.data_dir, repo.id, run.head_sha):
+    uploaded = source_store.source_store(settings)  # local files, or the object store via its cache
+    if await asyncio.to_thread(uploaded.has, repo.id, run.head_sha):
+        stored = await asyncio.to_thread(uploaded.checkout, repo.id, run.head_sha)
         return _Head(stored, None, mirror, False, "sources")
     return _Head(
         Path(tempfile.mkdtemp(prefix="coverset-upload-")), None, mirror, False, "none", owns_checkout=True
     )
+
+
+def _restore_shards(settings: Settings, run: Run, shards: Sequence[Shard], dirs: Mapping[int, Path]) -> None:
+    """Restore each shard whose directory this replica lacks from its archive in the object store
+    (:mod:`coverset.storage.uploads`; the runs directory is scratch there). A no-op locally."""
+    blobs = remote_store(settings)
+    if blobs is None:
+        return
+    for shard in shards:
+        parsed = parse_worker_ref(shard.worker_ref)
+        if parsed is None or dirs[shard.shard_id].is_dir():
+            continue
+        digest, label = parsed
+        restore_upload(
+            blobs,
+            run.repo_id,
+            run.head_sha,
+            label,
+            dirs[shard.shard_id],
+            upload_limits(settings),
+            sha256_prefix=digest,
+        )
 
 
 def _can_fetch(repo: Repo, forge: Any) -> bool:
@@ -648,8 +678,7 @@ def _store_uploaded_sources(settings: Settings, run: Run, shard_dirs: Sequence[P
         if not uploaded.is_dir() or uploaded.is_symlink():
             continue
         allowed = _bundle_paths(shard, limits)
-        result = source_store.store_sources(
-            settings.data_dir,
+        result = source_store.source_store(settings).store(
             run.repo_id,
             run.head_sha,
             uploaded,
@@ -889,6 +918,7 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
     if repo is None or not shards:
         return
     dirs = {s.shard_id: shard_dir(settings, run_id, s.shard_id) for s in shards}
+    await asyncio.to_thread(_restore_shards, settings, run, shards, dirs)  # object store: after a restart
     adapter = PythonAdapter()
     head = await _head(ctx, run, repo, [d for d in dirs.values() if d.is_dir()])
     try:
@@ -898,7 +928,7 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
             paths = (
                 head.head_paths
                 if head.head_paths is not None
-                else frozenset(source_store.list_sources(settings.data_dir, repo.id, run.head_sha))
+                else frozenset(source_store.source_store(settings).list(repo.id, run.head_sha))
             )
             measured, head_functions, invariant_targets = await asyncio.to_thread(
                 _index_head, adapter, head.checkout, config, paths

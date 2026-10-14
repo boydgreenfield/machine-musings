@@ -9,7 +9,6 @@ import re
 from quart.typing import TestClientProtocol as Client
 from web_helpers import Demo, assert_csp_clean
 
-from coverset.facts.store import FactsStore
 from coverset.web.facts_view import run_facts
 
 PARSE = "src/ledger/durations/parse.py"
@@ -26,7 +25,7 @@ async def test_the_summary_line_of_parse_py(client: Client, demo: Demo) -> None:
         as_text=True
     )
     assert_csp_clean(page)
-    store = FactsStore(demo.data_dir / "facts")
+    store = demo.facts()
     row = next(
         r for r in store.read_table(demo.repo_id, demo.pr2_run, "file_cov").to_pylist() if r["path"] == PARSE
     )
@@ -49,7 +48,7 @@ async def test_the_summary_line_of_parse_py(client: Client, demo: Demo) -> None:
 
 
 async def test_every_file_has_one_summary_line(client: Client, demo: Demo) -> None:
-    facts = run_facts(FactsStore(demo.data_dir / "facts"), demo.repo_id, demo.pr2_run)
+    facts = run_facts(demo.facts(), demo.repo_id, demo.pr2_run)
     kinds = set()
     for path in sorted(facts.statics):
         page = await (await client.get(f"/repos/{demo.repo_id}/files/{path}?run={demo.pr2_run}")).get_data(

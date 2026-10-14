@@ -22,6 +22,15 @@ It exits 0 when the verdict is `ready` or `ready, with warnings` and 1 when any 
 Each finding has a fix; the suggested `[tool.coverset]` section at the end holds every value the
 doctor inferred, with a comment saying why, and parses as valid configuration.
 
+Both ways in below need a control plane that GitHub and your CI can reach. For a team, host it
+with its state in **Postgres and an S3-compatible bucket** (`COVERSET_DATABASE_URL`,
+`COVERSET_BLOB_URL`): the container is then stateless, so Fly.io, ECS Fargate, Modal, Railway,
+Render or one VM with compose all work, and `scripts/smoke_hosted.py` checks a new database and
+bucket end to end. For a trial, the laptop shape (SQLite and files, no service) behind an ngrok
+tunnel is enough (`coverset dev --tunnel`). [docs/deploy.md](deploy.md) has the requirements, the
+recipes and the costs; [docs/dev.md](dev.md#hosted-like-development) the same Postgres + MinIO shape
+on your machine.
+
 ## Two ways in
 
 | | A. Upload mode | B. Managed runs |
@@ -32,7 +41,7 @@ doctor inferred, with a comment saying why, and parses as valid configuration.
 | Environment | whatever your CI installs | built by coverset from the repository (see the source matrix below) |
 | What the repository needs | `pytest-coverset` installed in the test job | a describable environment, importable packages, pytest config coverset can run with |
 | Credentials | an upload token or the job's OIDC token | a GitHub App (or token + webhook), plus Modal for sandboxes |
-| Setup | three lines of CI ([docs/upload.md](upload.md)) | `coverset serve`, the App, `COVERSET_EXECUTOR=modal`, `coverset warm` |
+| Setup | a hosted coverset ([docs/deploy.md](deploy.md)) and three lines of CI ([docs/upload.md](upload.md)) | a hosted coverset, the App, `COVERSET_EXECUTOR=modal`, `coverset warm` |
 | Choose it when | the environment is exotic (system packages, services, GPUs), or you want results today | the suite is Python, its dependencies install from an index, and time-to-first-failure matters |
 
 **A, upload mode.** Keep running the tests where they run:
@@ -59,10 +68,11 @@ tests itself. The repository needs:
    pytest-cov is); `addopts` that need the cache plugin or a missing plugin stop pytest with a usage
    error. The doctor lists them and the override that removes them.
 
-Then, on the control plane: `coverset serve` reachable by GitHub, the GitHub App from `/setup`
-([docs/github.md](github.md)), `COVERSET_EXECUTOR=modal` after `modal setup` ([docs/modal.md](modal.md)),
-and `coverset warm --repo OWNER/NAME`, which builds the environment image and the first trusted snapshot
-(where the project and the repository's own packages get installed) before the first pull request.
+Then, on the control plane: coverset hosted where GitHub can reach it ([docs/deploy.md](deploy.md)),
+the GitHub App from `/setup` ([docs/github.md](github.md)), `COVERSET_EXECUTOR=modal` after `modal
+setup` ([docs/modal.md](modal.md)), and `coverset warm --repo OWNER/NAME`, which builds the
+environment image and the first trusted snapshot (where the project and the repository's own
+packages get installed) before the first pull request.
 
 ## `[tool.coverset]`
 

@@ -1580,28 +1580,19 @@ class ModalExecutor:
         log.warning("gave up on %s after %d attempts", label, len(DB_RETRY_DELAYS_S) + 1)
 
     async def _record_env(self, spec: EnvSpec, image_id: str) -> None:
-        from sqlalchemy.dialects.sqlite import insert
-
         from coverset.db.models import Env
+        from coverset.db.upsert import upsert
 
         async def write(session: Any) -> None:
-            if session.bind.dialect.name == "sqlite":
-                statement = insert(Env).values(
-                    env_hash=spec.env_hash, python=spec.python, image_id=image_id, created_at=_now()
-                )
-                await session.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=[Env.env_hash], set_={"image_id": image_id}
-                    )
-                )
-                return
-            row = await session.get(Env, spec.env_hash)
-            if row is None:
-                session.add(
-                    Env(env_hash=spec.env_hash, python=spec.python, image_id=image_id, created_at=_now())
-                )
-            else:
-                row.image_id = image_id
+            # One atomic statement on SQLite and Postgres: a concurrent build of the same env by
+            # another run (or replica) updates the row instead of failing on the primary key.
+            row = {
+                "env_hash": spec.env_hash,
+                "python": spec.python,
+                "image_id": image_id,
+                "created_at": _now(),
+            }
+            await upsert(session, Env, [row], keys=["env_hash"], update_columns=["image_id"])
 
         await self._db_write(f"recording env image {image_id}", write)
 

@@ -20,35 +20,125 @@ connection with :meth:`FactsStore.lease` instead of building views per query: th
 (:mod:`coverset.facts.cache`) is keyed by the stamps of the runs in scope, so a commit, a finalize
 or a gc is seen by the next lease. Every connection gets the bounded ``memory_limit`` and thread
 count of :func:`~coverset.facts.cache.memory_limit` and :func:`~coverset.facts.cache.threads`.
+
+**Over an object store** (``FactsStore(cache_dir / "facts", blobs=...)``, built by
+:func:`facts_store` when ``COVERSET_BLOB_URL`` is set) the directory is a *cache* of the bucket and
+everything above still runs on local files: DuckDB, pyarrow, the stamps and the hidden-temp atomic
+writes are unchanged. What is added is a per-run ``MANIFEST.json`` object, the source of truth for
+what a run contains (each ``*.parquet`` name with its size, etag and mtime, and a version that only
+grows), and two transfers around the run lock:
+
+* entering :meth:`FactsStore.run_lock` *pulls* the run (HEAD of the manifest; when its etag differs
+  from the one this cache last saw, GET it and download every file whose etag changed, delete local
+  files it no longer lists), so a writer always starts from the published state;
+* leaving it *publishes*: every local file that changed since the last pull or publish is uploaded
+  (in parallel) as a **new object** (``<name minus .parquet>.v<version>.<random tag>.parquet``: an
+  object is never rewritten in place, so every version of a file the bucket holds is complete),
+  then the manifest is written **last**, mapping each file name to its object key, with ``If-Match``
+  on the etag the writer started from (``If-None-Match: *`` for a new run), and only then are the
+  objects the new manifest no longer references deleted. A reader therefore never sees a
+  half-written run: until the manifest is replaced it sees the previous version, whose objects are
+  all still there, whatever happened to the writer in between (a writer that dies after its uploads
+  leaves unreferenced objects, which the run's deletion removes, and nothing else). A lost race
+  raises :class:`RunWriteConflict` instead of overwriting another writer's update, and deletes the
+  objects the loser uploaded. The manifest also carries the run's ``created_at`` (from
+  ``runs_dim`` when it is published), so retention (:mod:`coverset.facts.gc`) can age a run with
+  one small GET instead of pulling it.
+
+Readers pull before they look (:meth:`FactsStore._names`, :meth:`FactsStore.stamp`), at most once per
+``COVERSET_BLOB_SYNC_S`` (5 s) per run and process: within that window a lookup costs one ``stat``.
+A pull that fails (the store unreachable, a manifest naming an object that is gone) is not retried
+before the interval has passed either: a reader with a cached copy keeps reading it, one without
+gets the error again, so a broken run costs one attempt per interval, never one per request. A
+downloaded file gets the mtime its writer gave it, so the summaries' freshness rule
+(``queries.summary_is_fresh``) keeps its meaning. The fcntl run lock still serialises writers of a
+run on one machine (the ingest pool's processes share the cache directory); across machines the
+manifest's ``If-Match`` guards against lost updates, and the rule is that one process ingests a given
+run at a time, which the runner (one claimant per run) and the upload worker (one pass per run)
+already guarantee. With the local default (``blobs=None``) there is no transfer and no HEAD: reads
+keep their fast path, and the run lock only refreshes a local ``MANIFEST.json`` on exit (where the
+files are the objects, so an entry has no separate key).
 """
 
 from __future__ import annotations
 
 import fcntl
 import functools
+import json
+import logging
 import os
 import re
 import shutil
+import socket
+import threading
+import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from coverset.facts import cache
-from coverset.facts.atomic import atomic_write
+from coverset.facts.atomic import atomic_write, atomic_write_bytes
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import ATTEMPT_TABLES, RUN_TABLES, SCHEMAS, TABLES
+from coverset.storage import (
+    BlobNotFound,
+    BlobStore,
+    ObjectInfo,
+    PreconditionFailed,
+    facts_remote,
+    register_facts_remote,
+    transfer_pool,
+)
 
-__all__ = ["COMPACT_ENV", "FactsStore", "SqlNotAllowed", "compact_layout", "conform"]
+if TYPE_CHECKING:
+    from coverset.config import Settings
+
+__all__ = [
+    "COMPACT_ENV",
+    "MANIFEST_FILE",
+    "FactsStore",
+    "RunWriteConflict",
+    "SqlNotAllowed",
+    "compact_layout",
+    "conform",
+    "facts_store",
+]
+
+log = logging.getLogger(__name__)
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HIVE_TYPES = "{'repo': BIGINT, 'run': VARCHAR}"
 _LOCK_FILE = ".lock"
 _LOG = "ingest_log"
+MANIFEST_FILE = "MANIFEST.json"
+"""A run's manifest: the object a reader trusts, and a local copy beside the run's files."""
+_RECORD_FILE = ".sync.json"
+"""What this cache last pulled or published for a run (hidden: never part of a stamp)."""
+_MANIFEST_FORMAT = 2
+"""Format 2 added each entry's object ``key`` and the run's ``created_at``; an entry without a key
+(format 1, and every local manifest) names an object called exactly like the file."""
+_FILE_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.shard=\d+(\.attempt=\d+)?)?\.parquet$")
+"""A run file name a manifest may list (it becomes a local path, so nothing else is accepted)."""
+_OBJECT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.shard=\d+(\.attempt=\d+)?)?\.v\d+\.[0-9a-f]{8}\.parquet$")
+"""The object name of one version of a run file (``runs_dim.v8.3f9a1c2e.parquet``): the file name
+with the manifest version and a random tag before the extension. Disjoint from :data:`_FILE_NAME`."""
+_KEY_ROOT = "facts"
+_DOWNLOAD_ATTEMPTS = 3
+
+
+class _Unset:
+    """The type of :data:`_UNSET`."""
+
+
+_UNSET = _Unset()
 
 
 COMPACT_ENV = "COVERSET_FACTS_COMPACT"
@@ -63,6 +153,137 @@ def compact_layout() -> bool:
 
 class SqlNotAllowed(ValueError):
     """Ad-hoc SQL passed to :meth:`FactsStore.query` is not a single read-only SELECT."""
+
+
+class RunWriteConflict(RuntimeError):
+    """Another writer published the run's manifest since this writer pulled it (object store only).
+
+    Nothing is overwritten: the objects this writer uploaded are not referenced by the manifest, and
+    the next pull discards its local copies. One process ingests a given run at a time, so this
+    means two control planes claimed the same run.
+    """
+
+
+# -- object-store bookkeeping ---------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _SyncState:
+    """Per process and per run (or per dictionary): when it was last checked and what was seen."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    checked: float = float("-inf")
+    absent: bool = False
+    """The last check found no manifest and no local record (nothing to keep in step with)."""
+    error: Exception | None = None
+    """The last check failed with this; not tried again before the sync interval has passed."""
+
+
+_STATES: dict[tuple[str, ...], _SyncState] = {}
+_STATES_LOCK = threading.Lock()
+_LISTINGS: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_HELD = threading.local()
+EVICT_INTERVAL_S = 600.0
+"""How often (at most) a process that downloads facts checks its cache's bound."""
+_last_eviction = float("-inf")
+
+
+def _state(key: tuple[str, ...]) -> _SyncState:
+    with _STATES_LOCK:
+        found = _STATES.get(key)
+        if found is None:
+            found = _STATES[key] = _SyncState()
+        return found
+
+
+def _held() -> set[tuple[str, int, str]]:
+    """The runs whose lock this thread holds (a writer never pulls under its own feet)."""
+    held = getattr(_HELD, "runs", None)
+    if held is None:
+        held = _HELD.runs = set()
+    return held
+
+
+def _after_fork() -> None:
+    """In a forked child (the ingest pool on Linux): fresh sync bookkeeping, no inherited locks."""
+    global _STATES_LOCK, _last_eviction
+    _STATES_LOCK = threading.Lock()
+    _STATES.clear()
+    _LISTINGS.clear()
+    _HELD.runs = set()  # the forking thread's run locks are the parent's, not this process's
+    _last_eviction = float("-inf")
+
+
+os.register_at_fork(after_in_child=_after_fork)
+
+
+def _scan(run_dir: Path) -> dict[str, tuple[int, int, int]]:
+    """``name -> (size, mtime_ns, inode)`` of the run's visible-candidate ``*.parquet`` files."""
+    found: dict[str, tuple[int, int, int]] = {}
+    try:
+        with os.scandir(run_dir) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.startswith(".") or not name.endswith(".parquet"):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                found[name] = (st.st_size, st.st_mtime_ns, st.st_ino)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    return found
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_bytes())
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _local_etag(size: int, mtime_ns: int, ino: int) -> str:
+    return f"{ino:x}-{size:x}-{mtime_ns:x}"
+
+
+def _writer() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _object_name(name: str, version: int) -> str:
+    """A new object name for version ``version`` of the run file ``name`` (:data:`_OBJECT_NAME`)."""
+    return f"{name[: -len('.parquet')]}.v{version}.{uuid.uuid4().hex[:8]}.parquet"
+
+
+def _entry_key(name: str, entry: Mapping[str, Any]) -> str:
+    """The object name a manifest entry refers to (the file's own name when it has none)."""
+    key = entry.get("key")
+    if key is None:
+        return name
+    stem = name[: -len(".parquet")] + "."
+    if not isinstance(key, str) or not _OBJECT_NAME.match(key) or not key.startswith(stem):
+        raise ValueError(f"unexpected object name {key!r} for {name} in a manifest")
+    return key
+
+
+def _known_key(name: str, known: Mapping[str, Sequence[Any]]) -> str:
+    """The object name the local record holds for ``name`` (records before format 2 had none)."""
+    entry = known.get(name) or ()
+    return str(entry[4]) if len(entry) > 4 and entry[4] else name
+
+
+def _created_at_of(runs_dim: Path) -> str | None:
+    """``runs_dim.created_at`` of the run, ISO 8601 in UTC, or None (no row, or no such file)."""
+    try:
+        column = pq.read_table(runs_dim, columns=["created_at"]).column("created_at")
+    except (OSError, pa.ArrowException, KeyError):
+        return None
+    value = column[0].as_py() if len(column) else None
+    if not isinstance(value, datetime):
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
 
 
 def conform(table: str, data: pa.Table) -> pa.Table:
@@ -107,30 +328,70 @@ def _log_rows(path: str, mtime_ns: int, size: int) -> tuple[tuple[int, str], ...
 
 
 class FactsStore:
-    """Immutable per-run Parquet facts under one directory."""
+    """Immutable per-run Parquet facts under one directory (the store itself, or the local cache of
+    an object store when ``blobs`` is given: see the module docstring)."""
 
-    def __init__(self, facts_dir: Path) -> None:
+    def __init__(self, facts_dir: Path, *, blobs: BlobStore | None = None) -> None:
         self.root = Path(facts_dir)
+        if blobs is not None:
+            register_facts_remote(self.root, blobs)
+            self.blobs: BlobStore | None = blobs
+        else:
+            # A bare path is a cache when the process was configured for an object store and this
+            # is its cache directory (an ingest worker process gets only the path and the knobs).
+            self.blobs = facts_remote(self.root)
+        self._root_key = str(self.root)
+
+    def __repr__(self) -> str:
+        where = f", blobs={self.blobs!r}" if self.blobs is not None else ""
+        return f"FactsStore({str(self.root)!r}{where})"
+
+    @property
+    def remote(self) -> bool:
+        """True when the directory is a cache of an object store."""
+        return self.blobs is not None
 
     # -- layout ------------------------------------------------------------------------------
 
     def repo_dir(self, repo_id: int) -> Path:
-        """The directory holding every run (and the dictionary) of ``repo_id``."""
+        """The directory holding every run (and the dictionary) of ``repo_id``.
+
+        Over an object store the repo's ``dictionary.json`` is pulled first (rate-limited like every
+        pull), so code that reads the directory finds a current copy.
+        """
+        path = self._repo_path(repo_id)
+        if self.blobs is not None:
+            self._ensure_dictionary(repo_id, path)
+        return path
+
+    def run_dir(self, repo_id: int, run_id: str) -> Path:
+        """The directory holding one run's tables.
+
+        Over an object store the run is pulled into the cache first (at most once per sync
+        interval; :meth:`_ensure`), so every caller that goes to the directory itself (stamps,
+        ``is_dir`` checks, the web's run-facts cache) sees the published run, also on a replica
+        whose cache has never seen it.
+        """
+        path = self._run_path(repo_id, run_id)
+        if self.blobs is not None:
+            self._ensure(repo_id, run_id)
+        return path
+
+    def _repo_path(self, repo_id: int) -> Path:
         if isinstance(repo_id, bool) or not isinstance(repo_id, int) or repo_id < 0:
             raise ValueError(f"invalid repo id {repo_id!r}")
         return self.root / f"repo={repo_id}"
 
-    def run_dir(self, repo_id: int, run_id: str) -> Path:
-        """The directory holding one run's tables."""
+    def _run_path(self, repo_id: int, run_id: str) -> Path:
         if not isinstance(run_id, str) or not _RUN_ID.match(run_id):
             raise ValueError(f"invalid run id {run_id!r}")
-        return self.repo_dir(repo_id) / f"run={run_id}"
+        return self._repo_path(repo_id) / f"run={run_id}"
 
     def table_path(
         self, repo_id: int, run_id: str, table: str, shard_id: int | None = None, attempt: int | None = None
     ) -> Path:
         """Where one table file lives (shard tables need ``shard_id`` and, except ``ingest_log``, ``attempt``)."""
-        run_dir = self.run_dir(repo_id, run_id)
+        run_dir = self._run_path(repo_id, run_id)
         if table in RUN_TABLES:
             if shard_id is not None or attempt is not None:
                 raise ValueError(f"{table} is a run table: it takes no shard id or attempt")
@@ -152,12 +413,12 @@ class FactsStore:
 
     def shard_logs(self, repo_id: int, run_id: str) -> dict[int, tuple[tuple[int, str], ...]]:
         """``(attempt, status)`` history of every shard with an ``ingest_log``, by shard id."""
-        return self._logs(self.run_dir(repo_id, run_id), self._names(repo_id, run_id))
+        return self._logs(self._run_path(repo_id, run_id), self._names(repo_id, run_id))
 
     def attempt_files(self, repo_id: int, run_id: str, shard_id: int) -> dict[int, list[Path]]:
         """Every shard-table file of one shard (committed or not), by attempt."""
         pattern = re.compile(rf"^(\w+)\.shard={shard_id}\.attempt=(\d+)\.parquet$")
-        run_dir = self.run_dir(repo_id, run_id)
+        run_dir = self._run_path(repo_id, run_id)
         found: dict[int, list[Path]] = {}
         for name in self._names(repo_id, run_id):
             if (match := pattern.match(name)) and match.group(1) in ATTEMPT_TABLES:
@@ -183,7 +444,7 @@ class FactsStore:
 
     def _visible(self, repo_id: int, run_id: str, tables: Iterable[str]) -> dict[str, list[Path]]:
         """Visible files of each of ``tables`` in one run, from a single directory listing."""
-        run_dir = self.run_dir(repo_id, run_id)
+        run_dir = self._run_path(repo_id, run_id)
         names = set(self._names(repo_id, run_id))
         logs = self._logs(run_dir, names)
         committed = _committed(logs)
@@ -199,7 +460,9 @@ class FactsStore:
         return visible
 
     def _names(self, repo_id: int, run_id: str) -> list[str]:
-        run_dir = self.run_dir(repo_id, run_id)
+        if self.blobs is not None:
+            self._ensure(repo_id, run_id)
+        run_dir = self._run_path(repo_id, run_id)
         return [entry.name for entry in run_dir.iterdir()] if run_dir.is_dir() else []
 
     @staticmethod
@@ -218,18 +481,64 @@ class FactsStore:
 
     def dictionary(self, repo_id: int) -> RepoDictionary:
         """A snapshot of the repo's path, nodeid and shape-key ids."""
-        return RepoDictionary.load(self.repo_dir(repo_id))
+        repo_dir = self._repo_path(repo_id)
+        if self.blobs is not None:
+            self._ensure_dictionary(repo_id, repo_dir)
+        return RepoDictionary.load(repo_dir)
 
     @contextmanager
     def run_lock(self, repo_id: int, run_id: str) -> Iterator[None]:
-        """Exclusive lock serialising writers (ingest, failure records, finalize) of one run."""
-        run_dir = self.run_dir(repo_id, run_id)
+        """Exclusive lock serialising writers (ingest, failure records, finalize) of one run.
+
+        Over an object store the run is pulled when the lock is taken and published when it is
+        released (see the module docstring); a publish failure after the block raised is logged and
+        the block's own error is the one that propagates. Locally, release refreshes the run's
+        ``MANIFEST.json``.
+        """
+        run_dir = self._run_path(repo_id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
+        key = (self._root_key, repo_id, run_id)
+        held = _held()
         with open(run_dir / _LOCK_FILE, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            held.add(key)
             try:
-                yield
+                if self.blobs is not None:
+                    self._pull_run(repo_id, run_id, writer=True)
+                try:
+                    yield
+                except BaseException:
+                    try:
+                        self._commit(repo_id, run_id)
+                    except Exception:
+                        log.exception("publishing run %s after a failed write failed", run_id)
+                    raise
+                self._commit(repo_id, run_id)
             finally:
+                held.discard(key)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _commit(self, repo_id: int, run_id: str) -> None:
+        """What leaving the run lock does: publish (object store) or refresh the local manifest."""
+        if self.blobs is not None:
+            self._push_run(repo_id, run_id)
+        else:
+            self._write_local_manifest(repo_id, run_id)
+
+    def _after_write(self, repo_id: int, run_id: str) -> None:
+        """A write outside the run lock (tests, tools) is published at once over an object store."""
+        if self.blobs is None or (self._root_key, repo_id, run_id) in _held():
+            return
+        run_dir = self._run_path(repo_id, run_id)
+        key = (self._root_key, repo_id, run_id)
+        held = _held()
+        with open(run_dir / _LOCK_FILE, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            held.add(key)
+            try:
+                self._push_run(repo_id, run_id)
+            finally:
+                held.discard(key)
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     # -- reading and writing -----------------------------------------------------------------
@@ -252,6 +561,7 @@ class FactsStore:
             path,
             lambda tmp: pq.write_table(conformed, tmp, compression="zstd", use_dictionary=True),
         )
+        self._after_write(repo_id, run_id)
         return path
 
     def delete_table(self, repo_id: int, run_id: str, table: str) -> bool:
@@ -262,6 +572,7 @@ class FactsStore:
             self.table_path(repo_id, run_id, table).unlink()
         except FileNotFoundError:
             return False
+        self._after_write(repo_id, run_id)
         return True
 
     def read_table(self, repo_id: int, run_id: str, table: str, *, shard_id: int | None = None) -> pa.Table:
@@ -281,7 +592,17 @@ class FactsStore:
         return pa.concat_tables(parts) if parts else SCHEMAS[table].empty_table()
 
     def list_repos(self) -> list[int]:
-        """Every repo id with a directory in the store."""
+        """Every repo id with a directory in the store (over an object store: in the bucket's
+        listing, at most :func:`~coverset.facts.cache.sync_interval` old, or in the cache)."""
+        ids = set(self._local_repos())
+        if self.blobs is not None:
+            for name in self._listing(f"{_KEY_ROOT}/"):
+                prefix, _, value = name.partition("=")
+                if prefix == "repo" and value.isdigit():
+                    ids.add(int(value))
+        return sorted(ids)
+
+    def _local_repos(self) -> list[int]:
         if not self.root.is_dir():
             return []
         ids = []
@@ -289,11 +610,38 @@ class FactsStore:
             prefix, _, value = entry.name.partition("=")
             if prefix == "repo" and value.isdigit() and entry.is_dir():
                 ids.append(int(value))
-        return sorted(ids)
+        return ids
 
     def list_runs(self, repo_id: int) -> list[str]:
-        """Every run id stored for ``repo_id``, sorted."""
-        repo_dir = self.repo_dir(repo_id)
+        """Every run id stored for ``repo_id``, sorted.
+
+        Over an object store: the runs in the bucket's listing (cached for the sync interval) plus
+        runs this cache is writing that have no manifest yet; a cached run whose manifest is gone
+        (deleted by another replica) is dropped from the cache and from the answer.
+        """
+        local = self._local_runs(repo_id)
+        if self.blobs is None:
+            return sorted(local)
+        remote = {
+            value
+            for name in self._listing(f"{_KEY_ROOT}/repo={repo_id}/")
+            for prefix, _, value in [name.partition("=")]
+            if prefix == "run" and _RUN_ID.match(value)
+        }
+        runs = set(remote)
+        for run_id in set(local) - remote:
+            record = _read_json(self._run_path(repo_id, run_id) / _RECORD_FILE)
+            if record is None or record.get("etag") is None:
+                if _scan(self._run_path(repo_id, run_id)):
+                    runs.add(run_id)  # being written here: not published yet
+                continue
+            self._ensure(repo_id, run_id)
+            if self._run_path(repo_id, run_id).is_dir() and _scan(self._run_path(repo_id, run_id)):
+                runs.add(run_id)  # published after the cached listing was taken
+        return sorted(runs)
+
+    def _local_runs(self, repo_id: int) -> list[str]:
+        repo_dir = self._repo_path(repo_id)
         if not repo_dir.is_dir():
             return []
         runs = []
@@ -301,20 +649,525 @@ class FactsStore:
             prefix, _, value = entry.name.partition("=")
             if prefix == "run" and _RUN_ID.match(value) and entry.is_dir():
                 runs.append(value)
-        return sorted(runs)
+        return runs
+
+    def has_run(self, repo_id: int, run_id: str) -> bool:
+        """Whether the run exists (over an object store: its manifest, pulled into the cache)."""
+        run_dir = self._run_path(repo_id, run_id)
+        if self.blobs is None:
+            return run_dir.is_dir()
+        self._ensure(repo_id, run_id)
+        return run_dir.is_dir() and bool(_scan(run_dir))
+
+    def run_modified(self, repo_id: int, run_id: str) -> datetime | None:
+        """When the run last changed: its directory's mtime, or over an object store its manifest's
+        (else its newest object's, for a run whose first publish never happened); None if absent."""
+        run_dir = self._run_path(repo_id, run_id)
+        if self.blobs is not None:
+            info = self.blobs.head(self._run_key(repo_id, run_id, MANIFEST_FILE))
+            if info is not None:
+                return info.modified
+            newest = max(
+                (o.modified for o in self.blobs.list(self._run_prefix(repo_id, run_id))), default=None
+            )
+            if newest is not None:
+                return newest
+        try:
+            return datetime.fromtimestamp(run_dir.stat().st_mtime, tz=UTC)
+        except FileNotFoundError:
+            return None
 
     def delete_run(self, repo_id: int, run_id: str) -> bool:
         """Delete one run's directory (never the repo dictionary); returns whether it existed.
 
         The directory is first renamed to a hidden name so readers never see a half-deleted run.
+        Over an object store the manifest goes first (readers stop seeing the run at once), then
+        every object under the run's prefix, then the cached copy.
         """
-        run_dir = self.run_dir(repo_id, run_id)
+        existed = False
+        if self.blobs is not None:
+            manifest = self._run_key(repo_id, run_id, MANIFEST_FILE)
+            existed = self.blobs.head(manifest) is not None
+            self.blobs.delete([manifest])
+            existed = self.blobs.delete_prefix(self._run_prefix(repo_id, run_id)) > 0 or existed
+            self._forget_listing(repo_id)
+        run_dir = self._run_path(repo_id, run_id)
         if not run_dir.is_dir():
-            return False
+            return existed
         doomed = run_dir.with_name(f".deleting-{uuid.uuid4().hex}")
         run_dir.rename(doomed)
         shutil.rmtree(doomed)
         return True
+
+    # -- object store: keys, listings, pull and publish ---------------------------------------
+
+    def _run_prefix(self, repo_id: int, run_id: str) -> str:
+        """``facts/repo=<id>/run=<id>/``: the run's objects."""
+        self._run_path(repo_id, run_id)  # validates both ids
+        return f"{_KEY_ROOT}/repo={repo_id}/run={run_id}/"
+
+    def _run_key(self, repo_id: int, run_id: str, name: str) -> str:
+        return self._run_prefix(repo_id, run_id) + name
+
+    def _rel(self, path: Path) -> str:
+        """``path`` (a directory below the root) as a POSIX path relative to it."""
+        rel = Path(path).relative_to(self.root).as_posix()
+        if rel in ("", ".") or rel.startswith(".."):
+            raise ValueError(f"{path} is not below {self.root}")
+        return rel
+
+    def _listing(self, prefix: str) -> list[str]:
+        """The bucket's "directories" below ``prefix``, cached for the sync interval."""
+        assert self.blobs is not None
+        key = (self._root_key, prefix)
+        now = time.monotonic()
+        found = _LISTINGS.get(key)
+        if found is not None and now - found[0] < cache.sync_interval():
+            return found[1]
+        names = self.blobs.list_dirs(prefix)
+        _LISTINGS[key] = (now, names)
+        return names
+
+    def _forget_listing(self, repo_id: int) -> None:
+        _LISTINGS.pop((self._root_key, f"{_KEY_ROOT}/repo={repo_id}/"), None)
+        _LISTINGS.pop((self._root_key, f"{_KEY_ROOT}/"), None)
+
+    def _fresh(self, state: _SyncState, record: Path) -> bool:
+        """Within the sync interval of the last check, and the cache still holds what it saw then
+        (or that check found nothing, or failed: neither is tried again before the interval)."""
+        if time.monotonic() - state.checked >= cache.sync_interval():
+            return False
+        return state.absent or state.error is not None or record.exists()
+
+    @staticmethod
+    def _settled(state: _SyncState, record: Path) -> None:
+        """A fresh state's answer: nothing, or the last check's error again when this cache holds no
+        copy to read instead (a reader with a copy keeps reading it until the next check, which
+        :meth:`_ensure` applies to the failed check itself too)."""
+        if state.error is not None and not record.exists():
+            raise state.error
+
+    def _ensure(self, repo_id: int, run_id: str) -> None:
+        """Bring the cached run in step with its manifest, unless that was checked moments ago.
+
+        A run whose lock another writer holds (here or in another process on this machine) is read
+        as it is: that writer is producing the newer state, and it publishes on release. A check
+        that fails is remembered for the sync interval (:meth:`_settled`).
+        """
+        key = (self._root_key, repo_id, run_id)
+        if key in _held():
+            return
+        run_dir = self._run_path(repo_id, run_id)
+        record = run_dir / _RECORD_FILE
+        state = _state(("run", self._root_key, str(repo_id), run_id))
+        if self._fresh(state, record):
+            self._settled(state, record)
+            return
+        with state.lock:
+            if self._fresh(state, record):
+                self._settled(state, record)
+                return
+            assert self.blobs is not None
+            try:
+                head: ObjectInfo | None | _Unset = _UNSET
+                if not run_dir.is_dir():
+                    head = self.blobs.head(self._run_key(repo_id, run_id, MANIFEST_FILE))
+                    if head is None:
+                        state.absent, state.error, state.checked = True, None, time.monotonic()
+                        return
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                with open(run_dir / _LOCK_FILE, "a") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return  # a writer holds the run: read the cache as it is, check again next time
+                    try:
+                        self._pull_run(repo_id, run_id, writer=False, head=head)
+                    finally:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+            except Exception as exc:
+                state.error, state.checked = exc, time.monotonic()
+                if not record.exists():
+                    raise
+                log.warning("run %s: checking its manifest failed, reading the cached copy: %s", run_id, exc)
+                return
+            state.error, state.checked = None, time.monotonic()
+
+    def _ensure_many(self, scope: Sequence[tuple[int, str]]) -> None:
+        """:meth:`_ensure` for every run of a scope, the stale ones in parallel."""
+        stale = [
+            (repo, run)
+            for repo, run in scope
+            if not self._fresh(
+                _state(("run", self._root_key, str(repo), run)), self._run_path(repo, run) / _RECORD_FILE
+            )
+        ]
+        if len(stale) <= 1:
+            for repo, run in stale:
+                self._ensure(repo, run)
+            return
+        list(transfer_pool("sync").map(lambda pair: self._ensure(*pair), stale))
+
+    def _pull_run(
+        self, repo_id: int, run_id: str, *, writer: bool, head: ObjectInfo | None | _Unset = _UNSET
+    ) -> None:
+        """Make the cached run exactly what its manifest says (the caller holds the run lock;
+        ``head`` is the manifest's metadata when the caller just fetched it)."""
+        assert self.blobs is not None
+        run_dir = self._run_path(repo_id, run_id)
+        state = _state(("run", self._root_key, str(repo_id), run_id))
+        manifest_key = self._run_key(repo_id, run_id, MANIFEST_FILE)
+        record = _read_json(run_dir / _RECORD_FILE)
+        seen = record.get("etag") if record else None
+        info = self.blobs.head(manifest_key) if isinstance(head, _Unset) else head
+        if info is None:
+            if seen is not None:
+                # Deleted from the bucket (gc or purge on another replica): drop the cached copy.
+                for name in _scan(run_dir):
+                    (run_dir / name).unlink(missing_ok=True)
+                (run_dir / _RECORD_FILE).unlink(missing_ok=True)
+                (run_dir / MANIFEST_FILE).unlink(missing_ok=True)
+                self._forget_listing(repo_id)
+                if not writer:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+            state.absent = True
+            return
+        state.absent = False
+        if info.etag == seen:
+            os.utime(run_dir / _RECORD_FILE)  # the cache's least-recently-used clock
+            return
+        for attempt in range(_DOWNLOAD_ATTEMPTS):
+            data, etag = self.blobs.get_bytes(manifest_key)
+            if self._apply_manifest(repo_id, run_id, data, etag, record):
+                return
+            time.sleep(0.25 * 2**attempt)  # the manifest was replaced mid-pull: read the new one
+        # Objects are never rewritten, so after three fresh manifests this is not a race: an object
+        # the current manifest names is gone or differs (deleted or replaced behind coverset's back).
+        raise RunWriteConflict(
+            f"run {run_id}: its manifest names an object that is missing or does not match it"
+        )
+
+    def _apply_manifest(
+        self, repo_id: int, run_id: str, data: bytes, etag: str, record: Mapping[str, Any] | None
+    ) -> bool:
+        """Download what changed and swap it in; False (nothing changed) when an object's etag no
+        longer matches the manifest (a newer publish replaced it after the manifest was read)."""
+        assert self.blobs is not None
+        blobs = self.blobs
+        manifest = json.loads(data)
+        files: dict[str, dict[str, Any]] = manifest.get("files") or {}
+        keys: dict[str, str] = {}
+        for name, entry in files.items():
+            if not _FILE_NAME.match(name):
+                raise ValueError(f"run {run_id}: unexpected file name {name!r} in its manifest")
+            keys[name] = _entry_key(name, entry)
+        run_dir = self._run_path(repo_id, run_id)
+        local = _scan(run_dir)
+        known: Mapping[str, list[Any]] = (record or {}).get("files") or {}
+        need = [
+            name
+            for name, entry in files.items()
+            if not (
+                name in local
+                and name in known
+                and known[name][3] == entry.get("etag")
+                and tuple(known[name][:3]) == local[name]
+            )
+        ]
+
+        def fetch(name: str) -> tuple[str, Path, str | None]:
+            tmp = run_dir / f".{name}.{uuid.uuid4().hex}.tmp"
+            try:
+                return name, tmp, blobs.get_file(self._run_key(repo_id, run_id, keys[name]), tmp)
+            except BlobNotFound:
+                return name, tmp, None  # superseded (and deleted) since this manifest was read
+
+        fetched: list[tuple[str, Path, str | None]] = []
+        try:
+            for result in transfer_pool("io").map(fetch, need):
+                fetched.append(result)
+            if any(got != files[name].get("etag") for name, _, got in fetched):
+                return False
+            for name, tmp, _ in fetched:
+                mtime = int(files[name].get("mtime_ns") or time.time_ns())
+                os.utime(tmp, ns=(mtime, mtime))  # the writer's mtime: summary freshness compares them
+                os.replace(tmp, run_dir / name)
+        finally:
+            for _, tmp, _ in fetched:
+                tmp.unlink(missing_ok=True)
+        for name in local:
+            if name not in files:
+                (run_dir / name).unlink(missing_ok=True)
+        now = _scan(run_dir)
+        new_record = {
+            "etag": etag,
+            "version": manifest.get("version"),
+            "created_at": manifest.get("created_at"),
+            "files": {
+                name: [*now[name], entry.get("etag"), keys[name]]
+                for name, entry in files.items()
+                if name in now
+            },
+        }
+        atomic_write_bytes(run_dir / _RECORD_FILE, json.dumps(new_record).encode())
+        atomic_write_bytes(run_dir / MANIFEST_FILE, data)
+        if need:
+            _state(("dict", self._root_key, str(repo_id))).checked = float("-inf")  # new ids may be in use
+            self._maybe_evict()
+        return True
+
+    def _maybe_evict(self) -> None:
+        """Keep this host's cache within ``COVERSET_CACHE_MAX_GB`` (:mod:`coverset.storage.cachedir`):
+        after a pull that downloaded, at most once per :data:`EVICT_INTERVAL_S` per process, in the
+        background. The first download of a process runs it, which is the start-up pass; ``coverset
+        gc`` runs it too, but only one replica runs gc, and every replica has its own cache."""
+        global _last_eviction
+        now = time.monotonic()
+        with _STATES_LOCK:
+            if now - _last_eviction < EVICT_INTERVAL_S:
+                return
+            _last_eviction = now
+        from coverset.storage.cachedir import evict_dir
+
+        def run() -> None:
+            try:
+                report = evict_dir(self.root.parent)
+                if report.removed:
+                    log.info("%s", report.line())
+            except Exception:
+                log.warning("cache eviction under %s failed", self.root.parent, exc_info=True)
+
+        transfer_pool("sync").submit(run)
+
+    def _push_run(self, repo_id: int, run_id: str) -> None:
+        """Upload what changed since the last pull or publish as new objects, then the manifest,
+        last, with ``If-Match``; then delete the objects it superseded (the caller holds the lock).
+
+        A failure before the manifest is written changes nothing a reader can see: the objects
+        already uploaded are unreferenced (a lost race deletes them at once; after any other error
+        the next publish uploads new ones and the run's deletion removes them all).
+        """
+        assert self.blobs is not None
+        blobs = self.blobs
+        run_dir = self._run_path(repo_id, run_id)
+        record = _read_json(run_dir / _RECORD_FILE) or {}
+        known: Mapping[str, list[Any]] = record.get("files") or {}
+        seen = record.get("etag")
+        local = _scan(run_dir)
+        changed = [name for name, st in local.items() if name not in known or tuple(known[name][:3]) != st]
+        removed = [name for name in known if name not in local]
+        if not changed and not removed and (seen is not None or not local):
+            return
+        version = int(record.get("version") or 0) + 1
+        keys = {name: _known_key(name, known) for name in local if name not in changed}
+        keys.update({name: _object_name(name, version) for name in changed})
+        created_at = record.get("created_at")
+        if "runs_dim.parquet" in changed or (created_at is None and "runs_dim.parquet" in local):
+            created_at = _created_at_of(run_dir / "runs_dim.parquet") or created_at
+
+        def upload(name: str) -> tuple[str, str]:
+            return name, blobs.put_file(self._run_key(repo_id, run_id, keys[name]), run_dir / name)
+
+        uploaded = dict(transfer_pool("io").map(upload, changed))
+        files = {
+            name: {
+                "size": st[0],
+                "mtime_ns": st[1],
+                "etag": uploaded.get(name) or known[name][3],
+                "key": keys[name],
+            }
+            for name, st in sorted(local.items())
+        }
+        manifest = {
+            "format": _MANIFEST_FORMAT,
+            "repo_id": repo_id,
+            "run_id": run_id,
+            "version": version,
+            "created_at": created_at,
+            "written_at": datetime.now(UTC).isoformat(),
+            "writer": _writer(),
+            "files": files,
+        }
+        data = json.dumps(manifest, indent=1, sort_keys=True).encode()
+        manifest_key = self._run_key(repo_id, run_id, MANIFEST_FILE)
+        try:
+            if seen is None:
+                etag = blobs.put_bytes(manifest_key, data, if_none_match=True)
+            else:
+                etag = blobs.put_bytes(manifest_key, data, if_match=seen)
+        except PreconditionFailed as exc:
+            self._delete_objects(repo_id, run_id, [keys[name] for name in changed], "a lost race's")
+            raise RunWriteConflict(
+                f"run {run_id} was published by another writer since this one pulled it ({exc})"
+            ) from exc
+        superseded = [_known_key(name, known) for name in removed]
+        superseded += [_known_key(name, known) for name in changed if name in known]
+        self._delete_objects(repo_id, run_id, superseded, "superseded")
+        new_record = {
+            "etag": etag,
+            "version": version,
+            "created_at": created_at,
+            "files": {name: [*local[name], files[name]["etag"], keys[name]] for name in local},
+        }
+        atomic_write_bytes(run_dir / _RECORD_FILE, json.dumps(new_record).encode())
+        atomic_write_bytes(run_dir / MANIFEST_FILE, data)
+        state = _state(("run", self._root_key, str(repo_id), run_id))
+        state.absent, state.error, state.checked = False, None, time.monotonic()
+        if seen is None:
+            self._forget_listing(repo_id)
+
+    def _delete_objects(self, repo_id: int, run_id: str, names: list[str], what: str) -> None:
+        """Best-effort deletion of run objects no manifest references (they only cost space until
+        the run is deleted, whose prefix deletion removes everything)."""
+        assert self.blobs is not None
+        if not names:
+            return
+        try:
+            self.blobs.delete([self._run_key(repo_id, run_id, name) for name in names])
+        except Exception:
+            log.warning("run %s: deleting %d %s objects failed", run_id, len(names), what, exc_info=True)
+
+    def remote_manifest(self, repo_id: int, run_id: str) -> dict[str, Any] | None:
+        """The run's manifest as the bucket holds it right now, read with one GET and without
+        pulling the run (retention ages runs with it); None when there is none (an unpublished run,
+        or no run at all). With the local default, the local ``MANIFEST.json``."""
+        if self.blobs is None:
+            return _read_json(self._run_path(repo_id, run_id) / MANIFEST_FILE)
+        try:
+            data, _ = self.blobs.get_bytes(self._run_key(repo_id, run_id, MANIFEST_FILE))
+        except BlobNotFound:
+            return None
+        manifest = json.loads(data)
+        return manifest if isinstance(manifest, dict) else None
+
+    def _write_local_manifest(self, repo_id: int, run_id: str) -> None:
+        """The local default's ``MANIFEST.json``: the same document, with local etags, refreshed when
+        the run's files changed (one directory scan per release of the run lock)."""
+        run_dir = self._run_path(repo_id, run_id)
+        local = _scan(run_dir)
+        path = run_dir / MANIFEST_FILE
+        previous = _read_json(path) if local or path.exists() else None
+        if not local and previous is None:
+            return
+        files = {
+            name: {"size": st[0], "mtime_ns": st[1], "etag": _local_etag(*st)}
+            for name, st in sorted(local.items())
+        }
+        if previous is not None and previous.get("files") == files:
+            return
+        manifest = {
+            "format": _MANIFEST_FORMAT,
+            "repo_id": repo_id,
+            "run_id": run_id,
+            "version": int((previous or {}).get("version") or 0) + 1,
+            "written_at": datetime.now(UTC).isoformat(),
+            "writer": _writer(),
+            "files": files,
+        }
+        atomic_write_bytes(path, json.dumps(manifest, indent=1, sort_keys=True).encode())
+
+    def manifest(self, repo_id: int, run_id: str) -> dict[str, Any] | None:
+        """The run's manifest as this cache (or the local store) last wrote or pulled it."""
+        if self.blobs is not None:
+            self._ensure(repo_id, run_id)
+        return _read_json(self._run_path(repo_id, run_id) / MANIFEST_FILE)
+
+    def _ensure_dictionary(self, repo_id: int, repo_dir: Path) -> None:
+        """Pull the repo's ``dictionary.json`` when it changed (at most once per sync interval)."""
+        assert self.blobs is not None
+        state = _state(("dict", self._root_key, str(repo_id)))
+        if time.monotonic() - state.checked < cache.sync_interval():
+            return
+        with state.lock:
+            if time.monotonic() - state.checked < cache.sync_interval():
+                return
+            RepoDictionary.pull(repo_dir, self.blobs)
+            state.checked = time.monotonic()
+
+    # -- object store: immutable directories (production batches) ----------------------------
+
+    def pull_batches(self, directory: Path, *, marker: str) -> None:
+        """Mirror the immutable batch directories below ``directory`` from the bucket.
+
+        A batch (any directory holding ``marker``, uploaded last by :meth:`push_tree`) is downloaded
+        whole into a hidden staging directory and renamed into place, so a reader sees all of it or
+        none; a cached batch the bucket no longer has is removed. At most once per sync interval.
+        A no-op for the local default.
+        """
+        if self.blobs is None:
+            return
+        rel = self._rel(directory)
+        state = _state(("tree", self._root_key, rel))
+        if time.monotonic() - state.checked < cache.sync_interval():
+            return
+        with state.lock:
+            if time.monotonic() - state.checked < cache.sync_interval():
+                return
+            prefix = f"{_KEY_ROOT}/{rel}/"
+            groups: dict[str, list[str]] = {}
+            for info in self.blobs.list(prefix):
+                sub, _, name = info.key[len(prefix) :].rpartition("/")
+                if sub:
+                    groups.setdefault(sub, []).append(name)
+            remote = {sub for sub, names in groups.items() if marker in names}
+            local_root = Path(directory)
+            local = {
+                found.parent.relative_to(local_root).as_posix()
+                for found in local_root.rglob(marker)
+                if not any(part.startswith(".") for part in found.relative_to(local_root).parts)
+            }
+            for sub in sorted(remote - local):
+                target = local_root / sub
+                staging = target.with_name(f".staging-{uuid.uuid4().hex}")
+                staging.mkdir(parents=True)
+                try:
+                    for name in groups[sub]:
+                        self.blobs.get_file(f"{prefix}{sub}/{name}", staging / name)
+                    staging.rename(target)
+                except BaseException:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
+            for sub in sorted(local - remote):
+                self._drop_local(local_root / sub)
+            state.checked = time.monotonic()
+
+    def push_tree(self, directory: Path, *, last: str | None = None) -> None:
+        """Upload every file below ``directory`` (``last`` after all the others); a no-op locally."""
+        if self.blobs is None:
+            return
+        blobs = self.blobs
+        rel = self._rel(directory)
+        files = sorted(
+            p
+            for p in Path(directory).rglob("*")
+            if p.is_file() and not p.is_symlink() and not p.name.startswith(".")
+        )
+        first = [p for p in files if p.name != last]
+        final = [p for p in files if p.name == last]
+
+        def upload(path: Path) -> str:
+            return blobs.put_file(f"{_KEY_ROOT}/{rel}/{path.relative_to(directory).as_posix()}", path)
+
+        list(transfer_pool("io").map(upload, first))
+        for path in final:
+            upload(path)
+        for parent in Path(rel).parents:  # the next pull of any enclosing tree lists the bucket again
+            _state(("tree", self._root_key, parent.as_posix())).checked = float("-inf")
+
+    def remove_tree(self, directory: Path) -> None:
+        """Delete a directory below the root: its objects first (over an object store), then the
+        local copy (renamed to a hidden name, then removed)."""
+        if self.blobs is not None:
+            self.blobs.delete_prefix(f"{_KEY_ROOT}/{self._rel(directory)}/")
+        self._drop_local(Path(directory))
+
+    @staticmethod
+    def _drop_local(directory: Path) -> None:
+        if not directory.is_dir() or directory.is_symlink():
+            return
+        hidden = directory.with_name(f".deleting-{uuid.uuid4().hex}")
+        directory.rename(hidden)
+        shutil.rmtree(hidden, ignore_errors=True)
 
     # -- DuckDB ------------------------------------------------------------------------------
 
@@ -382,10 +1235,10 @@ class FactsStore:
     ) -> tuple[tuple[int, str, cache.RunStamp], ...]:
         """The stamps of every run in scope (see :mod:`coverset.facts.cache`): equal stamps mean
         every file a reader of the scope could see is byte-for-byte the same."""
-        return tuple(
-            (repo, run, cache.run_stamp(self.run_dir(repo, run)))
-            for repo, run in self._scope(repo_id, run_id, run_ids)
-        )
+        scope = self._scope(repo_id, run_id, run_ids)
+        if self.blobs is not None:
+            self._ensure_many(scope)
+        return tuple((repo, run, cache.run_stamp(self._run_path(repo, run))) for repo, run in scope)
 
     @contextmanager
     def lease(
@@ -425,10 +1278,10 @@ class FactsStore:
         if repo_id is None:
             return [str(self.root.resolve()) + "/"]
         if run_id is None and run_ids is None:
-            return [str(self.repo_dir(repo_id).resolve()) + "/"]
+            return [str(self._repo_path(repo_id).resolve()) + "/"]
         runs = [run_id] if run_id is not None else list(dict.fromkeys(run_ids or ()))
-        return [str(self.run_dir(repo_id, run).resolve()) + "/" for run in runs] or [
-            str(self.repo_dir(repo_id).resolve()) + "/"
+        return [str(self._run_path(repo_id, run).resolve()) + "/" for run in runs] or [
+            str(self._repo_path(repo_id).resolve()) + "/"
         ]
 
     def query(
@@ -471,3 +1324,14 @@ class FactsStore:
         con.execute(
             f"CREATE VIEW {table} AS SELECT *, NULL::BIGINT AS repo_id, NULL::VARCHAR AS run_id FROM {empty}"
         )
+
+
+def facts_store(settings: Settings) -> FactsStore:
+    """The facts store ``settings`` name: the object store's cache (``COVERSET_BLOB_URL`` set) or the
+    local facts directory. Every caller that has settings builds its store here."""
+    from coverset.storage import remote_store
+
+    blobs = remote_store(settings)
+    if blobs is None:
+        return FactsStore(settings.facts_dir)
+    return FactsStore(settings.facts_dir, blobs=blobs)

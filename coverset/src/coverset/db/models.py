@@ -32,7 +32,7 @@ from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from coverset.config import ExecutorKind, SandboxNetwork
-from coverset.db.types import UTCDateTime, new_id, str_enum, utc_now
+from coverset.db.types import BigIntId, UTCDateTime, new_id, str_enum, utc_now
 
 SECRET_COLUMN_LEN = 2048
 """Length of secret-bearing columns (stateless ``ghs_`` installation tokens are ~520 chars)."""
@@ -107,7 +107,7 @@ class Repo(Base):
     __tablename__ = "repos"
     __table_args__ = (UniqueConstraint("forge", "external_id"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     forge: Mapped[ForgeKind] = mapped_column(str_enum(ForgeKind))
     external_id: Mapped[str] = mapped_column(String(KEY_LEN))
     full_name: Mapped[str] = mapped_column(String(NAME_LEN))
@@ -138,7 +138,7 @@ class Snapshot(Base):
     __tablename__ = "snapshots"
     __table_args__ = (Index(None, "repo_id", "status", "created_at"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     env_hash: Mapped[str] = mapped_column(ForeignKey("envs.env_hash"), index=True)
     sha: Mapped[str] = mapped_column(String(SHA_LEN))
@@ -154,7 +154,7 @@ class Commit(Base):
     __tablename__ = "commits"
     __table_args__ = (UniqueConstraint("repo_id", "sha"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     sha: Mapped[str] = mapped_column(String(SHA_LEN))
     parent_shas: Mapped[list[str]] = mapped_column(JSONList, default=list)
@@ -170,7 +170,7 @@ class PullRequest(Base):
     __tablename__ = "pull_requests"
     __table_args__ = (UniqueConstraint("repo_id", "number"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     number: Mapped[int] = mapped_column(Integer)
     head_sha: Mapped[str] = mapped_column(String(SHA_LEN))
@@ -277,7 +277,7 @@ class TestCase(Base):
     __table_args__ = (UniqueConstraint("repo_id", "nodeid_hash"),)
     __test__ = False
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     nodeid: Mapped[str] = mapped_column(String(NODEID_LEN))
     nodeid_hash: Mapped[bytes] = mapped_column(LargeBinary(16))
@@ -355,9 +355,11 @@ class RunEvent(Base):
     """An ordered, redacted event in a run's stream (served over SSE and JSON polling)."""
 
     __tablename__ = "run_events"
-    __table_args__ = (UniqueConstraint("run_id", "seq"),)
+    __table_args__ = (UniqueConstraint("run_id", "seq"), Index(None, "at"))
+    """``(run_id, seq)`` is the stream's order and its dedupe across writers; ``at`` is the
+    retention gc's cutoff (``DELETE ... WHERE at < cutoff`` on the largest table, revision 0010)."""
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
     seq: Mapped[int] = mapped_column(Integer)
     kind: Mapped[str] = mapped_column(String(32))
@@ -371,7 +373,7 @@ class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
     __table_args__ = (Index(None, "received_at"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     delivery_id: Mapped[str] = mapped_column(String(KEY_LEN), unique=True)
     body_sha256: Mapped[str | None] = mapped_column(String(HASH_LEN), unique=True)
     """SHA-256 of the signed raw body: a captured delivery replayed with a fresh GUID is a duplicate."""
@@ -391,7 +393,7 @@ class ForgeCall(Base):
     __tablename__ = "forge_calls"
     __table_args__ = (Index(None, "repo_id", "created_at"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     forge: Mapped[ForgeKind] = mapped_column(str_enum(ForgeKind))
     repo_id: Mapped[int | None] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"), index=True)
@@ -409,7 +411,7 @@ class Invariant(Base):
     __tablename__ = "invariants"
     __table_args__ = (UniqueConstraint("repo_id", "inv_key", "spec_hash"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     inv_key: Mapped[str] = mapped_column(String(KEY_LEN))
     spec_hash: Mapped[str] = mapped_column(String(HASH_LEN))
@@ -442,7 +444,7 @@ class ReviewFinding(Base):
     __tablename__ = "review_findings"
     __table_args__ = (Index(None, "func_key", "bundle_hash"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
     func_key: Mapped[str] = mapped_column(String(32))
     body_hash: Mapped[str] = mapped_column(String(HASH_LEN))
@@ -463,7 +465,7 @@ class ExecutorSpend(Base):
     __tablename__ = "executor_spend"
     __table_args__ = (Index(None, "day", "executor", "kind"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     day: Mapped[date] = mapped_column(Date)
     """The UTC day the spend is charged to."""
     executor: Mapped[ExecutorKind] = mapped_column(str_enum(ExecutorKind))
@@ -504,7 +506,7 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("forge", "external_id", name="uq_users_forge_external"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     forge: Mapped[ForgeKind] = mapped_column(str_enum(ForgeKind))
     external_id: Mapped[str] = mapped_column(String(KEY_LEN))
     login: Mapped[str] = mapped_column(String(NAME_LEN), index=True)
@@ -545,7 +547,7 @@ class ApiToken(Base):
 
     __tablename__ = "api_tokens"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(HASH_LEN), unique=True)
     prefix: Mapped[str] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(NAME_LEN))
@@ -577,7 +579,7 @@ class AuditEvent(Base):
 
     __tablename__ = "audit_log"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now, index=True)
     actor_kind: Mapped[ActorKind] = mapped_column(str_enum(ActorKind))
     actor_id: Mapped[str | None] = mapped_column(String(KEY_LEN))
@@ -598,7 +600,7 @@ class ScopedSetting(Base):
     __tablename__ = "scoped_settings"
     __table_args__ = (UniqueConstraint("scope_kind", "scope_id", "key", name="uq_scoped_settings"),)
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntId, primary_key=True)
     scope_kind: Mapped[SettingScope] = mapped_column(str_enum(SettingScope))
     scope_id: Mapped[str] = mapped_column(String(KEY_LEN), default="")
     key: Mapped[str] = mapped_column(String(KEY_LEN))

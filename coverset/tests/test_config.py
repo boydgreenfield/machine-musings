@@ -242,3 +242,53 @@ def test_get_settings_is_cached(clean_env: pytest.MonkeyPatch) -> None:
         assert get_settings() is get_settings()
     finally:
         get_settings.cache_clear()
+
+
+# -- database URL --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://coverset:pw@db.internal:5432/coverset",
+        "postgres://coverset:pw@db.internal:5432/coverset",
+        "postgresql+asyncpg://coverset:pw@db.internal:5432/coverset",
+    ],
+)
+def test_postgres_urls_are_normalised_to_asyncpg(url: str) -> None:
+    settings = Settings.for_tests(database_url=url)
+    assert settings.database_url == "postgresql+asyncpg://coverset:pw@db.internal:5432/coverset"
+
+
+def test_hosted_libpq_query_parameters_are_kept_for_the_engine() -> None:
+    """``?sslmode=require`` stays in the URL; the engine translates it for asyncpg
+    (``coverset.db.session.postgres_connect_args``)."""
+    settings = Settings.for_tests(database_url="postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require")
+    assert settings.database_url == "postgresql+asyncpg://u:p@ep-x.neon.tech/neondb?sslmode=require"
+
+
+@pytest.mark.parametrize("url", ["postgresql+psycopg://u:p@h/db", "postgresql+psycopg2://u:p@h/db"])
+def test_other_postgres_drivers_are_refused(url: str) -> None:
+    with pytest.raises(ValidationError, match="asyncpg"):
+        Settings.for_tests(database_url=url)
+
+
+def test_hosted_needs_postgres_and_a_bucket(tmp_path: Path) -> None:
+    pg = "postgresql+asyncpg://u:p@h/db"
+    assert not Settings.for_tests(data_dir=tmp_path).hosted
+    assert not Settings.for_tests(database_url=pg).hosted
+    assert not Settings.for_tests(blob_url="s3://bucket/prefix").hosted
+    assert Settings.for_tests(database_url=pg, blob_url="s3://bucket/prefix").hosted
+
+
+def test_secure_data_dirs_with_postgres_touches_no_database_file(tmp_path: Path) -> None:
+    from coverset.config import secure_data_dirs
+
+    decoy = tmp_path / "data" / "db"  # the URL's database name, as a file: never chmodded
+    decoy.parent.mkdir()
+    decoy.write_text("not a database")
+    decoy.chmod(0o644)
+    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url="postgresql+asyncpg://u:p@h/db")
+    secure_data_dirs(settings)
+    assert (settings.data_dir.stat().st_mode & 0o777) == 0o700
+    assert (decoy.stat().st_mode & 0o777) == 0o644

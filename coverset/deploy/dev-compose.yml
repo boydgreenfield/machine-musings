@@ -1,0 +1,96 @@
+# coverset's development services: Postgres 17 and MinIO (an S3-compatible object store), so a
+# laptop runs the same hosted stack a deployment does. DEVELOPMENT ONLY: every credential below is
+# a well-known throwaway (coverset/coverset, minioadmin/minioadmin) and the ports are published on
+# 127.0.0.1 only. Never point a deployment at this file. docs/postgres.md has the details.
+#
+#   docker compose -f deploy/dev-compose.yml up -d --wait     # start (make services)
+#   docker compose -f deploy/dev-compose.yml down             # stop, keep the data (make services-down)
+#   docker compose -f deploy/dev-compose.yml down -v          # stop and delete the volumes
+#
+# Postgres is published on 127.0.0.1:55432, not 5432: a Postgres already installed on the laptop
+# (Homebrew, Postgres.app) usually holds 5432, and Docker then cannot bind it. MinIO's API is on
+# 9000 and its console (http://127.0.0.1:9001, minioadmin/minioadmin) on 9001. Move any of them
+# with COVERSET_DEV_PG_PORT, COVERSET_DEV_S3_PORT and COVERSET_DEV_S3_CONSOLE_PORT.
+#
+# Then, for the app:
+#   COVERSET_DATABASE_URL=postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/coverset
+#   COVERSET_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1'
+#   AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin
+# and for the test suite (make test-pg):
+#   COVERSET_TEST_DATABASE_URL=postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/coverset
+#   COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1'
+name: coverset-dev
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: coverset
+      POSTGRES_PASSWORD: coverset # dev only
+      POSTGRES_DB: coverset
+    # The test suite creates a database per test from a migrated template; a few more connections
+    # than the default 100 keep six xdist workers (each with its own pool) comfortable.
+    command: ["postgres", "-c", "max_connections=200"]
+    ports:
+      - "127.0.0.1:${COVERSET_DEV_PG_PORT:-55432}:5432"
+    volumes:
+      - coverset-dev-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coverset -d coverset"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # MinIO itself, built from source by Chainguard: MinIO stopped publishing images to Docker Hub
+  # (minio/minio, minio/mc) and quay.io in 2025, and those names no longer pull anonymously.
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    user: "0:0" # the named volume is root-owned; the image's default user (65532) cannot write it
+    environment:
+      MINIO_ROOT_USER: minioadmin # dev only
+      MINIO_ROOT_PASSWORD: minioadmin # dev only
+      MC_CONFIG_DIR: /tmp/.mc
+    ports:
+      - "127.0.0.1:${COVERSET_DEV_S3_PORT:-9000}:9000"
+      - "127.0.0.1:${COVERSET_DEV_S3_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - coverset-dev-minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Creates the "coverset" bucket (idempotent) once MinIO is up. It then idles instead of exiting:
+  # Compose before 2.30 makes `up --wait` fail (exit 1) when any container has exited, even with
+  # status 0, so a plain one-shot would break `make services`. Its healthcheck turns healthy once
+  # the bucket exists, which is what `--wait` waits for. Everything after mc is a bash builtin: the
+  # image's coreutils (sleep, touch, test) die with SIGILL under Docker Desktop on Apple M4.
+  minio-init:
+    image: cgr.dev/chainguard/minio:latest # holds the mc client and a shell
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    init: true # forward SIGTERM so `down` does not wait out the grace period
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        mc alias set dev http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing dev/coverset &&
+        : > /tmp/bucket-ready &&
+        trap 'exit 0' TERM INT &&
+        exec 9<> <(:) &&
+        while :; do read -t 3600 -u 9 _ || :; done
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /tmp/bucket-ready ]"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+
+volumes:
+  coverset-dev-postgres:
+  coverset-dev-minio:

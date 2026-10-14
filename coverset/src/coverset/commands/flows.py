@@ -63,9 +63,9 @@ async def _repo_and_run(
                 .order_by(Run.created_at.desc())
                 .limit(5)
             )
-            from coverset.facts.store import FactsStore
+            from coverset.facts.store import facts_store
 
-            store = FactsStore(settings.facts_dir)
+            store = facts_store(settings)
             for run in await session.scalars(query):
                 if store.run_dir(repo.id, run.id).is_dir():
                     return repo, run
@@ -99,10 +99,10 @@ async def _import(
 ) -> dict[str, Any]:
     from coverset.facts.flows import FlowsError, import_payloads, read_payload_file
     from coverset.facts.queries import ParquetPriorRun
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     repo, run = await _repo_and_run(settings, repo_spec, None)
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     regions = (
         await asyncio.to_thread(ParquetPriorRun(store, repo.id, run.id).functions) if run is not None else []
     )
@@ -161,11 +161,11 @@ def _import_text(result: dict[str, Any]) -> str:
 def flows_windows_command(repo_spec: str | None, service: str | None, as_json: bool) -> None:
     """List the imported production windows, oldest first."""
     from coverset.facts.flows import list_windows
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     settings = load()
     repo, _ = run_async(lambda: _repo_and_run(settings, repo_spec, None))
-    windows = list_windows(FactsStore(settings.facts_dir), repo.id, service)
+    windows = list_windows(facts_store(settings), repo.id, service)
     for w in windows:
         row = {
             "service": w.service,
@@ -188,12 +188,12 @@ def flows_windows_command(repo_spec: str | None, service: str | None, as_json: b
 def flows_prune_command(repo_spec: str | None, older_than_days: int, dry_run: bool) -> None:
     """Delete imported batches whose newest window ended more than N days ago."""
     from coverset.facts.flows import prune_windows
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     settings = load()
     repo, _ = run_async(lambda: _repo_and_run(settings, repo_spec, None))
     cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
-    doomed = prune_windows(FactsStore(settings.facts_dir), repo.id, older_than=cutoff, dry_run=dry_run)
+    doomed = prune_windows(facts_store(settings), repo.id, older_than=cutoff, dry_run=dry_run)
     verb = "would delete" if dry_run else "deleted"
     click.echo(f"{verb} {len(doomed)} batch(es) of {repo.full_name} ended before {cutoff:%Y-%m-%d %H:%M}Z")
 
@@ -316,14 +316,14 @@ async def _context(
 ) -> _Context:
     from coverset.facts.flows import read_prod, run_has_shapes
     from coverset.facts.queries import ParquetPriorRun
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     repo, run = await _repo_and_run(settings, repo_spec, run_id)
     if run is None:
         raise click.ClickException(
             f"{repo.full_name} has no completed run with facts on {repo.default_branch} yet"
         )
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     if not await asyncio.to_thread(run_has_shapes, store, repo.id, run.id):
         # Without shapes every production class would read as a gap: refuse rather than mislead.
         raise click.ClickException(

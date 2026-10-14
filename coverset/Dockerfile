@@ -5,6 +5,16 @@
 #   docker run -p 8000:8000 -v coverset-data:/data \
 #     -e COVERSET_ADMIN_TOKEN=$(openssl rand -hex 32) -e COVERSET_PUBLIC_URL=http://localhost:8000 coverset
 #
+# Two state shapes, one image. Laptop/VM: SQLite and files under /data (a volume). Hosted: set
+# COVERSET_DATABASE_URL (Postgres) and COVERSET_BLOB_URL (an S3-compatible bucket) plus the bucket's
+# AWS_* credentials (or an instance/task role), and the container is stateless: /data and the cache
+# (/var/cache/coverset, on the container's own disk) are disposable, so no volume is needed.
+#
+# At start `serve` runs `coverset init-db` first (COVERSET_MIGRATE_ON_START=true, the default). Every
+# replica may do so: on Postgres an advisory lock (coverset:migrate) runs them one after the other.
+# To migrate once per deploy instead, set it false and run `init-db` in a release step
+# (docs/deploy.md, "Migrations on deploy"). The entrypoint writes COVERSET_GITHUB_APP_PRIVATE_KEY (PEM text) to the key path when set.
+#
 # The project is installed *editable* on purpose: the executors find the pytest-coverset sources and
 # coverset's own uv.lock relative to src/coverset (env_export.PLUGIN_DIR), and the demo seeds from
 # examples/ and scripts/. uv stays in the final image because the executors call it at run time
@@ -39,16 +49,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 coverset \
     && useradd --system --uid 10001 --gid coverset --home-dir /home/coverset --create-home coverset \
-    && mkdir -p /data && chown coverset:coverset /data && chmod 700 /data
+    && mkdir -p /data /var/cache/coverset \
+    && chown coverset:coverset /data /var/cache/coverset && chmod 700 /data /var/cache/coverset
 COPY --from=build /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=build --chown=root:root /app /app
+COPY --chmod=755 deploy/docker-entrypoint.sh /usr/local/bin/coverset-entrypoint
 
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     UV_PYTHON_DOWNLOADS=never \
     COVERSET_ENV=prod \
     COVERSET_BIND=0.0.0.0:8000 \
-    COVERSET_DATA_DIR=/data
+    COVERSET_DATA_DIR=/data \
+    COVERSET_CACHE_DIR=/var/cache/coverset \
+    COVERSET_MIGRATE_ON_START=true
 USER coverset
 # The working directory holds the optional `.env` and `secrets/` (GitHub App key) that /setup
 # writes, so it lives on the data volume too; see docs/deploy.md.
@@ -60,6 +74,7 @@ VOLUME ["/data"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"]
-# tini reaps git's and uv's children and forwards SIGTERM, so `serve` drains and stops the pool.
-ENTRYPOINT ["tini", "--", "coverset"]
+# tini reaps git's and uv's children and forwards SIGTERM, so `serve` drains and stops the pool; the
+# entrypoint script execs `coverset "$@"` (so `docker run coverset init-db` works as before).
+ENTRYPOINT ["tini", "--", "coverset-entrypoint"]
 CMD ["serve", "--bind", "0.0.0.0:8000"]

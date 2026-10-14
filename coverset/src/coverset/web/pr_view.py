@@ -7,7 +7,9 @@ from ``git cat-file``, :func:`~coverset.analysis.diff.changed_functions`) and ru
 ``(mirror, base, head, facts store, repo, run, run stamp)``: the stamp
 (:func:`coverset.facts.cache.run_stamp`) changes whenever the run's facts do, so a re-ingested run
 is analysed again, and the key never depends on the identity of the facts object (an evicted
-object's ``id`` can be reused by a new one). Synchronous: call through ``asyncio.to_thread``.
+object's ``id`` can be reused by a new one). An analysis made without the mirror, or one git failed,
+is returned but not cached (:func:`_final`): with an object store a fresh replica clones its mirror
+in the background while the first pages render. Synchronous: call through ``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -77,11 +79,24 @@ def analyse_diff(mirror: Path, base_sha: str | None, head_sha: str, facts: RunFa
             _cache.move_to_end(key)
             return found
     result = _analyse(mirror, base_sha, head_sha, facts)
+    if not _final(mirror, base_sha, result):
+        return result
     with _lock:
         _cache[key] = result
         while len(_cache) > CACHE_SIZE:
             _cache.popitem(last=False)
     return result
+
+
+def _final(mirror: Path, base_sha: str | None, result: DiffAnalysis) -> bool:
+    """Whether ``result`` may be cached: not one computed without the mirror (a replica whose cache
+    lost it renders the page while ``repos.schedule_mirror_restore`` clones it again) or one that
+    failed on git (a commit not fetched yet). Either would otherwise stay on the PR page, with no
+    changed functions, until the run's facts change; recomputing them costs one ``stat`` or one git
+    call per request until the mirror is back."""
+    if result.error is not None:
+        return False
+    return not base_sha or (mirror / "HEAD").is_file()
 
 
 def _text(data: bytes | None) -> str | None:

@@ -572,7 +572,7 @@ async def load_run(
     from coverset.commands.common import find_repo, prepare_db
     from coverset.db.models import PullRequest, Repo, Run, RunEvent, TestCase, TestResult
     from coverset.db.session import Database
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
     from coverset.orchestrator.repos import RepoError, mirror_path, read_blobs
     from coverset.web.facts_view import run_facts
 
@@ -624,8 +624,8 @@ async def load_run(
             repo_name = repo.full_name if repo else f"repo {run.repo_id}"
     finally:
         await db.engine.dispose()
-    store = FactsStore(settings.facts_dir)
-    if not store.run_dir(repo_id, run_id).is_dir():
+    store = facts_store(settings)
+    if not await asyncio.to_thread(store.has_run, repo_id, run_id):
         raise LookupError(f"run {run_id} has no facts in {settings.facts_dir}")
     facts = await asyncio.to_thread(run_facts, store, repo_id, run_id)
     paths = sorted(facts.statics)

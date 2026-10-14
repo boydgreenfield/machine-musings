@@ -29,7 +29,7 @@ TAG_WITH_HANDLER = re.compile(r"<[a-zA-Z][^>]*\son[a-z]+\s*=", re.IGNORECASE)
 
 
 def _store(demo: Demo) -> FactsStore:
-    return FactsStore(demo.data_dir / "facts")
+    return demo.facts()
 
 
 def _validate_email_key(demo: Demo) -> str:

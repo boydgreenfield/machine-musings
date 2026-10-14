@@ -137,12 +137,12 @@ def test_a_failing_economy_leaves_the_report_without_its_page(
 
 
 def test_a_store_run_reads_the_stored_economy(demo: DemoData, tmp_path: Path) -> None:
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     inp = asyncio.run(load_run(demo.settings, demo.pr1_run))
     build_report(inp, tmp_path / "out")
     page = (tmp_path / "out" / "economy.html").read_text(encoding="utf-8")
-    view = view_from_store(FactsStore(demo.settings.facts_dir), demo.repo_id, demo.pr1_run)
+    view = view_from_store(facts_store(demo.settings), demo.repo_id, demo.pr1_run)  # type: ignore[arg-type]
     assert view is not None and view.totals is not None and view.tax is not None
     assert f"against run {view.tax.base_run_id}" in page
     assert f'<div class="value">{view.totals.removable_candidates}</div>' in page

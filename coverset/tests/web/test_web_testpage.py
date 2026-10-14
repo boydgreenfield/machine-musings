@@ -5,7 +5,6 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
-import sqlite3
 from collections.abc import Iterator
 from urllib.parse import parse_qs, urlparse
 
@@ -15,7 +14,6 @@ from quart.typing import TestClientProtocol as Client
 from web_helpers import HX, Demo, assert_csp_clean
 
 from coverset.facts import queries
-from coverset.facts.store import FactsStore
 from coverset.lang.base import ShapeObs
 from coverset.orchestrator.history import nodeid_hash
 from coverset.web import testpage
@@ -36,10 +34,6 @@ def assert_safe(text: str | Markup) -> None:
     assert not re.search(r"<script(?![^>]*\bsrc=\"/static/)", body, re.IGNORECASE), body[:400]
     assert not TAG_WITH_HANDLER.search(body), TAG_WITH_HANDLER.search(body)
     assert not LIVE_JS_URL.search(body), LIVE_JS_URL.search(body)
-
-
-def _db(demo: Demo) -> sqlite3.Connection:
-    return sqlite3.connect(demo.db_url.split("///", 1)[1])
 
 
 async def _failing_test_url(client: Client, demo: Demo) -> str:
@@ -81,12 +75,8 @@ async def test_the_page_agrees_with_the_facts_queries(client: Client, demo: Demo
     url = await _failing_test_url(client, demo)
     page = await (await client.get(url)).get_data(as_text=True)
     test_id = int(url.split("/tests/", 1)[1].split("?", 1)[0])
-    con = _db(demo)
-    try:
-        nodeid = con.execute("SELECT nodeid FROM tests WHERE id = ?", (test_id,)).fetchone()[0]
-    finally:
-        con.close()
-    store = FactsStore(demo.data_dir / "facts")
+    nodeid = demo.rows("SELECT nodeid FROM tests WHERE id = :id", {"id": test_id})[0][0]
+    store = demo.facts()
     touched = queries.test_touched(store, demo.repo_id, demo.pr1_run, nodeid)
     called = {fn.qualname for f in touched for fn in f.functions}
     assert "refund" in called
@@ -151,42 +141,52 @@ async def test_every_listing_links_to_the_test_page(client: Client, demo: Demo) 
 @pytest.fixture
 def hostile_test(demo: Demo) -> Iterator[int]:
     """A test with a hostile nodeid, a failed result in the baseline run and a hostile failure text."""
-    con = _db(demo)
     try:
-        cur = con.execute(
-            "INSERT INTO tests (repo_id, nodeid, nodeid_hash, family, quarantined) VALUES (?, ?, ?, ?, 0)",
-            (demo.repo_id, HOSTILE_NODEID, nodeid_hash(HOSTILE_NODEID), HOSTILE_NODEID.split("[", 1)[0]),
-        )
-        test_id = int(cur.lastrowid or 0)
-        con.execute(
+        test_id = _insert_test(demo, HOSTILE_NODEID)
+        demo.rows(
             "INSERT INTO test_results (run_id, test_id, outcome, duration_ms, attempts, flaky, quarantined) "
-            "VALUES (?, ?, 'failed', 12.0, 1, 0, 0)",
-            (demo.baseline_run, test_id),
+            "VALUES (:run, :test, 'failed', 12.0, 1, false, false)",
+            {"run": demo.baseline_run, "test": test_id},
         )
-        seq = con.execute(
-            "SELECT coalesce(max(seq), 0) + 1000 FROM run_events WHERE run_id = ?", (demo.baseline_run,)
-        ).fetchone()[0]
-        con.execute(
-            "INSERT INTO run_events (run_id, seq, kind, payload, at) VALUES (?, ?, 'test', ?, '2026-10-11 12:00:00')",
-            (
-                demo.baseline_run,
-                seq,
-                json.dumps({"nodeid": HOSTILE_NODEID, "outcome": "failed", "longrepr": EVIL}),
-            ),
+        ((seq,),) = demo.rows(
+            "SELECT coalesce(max(seq), 0) + 1000 FROM run_events WHERE run_id = :run",
+            {"run": demo.baseline_run},
         )
-        con.commit()
+        demo.rows(
+            "INSERT INTO run_events (run_id, seq, kind, payload, at) "
+            "VALUES (:run, :seq, 'test', :payload, '2026-10-11 12:00:00')",
+            {
+                "run": demo.baseline_run,
+                "seq": seq,
+                "payload": json.dumps({"nodeid": HOSTILE_NODEID, "outcome": "failed", "longrepr": EVIL}),
+            },
+        )
         yield test_id
     finally:
-        con.execute(
-            "DELETE FROM run_events WHERE run_id = ? AND payload LIKE ?", (demo.baseline_run, "%test_evil%")
+        demo.rows(
+            "DELETE FROM run_events WHERE run_id = :run AND CAST(payload AS TEXT) LIKE :like",
+            {"run": demo.baseline_run, "like": "%test_evil%"},
         )
-        con.execute(
-            "DELETE FROM test_results WHERE test_id IN (SELECT id FROM tests WHERE nodeid = ?)",
-            (HOSTILE_NODEID,),
+        demo.rows(
+            "DELETE FROM test_results WHERE test_id IN (SELECT id FROM tests WHERE nodeid = :nodeid)",
+            {"nodeid": HOSTILE_NODEID},
         )
-        con.execute("DELETE FROM tests WHERE nodeid = ?", (HOSTILE_NODEID,))
-        con.commit()
-        con.close()
+        demo.rows("DELETE FROM tests WHERE nodeid = :nodeid", {"nodeid": HOSTILE_NODEID})
+
+
+def _insert_test(demo: Demo, nodeid: str) -> int:
+    """A ``tests`` row for ``nodeid`` in the demo repository (raw SQL that both backends accept)."""
+    ((test_id,),) = demo.rows(
+        "INSERT INTO tests (repo_id, nodeid, nodeid_hash, family, quarantined) "
+        "VALUES (:repo, :nodeid, :hash, :family, false) RETURNING id",
+        {
+            "repo": demo.repo_id,
+            "nodeid": nodeid,
+            "hash": nodeid_hash(nodeid),
+            "family": nodeid.split("[", 1)[0],
+        },
+    )
+    return int(test_id)
 
 
 async def test_hostile_nodeids_and_failure_text_are_escaped(
@@ -356,25 +356,17 @@ BIDI_NODEID = "tests/test_refund.py::test_bidi[\u202eevil\u2066x\u2069]"
 @pytest.fixture
 def bidi_test(demo: Demo) -> Iterator[int]:
     """A test with bidi controls in its nodeid and a result in the baseline run only."""
-    con = _db(demo)
+    test_id = _insert_test(demo, BIDI_NODEID)
     try:
-        cur = con.execute(
-            "INSERT INTO tests (repo_id, nodeid, nodeid_hash, family, quarantined) VALUES (?, ?, ?, ?, 0)",
-            (demo.repo_id, BIDI_NODEID, nodeid_hash(BIDI_NODEID), BIDI_NODEID.split("[", 1)[0]),
-        )
-        test_id = int(cur.lastrowid or 0)
-        con.execute(
+        demo.rows(
             "INSERT INTO test_results (run_id, test_id, outcome, duration_ms, attempts, flaky, quarantined) "
-            "VALUES (?, ?, 'passed', 1.0, 1, 0, 0)",
-            (demo.baseline_run, test_id),
+            "VALUES (:run, :test, 'passed', 1.0, 1, false, false)",
+            {"run": demo.baseline_run, "test": test_id},
         )
-        con.commit()
         yield test_id
     finally:
-        con.execute("DELETE FROM test_results WHERE test_id = ?", (test_id,))
-        con.execute("DELETE FROM tests WHERE id = ?", (test_id,))
-        con.commit()
-        con.close()
+        demo.rows("DELETE FROM test_results WHERE test_id = :test", {"test": test_id})
+        demo.rows("DELETE FROM tests WHERE id = :test", {"test": test_id})
 
 
 async def test_bidi_controls_are_shown_not_applied(client: Client, demo: Demo, bidi_test: int) -> None:

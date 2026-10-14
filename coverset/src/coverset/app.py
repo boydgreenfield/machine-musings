@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import secrets
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from quart import Quart, Request, Response, jsonify, request, session
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from coverset.config import Settings, get_settings, secure_data_dirs
-from coverset.db.session import Database, init_db
+from coverset.db.session import WEB_STATEMENT_TIMEOUT_S, Database, init_db
 from coverset.facts.cache import configure as configure_caches
 from coverset.logging import configure_logging
 from coverset.web import register_blueprints
 from coverset.web.auth import session_lifetime
 from coverset.web.proxy import ProxyHeadersMiddleware
+
+if TYPE_CHECKING:
+    from coverset.db.leader import LeaderLease
 
 MAX_CONTENT_LENGTH = 25 * 1024 * 1024
 """Largest accepted request body (webhook payloads are capped well below this by GitHub), except
@@ -72,7 +76,8 @@ def create_app(settings: Settings | None = None) -> Quart:
     # Templates show a stored avatar URL only under the origin the CSP's img-src allows.
     app.jinja_env.globals["avatar_origin"] = AVATAR_ORIGIN + "/"
     app.extensions["settings"] = settings
-    database = Database.from_url(settings.database_url)
+    # On Postgres no statement of the web process runs longer than 30 s (SQLite has no timeout).
+    database = Database.from_url(settings.database_url, statement_timeout_s=WEB_STATEMENT_TIMEOUT_S)
     app.extensions["db"] = database
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
@@ -125,10 +130,68 @@ def create_app(settings: Settings | None = None) -> Quart:
         # The dispatcher that turns queued runs into executions; tests drive runs explicitly.
         from coverset.orchestrator.queue import install_run_queue
 
+        lease = install_leader_lease(app)  # one replica per database runs the loops below
         install_run_queue(app)
         schedule_gc(app)
         schedule_executor_upkeep(app)
+        app.after_serving(lease.release)  # last: after the dispatcher and the pool have stopped
     return app
+
+
+def install_leader_lease(app: Quart) -> LeaderLease:
+    """Put a :class:`~coverset.db.leader.LeaderLease` on the app (``app.extensions["leader"]``).
+
+    When serving starts, the process tries to take the lease once and logs its role; then it
+    re-checks every 30 s. While a lease is installed, :func:`add_leader_task` (gc, reaper, pool
+    maintainer) and the run queue run their loops only while it is held, so several replicas on
+    one Postgres run one dispatcher. On SQLite the lease is always held and nothing changes.
+    """
+    from coverset.db.leader import LEADER_EXTENSION, LeaderLease, process_label
+
+    database: Database = app.extensions["db"]
+    lease = LeaderLease(database.engine)
+    app.extensions[LEADER_EXTENSION] = lease
+
+    @app.before_serving
+    async def _take_leader_lease() -> None:
+        if not lease.exclusive:
+            return
+        try:
+            await lease.acquire()
+        except Exception as exc:  # noqa: BLE001 - serving starts regardless; keep() retries
+            app.logger.warning("leader lease: cannot reach the database yet (%s)", type(exc).__name__)
+        if lease.held:
+            app.logger.info(
+                "leader: %s runs the dispatcher, gc, reaper and pool maintainer (lease %s)",
+                process_label(),
+                lease.name,
+            )
+        else:
+            app.logger.info(
+                "follower: %s serves requests; another replica holds lease %s (re-checked every %.0f s)",
+                process_label(),
+                lease.name,
+                lease.check_s,
+            )
+        app.add_background_task(lease.keep, app.shutdown_event)
+
+    return lease
+
+
+def add_leader_task(app: Quart, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """``app.add_background_task(func, *args, **kwargs)``, run only while this process holds the
+    app's Postgres leader lease when one is installed (:func:`install_leader_lease`; tests install
+    none, and on SQLite the task starts directly, as it always did)."""
+    from coverset.db.leader import LEADER_EXTENSION, run_while_leader
+
+    lease = app.extensions.get(LEADER_EXTENSION)
+    if lease is None or not lease.exclusive:  # no lease, or SQLite's implicit one: run it as always
+        app.add_background_task(func, *args, **kwargs)
+        return
+    label = getattr(func, "__qualname__", repr(func))
+    app.add_background_task(
+        run_while_leader, lease, functools.partial(func, *args, **kwargs), app.shutdown_event, label=label
+    )
 
 
 def schedule_gc(app: Quart, *, interval_s: float | None = None) -> None:
@@ -146,7 +209,8 @@ def schedule_gc(app: Quart, *, interval_s: float | None = None) -> None:
 
     @app.before_serving
     async def _start_gc() -> None:
-        app.add_background_task(
+        add_leader_task(
+            app,
             gc_forever,
             database,
             settings,
@@ -196,7 +260,8 @@ def schedule_executor_upkeep(
             return
         started.add(id(executor))
         if isinstance(executor, ReapingExecutor):
-            app.add_background_task(
+            add_leader_task(
+                app,
                 reap_forever,
                 ctx.db,
                 executor,
@@ -210,7 +275,8 @@ def schedule_executor_upkeep(
             maintainers.append(maintainer)
             if ctx.pool_maintainer is None:
                 ctx.pool_maintainer = maintainer
-            app.add_background_task(
+            add_leader_task(
+                app,
                 maintainer.run_forever,
                 app.shutdown_event,
                 interval_s=POOL_INTERVAL_S if pool_interval_s is None else pool_interval_s,

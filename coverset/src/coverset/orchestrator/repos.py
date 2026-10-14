@@ -15,6 +15,14 @@ complete mirror is never deleted.
 Local repositories are registered with ``forge='local'`` and ``external_id`` = sha256 of the
 resolved source path, so registering the same path twice finds the same row.
 
+With an object store (``COVERSET_BLOB_URL``) the mirrors live in the disposable cache,
+``<cache_dir>/mirrors`` (``Settings.mirrors_dir``): eviction or a new replica loses them, and a run
+re-clones in :func:`ensure_mirror` as always. Pages that read a mirror (the source view, a PR's
+diff) restore it on demand with :func:`restore_mirror` / :func:`schedule_mirror_restore` (one clone
+per repository, coalesced, a failure retried after five minutes), so a replica that never ran the
+repository still shows its sources. With the local default a mirror is state, never re-cloned
+behind the operator's back.
+
 The git helpers here are synchronous (callers in async code wrap them in ``asyncio.to_thread``) and
 run git with a minimal environment (:func:`git_env`: ``PATH``, ``HOME``, locale, ``TZ``, ``TMPDIR``,
 CA bundles and proxies; never ``COVERSET_*``, ``ANTHROPIC_*``, ``MODAL_*``, ``AWS_*``, ``GITHUB_*``
@@ -36,7 +44,7 @@ import tarfile
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +72,8 @@ __all__ = [
     "read_blobs",
     "register_local_repo",
     "resolve_commit",
+    "restore_mirror",
+    "schedule_mirror_restore",
     "tree_paths",
 ]
 
@@ -314,6 +324,61 @@ async def ensure_mirror_async(
             repo_row.installation_id, repo_ref_from_model(repo_row)
         )
     return await asyncio.to_thread(ensure_mirror, settings, source, repo_row, credentials=credentials)
+
+
+_RESTORE_RETRY_S = 300.0
+_restore_failed: dict[tuple[str, int], float] = {}
+_restore_locks: dict[tuple[str, int], tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
+"""One lock per mirror and event loop: an asyncio lock belongs to the loop that first waited on it,
+and a process may run several loops one after another (``asyncio.run`` per CLI step or test), where
+a lock left held by a loop that ended would otherwise fail every later page with RuntimeError."""
+_restore_tasks: set[asyncio.Task[Path | None]] = set()
+
+
+async def restore_mirror(settings: Settings, repo_id: int, *, db: Any, forge: Forge | None) -> Path | None:
+    """The repository's mirror, cloned again if the object-store cache lost it (see the module
+    docstring); None when it is missing and cannot be cloned now (or with the local default)."""
+    import time
+
+    mirror = mirror_path(settings, repo_id)
+    if (mirror / "HEAD").is_file():
+        return mirror
+    if not settings.blob_url:
+        return None
+    key = (str(settings.mirrors_dir), repo_id)
+    loop = asyncio.get_running_loop()
+    entry = _restore_locks.get(key)
+    if entry is None or entry[0] is not loop:
+        entry = _restore_locks[key] = (loop, asyncio.Lock())
+    lock = entry[1]
+    async with lock:  # concurrent pages wait for one clone
+        if (mirror / "HEAD").is_file():
+            return mirror
+        if time.monotonic() - _restore_failed.get(key, float("-inf")) < _RESTORE_RETRY_S:
+            return None
+        async with db.session() as session:
+            repo_row = await session.get(Repo, repo_id)
+        if repo_row is None:
+            return None
+        try:
+            return await ensure_mirror_async(settings, repo_row, forge=forge)
+        except Exception as exc:  # no credentials, network: the page goes on without the mirror
+            log.info("restoring the mirror of repo %s failed: %s", repo_id, exc)
+            _restore_failed[key] = time.monotonic()
+            return None
+
+
+def schedule_mirror_restore(
+    settings: Settings, repo_id: int, *, db: Any, forge: Forge | None
+) -> asyncio.Task[Path | None] | None:
+    """:func:`restore_mirror` in the background when the mirror is missing (object store only);
+    returns the task (a caller may wait for it a while), or None when there is nothing to do."""
+    if not settings.blob_url or (mirror_path(settings, repo_id) / "HEAD").is_file():
+        return None
+    task = asyncio.get_running_loop().create_task(restore_mirror(settings, repo_id, db=db, forge=forge))
+    _restore_tasks.add(task)
+    task.add_done_callback(_restore_tasks.discard)
+    return task
 
 
 def resolve_commit(mirror: Path, ref: str) -> str:

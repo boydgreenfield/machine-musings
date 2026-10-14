@@ -218,7 +218,10 @@ def no_modal_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(deploy_cmd, "_profile_has_token", lambda: False)
 
 
-def test_deploy_check_on_a_ready_server(tmp_path: Path, admin_token: str, no_modal_profile: None) -> None:
+def test_deploy_check_on_a_ready_server(
+    tmp_path: Path, admin_token: str, no_modal_profile: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COVERSET_CACHE_MAX_GB", "0.01")  # a bound this machine's free disk holds
     pem = tmp_path / "app.pem"
     pem.write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
     settings = Settings.for_tests(
@@ -236,6 +239,8 @@ def test_deploy_check_on_a_ready_server(tmp_path: Path, admin_token: str, no_mod
         github_app_private_key_path=pem,
         github_webhook_secret=SecretStr("w" * 32),
         allowed_owners=["octo-org"],
+        database_url="postgresql+asyncpg://coverset:pw@db.internal/coverset",
+        blob_url="s3://coverset-prod/cs?region=us-east-1",
     )
     probed: list[str] = []
 
@@ -250,9 +255,11 @@ def test_deploy_check_on_a_ready_server(tmp_path: Path, admin_token: str, no_mod
             prober=prober,
             in_modal=False,
             check_database=False,
+            store_probe=lambda _settings: ("pass", "s3://coverset-prod/cs: conditional writes ok"),
         )
     )
     assert probed == [f"{PUBLIC_URL}/healthz"]
+    assert rows["state"].detail.startswith("hosted")
     assert {name: row.status for name, row in rows.items() if row.status != "pass"} == {}
     assert "MODAL_TOKEN_ID" in rows["executor"].detail
     assert "octo-org" in rows["github"].detail

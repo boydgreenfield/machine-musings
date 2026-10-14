@@ -8,19 +8,41 @@ that container the run dispatcher creates shard sandboxes in the App ``coverset-
 ``coverset serve`` does on a laptop (the Modal client is authenticated by the container runtime; no
 token is stored). ``docs/deploy.md`` is the operator's guide; this docstring records the design.
 
-**Exactly one container.** coverset keeps its control-plane state in SQLite and runs singleton
-background tasks (dispatcher, reaper, warm-pool maintainer, gc). ``max_containers=1`` keeps a
-single writer; ``min_containers=1`` keeps it warm so webhooks never wait for a cold start and the
-background tasks keep running between requests. ``@modal.concurrent`` lets that one container take
-many requests at once (the app is asyncio throughout, SSE streams included). Redeploys must use
-``--strategy recreate``: with the default rolling strategy the new version waits for a free
-container slot that the old, healthy container never gives up (observed 2026-10-13: the URL
-answered nothing for 25 minutes until the old container was stopped by hand).
+**Two modes, chosen from the Secret at container start** (:func:`plan_container`):
 
-**Where state lives.** Modal Volumes are eventually consistent, last-writer-wins file stores with
-explicit ``commit()``/``reload()`` and *no file locking* ("nor is distributed file locking
-supported", modal.com/docs/guide/volumes, read 2026-10-13); the docs give no SQLite guidance beyond
-an example that builds the database on local disk and copies the finished file onto the Volume.
+* **Hosted** (the Secret holds a Postgres ``COVERSET_DATABASE_URL`` and an ``s3://``
+  ``COVERSET_BLOB_URL``, plus ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` for the bucket): the
+  container is stateless. The Volume restore/backup machinery below is skipped entirely, the data
+  dir, the cache (mirrors, downloaded facts) and the working directory are on the container's own
+  disk, and a restart or a redeploy loses no run, fact or setting. The GitHub App key comes from the
+  Secret (``COVERSET_GITHUB_APP_PRIVATE_KEY``, PEM text) because nothing ``/setup`` writes to disk
+  survives. One thing does not carry over yet: ``<data_dir>/instance_id``, the tag the reaper uses
+  to find its own sandboxes, is new in every container, so after a restart or a leader failover
+  the earlier container's leftover sandboxes (warm-pool ones included) are only stopped by
+  ``coverset modal reap --any-instance`` (until the id lives in the database).
+  Deploy with ``COVERSET_WEB_STATE=hosted`` in the deploying shell to mount no Volume at all; the
+  image's environment then carries the hosted layout too (:func:`image_environment`), so a
+  ``modal container exec ... coverset ...`` shell sees the data dir, cache and key path the server
+  uses.
+* **Volume** (anything else, the default): SQLite on the container's disk, backed up to the Volume,
+  as described below. This is the mode the first deployment ran in on 2026-10-13.
+
+**One container by default.** coverset runs singleton background tasks (dispatcher, reaper,
+warm-pool maintainer, gc), and in the Volume mode SQLite allows one writer. ``max_containers=1``
+keeps both true (a hosted deploy may raise it with ``COVERSET_WEB_MAX_CONTAINERS``: on Postgres the
+leader lease keeps the loops in one container); ``min_containers=1`` keeps it warm so webhooks
+never wait for a cold start and the background tasks keep running between requests.
+``@modal.concurrent`` lets that one container take many requests at once (the app is asyncio
+throughout, SSE streams included). With one container, redeploys must use ``--strategy recreate``:
+with the default rolling strategy the new version waits for a free container slot that the old,
+healthy container never gives up (observed 2026-10-13: the URL answered nothing for 25 minutes
+until the old container was stopped by hand).
+
+**Where state lives in the Volume mode.** Modal Volumes are eventually consistent,
+last-writer-wins file stores with explicit ``commit()``/``reload()`` and *no file locking* ("nor
+is distributed file locking supported", modal.com/docs/guide/volumes, read 2026-10-13); the docs
+give no SQLite guidance beyond an example that builds the database on local disk and copies the
+finished file onto the Volume.
 Measured inside this container on 2026-10-13: ``flock``, ``lockf``, ``O_EXCL`` and ``rename`` work on
 the mounted (v1) Volume, hard links fail with EPERM, and WAL-mode SQLite *runs* there but 200
 single-row commits take 235 ms against 9 ms on local disk (26x), while what a background commit
@@ -53,7 +75,8 @@ Parquet facts (immutable files), git mirrors (re-fetched if lost), run scratch, 
 restarts. Modal commits the Volume in the background every few seconds and at exit.
 
 The module is importable without a Modal token (``tests/test_deploy.py`` exercises the backup logic
-on temporary directories); only ``modal deploy`` talks to Modal.
+on temporary directories, ``tests/test_deploy_hosted.py`` the mode branching with ``modal`` stubbed
+out); only ``modal deploy`` talks to Modal.
 """
 
 from __future__ import annotations
@@ -67,7 +90,8 @@ import shutil
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, MutableMapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -101,6 +125,15 @@ WEB_CPU = float(os.environ.get("COVERSET_WEB_CPU", "0.5"))
 """Physical cores reserved for the web container (billed as max(reserved, used)); deploy-time knob."""
 WEB_MEMORY_MIB = int(os.environ.get("COVERSET_WEB_MEMORY_MIB", "1024"))
 """Memory reserved for the web container, MiB (a request, not a hard limit); deploy-time knob."""
+WEB_STATE = os.environ.get("COVERSET_WEB_STATE", "volume").strip().lower()
+"""Deploy-time knob: ``volume`` (default) mounts the Volume ``coverset-data``; ``hosted`` mounts nothing,
+for a Secret that names Postgres and a bucket (the container is then stateless)."""
+WEB_MAX_CONTAINERS = int(os.environ.get("COVERSET_WEB_MAX_CONTAINERS", "1")) if WEB_STATE == "hosted" else 1
+"""Deploy-time knob, hosted only: containers Modal may run at once. On Postgres the leader lease keeps
+the background loops in one of them and migrations serialise on an advisory lock; with more than one,
+a default (rolling) deploy no longer waits for the only slot. The Volume mode is always one."""
+PRIVATE_KEY_ENV = "COVERSET_GITHUB_APP_PRIVATE_KEY"
+"""The GitHub App's PEM text in the Secret; written to a file at start (:func:`write_private_key`)."""
 REQUEST_TIMEOUT_S = 24 * 3600
 """Per-input timeout. Every HTTP request is one input, so this caps one SSE stream, not the container."""
 MAX_CONCURRENT_REQUESTS = 256
@@ -161,8 +194,9 @@ def build_image() -> modal.Image:
         {
             "PATH": "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
             # The same values web() sets, so a `modal container exec ... coverset ...` shell sees the
-            # live database and the Volume too (the Secret still overrides them).
-            **container_environment(),
+            # live database and the Volume, or in a hosted deploy the hosted layout (the Secret
+            # still overrides them).
+            **image_environment(),
         }
     )
 
@@ -366,11 +400,13 @@ def ensure_instance_id(data_dir: Path) -> str:
     return instance_id(data_dir)
 
 
-def container_environment() -> dict[str, str]:
-    """The ``COVERSET_*`` values this deployment fixes (the Secret may override any of them)."""
+def container_environment(
+    *, local_dir: Path = LOCAL_DIR, volume_mount: Path = VOLUME_MOUNT
+) -> dict[str, str]:
+    """The ``COVERSET_*`` values the Volume mode fixes (the Secret may override any of them)."""
     return {
-        "COVERSET_DATA_DIR": str(VOLUME_MOUNT),
-        "COVERSET_DATABASE_URL": f"sqlite+aiosqlite:///{LOCAL_DB}",
+        "COVERSET_DATA_DIR": str(volume_mount),
+        "COVERSET_DATABASE_URL": f"sqlite+aiosqlite:///{local_dir / LOCAL_DB.name}",
         # Measured 2026-10-13: Modal's ASGI runtime already puts the real client address and
         # ``https`` in the scope and strips client-sent X-Forwarded-For/-Proto, so there is no
         # header to trust; leaving it off means a future pass-through could not be spoofed.
@@ -381,13 +417,168 @@ def container_environment() -> dict[str, str]:
     }
 
 
+def hosted_layout(local_dir: Path = LOCAL_DIR) -> dict[str, str]:
+    """Where the hosted mode keeps its disposable files: all on the container's own disk."""
+    return {
+        "COVERSET_DATA_DIR": str(local_dir),
+        "COVERSET_CACHE_DIR": str(local_dir / "cache"),
+        "COVERSET_GITHUB_APP_PRIVATE_KEY_PATH": str(local_dir / "secrets" / "github-app.pem"),
+    }
+
+
+def image_environment(state: str = WEB_STATE, *, local_dir: Path = LOCAL_DIR) -> dict[str, str]:
+    """The image's ``COVERSET_*`` values: :func:`container_environment`, plus, for a
+    ``COVERSET_WEB_STATE=hosted`` deploy, :func:`hosted_layout`.
+
+    ``web()`` applies the layout in its own process (:func:`plan_container`); putting it in the
+    image too gives ``modal container exec`` shells the same view, so ``coverset deploy check``
+    there checks the server's data dir and cache instead of a ``/data`` that has no Volume behind
+    it. The key path equals the relative default ``/setup`` uses from the hosted working directory.
+    """
+    values = container_environment(local_dir=local_dir)
+    if state == "hosted":
+        values.update(hosted_layout(local_dir))
+    return values
+
+
+def secret_is_hosted(environ: Mapping[str, str]) -> bool:
+    """True when the environment (the Secret over the image's defaults) names Postgres and a bucket:
+    the same rule as :attr:`coverset.config.Settings.hosted`, read before Settings exist."""
+    url = environ.get("COVERSET_DATABASE_URL", "")
+    return url.startswith(("postgresql://", "postgresql+", "postgres://")) and bool(
+        environ.get("COVERSET_BLOB_URL")
+    )
+
+
+@dataclass(frozen=True)
+class ContainerPlan:
+    """How :func:`build_web_app` lays the container out: the stateless hosted mode or the Volume mode."""
+
+    hosted: bool
+    environment: dict[str, str]
+    """Values that replace what the image or the Secret set."""
+    workdir: Path
+    """The working directory (``.env`` and ``secrets/`` of the ``/setup`` flow land here)."""
+    backups: bool
+    """Restore and back up the local SQLite database from and to the Volume."""
+
+
+def plan_container(
+    environ: Mapping[str, str],
+    *,
+    local_dir: Path = LOCAL_DIR,
+    volume_mount: Path = VOLUME_MOUNT,
+) -> ContainerPlan:
+    """Choose the mode from the environment.
+
+    **Hosted** (Postgres URL and blob URL in the Secret): nothing needs the Volume. The data dir and
+    the cache are on the container's own disk (``local_dir``; a disposable cache of mirrors and
+    downloads), the working directory too, and the SQLite backup machinery is skipped entirely.
+
+    **Volume** (anything else): the data dir and the working directory are the Volume, and the
+    database is backed up to it when it is the container-local SQLite file this module defaults to.
+    """
+    if secret_is_hosted(environ):
+        layout = hosted_layout(local_dir)
+        values = {"COVERSET_DATA_DIR": layout["COVERSET_DATA_DIR"]}
+        if not environ.get("COVERSET_CACHE_DIR"):
+            values["COVERSET_CACHE_DIR"] = layout["COVERSET_CACHE_DIR"]
+        if environ.get(PRIVATE_KEY_ENV):
+            values["COVERSET_GITHUB_APP_PRIVATE_KEY_PATH"] = layout["COVERSET_GITHUB_APP_PRIVATE_KEY_PATH"]
+        return ContainerPlan(hosted=True, environment=values, workdir=local_dir, backups=False)
+    local_url = container_environment(local_dir=local_dir)["COVERSET_DATABASE_URL"]
+    return ContainerPlan(
+        hosted=False,
+        environment={},
+        workdir=volume_mount,
+        backups=environ.get("COVERSET_DATABASE_URL", local_url) == local_url,
+    )
+
+
+def write_private_key(environ: Mapping[str, str]) -> Path | None:
+    """Write the GitHub App key from ``COVERSET_GITHUB_APP_PRIVATE_KEY`` (PEM text in the Secret) to
+    ``COVERSET_GITHUB_APP_PRIVATE_KEY_PATH`` with mode 0600; None when the Secret holds no key.
+
+    In the hosted mode nothing on disk survives a restart, so the key that ``/setup`` wrote to the
+    working directory has to live in the Secret; this puts it where the settings look for it.
+    """
+    pem = environ.get(PRIVATE_KEY_ENV, "").strip()
+    if not pem:
+        return None
+    path = Path(environ.get("COVERSET_GITHUB_APP_PRIVATE_KEY_PATH", "secrets/github-app.pem"))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(pem + "\n")
+    return path
+
+
+def _fresh_settings() -> Any:
+    from coverset.config import get_settings
+
+    get_settings.cache_clear()  # the environment just changed
+    return get_settings()
+
+
+def build_web_app(
+    environ: MutableMapping[str, str],
+    *,
+    volume_mounted: bool,
+    local_dir: Path = LOCAL_DIR,
+    volume_mount: Path = VOLUME_MOUNT,
+    commit: Callable[[], None] | None = None,
+    create_app: Callable[[Any], Any] | None = None,
+    load_settings: Callable[[], Any] = _fresh_settings,
+) -> Any:
+    """Lay the container out (:func:`plan_container`), then build the coverset app.
+
+    Volume mode restores the database before ``create_app`` (which may touch the file) and installs
+    the backup timer; hosted mode builds the app straight away. A deployment without the Volume
+    (``COVERSET_WEB_STATE=hosted``) whose Secret is not hosted refuses to start rather than keep
+    its only database on a disk that disappears with the container.
+    """
+    for key, value in container_environment(local_dir=local_dir, volume_mount=volume_mount).items():
+        environ.setdefault(key, value)
+    plan = plan_container(environ, local_dir=local_dir, volume_mount=volume_mount)
+    if not plan.hosted and not volume_mounted:
+        raise RuntimeError(
+            "this deployment has no Volume (COVERSET_WEB_STATE=hosted) but the Secret does not name "
+            "Postgres and a bucket (COVERSET_DATABASE_URL=postgresql+asyncpg://..., COVERSET_BLOB_URL=s3://...)"
+        )
+    environ.update(plan.environment)
+    plan.workdir.mkdir(parents=True, exist_ok=True)
+    os.chdir(plan.workdir)  # .env and secrets/ written by /setup: the Volume, or (hosted) disposable
+    key_path = write_private_key(environ)
+    settings = load_settings()
+    if create_app is None:
+        from coverset.app import create_app
+    backup: SQLiteVolumeBackup | None = None
+    if plan.hosted:
+        outcome = "hosted: Postgres + object store, no Volume backups; cache on the container's disk"
+    elif plan.backups:
+        backup = SQLiteVolumeBackup(local_dir / LOCAL_DB.name, volume_mount / BACKUP_DIR.name, commit=commit)
+        outcome = backup.restore()  # before create_app, which may touch the database file
+    else:
+        outcome = "COVERSET_DATABASE_URL is overridden: no SQLite volume backups"
+    quart_app = create_app(settings)  # configures logging, so report the layout afterwards
+    log.info("coverset-web state: %s", outcome)
+    if key_path is not None:
+        log.info("coverset-web: GitHub App key written from the Secret to %s", key_path)
+    if backup is not None:
+        install_backups(quart_app, backup)
+    return quart_app
+
+
 @app.function(
     # The image is built from local files at deploy time; in the container it is already attached.
     image=build_image() if modal.is_local() else modal.Image.debian_slim(python_version=PYTHON_VERSION),
-    volumes={str(VOLUME_MOUNT): volume},
+    # COVERSET_WEB_STATE=hosted (deploy time) mounts no Volume: Postgres and the bucket hold the state.
+    volumes={} if WEB_STATE == "hosted" else {str(VOLUME_MOUNT): volume},
     secrets=[modal.Secret.from_name(SECRET_NAME)],
     min_containers=1,
-    max_containers=1,
+    # One container unless the hosted deploy asks for more (the leader lease then picks the one
+    # that runs the dispatcher, reaper, warm-pool maintainer and gc).
+    max_containers=WEB_MAX_CONTAINERS,
     timeout=REQUEST_TIMEOUT_S,
     cpu=WEB_CPU,
     memory=WEB_MEMORY_MIB,
@@ -395,26 +586,12 @@ def container_environment() -> dict[str, str]:
 @modal.concurrent(max_inputs=MAX_CONCURRENT_REQUESTS)
 @modal.asgi_app(label=APP_NAME)
 def web() -> Any:
-    """Restore the database, then build the coverset app (its lifespan starts the background tasks).
+    """Lay the container out and build the coverset app (its lifespan starts the background tasks).
 
     Modal calls this once per container and runs the returned app's ASGI lifespan when the container
     starts: Quart's ``before_serving`` hooks then migrate the database and start the dispatcher, gc,
-    reaper, warm-pool maintainer and the backup timer; ``after_serving`` drains them on shutdown.
+    reaper, warm-pool maintainer and (Volume mode) the backup timer; ``after_serving`` drains them.
     """
-    for key, value in container_environment().items():
-        os.environ.setdefault(key, value)
-    os.chdir(VOLUME_MOUNT)  # .env and secrets/ written by /setup persist on the Volume
-    from coverset.app import create_app
-    from coverset.config import get_settings
-
-    settings = get_settings()
-    backup: SQLiteVolumeBackup | None = None
-    outcome = "COVERSET_DATABASE_URL is overridden: no SQLite volume backups"
-    if settings.database_url == container_environment()["COVERSET_DATABASE_URL"]:
-        backup = SQLiteVolumeBackup(LOCAL_DB, BACKUP_DIR, commit=volume.commit)
-        outcome = backup.restore()  # before create_app, which may touch the database file
-    quart_app = create_app(settings)  # configures logging, so report the restore afterwards
-    log.info("coverset-web database: %s", outcome)
-    if backup is not None:
-        install_backups(quart_app, backup)
-    return quart_app
+    return build_web_app(
+        os.environ, volume_mounted=WEB_STATE != "hosted" and VOLUME_MOUNT.is_dir(), commit=volume.commit
+    )

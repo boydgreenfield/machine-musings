@@ -94,7 +94,7 @@ def _store_view(run_id: str, repo_spec: str | None, threshold: float | None) -> 
     from coverset.commands.common import find_repo, load, prepare_db, run_async
     from coverset.db.models import Repo, Run
     from coverset.db.session import Database
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
     from coverset.report.economy import view_from_store
 
     settings = load()
@@ -120,7 +120,7 @@ def _store_view(run_id: str, repo_spec: str | None, threshold: float | None) -> 
         finally:
             await db.engine.dispose()
         view = await asyncio.to_thread(
-            view_from_store, FactsStore(settings.facts_dir), run.repo_id, run_id, threshold=limit
+            view_from_store, facts_store(settings), run.repo_id, run_id, threshold=limit
         )
         if view is None:
             raise LookupError(

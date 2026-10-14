@@ -3,8 +3,16 @@
 Run it where ``coverset serve`` will run (a container, a VM, ``modal container exec`` into the web
 container) with the same environment. Every row is ``PASS``, ``WARN`` or ``FAIL`` with the reason
 and, for anything not passing, what to change; the exit status is 1 when any row fails. The checks
-read configuration and local state only, plus one ``GET <public url>/healthz`` (skip it with
+read configuration and local state, connect to the database (``check_database``: backend, version,
+migrated revision) and the object store (``check_store``: a write-read-list-delete of one small
+probe object and a conditional write), plus one ``GET <public url>/healthz`` (skip it with
 ``--offline``), and never print a secret: tokens are reported by length and source, not value.
+
+Four rows describe where the state lives: ``database``, ``object store``, ``cache dir`` (the
+disposable local cache against its bound) and ``state``: *hosted* when the database is Postgres
+and a bucket is set (nothing under the data dir must survive a restart), a mixed shape that still
+needs a persistent disk for one half, or the laptop shape (SQLite + files), which warns behind a
+public URL.
 
 The checks are a pure function of a :class:`~coverset.config.Settings`, an environment mapping and
 a URL prober (:func:`deployment_checks`), so tests drive them with hermetic settings.
@@ -13,6 +21,8 @@ a URL prober (:func:`deployment_checks`), so tests drive them with hermetic sett
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import json
 import os
 import shutil
@@ -21,7 +31,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import click
@@ -101,46 +112,137 @@ def _modal_token_source(environ: Mapping[str, str], in_modal: bool) -> str | Non
     return None
 
 
-def _database_check(settings: Settings) -> Check:
-    """Compare the database's Alembic revision with the packaged head, without creating a file."""
-    from coverset.db.session import sqlite_file_path
+DatabaseProbe = Callable[[str], Any]
+"""``check_database(url)`` (``coverset.db.session``): a report that unpacks as ``(status, detail)``."""
+StoreProbe = Callable[[Settings], Any]
+"""``check_store(settings)`` (``coverset.storage``): ``(status, detail)`` of the bucket probe."""
 
-    db_file = sqlite_file_path(settings.database_url)
-    if db_file is not None and not db_file.exists():
-        return Check("database", "warn", f"{db_file} does not exist yet (serve creates and migrates it)")
+
+def _resolve(result: Any) -> Any:
+    """A probe's result, awaited when the probe was a coroutine function."""
+    return asyncio.run(result) if inspect.isawaitable(result) else result
+
+
+def _database_check(settings: Settings, probe: DatabaseProbe | None = None) -> Check:
+    """Backend, server version, the migrated revision against the packaged head and the pool, from
+    :func:`coverset.db.session.check_database` (``probe`` replaces it in tests). It never creates a
+    SQLite file and reports an unreachable server as a failing row."""
+    if probe is None:
+        from coverset.db.session import check_database
+
+        probe = check_database
     try:
-        current, heads = asyncio.run(_revisions(settings.database_url))
+        report = _resolve(probe(settings.database_url))
     except Exception as exc:  # noqa: BLE001 - any driver error is a report row, not a crash
         return Check("database", "fail", f"cannot read the schema revision: {type(exc).__name__}: {exc}")
-    if not current:
-        return Check(
-            "database", "warn", "not migrated yet (serve migrates at startup; or `coverset init-db`)"
-        )
-    if set(current) == heads:
-        return Check("database", "pass", f"migrated to head {', '.join(sorted(heads))}")
-    return Check(
-        "database",
-        "warn",
-        f"at {', '.join(sorted(current))}, head is {', '.join(sorted(heads))} (serve upgrades at startup)",
-    )
+    status, detail = report
+    return Check("database", status, detail)
 
 
-async def _revisions(url: str) -> tuple[tuple[str, ...], set[str]]:
-    from alembic.runtime.migration import MigrationContext
-    from alembic.script import ScriptDirectory
+def _store_check(settings: Settings, probe: StoreProbe | None = None) -> Check:
+    """The object store, from :func:`coverset.storage.check_store` (``probe`` replaces it in tests):
+    local files pass; a bucket is probed with a write-read-list-delete of one small object and a
+    conditional write that must be refused (a store that ignores ``If-Match`` warns)."""
+    if probe is None:
+        from coverset.storage import check_store
 
-    from coverset.db.session import alembic_config, make_engine
-
-    heads = set(ScriptDirectory.from_config(alembic_config()).get_heads())
-    engine = make_engine(url)
+        probe = check_store
     try:
-        async with engine.connect() as connection:
-            current = await connection.run_sync(
-                lambda sync: tuple(MigrationContext.configure(sync).get_current_heads())
-            )
-    finally:
-        await engine.dispose()
-    return current, heads
+        status, detail = _resolve(probe(settings))
+    except Exception as exc:  # noqa: BLE001 - credentials, DNS, permissions: a row, not a crash
+        return Check(
+            "object store", "fail", f"{settings.blob_url.split('?', 1)[0]}: {type(exc).__name__}: {exc}"
+        )
+    return Check("object store", status, detail)
+
+
+CACHE_SCAN_LIMIT = 100_000
+"""Files the cache-size walk counts before it stops and reports a lower bound."""
+
+
+def _cache_size(root: Path) -> tuple[int, int, bool]:
+    """``(bytes, files, complete)`` under ``root``; symlinks are not followed and the walk stops after
+    :data:`CACHE_SCAN_LIMIT` files so a huge cache cannot stall the check."""
+    total = files = 0
+    for current, _dirs, names in os.walk(root):
+        for name in names:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(current, name)).st_size
+            files += 1
+            if files >= CACHE_SCAN_LIMIT:
+                return total, files, False
+    return total, files, True
+
+
+def _cache_bound(settings: Settings) -> int | None:
+    """The cache's size bound in bytes (``COVERSET_CACHE_MAX_GB``), or None when this build has none."""
+    configured = getattr(settings, "cache_max_gb", None)
+    if configured is not None:
+        return int(float(configured) * 1_000_000_000)
+    try:
+        from coverset.facts.cache import cache_max_bytes
+    except ImportError:
+        return None
+    return cache_max_bytes()
+
+
+def _cache_check(settings: Settings) -> Check:
+    """The disposable local cache (object-store downloads, mirrors): writable, its size against its
+    bound (``COVERSET_CACHE_MAX_GB``, which gc and start-up evict to) and the free disk under it."""
+    cache = settings.cache_dir or settings.data_dir / "cache"
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=cache, prefix=".deploy-check-"):
+            pass
+    except OSError as exc:
+        return Check("cache dir", "fail", f"{cache} is not writable: {exc}")
+    size, files, complete = _cache_size(cache)
+    free = shutil.disk_usage(cache).free
+    bound = _cache_bound(settings)
+    amount = f"{size / 1e9:.2f} GB in {files} files" + ("" if complete else "+")
+    limit = f"bound {bound / 1e9:g} GB" if bound is not None else "no bound"
+    detail = f"{cache}: {amount} ({limit}), {free / 1024**3:.1f} GiB free; disposable"
+    status: Status = "pass"
+    if free < LOW_DISK_BYTES:
+        status = "warn"
+    elif bound is not None and settings.blob_url and bound > size + free:
+        status = "warn"
+        detail += "; the bound is larger than the disk can hold (lower COVERSET_CACHE_MAX_GB)"
+    return Check("cache dir", status, detail)
+
+
+def _state_check(settings: Settings) -> Check:
+    """Where the state that must survive a restart lives, and whether that fits the public URL."""
+    postgres = settings.database_url.startswith("postgresql+")
+    public_host = urlsplit(settings.public_url).hostname
+    if settings.hosted:
+        return Check(
+            "state",
+            "pass",
+            f"hosted: Postgres + object store; nothing under {settings.data_dir} must survive a restart",
+        )
+    if postgres:
+        return Check(
+            "state",
+            "warn",
+            f"Postgres, but facts and uploads are files under {settings.data_dir}: keep it on a persistent "
+            "volume, or set COVERSET_BLOB_URL for a stateless app",
+        )
+    if settings.blob_url:
+        return Check(
+            "state",
+            "warn",
+            "object store, but the database is SQLite: keep its file on a persistent volume, or set "
+            "COVERSET_DATABASE_URL to Postgres for a stateless app",
+        )
+    if is_private_host(public_host):
+        return Check("state", "pass", f"laptop: SQLite + files under {settings.data_dir}")
+    return Check(
+        "state",
+        "warn",
+        f"SQLite + files under {settings.data_dir} behind the public {settings.public_url}: one process, "
+        "and that directory must be a disk that survives restarts; hosted = Postgres + S3 (docs/deploy.md)",
+    )
 
 
 def _data_dir_check(settings: Settings) -> list[Check]:
@@ -204,8 +306,15 @@ def deployment_checks(
     prober: Prober | None = probe_healthz,
     in_modal: bool | None = None,
     check_database: bool = True,
+    check_store: bool = True,
+    database_probe: DatabaseProbe | None = None,
+    store_probe: StoreProbe | None = None,
 ) -> list[Check]:
-    """Every readiness row for ``settings`` (``prober=None`` skips the network probe)."""
+    """Every readiness row for ``settings`` (``prober=None`` skips the network probe).
+
+    ``check_database`` / ``check_store`` turn the rows that connect to the database and the bucket
+    off; ``database_probe`` / ``store_probe`` replace ``check_database`` / ``check_store`` (tests).
+    """
     env = os.environ if environ is None else environ
     modal_container = _in_modal_container(env) if in_modal is None else in_modal
     public = urlsplit(settings.public_url)
@@ -275,7 +384,12 @@ def deployment_checks(
             Check("secret key", "pass", "derived from the admin token (rotating it signs everyone out)")
         )
     else:
-        checks.append(Check("secret key", "warn", f"random key file {settings.data_dir / 'secret_key'}"))
+        key_file = settings.data_dir / "secret_key"
+        if settings.hosted:  # the data dir is disposable: every new container would sign everyone out
+            detail = f"random key file {key_file}, lost with the container: set COVERSET_SECRET_KEY"
+        else:
+            detail = f"random key file {key_file}"
+        checks.append(Check("secret key", "warn", detail))
 
     if settings.trust_proxy:
         checks.append(
@@ -296,7 +410,11 @@ def deployment_checks(
 
     checks.extend(_data_dir_check(settings))
     if check_database:
-        checks.append(_database_check(settings))
+        checks.append(_database_check(settings, database_probe))
+    if check_store:
+        checks.append(_store_check(settings, store_probe))
+    checks.append(_cache_check(settings))
+    checks.append(_state_check(settings))
 
     if settings.executor == "modal":
         source = _modal_token_source(env, modal_container)

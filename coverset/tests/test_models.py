@@ -1,4 +1,9 @@
-"""Migrations build the full schema; rows round-trip; constraints and pragmas are enforced."""
+"""Migrations build the full schema; rows round-trip; constraints and pragmas are enforced.
+
+Runs on the suite's backend: SQLite files by default, Postgres under ``make test-pg``
+(``COVERSET_TEST_DATABASE_URL``); ``sqlite_only`` tests check SQLite mechanics (pragmas, batch
+table rebuilds, ``PRAGMA foreign_key_check``) that Postgres does not have.
+"""
 
 from __future__ import annotations
 
@@ -75,6 +80,7 @@ async def test_migrate_is_idempotent(db: Database) -> None:
     assert len(versions) == 1
 
 
+@pytest.mark.sqlite_only
 async def test_sqlite_pragmas(db: Database) -> None:
     async with db.engine.connect() as conn:
         pragmas = {
@@ -226,6 +232,46 @@ async def test_foreign_keys_enforced(db: Database) -> None:
     await _expect_integrity_error(db, Run(repo_id=999, head_sha="e" * 40, trigger="manual"))
 
 
+async def test_datetimes_keep_microseconds_and_compare_in_sql(db: Database) -> None:
+    """``UTCDateTime`` on both backends: SQLite text with microseconds, Postgres ``timestamptz``
+    through asyncpg (aware in, aware out); comparisons in SQL see the same instants."""
+    repo = await make_repo(db)
+    instants = [
+        datetime(2026, 10, 10, 12, 0, 0, 123456, tzinfo=UTC) + timedelta(microseconds=n) for n in range(3)
+    ]
+    async with db.session() as session:
+        run = Run(repo_id=repo.id, head_sha="9" * 40, trigger="manual")
+        session.add(run)
+        await session.flush()
+        session.add_all([RunEvent(run_id=run.id, seq=n, kind="log", at=at) for n, at in enumerate(instants)])
+        await session.commit()
+    async with db.session() as session:
+        loaded = list(await session.scalars(select(RunEvent.at).order_by(RunEvent.seq)))
+        later = list(await session.scalars(select(RunEvent.seq).where(RunEvent.at > instants[0])))
+    assert loaded == instants and all(at.tzinfo is UTC for at in loaded)
+    assert later == [1, 2]
+    async with db.engine.connect() as conn:
+        stored = (await conn.execute(text("SELECT at FROM run_events WHERE seq = 0"))).scalar()
+    if db.engine.dialect.name == "postgresql":
+        assert isinstance(stored, datetime) and stored.utcoffset() == timedelta(0)
+    else:
+        assert stored == "2026-10-10 12:00:00.123456"
+
+
+async def test_integer_ids_accept_any_int64(db: Database) -> None:
+    """Ids are ``BIGINT`` on Postgres (``BigIntId``): the largest id a URL may carry is a miss,
+    not an int4 overflow; SQLite's ``INTEGER`` is 64-bit anyway."""
+    async with db.session() as session:
+        assert await session.get(Repo, 2**63 - 1) is None
+        assert await session.get(TestCase, 2**31) is None
+    repo = await make_repo(db)
+    async with db.session() as session:
+        session.add(Repo(id=2**40, forge="fake", external_id="big", full_name="acme/big"))
+        session.add(Commit(repo_id=repo.id, sha="1" * 40))
+        await session.commit()
+        assert (await session.get(Repo, 2**40)) is not None
+
+
 def test_new_id_sorts_by_creation_time() -> None:
     ids = [new_id("run") for _ in range(50)]
     assert all(re.fullmatch(r"run_[0-9A-HJKMNP-TV-Z]{26}", value) for value in ids)
@@ -255,6 +301,7 @@ async def test_json_columns_track_in_place_changes(db: Database) -> None:
         assert reloaded_commit.parent_shas == ["0" * 40]
 
 
+@pytest.mark.sqlite_only
 async def test_batch_migration_on_parent_keeps_child_rows(db: Database) -> None:
     """A batch migration recreates the parent table; with foreign keys on, that would cascade."""
     run = await _run(db, await make_repo(db))
@@ -281,6 +328,7 @@ async def test_failed_schema_change_rolls_back_ddl(db: Database) -> None:
     assert "probe_t" not in tables
 
 
+@pytest.mark.sqlite_only
 async def test_schema_change_leaving_orphans_is_rolled_back(db: Database) -> None:
     def orphan(sync: Connection) -> None:
         sync.exec_driver_sql(

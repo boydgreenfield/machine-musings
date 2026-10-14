@@ -7,9 +7,17 @@ UV ?= uv
 BIND ?= 127.0.0.1:8000
 WORKERS ?= 6
 QUICK_MARKERS ?= not slow and not modal and not network
+# The dev services' Postgres (deploy/dev-compose.yml publishes it on 55432, clear of a local Postgres on
+# 5432; COVERSET_DEV_PG_PORT moves both). test-pg runs the suite against it.
+DEV_PG_PORT ?= $(or $(COVERSET_DEV_PG_PORT),55432)
+TEST_DATABASE_URL ?= postgresql+asyncpg://coverset:coverset@127.0.0.1:$(DEV_PG_PORT)/coverset
+# coverset dev --hosted's data dir (commands/dev.py DEV_HOSTED_DATA_DIR). Its cache and the demo's git
+# repository belong to the dev database, so services-reset deletes it with the volumes. Deliberately
+# not COVERSET_DATA_DIR, which may name the laptop's SQLite data.
+HOSTED_DEV_DATA_DIR ?= data/hosted-dev
 
 .DEFAULT_GOAL := help
-.PHONY: help dev serve demo-reset check test test-plugin-312 test-vitest shots readme lint format clean
+.PHONY: help dev dev-hosted services services-down services-reset services-psql test-pg serve demo-reset check test test-plugin-312 test-vitest shots readme lint format clean
 
 help: ## List the targets
 	@echo "coverset make targets (variables: BIND=$(BIND) WORKERS=$(WORKERS)):"
@@ -18,6 +26,29 @@ help: ## List the targets
 dev: ## Seed the demo once, then serve with reload on BIND (coverset dev)
 	@echo "==> coverset dev --bind $(BIND): seeds an empty data dir, restarts on .py changes"
 	$(UV) run coverset dev --bind $(BIND)
+
+# Postgres + MinIO from deploy/dev-compose.yml instead of SQLite + files (docs/dev.md, "Hosted-like
+# development"); coverset dev --hosted starts the stack itself when it is down.
+dev-hosted: ## coverset dev against Postgres + MinIO (starts deploy/dev-compose.yml if needed)
+	@echo "==> coverset dev --hosted --bind $(BIND): COVERSET_DATABASE_URL/BLOB_URL and the MinIO keys point at the dev services"
+	$(UV) run coverset dev --hosted --bind $(BIND)
+
+services: ## Start the dev Postgres 17 + MinIO (deploy/dev-compose.yml) and wait until they are healthy
+	@echo "==> docker compose -f deploy/dev-compose.yml up -d --wait: Postgres on 127.0.0.1:$(DEV_PG_PORT), MinIO on 127.0.0.1:9000 (console :9001)"
+	docker compose -f deploy/dev-compose.yml up -d --wait
+
+services-down: ## Stop the dev services, keeping their data (services-reset deletes it)
+	@echo "==> docker compose -f deploy/dev-compose.yml down: the volumes stay"
+	docker compose -f deploy/dev-compose.yml down
+
+services-reset: ## Stop the dev services and delete their data (Postgres and MinIO volumes, HOSTED_DEV_DATA_DIR)
+	@echo "==> docker compose -f deploy/dev-compose.yml down -v: drops the dev database and bucket; then $(HOSTED_DEV_DATA_DIR), whose cache and demo repository belong to them"
+	docker compose -f deploy/dev-compose.yml down -v
+	rm -rf $(HOSTED_DEV_DATA_DIR)
+
+services-psql: ## psql inside the dev Postgres container
+	@echo "==> psql -U coverset coverset in the dev Postgres container"
+	docker compose -f deploy/dev-compose.yml exec postgres psql -U coverset coverset
 
 serve: ## Serve with reload, no seeding (coverset serve --reload)
 	@echo "==> coverset serve --reload --bind $(BIND)"
@@ -47,6 +78,10 @@ check: ## ruff check + format --check + the quick tests (no slow, modal or netwo
 test: ## The whole suite in parallel (pytest -n WORKERS)
 	@echo "==> pytest -n $(WORKERS): the whole suite"
 	$(UV) run pytest -q -n $(WORKERS) -p no:cacheprovider
+
+test-pg: services ## The whole suite against the dev Postgres (a fresh database per test); leaves the services running
+	@echo "==> pytest -n $(WORKERS) with COVERSET_TEST_DATABASE_URL=$(TEST_DATABASE_URL)"
+	COVERSET_TEST_DATABASE_URL=$(TEST_DATABASE_URL) $(UV) run pytest -q -n $(WORKERS) -p no:cacheprovider
 
 # --with-editable, not --with: uv caches a local directory's built wheel until its pyproject.toml
 # changes, so --with would test a stale copy of the plugin's sources.

@@ -81,15 +81,8 @@ async def test_replay_reemits_events_in_order(client: Client, demo: Demo) -> Non
 
 async def test_replay_freezes_mid_run(client: Client, demo: Demo) -> None:
     import json
-    import sqlite3
 
-    con = sqlite3.connect(demo.data_dir.parent / "coverset.db")
-    try:
-        timeline = json.loads(
-            con.execute("SELECT timeline FROM runs WHERE id = ?", (demo.pr1_run,)).fetchone()[0]
-        )
-    finally:
-        con.close()
+    timeline = json.loads(demo.rows("SELECT timeline FROM runs WHERE id = :id", {"id": demo.pr1_run})[0][0])
     t0 = datetime.fromisoformat(timeline["queued"])
     first, last = (
         (datetime.fromisoformat(timeline[key]) - t0).total_seconds() for key in ("first_test", "finished")

@@ -5,6 +5,7 @@ parsing and the cache warm-up after an ingest."""
 from __future__ import annotations
 
 import asyncio
+import shutil
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from coverset import settings_scopes
 from coverset.config import Settings
 from coverset.db.models import PullRequest, Repo, Run, ScopedSetting
 from coverset.facts.economy import EconomyInputs
+from coverset.facts.sources import source_store
 from coverset.forge.base import RERUN_ALL, RERUN_FAILED
 from coverset.forge.fake import FakeForge
 from coverset.forge.verdict import VerdictSummary, verdict_actions
@@ -265,14 +267,29 @@ SHA_OLD = "1" * 40
 SHA_SHARED = "2" * 40
 
 
-def _upload_files(settings: Settings, repo_id: int, run_id: str, sha: str) -> tuple[Path, Path]:
-    sources = settings.data_dir / "sources" / str(repo_id) / sha
-    (sources / "pkg").mkdir(parents=True, exist_ok=True)
-    (sources / "pkg" / "a.py").write_text("x = 1\n")
+class _Sources:
+    """A commit's uploaded sources, stored and checked through the configured source store (local
+    files, or the object store under ``COVERSET_TEST_BLOB_URL``)."""
+
+    def __init__(self, settings: Settings, repo_id: int, sha: str) -> None:
+        self.settings, self.repo_id, self.sha = settings, repo_id, sha
+
+    def exists(self) -> bool:
+        return source_store(self.settings).has(self.repo_id, self.sha)
+
+    is_dir = exists
+
+
+def _upload_files(settings: Settings, repo_id: int, run_id: str, sha: str) -> tuple[_Sources, Path]:
+    uploaded = settings.runs_dir / f"sources-{run_id}"
+    (uploaded / "pkg").mkdir(parents=True, exist_ok=True)
+    (uploaded / "pkg" / "a.py").write_text("x = 1\n")
+    source_store(settings).store(repo_id, sha, uploaded, allowed={"pkg/a.py"})
+    shutil.rmtree(uploaded)
     upload = settings.runs_dir / run_id / "upload" / "shard-0"
     upload.mkdir(parents=True)
     (upload / "bundle.tar.gz").write_bytes(b"bundle")
-    return sources, upload.parent
+    return _Sources(settings, repo_id, sha), upload.parent
 
 
 async def _upload_run(ctx: OrchestratorContext, repo_id: int, sha: str, *, days: int) -> str:
@@ -362,7 +379,8 @@ async def test_purge_forgets_the_repo_scope_and_removes_its_uploads(
         assert await session.get(Repo, repo_id) is None
         rows = list(await session.scalars(select(ScopedSetting).where(ScopedSetting.scope_kind == "repo")))
         assert rows == []
-    assert not sources.parent.exists() and not upload.exists()
+    assert not sources.exists() and not upload.exists()
+    assert not (ctx.settings.data_dir / "sources" / str(repo_id)).exists()  # the repository's directory too
 
 
 # -- git cat-file batches --------------------------------------------------------------------------

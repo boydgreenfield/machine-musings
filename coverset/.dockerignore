@@ -1,7 +1,7 @@
 # Allow-list: the image needs the project, its workspace packages, the lock, the migrations
-# (under src/), and what `coverset seed-demo` / `coverset replay` read (scripts/, examples/demo-*,
-# fixtures/). Everything else (docs images, tests, the TypeScript packages, node_modules, local
-# data and secrets) stays out of the build context.
+# (under src/), the entrypoint script, and what `coverset seed-demo` / `coverset replay` read
+# (scripts/, examples/demo-*, fixtures/). Everything else (docs images, tests, the TypeScript
+# packages, node_modules, local data and secrets) stays out of the build context.
 *
 !pyproject.toml
 !uv.lock
@@ -14,6 +14,7 @@
 !examples/demo-app/
 !examples/demo-prs/
 !fixtures/
+!deploy/docker-entrypoint.sh
 
 # Never ship local state, caches or secrets, even inside allowed directories.
 **/__pycache__

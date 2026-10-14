@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 
 import pytest
 from quart.typing import TestClientProtocol as Client
@@ -14,14 +13,10 @@ from coverset.app import CONTENT_SECURITY_POLICY
 
 def _a_test_id(demo: Demo) -> int:
     """The control database's id of a test PR #1 ran (its result is in that run)."""
-    con = sqlite3.connect(demo.db_url.split("///", 1)[1])
-    try:
-        row = con.execute(
-            "SELECT test_id FROM test_results WHERE run_id = ? ORDER BY test_id LIMIT 1", (demo.pr1_run,)
-        ).fetchone()
-    finally:
-        con.close()
-    return int(row[0])
+    rows = demo.rows(
+        "SELECT test_id FROM test_results WHERE run_id = :run ORDER BY test_id LIMIT 1", {"run": demo.pr1_run}
+    )
+    return int(rows[0][0])
 
 
 def page_urls(demo: Demo) -> list[str]:

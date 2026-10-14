@@ -1,23 +1,37 @@
-# coverset on one AWS VM (Lightsail or EC2)
+# coverset on AWS
+
+Two shapes, both with shards on Modal:
+
+* **ECS Fargate + RDS + S3** (stateless, the production shape): the image from ECR, Postgres on
+  RDS, facts in an S3 bucket the task reaches through its role. The recipe is in
+  [docs/deploy.md](../../docs/deploy.md#aws-ecs-fargate-rds-s3); this directory holds its
+  [task definition](ecs-task-definition.json) and the [least-privilege bucket policy](iam-policy.json)
+  for the task role. Config only: not deployed (no AWS account was used).
+* **One VM (Lightsail or EC2)**, below: the cheapest always-on option.
+
+## One VM
 
 One Ubuntu 24.04 machine runs [`deploy/compose.yml`](../compose.yml): coverset plus Caddy, which
-gets a Let's Encrypt certificate on its own. Shards still run on Modal; the VM only runs the control
-plane. Not deployed from this repository: [`user-data.sh`](user-data.sh) passes `bash -n` and
+gets a Let's Encrypt certificate on its own. With `COVERSET_STATE=hosted` the script also runs the
+compose file's `hosted` profile: Postgres 17 and MinIO on the same VM, their data on the data disk,
+so coverset's own container is disposable; the default (`files`) keeps SQLite + files on the data
+disk. Shards still run on Modal; the VM only runs the control plane. Not deployed from this repository: [`user-data.sh`](user-data.sh) passes `bash -n` and
 shellcheck and was dry-run in an `ubuntu:24.04` container with Docker stubbed out; the compose stack
 itself was run locally with Caddy's internal TLS (docs/deploy.md has what was verified).
 
 **Cheapest:** Lightsail, `$12/month` for 2 GB / 2 vCPU / 60 GB SSD (the `$7` 1 GB bundle works, but
-the image build is tight), plus `$0.10/GB-month` for an optional block-storage disk. EC2
+the image build is tight), plus `$0.10/GB-month` for an optional block-storage disk. With
+`COVERSET_STATE=hosted` take the `$24` 4 GB bundle: Postgres and MinIO share the machine. EC2
 `t4g.small` (arm64, 2 GB) is about `$12/month` on demand plus a gp3 volume (`$0.08/GB-month`).
 
-## Lightsail (console, five minutes)
+### Lightsail (console, five minutes)
 
 1. **Create instance** → Linux/Unix → OS Only → **Ubuntu 24.04 LTS**, bundle `$12`.
 2. **Launch script**: paste [`user-data.sh`](user-data.sh) with the variables at the top filled in:
    `REPO_URL` (an https URL the instance can clone; for a private repository use a URL with a
    read-only fine-grained token, or leave it empty and copy the source to `/opt/coverset/src`
-   before running the script by hand), `REPO_REF`, `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`, and
-   optionally `COVERSET_DOMAIN`.
+   before running the script by hand), `REPO_REF`, `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`,
+   optionally `COVERSET_DOMAIN`, and `COVERSET_STATE=hosted` for Postgres + MinIO.
 3. **Networking**: attach a **static IP**, then in the IPv4 firewall allow `HTTPS (443)` and
    `HTTP (80)` (Let's Encrypt's HTTP challenge and the redirect); restrict `SSH (22)` to your address.
 4. Optional **block storage** disk (attach before first boot or rerun the script): it is formatted
@@ -29,7 +43,7 @@ Without `COVERSET_DOMAIN` the script uses `<public-ip-with-dashes>.sslip.io`, a 
 name that resolves to the IP, so Caddy gets a real certificate without a domain. For your own
 domain, point an `A` record at the static IP first, then set `COVERSET_DOMAIN`.
 
-## EC2 (same script)
+### EC2 (same script)
 
 * AMI: Ubuntu Server 24.04 LTS (amd64 or arm64), `t4g.small` or `t3.small`.
 * Storage: root 20 GB gp3, plus a second gp3 volume (10-50 GB) for `/srv/coverset/data`; the script
@@ -41,7 +55,7 @@ domain, point an `A` record at the static IP first, then set `COVERSET_DOMAIN`.
   `/etc/cron.daily/coverset-backup` also writes a consistent SQLite copy next to the live database
   every night (kept 7 days), so a snapshot always holds a clean copy.
 
-### Security group (inbound)
+#### Security group (inbound)
 
 | Port | Source | Why |
 |---|---|---|
@@ -54,7 +68,7 @@ Outbound: allow all (GitHub's API, Modal's API, PyPI and the package indexes the
 uses, Let's Encrypt). coverset itself listens only inside the compose network; port 8000 is never
 published.
 
-## Operating it
+### Operating it
 
 ```sh
 cd /opt/coverset/src/coverset/deploy
@@ -69,3 +83,13 @@ Settings live in `/opt/coverset/coverset.env` (root only); edit, then
 `docker compose --env-file /etc/coverset.compose.env up -d`. The GitHub App flow at `/setup` writes
 its key and `.env` into the data dir (the container's working directory is `/data`), so they survive
 rebuilds.
+
+With `COVERSET_STATE=hosted`: the Postgres and MinIO passwords are in `/opt/coverset/services.env`
+(root only) and the matching URLs in `/opt/coverset/coverset.env`; `/srv/coverset/data` holds
+`app/` (coverset's cache and the `/setup` files), `postgres/`, `minio/` and `backups/` (a nightly
+`pg_dump`, 7 days). psql: `sudo docker compose --env-file /etc/coverset.compose.env exec postgres
+psql -U coverset coverset`. MinIO publishes no port; list the bucket from inside its container
+with `mc alias set vm http://localhost:9000 <MINIO_ROOT_USER> <MINIO_ROOT_PASSWORD>` and then
+`mc ls --recursive vm/coverset` (`docker compose ... exec minio sh`). Switching an
+existing `files` VM to `hosted` does not move its data: `coverset db copy --to <postgres url>` first
+([docs/postgres.md](../../docs/postgres.md)).

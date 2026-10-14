@@ -8,6 +8,8 @@ that machine.
 - [Setup](#setup)
 - [The 30-second loop](#the-30-second-loop)
 - [Data](#data)
+- [Hosted-like development](#hosted-like-development): Postgres + MinIO, `make dev-hosted`
+- [A public demo through a tunnel](#a-public-demo-through-a-tunnel): `coverset dev --tunnel`
 - [Signing in locally](#signing-in-locally)
 - [Exercising runs without GitHub](#exercising-runs-without-github)
 - [Iterating on a page](#iterating-on-a-page)
@@ -26,7 +28,7 @@ that machine.
 | Python 3.12 | the pytest plugin's floor (`requires-python = ">=3.12"`) | `make test-plugin-312` runs its tests on 3.12 |
 | git | mirrors, the demo repository | |
 | node 20+ and npm | the Vitest reporter (`packages/coverset-vitest`) and its end-to-end test | `make test-vitest` |
-| docker | optional: `deploy/compose.yml`, the Dockerfile | |
+| docker | optional: `make dev-hosted` (Postgres + MinIO from `deploy/dev-compose.yml`), `deploy/compose.yml`, the Dockerfile | `docker compose version` (2.20+) |
 | Modal CLI and a token | optional: `COVERSET_EXECUTOR=modal` and the `modal` tests | |
 | cargo (plus `llvm-tools-preview`) | optional: the Rust adapter and its end-to-end test | |
 
@@ -104,7 +106,7 @@ database ready (already at the latest revision): sqlite+aiosqlite:////tmp/cs/cov
 ## Data
 
 Everything lives in `COVERSET_DATA_DIR` (default `./data`; directories are 0700, the database
-0600). After the demo and one upload:
+0600), unless the state is hosted ([below](#hosted-like-development)). After the demo and one upload:
 
 | Path | What |
 |---|---|
@@ -141,6 +143,194 @@ uv run python -c "import duckdb; print(duckdb.sql(\"select count(*) from 'data/f
 ```
 
 `--run` needs `--repo-id` (`Error: query failed: run_id and run_ids require repo_id` otherwise).
+
+## Hosted-like development
+
+`make dev` keeps everything in SQLite and files, which is what the demo and most work need. A
+deployment keeps its state in Postgres and an S3-compatible bucket instead ([deploy.md](deploy.md)),
+and some bugs only show up there: a query SQLite forgives, a transaction that holds a lock, a write
+that must be conditional, a cache that was never filled. `make dev-hosted` runs the same development
+loop against that shape, on your machine.
+
+### The stack
+
+`deploy/dev-compose.yml` is Postgres 17 and MinIO (an S3-compatible server), with throwaway
+credentials and ports published on `127.0.0.1` only:
+
+| Service | Where | Credentials |
+|---|---|---|
+| Postgres 17 | `127.0.0.1:55432`, database `coverset` (`COVERSET_DEV_PG_PORT` moves it) | `coverset` / `coverset` |
+| MinIO API | `http://127.0.0.1:9000`, bucket `coverset` (`COVERSET_DEV_S3_PORT`) | `minioadmin` / `minioadmin` |
+| MinIO console | `http://127.0.0.1:9001` (`COVERSET_DEV_S3_CONSOLE_PORT`) | the same |
+
+```sh
+make services          # docker compose -f deploy/dev-compose.yml up -d --wait (pulls the images the first time)
+make dev-hosted        # coverset dev --hosted: starts the services itself when they are down
+make services-down     # stop them, keep the data
+make services-reset    # stop them and delete both volumes: an empty database and bucket next time
+```
+
+Postgres is on 55432 rather than 5432 so that a Postgres already installed on the laptop
+(Homebrew, Postgres.app) does not collide with it. `COVERSET_DEV_PG_PORT`, `COVERSET_DEV_S3_PORT`
+and `COVERSET_DEV_S3_CONSOLE_PORT` move the three ports; `coverset dev --hosted` asks Docker which
+ports the running containers publish (`docker compose port`), so it finds a moved port even when
+the variable was set only in the shell that started the stack.
+
+### What `coverset dev --hosted` does
+
+1. Checks the stack with `docker compose ps`; when `postgres` or `minio` is not running it runs
+   `docker compose -f deploy/dev-compose.yml up -d --wait` and prints that command. Without docker
+   it expects the two ports to answer already (a Postgres and a MinIO you started yourself) and
+   says how to start them when they do not.
+2. Sets `COVERSET_DATABASE_URL`, `COVERSET_BLOB_URL`, `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY` to the stack's values in its own environment, which the seeding and
+   server children inherit (they replace values from `.env`), and `COVERSET_DATA_DIR` to
+   `data/hosted-dev` unless the environment sets one, kept apart from the SQLite demo in `data/`:
+   it holds the cache (mirrors, downloaded facts) and the demo's git repository, which the database
+   points at (see "Resetting it"). It also removes `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`,
+   `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` from its environment: a session token from an SSO login
+   sent with the MinIO keys makes MinIO refuse every request.
+3. Prints where everything is, then continues exactly like `coverset dev`: it seeds the demo into the
+   Postgres database and the bucket when the database holds no repository, and serves with reload.
+
+```
+$ make dev-hosted
+coverset dev: the dev services are running (deploy/dev-compose.yml)
+coverset dev: hosted-like: Postgres 127.0.0.1:55432/coverset (psql: make services-psql)
+coverset dev: hosted-like: object store s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1
+coverset dev: MinIO console http://127.0.0.1:9001 (user minioadmin, password minioadmin; bucket coverset)
+coverset dev: data directory .../data/hosted-dev
+...
+coverset dev: serving on http://127.0.0.1:8000 (ready in 0.7 s; Ctrl-C to stop)
+```
+
+(Run on this machine with the stack already up: the migrations of an empty database, then the
+server answering `/healthz` and `/` with 200 within a second.)
+[`.env.hosted-dev.example`](../.env.hosted-dev.example) holds the same values for a shell
+(`set -a; . ./.env.hosted-dev.example; set +a`) or, copied into `.env`, as your default. Any other
+Postgres and bucket work the same way: set the four variables and run plain `coverset dev`.
+
+`coverset deploy check --offline` in that environment prints the `database` (Postgres 17, the
+migrated revision, the pool), `object store` (the MinIO bucket probed with a conditional write),
+`cache dir` and `state` (`hosted`) rows a deployment would.
+
+**What a restart costs** (measured 2026-10-14 on an M4 Max laptop against the dev stack, with
+`COVERSET_DATABASE_URL`, `COVERSET_BLOB_URL` and an empty `COVERSET_DATA_DIR` set and `coverset dev
+--no-open`): seeding the demo into the empty database and bucket took 20 s and the server answered
+23 s after the start. Stopping it, deleting the data directory's `cache/` (every downloaded fact and
+the mirror) and starting again: ready in 1-2 s, and every page rendered the same as before the wipe
+on its first request, the facts pulled from MinIO and the mirror cloned again on demand.
+
+| Page | first request after the wipe | warm |
+|---|---|---|
+| dashboard (pulls every baseline for the trend) | 238 ms | 17-30 ms |
+| repository overview | 71 ms | 16-19 ms |
+| PR #1 (waits for the mirror clone for its diff) | 216 ms | 18-26 ms |
+| PR #2 | 134 ms | 19-25 ms |
+| source view of `parse.py` | 53 ms | 8-16 ms |
+| test page | 74 ms | 15-24 ms |
+| economy, map, tests, invariants, run page | 17-34 ms | 9-25 ms |
+| run events (SSE; finished run, and replay at 100x) | 25 ms, 44 ms | 21 ms, 46 ms |
+
+Only two things under the data directory outlive the cache in this setup: `demo.git` (the demo's
+"upstream", which the database names as the repository's source; a GitHub repository has none) and
+`secret_key` (sign-in cookies; a deployment sets `COVERSET_SECRET_KEY` instead).
+
+### Resetting it
+
+`data/hosted-dev` is not all cache: next to `cache/` it holds the demo's git repository, whose
+absolute path the database records as the repository's source (mirrors clone from it). It belongs
+to the database: reset them together, and never delete the git repository while the database
+still names it.
+
+| To | Run |
+|---|---|
+| start over with an empty database and bucket | `make services-reset && make dev-hosted` (`services-reset` also deletes `data/hosted-dev`; the demo seeds again) |
+| empty only the database | `make services-psql`, then `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`, then `rm -rf data/hosted-dev` (a new database numbers repositories from 1 again, so the old cache's `facts/repo=1/` would pass for the new repository's; the bucket's facts are orphans that gc removes) |
+| drop the local cache | `rm -rf data/hosted-dev/cache` (the next page view downloads what it needs; leave `demo.git` beside it) |
+| remove just the demo repository | `uv run coverset repo purge coverset-demo/ledger --yes` in the hosted environment |
+
+### Looking inside
+
+* **Postgres:** `make services-psql` opens `psql -U coverset coverset` in the container
+  (`\dt` lists the tables, `select id, status, verdict from runs order by created_at desc limit 5;`).
+  `uv run coverset db status` prints the backend, the revision, the pool and who holds the leader
+  lease.
+* **MinIO:** the console at `http://127.0.0.1:9001` (minioadmin / minioadmin) browses the `coverset`
+  bucket: `facts/repo=<id>/run=<run id>/` holds each run's Parquet files and `MANIFEST.json`,
+  `facts/repo=<id>/dictionary.json` the repository's id spaces, `sources/` and `uploads/` what
+  `coverset-ci upload` sent. From a shell: `docker compose -f deploy/dev-compose.yml exec minio mc
+  ls --recursive dev/coverset` after `mc alias set dev http://localhost:9000 minioadmin minioadmin`.
+* **The whole path at once:** `uv run python scripts/smoke_hosted.py` with the hosted environment
+  migrates, seeds, serves, fetches four pages, uploads a bundle and lists the run's keys in the
+  bucket ([deploy.md](deploy.md#smoke-test-a-hosted-state)); `--clean-only` removes what it made.
+  It refuses the `coverset` database that `make dev-hosted` seeded (that demo repository is not the
+  smoke's): create a database of its own first, e.g. `make services-psql` then
+  `CREATE DATABASE coverset_smoke;`, and point `COVERSET_DATABASE_URL` at `.../coverset_smoke`
+  (and `COVERSET_BLOB_URL` at a prefix such as `s3://coverset/smoke?...`).
+
+### The test suite against both
+
+The suite needs no service: SQLite, local files and an in-process moto S3 server. Two variables
+point it at the real ones:
+
+| Variable | Effect |
+|---|---|
+| `COVERSET_TEST_DATABASE_URL=postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/coverset` | the `settings` fixture gets a fresh Postgres database per test, cloned from a template migrated once per worker, and the page and report tests' shared demo is seeded into a Postgres database too; SQLite-specific tests (`sqlite_only`) skip ([postgres.md](postgres.md)) |
+| `COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1'` (with `AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin`) | the object-store tests run against MinIO instead of moto, and the `settings` fixture and the shared demos keep their facts, sources and upload archives under a fresh key prefix there; tests that plant facts in the local layout (`local_files_only`) skip ([object-store.md](object-store.md#testing-against-a-real-store)) |
+
+`make test-pg` runs the whole suite with the first one set against the dev stack; add the second
+for MinIO:
+
+```sh
+make services
+make test-pg
+COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1' \
+  AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin make test-pg
+```
+
+## A public demo through a tunnel
+
+A demo from your laptop needs a public `https` URL, which a tunnel (ngrok, cloudflared) gives you.
+`coverset dev --tunnel` prints what to run and which settings a public URL needs; it never starts
+the tunnel itself:
+
+```
+$ uv run coverset dev --tunnel
+coverset dev: a public demo through a tunnel (coverset does not start it):
+coverset dev:   not ready: COVERSET_PUBLIC_URL is http://127.0.0.1:8000, not the tunnel's public https URL
+coverset dev:   not ready: COVERSET_ADMIN_TOKEN is unset (a public URL refuses open mode)
+  1. start a tunnel to this server in another terminal:
+    ngrok http http://127.0.0.1:8000    # prints https://<name>.ngrok-free.app
+    cloudflared tunnel --url http://127.0.0.1:8000    # or this: prints https://<name>.trycloudflare.com
+  2. set the two settings a public URL needs, in the shell or .env:
+    export COVERSET_PUBLIC_URL=https://<the tunnel's host>
+    export COVERSET_ADMIN_TOKEN=<64 fresh hex characters>    # 32+ characters; open mode is refused on a public URL
+     optional: COVERSET_TRUST_PROXY=true (the tunnel's X-Forwarded-For: rate limits per visitor)
+  3. run `coverset dev --tunnel` again, then sign in at <public url>/login with the token
+```
+
+With both set it serves as usual and prints the command for the configured host (`ngrok http
+--url=https://<name>.ngrok-free.app http://127.0.0.1:8000` for an ngrok domain). Why the two
+settings: links, cookies, the OIDC audience and the GitHub App's webhook URL all derive from
+`COVERSET_PUBLIC_URL`, and with a public URL open mode would make every visitor the operator, so
+settings refuse to load without an admin token (and the development sign-in turns itself off).
+Visitors sign in at `<url>/login` with the token; an API client sends it as a bearer.
+
+The flow end to end:
+
+1. `ngrok http http://127.0.0.1:8000` in one terminal. A free ngrok account has one static domain;
+   use it (`ngrok http --url=https://<your-domain> ...`) so the URL survives restarts.
+2. In another: `export COVERSET_PUBLIC_URL=https://<your-domain> COVERSET_ADMIN_TOKEN=$(openssl rand
+   -hex 32)`, then `uv run coverset dev --tunnel` (or `make dev-hosted` with the same variables, for the
+   Postgres + MinIO shape behind the tunnel).
+3. Open the URL, sign in with the token. For webhooks from real repositories, create a GitHub App at
+   `<url>/setup` ([github.md](github.md)): it is created on the tunnel's URL, so keep the domain.
+4. Ctrl-C stops the server; stop ngrok separately.
+
+ngrok's free tier shows browsers an interstitial page before the first request (webhooks and API
+clients are not affected). `coverset deploy check` with these settings warns that the bind is
+loopback ("only a proxy or tunnel on this host can reach it"), which is exactly the setup.
 
 ## Signing in locally
 
@@ -264,6 +454,7 @@ fixture dominates both; while you work, run the module you are changing.
 | `make test` | the whole suite, `pytest -q -n 6 -p no:cacheprovider` | 2,703 in 131 s |
 | `make test-plugin-312` | the plugin's tests on Python 3.12 in an isolated environment | 237 passed, 23.7 s |
 | `make test-vitest` | the reporter's Vitest suite | 156 passed, 0.9 s |
+| `make test-pg` | the whole suite against the dev stack's Postgres ([Hosted-like development](#the-test-suite-against-both)) | |
 | `uv run pytest tests/test_dev_command.py` | one module while you work on it | 0.4 s |
 
 `make test-plugin-312` installs the two local packages with `--with-editable`. uv caches the wheel

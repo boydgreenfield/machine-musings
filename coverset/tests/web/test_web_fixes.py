@@ -5,15 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
 from quart.typing import TestClientProtocol as Client
 from web_helpers import Demo
 
-from coverset.config import Settings
-from coverset.facts.store import FactsStore
 from coverset.forge.comment import missing_counts
 from coverset.orchestrator.repos import mirror_path
 from coverset.orchestrator.verdict import summary_from_json
@@ -50,27 +47,21 @@ async def test_demo_run_pages_show_the_demo_cold_path(client: Client, demo: Demo
 
 @pytest.mark.parametrize("number", [1, 2])
 async def test_the_comment_counts_the_classes_the_cards_count(demo: Demo, number: int) -> None:
-    con = sqlite3.connect(demo.data_dir.parent / "coverset.db")
-    try:
-        run_id = demo.pr1_run if number == 1 else demo.pr2_run
-        head, base, summary_text = con.execute(
-            "SELECT head_sha, base_sha, summary_json FROM runs WHERE id = ?", (run_id,)
-        ).fetchone()
-        comments = [
-            json.loads(row[0])
-            for row in con.execute(
-                "SELECT request FROM forge_calls WHERE method = 'upsert_pr_comment' ORDER BY id"
-            )
-        ]
-        bodies = [c["body"] for c in comments if c.get("pr_number") == number][-1:]  # the final verdict's
-    finally:
-        con.close()
+    run_id = demo.pr1_run if number == 1 else demo.pr2_run
+    ((head, base, summary_text),) = demo.rows(
+        "SELECT head_sha, base_sha, summary_json FROM runs WHERE id = :id", {"id": run_id}
+    )
+    comments = [
+        json.loads(row[0])
+        for row in demo.rows("SELECT request FROM forge_calls WHERE method = 'upsert_pr_comment' ORDER BY id")
+    ]
+    bodies = [c["body"] for c in comments if c.get("pr_number") == number][-1:]  # the final verdict's
     summary = summary_from_json(json.loads(summary_text))
     changed, _elsewhere = missing_counts(summary.function_rows, summary.missing_input_classes)
 
     def cards_count() -> int:
-        facts = run_facts(FactsStore(demo.data_dir / "facts"), demo.repo_id, run_id)
-        settings = Settings.for_tests(data_dir=demo.data_dir, database_url=demo.db_url)
+        facts = run_facts(demo.facts(), demo.repo_id, run_id)
+        settings = demo.settings()
         analysis = analyse_diff(mirror_path(settings, demo.repo_id), base, head, facts)
         cards = build_cards(facts, analysis, [], [], {})
         return len(
@@ -91,13 +82,7 @@ async def test_the_comment_counts_the_classes_the_cards_count(demo: Demo, number
 @pytest.mark.parametrize("number", [1, 2])
 async def test_the_invariants_page_lists_the_target_gaps(client: Client, demo: Demo, number: int) -> None:
     run_id = demo.pr1_run if number == 1 else demo.pr2_run
-    con = sqlite3.connect(demo.data_dir.parent / "coverset.db")
-    try:
-        summary = json.loads(
-            con.execute("SELECT summary_json FROM runs WHERE id = ?", (run_id,)).fetchone()[0]
-        )
-    finally:
-        con.close()
+    summary = json.loads(demo.rows("SELECT summary_json FROM runs WHERE id = :id", {"id": run_id})[0][0])
     parsed = summary_from_json(summary)
     _changed, elsewhere = missing_counts(parsed.function_rows, parsed.missing_input_classes)
     gaps = target_gaps(summary)

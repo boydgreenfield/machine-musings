@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -19,6 +18,8 @@ from pathlib import Path
 
 import pytest
 from report_helpers import DemoData, FixtureRun
+
+from coverset.db.testing import PostgresTestDatabases, run_sql
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PROJECT = ROOT / "packages" / "pytest-coverset" / "tests" / "fixture_project"
@@ -60,8 +61,12 @@ def fixture_out(tmp_path_factory: pytest.TempPathFactory) -> FixtureRun:
 
 
 @pytest.fixture(scope="session")
-def demo(tmp_path_factory: pytest.TempPathFactory) -> DemoData:
-    """Run the local demo once (history, both PRs) into a temp data dir."""
+def demo(
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases | None
+) -> Iterator[DemoData]:
+    """Run the local demo once (history, both PRs) into a temp data dir, on the suite's backends
+    (SQLite and local facts, or the Postgres database and object-store prefix the
+    ``COVERSET_TEST_*`` variables select; see ``tests/web/conftest.py``)."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
     from coverset.config import Settings
@@ -72,12 +77,18 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> DemoData:
     from coverset.logging import clear_registered_secrets
     from coverset.orchestrator.bundles import IngestPool
     from coverset.orchestrator.runner import OrchestratorContext
+    from coverset.storage.testing import fresh_blob_url, test_blob_url
 
     root = tmp_path_factory.mktemp("report-demo")
     data_dir = root / "data"
+    db_url = f"sqlite+aiosqlite:///{root / 'coverset.db'}"
+    if postgres_databases is not None:
+        db_url = postgres_databases.create()  # dropped with the worker's other databases
+    blob_url = fresh_blob_url("report-demo") if test_blob_url() is not None else ""
     settings = Settings.for_tests(
         data_dir=data_dir,
-        database_url=f"sqlite+aiosqlite:///{root / 'coverset.db'}",
+        database_url=db_url,
+        blob_url=blob_url,
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
     )
@@ -95,24 +106,30 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> DemoData:
 
     asyncio.run(scenario())
     clear_registered_secrets()
-    con = sqlite3.connect(root / "coverset.db")
-    try:
 
-        def pr_run(number: int) -> str:
-            row = con.execute(
-                "SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = ? "
+    def pr_run(number: int) -> str:
+        return str(
+            run_sql(
+                db_url,
+                "SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = :number "
                 "ORDER BY r.created_at DESC LIMIT 1",
-                (number,),
-            ).fetchone()
-            return str(row[0])
+                {"number": number},
+            )[0][0]
+        )
 
-        repo_id = int(con.execute("SELECT id FROM repos ORDER BY id LIMIT 1").fetchone()[0])
-        pr1 = pr_run(1)
-        main = con.execute(
-            "SELECT b.id FROM runs r JOIN runs b ON b.repo_id = r.repo_id AND b.head_sha = r.base_sha "
-            "WHERE r.id = ? AND b.pr_id IS NULL ORDER BY b.created_at DESC LIMIT 1",
-            (pr1,),
-        ).fetchone()
-        return DemoData(settings, pr1, pr_run(2), repo_id, str(main[0]) if main else "")
+    repo_id = int(run_sql(db_url, "SELECT id FROM repos ORDER BY id LIMIT 1")[0][0])
+    pr1 = pr_run(1)
+    main = run_sql(
+        db_url,
+        "SELECT b.id FROM runs r JOIN runs b ON b.repo_id = r.repo_id AND b.head_sha = r.base_sha "
+        "WHERE r.id = :run AND b.pr_id IS NULL ORDER BY b.created_at DESC LIMIT 1",
+        {"run": pr1},
+    )
+    try:
+        yield DemoData(settings, pr1, pr_run(2), repo_id, str(main[0][0]) if main else "")
     finally:
-        con.close()
+        if blob_url:
+            from coverset.storage import S3BlobStore
+
+            blobs = S3BlobStore.from_url(blob_url)
+            blobs.delete([info.key for info in blobs.list()])  # this demo's prefix only

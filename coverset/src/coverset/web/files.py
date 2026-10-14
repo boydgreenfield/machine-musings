@@ -24,12 +24,12 @@ from werkzeug.exceptions import NotFound
 from coverset.db.models import PullRequest, Run, TestCase, TestResult
 from coverset.facts.queries import function_history, test_touched
 from coverset.facts.schema import CALLABLE_KINDS
-from coverset.orchestrator.repos import mirror_path
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db
 from coverset.web.detail import function_detail
 from coverset.web.facts_view import FunctionView, RunFacts, history_losses, run_point
 from coverset.web.loaders import (
     default_run,
+    diff_mirror,
     facts_for,
     findings_for_run,
     invariant_rows,
@@ -111,7 +111,7 @@ async def source(rid: int, path: str) -> Response:
     removed: dict[int, list[str]] = {}
     if pr is not None or run.pr_id is not None:
         analysis = await asyncio.to_thread(
-            analyse_diff, mirror_path(app_settings(), rid), run.base_sha, run.head_sha, facts
+            analyse_diff, await diff_mirror(rid), run.base_sha, run.head_sha, facts
         )
         changed = analysis.changed_lines.get(path, set())
         removed = analysis.removed.get(path, {})
@@ -309,7 +309,7 @@ async def function(rid: int, func_key: str) -> Response:
     analysis = None
     if run.pr_id is not None:
         analysis = await asyncio.to_thread(
-            analyse_diff, mirror_path(app_settings(), rid), run.base_sha, run.head_sha, facts
+            analyse_diff, await diff_mirror(rid), run.base_sha, run.head_sha, facts
         )
     detail = await function_detail(
         repo, run, facts, region, analysis=analysis, results=results, finding=findings.get(func_key)

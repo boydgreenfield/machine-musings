@@ -133,14 +133,12 @@ def invariants_scan_command(repo_spec: str | None, executor: str | None) -> None
 async def _scan(settings: Settings, repo_spec: str | None, executor: ExecutorKind | None) -> ScanReport:
     from coverset.ai.client import ConfigError
     from coverset.db.session import Database
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     await prepare_db(settings)
     db = Database.from_url(settings.database_url)
     try:
-        return await scan_invariants(
-            db, settings, FactsStore(settings.facts_dir), repo_spec, executor=executor
-        )
+        return await scan_invariants(db, settings, facts_store(settings), repo_spec, executor=executor)
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from None
     finally:

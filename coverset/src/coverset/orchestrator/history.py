@@ -39,6 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coverset.analysis.prior import PriorCandidate
 from coverset.analysis.scoring import TestHistory
 from coverset.db.models import PullRequest, Run, RunEvent, TestCase, TestResult, TestStats, WebhookDelivery
+from coverset.db.session import lift_statement_timeout
+from coverset.db.upsert import upsert
 from coverset.facts.store import FactsStore
 
 if TYPE_CHECKING:
@@ -428,32 +430,10 @@ async def upsert_rows(
 ) -> None:
     """Insert ``rows`` into ``model``'s table, replacing the other columns where ``keys`` exist.
 
-    One statement per distinct column set (SQLite and PostgreSQL); other dialects merge row by row.
+    One ``INSERT ... ON CONFLICT`` per distinct column set on SQLite and Postgres alike
+    (:func:`coverset.db.upsert.upsert`).
     """
-    if not rows:
-        return
-    dialect = session.get_bind().dialect.name
-    if dialect not in ("sqlite", "postgresql"):  # pragma: no cover - documented, not tested
-        for row in rows:
-            await session.merge(model(**row))
-        await session.flush()
-        return
-    if dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as dialect_insert
-    else:
-        from sqlalchemy.dialects.postgresql import insert as dialect_insert
-    groups: dict[tuple[str, ...], list[Mapping[str, Any]]] = defaultdict(list)
-    for row in rows:
-        groups[tuple(sorted(row))].append(row)
-    for columns, group in groups.items():
-        stmt = dialect_insert(model)
-        changed = [c for c in columns if c not in keys]
-        stmt = (
-            stmt.on_conflict_do_update(index_elements=list(keys), set_={c: stmt.excluded[c] for c in changed})
-            if changed
-            else stmt.on_conflict_do_nothing(index_elements=list(keys))
-        )
-        await session.execute(stmt, list(group))
+    await upsert(session, model, rows, keys)
 
 
 def _fill_stats(row: TestStats, window: Sequence[_Executed], run_id: str) -> None:
@@ -758,6 +738,8 @@ async def _collect_garbage(db: Database, settings: Settings, store: FactsStore, 
             or 0
         )
         if not dry_run:
+            # The web engine's 30 s statement timeout must not cancel a backlog's delete for good.
+            await lift_statement_timeout(session)
             if report.expired_db:
                 await session.execute(delete(Run).where(Run.id.in_(report.expired_db)))
             await session.execute(delete(RunEvent).where(RunEvent.at < event_cutoff))
@@ -774,6 +756,10 @@ async def _collect_garbage(db: Database, settings: Settings, store: FactsStore, 
     report.expired_facts = await asyncio.to_thread(
         expire_runs, store, keep_run_ids=keep, older_than=run_cutoff, dry_run=dry_run
     )
+    from coverset.storage.cachedir import evict  # object store: keep this host's cache in its bound
+
+    if (evicted := await asyncio.to_thread(evict, settings, dry_run=dry_run)).removed:
+        log.info("gc: %s", evicted.line())
     return report
 
 
@@ -803,6 +789,7 @@ async def expire_pr_runs(
             ).all()
             expired = [(int(repo_id), str(run_id), str(head_sha)) for repo_id, run_id, head_sha in rows]
             if expired and not dry_run:
+                await lift_statement_timeout(session)
                 await session.execute(delete(Run).where(Run.id.in_([run_id for _, run_id, _ in expired])))
                 await session.commit()
             if expired:
@@ -829,7 +816,10 @@ async def prune_upload_files(
     expired ones has that head (call it after the runs' rows are deleted, or with ``dry_run``).
     Returns ``(run ids, "<repo_id>/<sha>" commits)`` that were (or would be) removed.
     """
-    from coverset.facts.gc import remove_sources, remove_upload_dirs
+    from coverset.facts.gc import remove_upload_dirs
+    from coverset.facts.sources import source_store
+    from coverset.storage import remote_store
+    from coverset.storage.uploads import remove_uploads
 
     if not expired:
         return [], []
@@ -848,10 +838,17 @@ async def prune_upload_files(
             )
         )
         removed = await asyncio.to_thread(
-            remove_sources, settings.data_dir, repo_id, shas - live, dry_run=dry_run
+            source_store(settings).remove, repo_id, shas - live, dry_run=dry_run
         )
         sources += [f"{repo_id}/{sha}" for sha in removed]
-    return uploads, sources
+        if (blobs := remote_store(settings)) is not None:  # the commits' archives in the object store
+            archived = set(
+                await asyncio.to_thread(remove_uploads, blobs, repo_id, shas - live, dry_run=dry_run)
+            )
+            uploads += [
+                r for rid, r, sha in expired if rid == repo_id and sha in archived and r not in uploads
+            ]
+    return sorted(uploads), sources
 
 
 async def gc_forever(

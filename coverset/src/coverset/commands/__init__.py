@@ -73,3 +73,9 @@ def register_commands(
     from coverset.commands.dev import dev_command
 
     cli.add_command(dev_command, "dev")
+    from coverset.commands.db_cmd import db_group
+
+    cli.add_command(db_group, "db")
+    from coverset.commands.cache_cmd import cache_group
+
+    cli.add_command(cache_group, "cache")

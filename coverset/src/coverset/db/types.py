@@ -11,12 +11,23 @@ import time
 from datetime import UTC, datetime
 from typing import Any, get_args
 
-from sqlalchemy import DateTime, Dialect, Enum
-from sqlalchemy.types import TypeDecorator
+from sqlalchemy import BigInteger, DateTime, Dialect, Enum, Integer
+from sqlalchemy.types import TypeDecorator, TypeEngine
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ENUM_LENGTH = 32
 """Every string enum is stored as ``VARCHAR(32)``, so adding a value never changes the column."""
+
+
+BigIntId: TypeEngine[int] = BigInteger().with_variant(Integer(), "sqlite")
+"""The type of every integer primary key (and so of the foreign keys that point at one).
+
+``BIGINT`` on Postgres: a ``SERIAL`` there is 32-bit, and high-volume tables (``run_events``,
+``audit_log``, ``webhook_deliveries``) burn ids that are never reused, while the web layer accepts
+any id up to 2**63 - 1 (a larger one in a URL must be a 404, not an int4 overflow). ``INTEGER`` on
+SQLite, where it is already 64-bit and where only ``INTEGER PRIMARY KEY`` (not ``BIGINT``) is the
+auto-incrementing rowid alias. Migration 0009 widens the Postgres columns; SQLite's DDL is unchanged.
+"""
 
 
 def new_id(prefix: str) -> str:

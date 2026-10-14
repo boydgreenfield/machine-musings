@@ -35,14 +35,14 @@ from coverset.facts.queries import (
     top_gaps,
 )
 from coverset.forge.comment import missing_counts
-from coverset.orchestrator.repos import mirror_path
 from coverset.orchestrator.verdict import summary_from_json
 from coverset.web.audit import record_audit
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db
 from coverset.web.detail import build_cards, card_detail
 from coverset.web.facts_view import run_facts
 from coverset.web.loaders import (
     default_run,
+    diff_mirror,
     facts_for,
     findings_for_run,
     invariant_rows,
@@ -458,7 +458,7 @@ async def pr_page(rid: int, n: int) -> Response:
     analysis = None
     if facts.exists:
         analysis = await asyncio.to_thread(
-            analyse_diff, mirror_path(app_settings(), rid), run.base_sha, run.head_sha, facts
+            analyse_diff, await diff_mirror(rid), run.base_sha, run.head_sha, facts
         )
     async with app_db().session() as session:
         _order, results = await order_rows(session, run)
@@ -506,7 +506,7 @@ async def pr_card(rid: int, n: int, func_key: str) -> Response:
         raise NotFound()
     facts = await facts_for(run)
     analysis = await asyncio.to_thread(
-        analyse_diff, mirror_path(app_settings(), rid), run.base_sha, run.head_sha, facts
+        analyse_diff, await diff_mirror(rid), run.base_sha, run.head_sha, facts
     )
     async with app_db().session() as session:
         _order, results = await order_rows(session, run)

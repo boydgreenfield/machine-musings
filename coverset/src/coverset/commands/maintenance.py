@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 from pathlib import Path
 
 import click
@@ -27,13 +26,13 @@ def gc_command(dry_run: bool) -> None:
 async def _gc(settings: Settings, *, dry_run: bool) -> list[str]:
     """``serve`` runs the same pass daily in-process (``orchestrator.history.gc_forever``)."""
     from coverset.db.session import Database
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
     from coverset.orchestrator.history import collect_garbage
 
     await prepare_db(settings)
     db = Database.from_url(settings.database_url)
     try:
-        report = await collect_garbage(db, settings, FactsStore(settings.facts_dir), dry_run=dry_run)
+        report = await collect_garbage(db, settings, facts_store(settings), dry_run=dry_run)
     finally:
         await db.engine.dispose()
     return report.lines(settings)
@@ -61,10 +60,7 @@ async def _purge(settings: Settings, name: str, *, yes: bool) -> None:
     from coverset import settings_scopes
     from coverset.db.models import Repo, Run
     from coverset.db.session import Database
-    from coverset.facts.gc import remove_upload_dirs
-    from coverset.facts.sources import sources_root
-    from coverset.facts.store import FactsStore
-    from coverset.orchestrator.repos import mirror_path
+    from coverset.facts.gc import purge_repo_files
 
     await prepare_db(settings)
     db = Database.from_url(settings.database_url)
@@ -82,13 +78,8 @@ async def _purge(settings: Settings, name: str, *, yes: bool) -> None:
             await session.commit()
     finally:
         await db.engine.dispose()
-    store = FactsStore(settings.facts_dir)
-    await asyncio.to_thread(shutil.rmtree, store.repo_dir(repo_id), True)
-    await asyncio.to_thread(shutil.rmtree, mirror_path(settings, repo_id), True)
-    sources = sources_root(settings.data_dir) / str(repo_id)
-    if not sources.is_symlink():
-        await asyncio.to_thread(shutil.rmtree, sources, True)
-    await asyncio.to_thread(remove_upload_dirs, settings.runs_dir, run_ids)
+    # Facts, mirror, uploaded sources, upload archives: objects and cached copies too (object store).
+    await asyncio.to_thread(purge_repo_files, settings, repo_id, run_ids)
     click.echo(f"purged {label} (repo {repo_id}): database rows, scoped settings, facts, mirror and uploads")
 
 

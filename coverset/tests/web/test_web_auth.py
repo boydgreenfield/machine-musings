@@ -13,7 +13,7 @@ from web_helpers import HX, Demo
 
 @pytest.fixture
 def settings_overrides(demo: Demo, admin_token: str) -> dict[str, Any]:
-    return {"data_dir": demo.data_dir, "database_url": demo.db_url, "admin_token": admin_token}
+    return {**demo.overrides(), "admin_token": admin_token}
 
 
 def bearer(token: str) -> dict[str, str]:

@@ -49,10 +49,10 @@ ANY_BRANCH = "any"
 @click.option("--json", "as_json", is_flag=True, help="Print JSON lines instead of a table.")
 def facts_query_command(sql: str, repo_id: int | None, run_id: str | None, as_json: bool) -> None:
     """Run one read-only SELECT over the facts views (test_lines, files, functions, call_shapes, ...)."""
-    from coverset.facts.store import FactsStore, SqlNotAllowed
+    from coverset.facts.store import SqlNotAllowed, facts_store
 
     settings = load()
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     try:
         table = store.query(sql, repo_id=repo_id, run_id=run_id)
     except SqlNotAllowed as exc:
@@ -124,13 +124,13 @@ async def _shapes(
     from coverset.db.models import Run
     from coverset.db.session import Database
     from coverset.facts.queries import ParquetPriorRun, shapes_for_function
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
     from coverset.lang.python import PythonAdapter
     from coverset.orchestrator.repos import mirror_path, read_blobs
 
     await prepare_db(settings)
     db = Database.from_url(settings.database_url)
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     try:
         async with db.session() as session:
             repo = await find_repo(session, repo_spec)
@@ -381,11 +381,11 @@ def _size(n: int) -> str:
 def facts_tables_command(repo_spec: str | None, run_id: str | None, as_json: bool) -> None:
     """Inventory of a run's facts: every Parquet table with its files, rows and bytes."""
     from coverset.facts.queries import run_inventory
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     settings = load()
     repo, run, _extra = run_async(lambda: _repo_and_run(settings, repo_spec, run_id))
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     _require_facts(store, repo, run)
     inventory = run_inventory(store, repo.id, run.id)
     rows = [
@@ -408,11 +408,11 @@ def facts_tables_command(repo_spec: str | None, run_id: str | None, as_json: boo
 def facts_explain_command(repo_spec: str | None, run_id: str, as_json: bool) -> None:
     """Everything recorded about one run: the run row, timeline, shards, ingest log (with tracer
     notes), coverage completeness, limits hit, bundle sizes and the run it was scored against."""
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     settings = load()
     repo, run, extra = run_async(lambda: _repo_and_run(settings, repo_spec, run_id))
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     data = _explain(settings, store, repo, run, extra)
     _emit(data, _explain_text(data), as_json)
 
@@ -602,11 +602,11 @@ def facts_test_command(
     """What test NODEID ran and passed in a run: files, functions and lines, its input shapes per
     parameter, and its outcome in the last runs."""
     from coverset.facts.queries import test_history, test_shapes, test_touched
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     settings = load()
     repo, run, extra = run_async(lambda: _repo_and_run(settings, repo_spec, run_id))
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     _require_facts(store, repo, run)
     touched = test_touched(store, repo.id, run.id, nodeid)
     shapes = test_shapes(store, repo.id, run.id, nodeid)
@@ -697,7 +697,7 @@ def facts_line_command(location: str, repo_spec: str | None, run_id: str | None,
     """Which tests ran LOCATION (``path:line``) in a run, in run order, and the function it belongs to."""
     from coverset.facts.queries import ParquetPriorRun, line_tests
     from coverset.facts.schema import CALLABLE_KINDS
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     path, sep, number = location.rpartition(":")
     if not sep or not path or not (number.isascii() and number.isdigit()):
@@ -705,7 +705,7 @@ def facts_line_command(location: str, repo_spec: str | None, run_id: str | None,
     line = int(number)
     settings = load()
     repo, run, extra = run_async(lambda: _repo_and_run(settings, repo_spec, run_id))
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     _require_facts(store, repo, run)
     nodeids = line_tests(store, repo.id, run.id, path, line)
     results = extra["results"]
@@ -785,11 +785,11 @@ def facts_export_command(
     """
     from coverset.facts.dictionary import DICTIONARY_FILE
     from coverset.facts.schema import RUN_TABLES, TABLES
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
 
     settings = load()
     repo, run, _extra = run_async(lambda: _repo_and_run(settings, repo_spec, run_id))
-    store = FactsStore(settings.facts_dir)
+    store = facts_store(settings)
     _require_facts(store, repo, run)
     _check_export_target(target, force)
     target.mkdir(parents=True, exist_ok=True)

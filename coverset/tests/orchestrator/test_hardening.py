@@ -259,6 +259,7 @@ async def test_gc_lock_makes_a_concurrent_gc_skip(
     assert len(await _run_ids(ctx)) == 2
 
 
+@pytest.mark.local_files_only  # ages an empty local run dir by mtime; tests/facts/test_facts_gc.py covers a bucket
 async def test_collect_garbage_applies_retention(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int
 ) -> None:

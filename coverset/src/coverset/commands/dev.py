@@ -5,6 +5,18 @@ command's own :func:`~coverset.commands.demo.seed_demo_data`, run in a child pro
 :func:`seed_in_child`; ``--no-seed`` skips it), then serves with reload. ``coverset serve
 --reload`` is the same reloader without the seeding.
 
+Two options change what it serves against, never how it reloads:
+
+* ``--hosted`` runs against the hosted state shape on this machine: Postgres and MinIO from
+  ``deploy/dev-compose.yml`` (:func:`ensure_dev_stack` starts the stack when docker is available
+  and it is down, and asks the running containers which ports they publish), with the URLs and
+  MinIO's credentials put into this process's environment for the children to inherit
+  (:func:`apply_hosted_environment`).
+* ``--tunnel`` prepares a public demo: it prints the ngrok/cloudflared command and the two settings a
+  public URL needs (an https ``COVERSET_PUBLIC_URL`` and a 32+ character admin token, because a
+  public URL refuses open mode) and serves only once they are set (:func:`tunnel_problems`). It
+  never starts a tunnel itself.
+
 The reloader is this process; the server is a child process (:func:`serve_child`) that
 :class:`Reloader` replaces whenever a watched file changes:
 
@@ -37,6 +49,8 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -45,7 +59,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -437,6 +451,8 @@ def serve_child(bind: str) -> None:
     except click.ClickException as exc:
         click.echo(f"Error: {exc.format_message()}", err=True)
         raise SystemExit(2) from None
+    if not settings.migrate_on_start:
+        settings = settings.model_copy(update={"skip_migrations": True})
     app = create_app(settings)
     enable_dev_reload(app)
     with contextlib.suppress(KeyboardInterrupt):
@@ -470,6 +486,321 @@ async def _exit_with_parent(shutdown: asyncio.Event, parent: int) -> None:
         if os.getppid() != parent:
             log.warning("coverset dev: the reloader exited; stopping the server")
             shutdown.set()
+
+
+# -- hosted-like development (--hosted) ------------------------------------------------------------
+
+DEV_COMPOSE_FILE = _PACKAGE_DIR.parent.parent / "deploy" / "dev-compose.yml"
+"""Postgres 17 + MinIO for development (``make services``); its ports follow the variables below."""
+DEV_SERVICES = ("postgres", "minio")
+DEV_BUCKET = "coverset"
+"""The bucket the compose file's one-shot ``minio-init`` creates."""
+DEV_S3_CREDENTIALS = ("minioadmin", "minioadmin")
+"""MinIO's root user and password in the compose file: well-known development values, never a deployment's."""
+DEV_PG_CREDENTIALS = ("coverset", "coverset")
+DEV_HOSTED_DATA_DIR = Path("data") / "hosted-dev"
+"""The data directory ``--hosted`` uses unless ``COVERSET_DATA_DIR`` is in the environment: only a
+cache then (mirrors, downloads, the demo's git repository), kept apart from the SQLite demo in ``data/``."""
+SERVICES_UP_TIMEOUT_S = 300.0
+"""``docker compose up --wait`` may pull both images the first time."""
+SERVICE_PROBE_TIMEOUT_S = 2.0
+
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+@dataclass(frozen=True)
+class DevStack:
+    """Where ``deploy/dev-compose.yml`` publishes its services on this machine.
+
+    The compose file reads ``COVERSET_DEV_PG_PORT``, ``COVERSET_DEV_S3_PORT`` and
+    ``COVERSET_DEV_S3_CONSOLE_PORT`` (Postgres defaults to 55432, clear of a local Postgres on 5432), so
+    this reads the same variables and every URL below matches the running containers.
+    """
+
+    pg_port: int = 55432
+    s3_port: int = 9000
+    console_port: int = 9001
+
+    @classmethod
+    def from_environ(cls, environ: Mapping[str, str]) -> DevStack:
+        """The ports from the compose file's variables, defaulting like the compose file does."""
+
+        def port(name: str, default: int) -> int:
+            value = environ.get(name, "").strip()
+            if not value:
+                return default
+            if not value.isdigit() or not 0 < int(value) < 65536:
+                raise click.ClickException(f"{name}={value!r} is not a TCP port")
+            return int(value)
+
+        return cls(
+            pg_port=port("COVERSET_DEV_PG_PORT", 55432),
+            s3_port=port("COVERSET_DEV_S3_PORT", 9000),
+            console_port=port("COVERSET_DEV_S3_CONSOLE_PORT", 9001),
+        )
+
+    @property
+    def database_url(self) -> str:
+        user, password = DEV_PG_CREDENTIALS
+        return f"postgresql+asyncpg://{user}:{password}@127.0.0.1:{self.pg_port}/coverset"
+
+    @property
+    def s3_endpoint(self) -> str:
+        return f"http://127.0.0.1:{self.s3_port}"
+
+    @property
+    def blob_url(self) -> str:
+        return f"s3://{DEV_BUCKET}?endpoint_url={self.s3_endpoint}&region=us-east-1"
+
+    @property
+    def console_url(self) -> str:
+        return f"http://127.0.0.1:{self.console_port}"
+
+    def environment(self) -> dict[str, str]:
+        """The settings that point coverset at this stack (the MinIO root user as S3 credentials)."""
+        key, secret = DEV_S3_CREDENTIALS
+        return {
+            "COVERSET_DATABASE_URL": self.database_url,
+            "COVERSET_BLOB_URL": self.blob_url,
+            "AWS_ACCESS_KEY_ID": key,
+            "AWS_SECRET_ACCESS_KEY": secret,
+        }
+
+
+def compose_command(*args: str, compose_file: Path = DEV_COMPOSE_FILE) -> list[str]:
+    """``docker compose -f deploy/dev-compose.yml ARGS``."""
+    return ["docker", "compose", "-f", str(compose_file), *args]
+
+
+def running_services(
+    *, run: Runner = subprocess.run, which: Callable[[str], str | None] = shutil.which
+) -> set[str] | None:
+    """The dev stack's running services, or None when docker (or its daemon) is unavailable."""
+    if which("docker") is None:
+        return None
+    try:
+        result = run(
+            compose_command("ps", "--services", "--status", "running"),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return set(result.stdout.split())
+
+
+def port_open(port: int, host: str = "127.0.0.1", timeout: float = SERVICE_PROBE_TIMEOUT_S) -> bool:
+    """True when something accepts TCP connections on ``host:port``."""
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def published_port(service: str, port: int, *, run: Runner = subprocess.run) -> int | None:
+    """The host port compose published ``service``'s container ``port`` on, or None."""
+    try:
+        result = run(
+            compose_command("port", service, str(port)),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    host_port = result.stdout.strip().rpartition(":")[2] if result.returncode == 0 else ""
+    return int(host_port) if host_port.isdigit() else None
+
+
+def discover_ports(stack: DevStack, *, run: Runner = subprocess.run) -> DevStack:
+    """``stack`` with the ports the running containers actually publish.
+
+    The compose file's port variables may have been set in another shell than this one, so the
+    containers, not this environment, say where they listen.
+    """
+    found = {
+        field_name: published_port(service, port, run=run)
+        for field_name, service, port in (
+            ("pg_port", "postgres", 5432),
+            ("s3_port", "minio", 9000),
+            ("console_port", "minio", 9001),
+        )
+    }
+    return DevStack(**{name: value or getattr(stack, name) for name, value in found.items()})
+
+
+def ensure_dev_stack(
+    stack: DevStack,
+    *,
+    echo: Callable[[str], None] = click.echo,
+    run: Runner = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+    probe: Callable[[int], bool] = port_open,
+) -> DevStack:
+    """Start ``deploy/dev-compose.yml`` when its services are not running, check both ports, and
+    return the stack with the ports its containers publish (:func:`discover_ports`).
+
+    Without docker the stack may still be up (started by hand, or another Postgres and MinIO on the
+    same ports): then the ports decide, and a closed one is a :class:`click.ClickException` that
+    says how to start the services.
+    """
+    running = running_services(run=run, which=which)
+    if running is None:
+        echo("coverset dev: docker is not available; expecting Postgres and MinIO on their ports already")
+    elif not set(DEV_SERVICES) <= running:
+        command = compose_command("up", "-d", "--wait")
+        echo(f"coverset dev: starting the dev services: {' '.join(command)}")
+        try:
+            result = run(command, timeout=SERVICES_UP_TIMEOUT_S, check=False)
+        except subprocess.TimeoutExpired:
+            raise click.ClickException(
+                f"the dev services did not become healthy in {SERVICES_UP_TIMEOUT_S:.0f} s"
+            ) from None
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"starting the dev services failed (exit {result.returncode}); "
+                f"see `{' '.join(compose_command('logs'))}`"
+            )
+    else:
+        echo("coverset dev: the dev services are running (deploy/dev-compose.yml)")
+    if running is not None:
+        stack = discover_ports(stack, run=run)
+    closed = [
+        f"{name} on 127.0.0.1:{port}"
+        for name, port in (("Postgres", stack.pg_port), ("MinIO", stack.s3_port))
+        if not probe(port)
+    ]
+    if closed:
+        raise click.ClickException(
+            f"nothing answers for {', '.join(closed)}: start the services with `make services` "
+            f"({' '.join(compose_command('up', '-d', '--wait'))})"
+        )
+    return stack
+
+
+AWS_SHELL_IDENTITY = ("AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE")
+"""The shell's AWS identity besides the key pair, removed when the MinIO keys take over."""
+
+
+def apply_hosted_environment(stack: DevStack, environ: MutableMapping[str, str] | None = None) -> list[str]:
+    """Point this process (and the seeding and server children it starts) at the dev stack.
+
+    The stack's URLs and credentials replace any in the environment or ``.env`` (the process
+    environment outranks ``.env``); the data directory defaults to :data:`DEV_HOSTED_DATA_DIR`
+    unless ``COVERSET_DATA_DIR`` is already in the environment. Returns the lines to print.
+
+    The rest of the shell's AWS identity goes (:data:`AWS_SHELL_IDENTITY`): botocore sends an
+    ``AWS_SESSION_TOKEN`` left by an SSO or ``assume-role`` login together with the static MinIO
+    keys, and MinIO rejects every request as an invalid security token; an ``AWS_PROFILE`` naming
+    a profile this machine lacks fails the session before the keys are read.
+    """
+    env = os.environ if environ is None else environ
+    env.update(stack.environment())
+    env.setdefault("COVERSET_DATA_DIR", str(DEV_HOSTED_DATA_DIR))
+    dropped = [key for key in AWS_SHELL_IDENTITY if env.pop(key, None) is not None]
+    user, password = DEV_S3_CREDENTIALS
+    lines = [
+        f"coverset dev: hosted-like: Postgres {stack.database_url.split('@', 1)[1]} (psql: make services-psql)",
+        f"coverset dev: hosted-like: object store {stack.blob_url}",
+        f"coverset dev: MinIO console {stack.console_url} (user {user}, password {password}; "
+        f"bucket {DEV_BUCKET})",
+    ]
+    if dropped:
+        lines.append(
+            f"coverset dev: ignoring {', '.join(dropped)} from the shell (the MinIO keys replace them)"
+        )
+    return lines
+
+
+# -- public demos through a tunnel (--tunnel) -------------------------------------------------------
+
+NGROK_SUFFIXES = (".ngrok-free.app", ".ngrok-free.dev", ".ngrok.app", ".ngrok.dev", ".ngrok.io")
+
+
+def tunnel_problems(settings: Settings | None, error: str | None = None) -> list[str]:
+    """What keeps this configuration from serving a public demo (empty: ready).
+
+    A tunnel forwards internet traffic to the loopback bind, so the settings must say so: an
+    ``https`` ``COVERSET_PUBLIC_URL`` on the tunnel's host (links, cookies, OIDC audience, the GitHub
+    App's webhook URL all derive from it) and an admin token, without which a public URL is refused
+    because open mode would make every visitor the operator.
+    """
+    if settings is None:
+        return [error or "the configuration does not load"]
+    from urllib.parse import urlsplit
+
+    from coverset.config import is_private_host
+
+    public = urlsplit(settings.public_url)
+    problems = []
+    if is_private_host(public.hostname):
+        problems.append(f"COVERSET_PUBLIC_URL is {settings.public_url}, not the tunnel's public https URL")
+    elif public.scheme != "https":
+        problems.append(f"COVERSET_PUBLIC_URL is {settings.public_url}: use the tunnel's https URL")
+    if settings.admin_token is None:
+        problems.append("COVERSET_ADMIN_TOKEN is unset (a public URL refuses open mode)")
+    return problems
+
+
+def tunnel_commands(bind: str, public_url: str | None = None) -> list[str]:
+    """The tunnel commands for ``bind``: ngrok (on the configured host when it is an ngrok domain)
+    and cloudflared's quick tunnel. coverset never starts either."""
+    from urllib.parse import urlsplit
+
+    target = health_url(bind).removesuffix("/healthz")
+    host = (urlsplit(public_url).hostname or "") if public_url else ""
+    ngrok = f"ngrok http {target}"
+    if host.endswith(NGROK_SUFFIXES):
+        ngrok = f"ngrok http --url=https://{host} {target}"
+    return [
+        f"{ngrok}    # prints https://<name>.ngrok-free.app",
+        f"cloudflared tunnel --url {target}    # or this: prints https://<name>.trycloudflare.com",
+    ]
+
+
+def tunnel_lines(
+    bind: str,
+    settings: Settings | None,
+    problems: list[str],
+    *,
+    new_token: Callable[[], str] = lambda: secrets.token_hex(32),
+) -> list[str]:
+    """What ``coverset dev --tunnel`` prints: the recipe while ``problems`` remain, else the command
+    for the configured URL. The suggested token is fresh (64 hex characters) and printed only here."""
+    from coverset.config import MIN_ADMIN_TOKEN_CHARS
+
+    public_url = settings.public_url if settings is not None else None
+    commands = tunnel_commands(bind, public_url)
+    if not problems and settings is not None:
+        return [
+            f"coverset dev: public demo on {settings.public_url} (admin token set); start the tunnel in "
+            "another terminal:",
+            f"    {commands[0].split('    #')[0]}",
+            f"coverset dev: sign in at {settings.public_url}/login with the admin token; a GitHub App "
+            f"made at {settings.public_url}/setup gets webhooks through the tunnel",
+        ]
+    token_line = "    export COVERSET_ADMIN_TOKEN=" + new_token()
+    if settings is not None and settings.admin_token is not None:
+        token_line = "    # COVERSET_ADMIN_TOKEN is set already"
+    return [
+        "coverset dev: a public demo through a tunnel (coverset does not start it):",
+        *(f"coverset dev:   not ready: {problem}" for problem in problems),
+        "  1. start a tunnel to this server in another terminal:",
+        *(f"    {command}" for command in commands),
+        "  2. set the two settings a public URL needs, in the shell or .env:",
+        "    export COVERSET_PUBLIC_URL=https://<the tunnel's host>",
+        token_line + f"    # {MIN_ADMIN_TOKEN_CHARS}+ characters; open mode is refused on a public URL",
+        "     optional: COVERSET_TRUST_PROXY=true (the tunnel's X-Forwarded-For: rate limits per visitor)",
+        "  3. run `coverset dev --tunnel` again, then sign in at <public url>/login with the token",
+    ]
 
 
 # -- the command -----------------------------------------------------------------------------------
@@ -508,16 +839,44 @@ def data_dir_has_repository(settings: Settings) -> bool:
 )
 @click.option("--no-seed", is_flag=True, help="Do not seed the demo, even into an empty data directory.")
 @click.option("--open/--no-open", "open_browser", default=False, help="Open the browser once serving.")
-def dev_command(bind: str, no_seed: bool, open_browser: bool) -> None:
+@click.option(
+    "--hosted",
+    is_flag=True,
+    help="Run against Postgres + MinIO from deploy/dev-compose.yml (started when docker is available).",
+)
+@click.option(
+    "--tunnel",
+    is_flag=True,
+    help="Print the ngrok/cloudflared command and the settings a public demo needs; serve once they are set.",
+)
+def dev_command(bind: str, no_seed: bool, open_browser: bool, hosted: bool, tunnel: bool) -> None:
     """Seed the demo (first time only) and serve with reload: the local development loop.
 
     Python changes under src/coverset and packages/*/src restart the server; template and static
-    file changes are served fresh without one. See docs/dev.md.
+    file changes are served fresh without one. --hosted keeps the state in Postgres and an S3
+    bucket (MinIO) like a deployment; --tunnel prepares a public demo. See docs/dev.md.
     """
     from coverset.cli import load_settings
 
+    if hosted:
+        stack = ensure_dev_stack(DevStack.from_environ(os.environ))
+        for line in apply_hosted_environment(stack):
+            click.echo(line)
+    if tunnel:
+        try:
+            loaded: Settings | None = load_settings(bind=bind)
+            error = None
+        except click.ClickException as exc:
+            loaded, error = None, exc.message
+        problems = tunnel_problems(loaded, error)
+        for line in tunnel_lines(bind, loaded, problems):
+            click.echo(line)
+        if problems:
+            return
     settings = load_settings(bind=bind)
     click.echo(f"coverset dev: data directory {settings.data_dir}")
+    if hosted and not settings.hosted:
+        click.echo("coverset dev: warning: the settings are not hosted (Postgres + bucket) after --hosted")
     if settings.dev_login:
         from coverset.web.account import dev_login_problems
 

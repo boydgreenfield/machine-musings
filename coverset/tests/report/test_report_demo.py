@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 from report_helpers import DemoData, all_pages, parse_page
 
-from coverset.facts.store import FactsStore
+from coverset.facts.store import facts_store
 from coverset.report import build_report
 from coverset.report.load import load_run
 from coverset.report.output import hashed_name
@@ -30,7 +30,7 @@ def pr2(demo: DemoData, tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def test_pages_and_totals_match_the_store(pr2: Path, demo: DemoData) -> None:
     settings = demo.settings
-    store = FactsStore(settings.facts_dir)  # type: ignore[attr-defined]
+    store = facts_store(settings)  # type: ignore[arg-type]
     file_cov = store.read_table(demo.repo_id, demo.pr2_run, "file_cov").to_pylist()
     tests = {r["nodeid"] for r in store.read_table(demo.repo_id, demo.pr2_run, "tests_dim").to_pylist()}
     tests.discard("<import>")
@@ -72,7 +72,7 @@ def test_validate_email_multi_label_domain_is_hollow(pr2: Path) -> None:
 def test_line_tests_and_lens_data(pr2: Path, demo: DemoData) -> None:
     from coverset.web.facts_view import run_facts
 
-    facts = run_facts(FactsStore(demo.settings.facts_dir), demo.repo_id, demo.pr2_run)  # type: ignore[attr-defined]
+    facts = run_facts(facts_store(demo.settings), demo.repo_id, demo.pr2_run)  # type: ignore[arg-type]
     expected = facts.tests_in_range(PARSE, 18, 18)
     html = (pr2 / f"files/{PARSE}.html").read_text(encoding="utf-8")
     block = re.search(r'<script type="application/json" id="report-data">(.*?)</script>', html, re.S)
@@ -95,6 +95,7 @@ def test_cli_run(demo: DemoData, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COVERSET_DATA_DIR", str(settings.data_dir))  # type: ignore[attr-defined]
     monkeypatch.setenv("COVERSET_DATABASE_URL", str(settings.database_url))  # type: ignore[attr-defined]
+    monkeypatch.setenv("COVERSET_BLOB_URL", str(settings.blob_url))  # type: ignore[attr-defined]  # "" = files
     opened: list[str] = []
     monkeypatch.setattr("webbrowser.open", lambda url, *a, **k: opened.append(url))
     result = CliRunner().invoke(cli, ["report", "--run", demo.pr1_run, "--out", str(tmp_path / "pr1")])
@@ -125,7 +126,7 @@ def test_the_parse_py_summary_line_matches_the_store(pr2: Path, demo: DemoData) 
 
     from coverset.web.facts_view import run_facts
 
-    store = FactsStore(demo.settings.facts_dir)  # type: ignore[attr-defined]
+    store = facts_store(demo.settings)  # type: ignore[arg-type]
     row = next(
         r for r in store.read_table(demo.repo_id, demo.pr2_run, "file_cov").to_pylist() if r["path"] == PARSE
     )

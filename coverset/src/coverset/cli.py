@@ -53,7 +53,7 @@ def cli() -> None:
 def init_db_command() -> None:
     """Create the data directory and migrate the control-plane database to the latest revision."""
     from coverset.config import secure_data_dirs
-    from coverset.db.session import init_db
+    from coverset.db.session import check_database, init_db
 
     settings = load_settings()
     secure_data_dirs(settings)
@@ -63,7 +63,9 @@ def init_db_command() -> None:
         click.echo(f"applied migration {revision}")
     url = make_url(settings.database_url).render_as_string(hide_password=True)
     state = f"{len(applied)} migration(s) applied" if applied else "already at the latest revision"
-    click.echo(f"database ready ({state}): {url}")
+    report = check_database(settings.database_url)  # the backend and its version, e.g. "Postgres 17.6"
+    backend = " ".join(part for part in (report.backend, report.server_version) if part)
+    click.echo(f"database ready ({state}): {url} ({backend})")
 
 
 @cli.command()
@@ -83,9 +85,36 @@ def serve(bind: str | None, reload: bool) -> None:
         return
     from coverset.app import create_app
 
-    app = create_app(settings)
+    app = create_app(migrate_before_serving(settings))
     click.echo(f"coverset {__version__} serving on {settings.public_url} (bind {settings.bind})")
     asyncio.run(_serve(app, settings.bind))
+
+
+def migrate_before_serving(settings: Settings) -> Settings:
+    """Run ``init-db`` before serving when ``COVERSET_MIGRATE_ON_START`` (the default), and return
+    the settings the app should be built with: its own startup migration is then skipped, because
+    the schema is at head already (``COVERSET_MIGRATE_ON_START=false`` skips both).
+
+    Migrating here rather than only in the app's ``before_serving`` hook means a container start
+    reports each applied migration (or the failure, with a non-zero exit) before the port opens,
+    so a platform's health check never sees a half-migrated app. ``COVERSET_SKIP_MIGRATIONS``
+    keeps its meaning: no migration anywhere.
+    """
+    if settings.skip_migrations:
+        return settings
+    if settings.migrate_on_start:
+        from coverset.config import secure_data_dirs
+        from coverset.db.session import init_db
+
+        secure_data_dirs(settings)
+        applied = asyncio.run(init_db(settings))
+        secure_data_dirs(settings)  # the SQLite file init_db may just have created
+        for revision in applied:
+            click.echo(f"applied migration {revision}")
+        url = make_url(settings.database_url).render_as_string(hide_password=True)
+        state = f"{len(applied)} migration(s) applied" if applied else "already at the latest revision"
+        click.echo(f"database ready ({state}): {url}")
+    return settings.model_copy(update={"skip_migrations": True})
 
 
 async def _serve(app: Quart, bind: str) -> None:
