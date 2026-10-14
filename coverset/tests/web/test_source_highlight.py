@@ -139,7 +139,7 @@ def test_the_script_applies_the_mode_before_paint_and_only_adjusts_links() -> No
     # read at load, outside any DOMContentLoaded handler: <html data-highlight> is set before the body
     top = script.split('document.addEventListener("DOMContentLoaded"', 1)[0]
     assert 'root.setAttribute("data-highlight", startHighlight());' in top
-    assert "coverset-highlight" in script and "a[data-keep-view]" in script
+    assert "coverset-highlight" in script and "a[data-keep-view]" in (STATIC / "keys.js").read_text()
 
 
 # -- the width of the source block (content-visibility must not move the scroll width) -------------
@@ -198,14 +198,14 @@ def _page(folder: Path, body: str, meta: str = "") -> Path:
     """A page with the live pages' stylesheet and script (copied next to it), the view meta the
     server would write, and ``body``."""
     folder.mkdir(parents=True, exist_ok=True)
-    for name in ("app.css", "app.js"):
+    for name in ("app.css", "keys.js", "app.js"):
         shutil.copy(STATIC / name, folder / name)
     page = folder / "page.html"
     page.write_text(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<link rel="stylesheet" href="app.css">'
         f'<meta name="coverset-view" content="" data-highlight="all" data-highlight-from="default"{meta}>'
-        f'<script src="app.js"></script></head><body>{body}</body></html>',
+        f'<script src="keys.js"></script><script src="app.js"></script></head><body>{body}</body></html>',
         encoding="utf-8",
     )
     return page

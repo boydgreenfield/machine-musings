@@ -63,7 +63,7 @@ from coverset.orchestrator.upload import (
 )
 from coverset.web import tokens
 from coverset.web.api import JWK_CLIENT_EXTENSION, OUTCOMES, SlidingWindowLimiter, client_key
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db, app_extension, app_settings
 from coverset.web.principal import current_principal
 
 bp = Blueprint("uploads", __name__)
@@ -120,10 +120,7 @@ def upload_worker(app: Any) -> UploadWorker:
 
 
 def _limiter() -> SlidingWindowLimiter:
-    limiter = current_app.extensions.get(LIMITER_EXTENSION)
-    if limiter is None:
-        limiter = current_app.extensions[LIMITER_EXTENSION] = SlidingWindowLimiter(UPLOADS_PER_MINUTE)
-    return limiter
+    return app_extension(LIMITER_EXTENSION, lambda: SlidingWindowLimiter(UPLOADS_PER_MINUTE))
 
 
 def _lock(key: tuple[int, str]) -> asyncio.Lock:

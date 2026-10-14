@@ -68,8 +68,8 @@ async def test_without_pytest_args_nothing_is_appended(
 
 async def _set_threshold(ctx: OrchestratorContext, repo_id: int, value: float) -> None:
     async with ctx.db.session() as session:
-        await settings_scopes.set_value(
-            session, "policy.test_tax_threshold", value, scope="repo", scope_id=repo_id
+        await settings_scopes.apply_changes(
+            session, {"policy.test_tax_threshold": value}, scope="repo", scope_id=repo_id
         )
 
 

@@ -24,7 +24,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from coverset.analysis.cover import greedy_cover_csr, greedy_weighted_cover, prune_csr, prune_redundant
+from coverset.analysis.cover import csr_of, greedy_cover_csr, prune_csr
 from coverset.analysis.economy import (
     CLASS_WEIGHT,
     BaseSnapshot,
@@ -740,12 +740,8 @@ def test_the_minimal_set_covers_every_fact_and_is_irredundant(
 ) -> None:
     keys = sorted(sets)
     weights = {k: data.draw(st.floats(0.0005, 5.0), label=k) for k in keys}
-    offsets = [0]
-    elements: list[int] = []
-    for k in keys:
-        elements.extend(sorted(sets[k]))
-        offsets.append(len(elements))
-    off, el, w = np.array(offsets), np.array(elements, dtype=np.int64), np.array([weights[k] for k in keys])
+    off, el = csr_of([sets[k] for k in keys])
+    w = np.array([weights[k] for k in keys])
     chosen = prune_csr(greedy_cover_csr(off, el, w), off, el, w)
     picked = [keys[i] for i in chosen]
     universe = set().union(*sets.values())
@@ -753,8 +749,6 @@ def test_the_minimal_set_covers_every_fact_and_is_irredundant(
     for k in picked:  # irredundant: no chosen set can be dropped
         others = set().union(*(sets[o] for o in picked if o != k))
         assert not sets[k] <= others
-    # the set-based helpers pick the same tests (ties break by name in both)
-    assert prune_redundant(greedy_weighted_cover(sets, weights), sets, weights) == picked
 
 
 @settings(max_examples=60, deadline=None)

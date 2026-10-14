@@ -54,7 +54,7 @@ from coverset.forge.registry import forge_for_app
 from coverset.orchestrator import enqueue_run
 from coverset.orchestrator.intake import Followup, IntakeResult, apply_forge_followups, approve_awaiting_run
 from coverset.web.auth import current_auth, is_admin
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db, app_extension, app_settings
 from coverset.web.principal import Principal, current_principal, require_repo, set_principal
 from coverset.web.tokens import looks_like_token
 
@@ -210,30 +210,23 @@ class StreamSlots:
         return sum(len(v) for v in self._open.values())
 
 
-def _extension[T](name: str, build: Callable[[], T]) -> T:
-    value = current_app.extensions.get(name)
-    if value is None:
-        value = current_app.extensions[name] = build()
-    return value
-
-
 def _limiter() -> SlidingWindowLimiter:
-    return _extension(LIMITER_EXTENSION, lambda: SlidingWindowLimiter(app_settings().public_verdict_rpm))
+    return app_extension(LIMITER_EXTENSION, lambda: SlidingWindowLimiter(app_settings().public_verdict_rpm))
 
 
 def _poll_limiter() -> SlidingWindowLimiter:
-    return _extension(
+    return app_extension(
         POLL_LIMITER_EXTENSION, lambda: SlidingWindowLimiter(2 * app_settings().public_verdict_rpm)
     )
 
 
 def _bearer_limiter() -> SlidingWindowLimiter:
-    return _extension(BEARER_LIMITER_EXTENSION, lambda: SlidingWindowLimiter(BEARER_RPM))
+    return app_extension(BEARER_LIMITER_EXTENSION, lambda: SlidingWindowLimiter(BEARER_RPM))
 
 
 def stream_slots() -> StreamSlots:
     """The app's anonymous SSE stream counter."""
-    return _extension(STREAM_SLOTS_EXTENSION, StreamSlots)
+    return app_extension(STREAM_SLOTS_EXTENSION, StreamSlots)
 
 
 def client_key() -> str:

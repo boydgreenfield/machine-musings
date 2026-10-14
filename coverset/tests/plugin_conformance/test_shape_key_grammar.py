@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import gzip
+import hashlib
 import importlib.util
 import json
 import re
@@ -180,9 +181,18 @@ def test_test_features_keys_are_in_the_grammar(key: str) -> None:
 def _value_id(value: Any) -> str:
     """An id that is the same in every process: pytest-xdist workers refuse to run when their ids
     differ ("Different tests were collected"). An object's repr holds its memory address and a set's
-    order follows string hashing, which is randomised per process, so those are spelled stably."""
+    order follows string hashing, which is randomised per process, so those are spelled stably. A
+    long one keeps its first 60 characters and a digest of the rest: the 5,000 to 11,000 character
+    ids of the huge values were dropped from the neutral bundle (test ids are capped at 4,096)."""
+    text = _stable_repr(value)
+    if len(text) <= 80:
+        return text
+    return f"{text[:60]}...{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+
+
+def _stable_repr(value: Any) -> str:
     if type(value) in (set, frozenset):
-        return f"{type(value).__name__}({sorted(_value_id(v) for v in value)})"
+        return f"{type(value).__name__}({sorted(_stable_repr(v) for v in value)})"
     return re.sub(r" at 0x[0-9a-f]+>", ">", repr(value))
 
 

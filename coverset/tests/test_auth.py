@@ -12,7 +12,7 @@ from quart.typing import TestClientProtocol as Client
 
 from coverset.app import MAX_CONTENT_LENGTH, create_app
 from coverset.config import Settings
-from coverset.web.auth import CSRF_HEADER, current_auth, is_admin, is_admin_only, is_public, require_admin
+from coverset.web.auth import CSRF_HEADER, current_auth, is_admin, is_admin_only, is_public
 
 
 @pytest.fixture
@@ -285,21 +285,6 @@ async def test_oversized_login_body_rejected(client: Client) -> None:
     size = MAX_CONTENT_LENGTH + 1
     response = await client.post("/login", data=b"x" * size, headers={"Content-Length": str(size)})
     assert response.status_code == 413
-
-
-@pytest.mark.security
-async def test_require_admin_blocks_public_paths(settings: Settings, admin_token: str) -> None:
-    app = create_app(settings)
-    extra = Blueprint("extra", __name__)
-
-    @extra.post("/webhooks/admin-only")
-    @require_admin
-    async def admin_only() -> dict[str, str | None]:
-        return {"auth": current_auth()}
-
-    app.register_blueprint(extra)
-    client = app.test_client()
-    assert (await client.post("/webhooks/admin-only")).status_code == 401
 
 
 async def test_token_mode_does_not_check_host(client: Client, admin_token: str) -> None:

@@ -14,8 +14,6 @@ import re
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 
-from coverset.web.render.html import esc
-
 __all__ = ["render_markdown", "render_sticky"]
 
 _DETAILS_OPEN = re.compile(r"^<details><summary>(.*)</summary>\s*$")
@@ -79,8 +77,3 @@ def render_sticky(text: str | None) -> Markup:
     flush()
     out.extend(Markup("</details>") for _ in range(depth))
     return Markup("").join(out)
-
-
-def plain(text: str | None) -> Markup:
-    """Escaped text (for callers that want a uniform return type)."""
-    return esc(text or "")

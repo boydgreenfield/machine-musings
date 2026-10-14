@@ -27,6 +27,7 @@ from pytest_coverset.merge import (
     read_workers,
 )
 from pytest_coverset.outcomes import TestResult
+from pytest_coverset.plugin import VALUE_OPTIONS, glue_values
 
 pytest.importorskip("xdist")
 
@@ -300,6 +301,153 @@ def test_shapes_off_with_workers(project: pytest.Pytester) -> None:
     assert read_shapes(project.path / "out").obs == []
 
 
+CONFIGURED_PROJECT = {
+    "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths = ["tests"]\nxfail_strict = true\n',
+    "cfgpkg/__init__.py": "def inc(x):\n    return x + 1\n",
+    "tests/test_cfg.py": (
+        "import pytest\n\nimport cfgpkg\n\n\ndef test_inc():\n    assert cfgpkg.inc(1) == 2\n\n\n"
+        "@pytest.mark.xfail\ndef test_strict_xpass():\n    pass\n"
+    ),
+    "elsewhere/test_outside_testpaths.py": "def test_never_collected():\n    assert False\n",
+}
+
+
+def configured_project(pytester: pytest.Pytester) -> Path:
+    """A project whose ``pyproject.toml`` matters (testpaths, xfail_strict); an output dir outside it."""
+    for name, text in CONFIGURED_PROJECT.items():
+        (pytester.path / name).parent.mkdir(parents=True, exist_ok=True)
+        (pytester.path / name).write_text(text)
+    return pytester.path.parent / f"{pytester.path.name}-out"
+
+
+@pytest.mark.parametrize("via", ["argv", "PYTEST_ADDOPTS"])
+def test_a_separate_value_word_keeps_the_workers_configuration(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, via: str
+) -> None:
+    """``--coverset-out DIR`` (two words): the workers see the controller's rootdir and ini file.
+
+    pytest looks for its configuration before the plugin's options exist and takes ``DIR`` for a
+    test path once it exists. The controller creates it before the workers start, so the workers
+    used to land on another rootdir, without ``pyproject.toml``: they collected ``elsewhere/`` and
+    lost ``xfail_strict`` (the dogfood run of coverset's own suite lost ``asyncio_mode``), while the
+    merged bundle carried no error. A second run, where ``DIR`` exists before pytest starts, cannot
+    be repaired and stops with the one-word form.
+    """
+    out = configured_project(pytester)
+    words = ["--coverset-out", str(out), "--coverset-source=cfgpkg"]
+    if via == "PYTEST_ADDOPTS":
+        monkeypatch.setenv("PYTEST_ADDOPTS", " ".join(words))
+        words = []
+    pytester.runpytest_subprocess("-n", "2", *words).assert_outcomes(passed=1, failed=1)
+    info = meta(out)
+    assert info["errors"] == [] and info["counts"]["failed"] == 1
+    assert info["configfile"] == str(pytester.path / "pyproject.toml")
+
+    again = pytester.runpytest_subprocess("-n", "2", *words)
+    assert again.ret == 4
+    assert f"Write the option and its value as one word: --coverset-out={out}" in again.stderr.str()
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    glued = (f"--coverset-out={out}", "--coverset-source=cfgpkg")
+    pytester.runpytest_subprocess("-n", "2", *glued).assert_outcomes(passed=1, failed=1)
+
+
+def test_a_value_word_inside_the_project_changes_nothing(pytester: pytest.Pytester) -> None:
+    """``--coverset-out .coverset`` run twice: the directory is a test path for pytest, but harmless."""
+    configured_project(pytester)
+    for _ in range(2):
+        result = pytester.runpytest_subprocess(
+            "-n", "2", "--coverset-out", ".coverset", "--coverset-source", "cfgpkg"
+        )
+        result.assert_outcomes(passed=1, failed=1)
+    assert meta(pytester.path / ".coverset")["errors"] == []
+
+
+def test_workers_with_another_configuration_are_an_error(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merge compares each worker's rootdir and ini file with the controller's."""
+    configured_project(pytester)
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)  # set when this test runs on a worker
+    (pytester.path / "other.ini").write_text("[pytest]\ntestpaths = tests\n")
+    # Imported by the controller only after it chose its configuration: only workers read it.
+    pytester.makeconftest(
+        "import os\n\nif 'PYTEST_XDIST_WORKER' not in os.environ:\n"
+        "    os.environ['PYTEST_ADDOPTS'] = '-c other.ini'\n"
+    )
+    pytester.runpytest_subprocess("-n", "1", "--coverset-out=out", "--coverset-source=cfgpkg")
+    errors = meta(pytester.path / "out")["errors"]
+    assert errors == [
+        f"xdist worker gw0: rootdir . with configuration file {pytester.path / 'other.ini'}, not the "
+        f"controller's . with {pytester.path / 'pyproject.toml'}"
+    ]
+    assert (pytester.path / "out" / "workers" / "gw0").is_dir()  # kept for a look
+
+
+INNER_TEST = "def test_inner():\n    assert True\n"
+TESTS_THAT_RUN_PYTEST = """
+import os
+import subprocess
+import sys
+
+import pytest
+
+LEAKS = ("COVERSET", "COVERSET_XDIST", "COVERSET_EVENT_NONCE")
+
+
+def inner(tmp_path):
+    (tmp_path / "inner").mkdir()
+    (tmp_path / "inner" / "test_inner.py").write_text({inner!r})
+    return tmp_path / "inner"
+
+
+def child(cwd, *args):
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *args],
+        cwd=cwd, capture_output=True, text=True, check=False,
+    )
+
+
+def test_the_environment_carries_no_coverset_switch():
+    assert [name for name in LEAKS if name in os.environ] == []
+
+
+def test_a_plain_child_pytest(tmp_path):
+    result = child(inner(tmp_path))
+    assert result.returncode == 0, result.stdout
+    assert not (tmp_path / "inner" / ".coverset").exists()
+
+
+def test_an_instrumented_child_pytest_writes_its_own_bundle(tmp_path):
+    result = child(inner(tmp_path), "--coverset-out=out")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "inner" / "out" / "meta.json").is_file()
+
+
+def test_a_child_pytest_with_its_own_workers(tmp_path):
+    result = child(inner(tmp_path), "-n", "2", "--coverset-out=out")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "inner" / "out" / "bundle.tar.gz").is_file()
+
+
+def test_pytest_main_in_process(tmp_path, monkeypatch):
+    monkeypatch.chdir(inner(tmp_path))
+    assert pytest.main(["-q", "-p", "no:cacheprovider", "test_inner.py"]) == 0
+"""
+
+
+def test_tests_that_run_pytest_stay_out_of_the_run(project: pytest.Pytester) -> None:
+    """Tests that start pytest (subprocesses, with and without their own workers, and in-process)
+    under ``-n 2``: none of them joins the outer run, and the outer bundle is clean."""
+    (project.path / "tests" / "test_runs_pytest.py").write_text(
+        TESTS_THAT_RUN_PYTEST.format(inner=INNER_TEST)
+    )
+    run(project, "out", "-n", "2").assert_outcomes(passed=24 + 5)
+    info = meta(project.path / "out")
+    assert info["errors"] == [] and info["counts"]["passed"] == 29
+    assert not any("test_inner" in r["nodeid"] for r in read_jsonl(project.path / "out" / "results.jsonl"))
+    assert not (project.path / "out" / "workers").exists()
+
+
 # -- the pieces, without workers ------------------------------------------------------------------
 
 
@@ -329,6 +477,23 @@ def test_the_token_is_removed_and_needs_a_worker_id(tmp_path: Path) -> None:
 )
 def test_only_local_worker_specs(spec: str, ok: bool) -> None:
     assert _local_spec(spec) is ok
+
+
+def test_glue_values_joins_every_coverset_value_word(pytester: pytest.Pytester) -> None:
+    group = pytester.parseconfig()._parser.getgroup("coverset")
+    with_value = {name for option in group.options for name in option.names() if option.attrs()["nargs"] != 0}
+    assert with_value == VALUE_OPTIONS
+    assert glue_values(
+        ["-q", "--coverset-out", "o", "--coverset", "--coverset-source=a", "--", "--coverset-out", "x"]
+    ) == [
+        "-q",
+        "--coverset-out=o",
+        "--coverset",
+        "--coverset-source=a",
+        "--",
+        "--coverset-out",
+        "x",
+    ]
 
 
 def test_worker_ids_sort_naturally() -> None:

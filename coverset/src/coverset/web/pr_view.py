@@ -99,7 +99,7 @@ def _final(mirror: Path, base_sha: str | None, result: DiffAnalysis) -> bool:
     return not base_sha or (mirror / "HEAD").is_file()
 
 
-def _text(data: bytes | None) -> str | None:
+def utf8_text(data: bytes | None) -> str | None:
     if data is None:
         return None
     try:
@@ -123,8 +123,8 @@ def _analyse(mirror: Path, base_sha: str | None, head_sha: str, facts: RunFacts)
         head_blobs = read_blobs(mirror, head_sha, [d.path for d in py.values() if d.status != "deleted"])
     except RepoError as exc:
         return DiffAnalysis(base=base, head=head_sha, files=files, error=str(exc))
-    base_tree = {p: _text(b) for p, b in base_blobs.items()}
-    head_tree = {p: _text(b) for p, b in head_blobs.items()}
+    base_tree = {p: utf8_text(b) for p, b in base_blobs.items()}
+    head_tree = {p: utf8_text(b) for p, b in head_blobs.items()}
     changes = changed_functions(PythonAdapter(), base_tree, head_tree, py)  # type: ignore[arg-type]
     measured = set(facts.statics)
     source = [

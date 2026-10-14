@@ -697,8 +697,8 @@ cover over every distinct argument *shape*, finer than the input classes `minima
   bundle on first use): test statements, assertions, fixtures and helpers against unique facts,
   equivalence groups, dominance, collapsible parametrize families and the PR test tax. The economy
   counts every distinct argument shape as a fact, which is finer than the input classes
-  `minimal_test_set` keeps, so its minimal set is usually larger. Without it, `redundant_tests` groups
-  tests by their lines and input classes itself and `test_tax` says why it is unavailable.
+  `minimal_test_set` keeps, so its minimal set is usually larger. Without it (an older run),
+  `redundant_tests` and `test_tax` answer `available: false` with the reason.
 
 ## Trust notes
 

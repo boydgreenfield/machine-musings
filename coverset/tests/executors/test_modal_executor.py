@@ -716,7 +716,7 @@ async def test_release_terminates_once_and_frees_the_slot(
     executor = make_executor(settings, fake_modal)
     worker = await one_worker(executor, spec)
     sandbox = world.live()[0]
-    assert executor._slots.used == 1 and executor.live_sandboxes == 1
+    assert executor._slots.used == 1 and len(executor._live) == 1
     await worker.release()
     await worker.release()
     assert sandbox.terminated and executor._slots.used == 0 and executor.stats.terminated == 1
@@ -831,7 +831,7 @@ async def test_reap_terminates_orphans_by_instance_tag(
     assert not active.terminated and not foreign.terminated and not world.live()[-1].terminated
     report = await executor.reap(active_run_ids={"run_live"}, all=True)
     assert report.terminated == 2 and active.terminated and not foreign.terminated
-    assert executor.live_sandboxes == 0 and executor._slots.used == 0
+    assert len(executor._live) == 0 and executor._slots.used == 0
     await held.release()
     assert await executor.list_running() == []
 
@@ -907,7 +907,7 @@ async def test_cancelled_acquire_leaves_no_sandbox_and_no_slot(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert world.live() == [] and executor.live_sandboxes == 0
+    assert world.live() == [] and len(executor._live) == 0
     assert executor._slots.used == 0, "every slot came back: the two created and the two cancelled"
 
 

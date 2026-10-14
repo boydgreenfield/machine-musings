@@ -1244,11 +1244,6 @@ class ModalExecutor:
         now = time.monotonic()
         return sum(live.rate() * (now - live.created_at) for live in self._live.values())
 
-    @property
-    def live_sandboxes(self) -> int:
-        """Sandboxes this process created and has not terminated."""
-        return len(self._live)
-
     async def close(self) -> None:
         """Terminate every sandbox this process holds (pool included) and flush pending DB writes.
 

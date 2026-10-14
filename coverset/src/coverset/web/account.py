@@ -87,7 +87,7 @@ from coverset.web.auth import (
     token_matches,
     user_principal,
 )
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db, app_extension, app_settings
 from coverset.web.pages import parse_int, render_page
 from coverset.web.principal import ADMIN, PUBLIC, Principal, current_principal, require_instance_admin
 
@@ -660,10 +660,7 @@ async def revoke_user_access(db: AsyncSession, user: User, *, reason: str) -> No
 
 
 def _marks() -> dict[int, datetime]:
-    marks = current_app.extensions.get(ACCESS_SYNC_EXTENSION)
-    if marks is None:
-        marks = current_app.extensions[ACCESS_SYNC_EXTENSION] = {}
-    return marks
+    return app_extension(ACCESS_SYNC_EXTENSION, dict)
 
 
 def _mark_synced(user_id: int, when: datetime) -> None:

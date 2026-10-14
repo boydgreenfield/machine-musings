@@ -11,13 +11,11 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 from markupsafe import Markup, escape
-
-from coverset.units import fmt_ms, fmt_secs
 
 __all__ = [
     "Markup",
@@ -26,9 +24,6 @@ __all__ = [
     "attrs",
     "breakable",
     "esc",
-    "fmt_ms",
-    "fmt_secs",
-    "join",
     "json_data",
     "num",
     "relative_hrefs",
@@ -135,11 +130,6 @@ def num(value: float, digits: int = 2) -> str:
 def truncate(text: str, limit: int) -> str:
     """``text`` cut to ``limit`` characters with an ellipsis."""
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
-
-
-def join(parts: Iterable[Markup | str]) -> Markup:
-    """Concatenate already-safe pieces (plain strings are escaped)."""
-    return Markup("").join(p if isinstance(p, Markup) else escape(p) for p in parts)
 
 
 _BIDI = re.compile("[؜‎‏‪-‮⁦-⁩]")

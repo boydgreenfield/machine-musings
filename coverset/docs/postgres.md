@@ -111,7 +111,7 @@ lease (a database the server does not have yet is a failing row that names `cove
 ```
 $ uv run coverset deploy check --offline
 ...
-PASS  database        Postgres 14.17, migrated to head 0011; 10 + 10 overflow connections per process; lease coverset:background: free (no process runs the background tasks right now)
+PASS  database        Postgres 14.17, migrated to head 0012; 10 + 10 overflow connections per process; lease coverset:background: free (no process runs the background tasks right now)
 ```
 
 `db.session.check_database(url)` is the same report as a value (it unpacks as `(status, detail)`
@@ -162,7 +162,7 @@ warns when the host looks like a transaction pooler (`-pooler.` in the name, or 
 
 ## Schema and migrations
 
-One Alembic chain (`0001`-`0011`) builds the schema. Every constraint has a name (the metadata's
+One Alembic chain (`0001`-`0012`) builds the schema. Every constraint has a name (the metadata's
 naming convention), and `tests/db/test_postgres_migrations.py` runs the whole chain on an empty
 database, compares the result with the models (what `alembic check` does), downgrades to base
 (only `alembic_version` is left, and no sequences) and upgrades again. Nothing in the schema or in
@@ -183,7 +183,9 @@ widens the columns in one `ALTER TABLE` per table. `0010` adds `ix_run_events_at
 cutoff` uses (the largest table; without it the daily delete scanned all of it). `0011` makes
 `settings.value` `text` (it was `VARCHAR(2048)`): the sealed GitHub App `/setup` stores, private key
 included, is about 2.7 KB ([security.md](security.md#5-secrets)); on Postgres the change rewrites no
-rows.
+rows. `0012` drops `repos.ai_review_enabled`, the per-repository AI-review opt-in that predates
+scoped settings: a repository that had it gets an explicit repository-scope `policy.ai_review = true`
+row, unless it already had its own.
 
 **Why `json`, not `jsonb`:** coverset never filters, indexes or compares JSON in SQL (it reads whole
 documents), so `jsonb`'s operators and indexes would buy nothing yet. The one rule that follows:

@@ -60,6 +60,46 @@ async def test_the_chain_builds_the_models_on_postgres_and_round_trips(empty_pos
         await engine.dispose()
 
 
+async def test_the_ai_review_column_moves_into_a_repository_row(empty_postgres: str) -> None:
+    """0012: a repository that opted in with the old column gets ``policy.ai_review = true`` at repo
+    scope, unless it already had its own row (which always won)."""
+    engine = make_engine(empty_postgres)
+    try:
+        await run_schema_change(engine, lambda sync: command.upgrade(alembic_config(sync), "0011"))
+        async with engine.begin() as connection:
+            for rid, name, opted in ((1, "a/opted", True), (2, "a/own-row", True), (3, "a/plain", False)):
+                await connection.execute(
+                    text(
+                        "INSERT INTO repos (id, forge, external_id, full_name, default_branch, private, language,"
+                        " ai_review_enabled, settings_json, created_at)"
+                        " VALUES (:id, 'github', :name, :name, 'main', true, 'python', :opted, '{}', now())"
+                    ),
+                    {"id": rid, "name": name, "opted": opted},
+                )
+            await connection.execute(
+                text(
+                    "INSERT INTO scoped_settings (scope_kind, scope_id, key, value, updated_at)"
+                    " VALUES ('repo', '2', 'policy.ai_review', '{\"v\": false}', now())"
+                )
+            )
+        await migrate(engine)
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT scope_id, value FROM scoped_settings WHERE key = 'policy.ai_review' ORDER BY scope_id"
+                    )
+                )
+            ).all()
+            columns = {
+                c["name"] for c in await connection.run_sync(lambda s: inspect(s).get_columns("repos"))
+            }
+        assert [(sid, value) for sid, value in rows] == [("1", {"v": True}), ("2", {"v": False})]
+        assert "ai_review_enabled" not in columns
+    finally:
+        await engine.dispose()
+
+
 async def test_postgres_column_types(empty_postgres: str) -> None:
     engine = make_engine(empty_postgres)
     try:

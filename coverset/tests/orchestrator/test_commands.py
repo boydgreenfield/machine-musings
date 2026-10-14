@@ -28,7 +28,7 @@ def runner(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> CliRunner:
 
 
 def test_commands_replace_their_placeholders() -> None:
-    for name in ("run", "warm", "seed-demo", "demo", "shapes", "gc"):
+    for name in ("run", "warm", "demo", "shapes", "gc"):
         assert "arrives in phase" not in (cli.commands[name].help or ""), name
     groups = {name: cli.commands[name] for name in ("facts", "invariants", "repo", "modal")}
     assert {"query"} <= set(groups["facts"].commands)  # type: ignore[attr-defined]

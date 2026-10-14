@@ -16,7 +16,7 @@ A setting is one `scoped_settings` row: `(scope_kind, scope_id, key) -> {"v": va
 Keys belong to two groups that inherit differently:
 
 - **View preferences** (`view.*`) change how pages paint coverage, so the reader decides last: **user > repo > org > instance > built-in default**.
-- **Policy** (`policy.*`) changes what coverset does with a pull request, so the people who answer for the repository's CI decide: **repo > org > instance > `COVERSET_*` configuration > built-in default**. A user cannot set a policy key at all; `set_value` refuses it.
+- **Policy** (`policy.*`) changes what coverset does with a pull request, so the people who answer for the repository's CI decide: **repo > org > instance > `COVERSET_*` configuration > built-in default**. A user cannot set a policy key at all; `apply_changes` refuses it.
 
 Every value is validated on write and again on read. A stored row that the catalogue no longer accepts (an enum value that was removed, a hand-edited row) is logged and skipped, so resolution falls through to the next scope instead of breaking a page or a run.
 
@@ -45,7 +45,7 @@ Notes on particular keys:
 
 - **`policy.untrusted_pr_policy`** falls back to `COVERSET_UNTRUSTED_PR_POLICY`, including its token-mode default (`run_blocked_network` when coverset uses a personal access token, because token mode has no Approve button; `forge/registry.py`, `effective_untrusted_pr_policy`). Whatever this key says, the dispatcher still never runs an untrusted PR on the LocalExecutor and always blocks its network.
 - **`policy.fail_fast`, `policy.max_shards`, `policy.target_shard_seconds`** have no instance configuration. When no scope sets them, the repository's own `[tool.coverset]` decides (defaults `finish_in_background`, 16 and 20 s). When a scope sets `fail_fast` or `target_shard_seconds`, it replaces the `[tool.coverset]` value, because that file is read from the pull request's head, which the PR author controls, while scoped policy is set by the repository's writers and admins. `max_shards` is different: it is an upper bound, so a run gets the smallest of the scoped value, the file's `max_shards` and `COVERSET_MAX_SHARDS`. Only raising the shard count costs the instance anything, so a repository whose file asks for 2 shards keeps 2 under an instance-wide cap of 8.
-- **`policy.ai_review`** sends the repository's changed functions to Anthropic at the instance's expense, so at repo scope it needs repository **admin**, like the other keys that change cost or exposure. It also reads the older per-repository `repos.ai_review_enabled` column. The column counts as an implicit repository-level `true`: an explicit repository row wins over it, and it wins over organization and instance values, since it was always a per-repository opt-in. The live reviewer still needs `COVERSET_AI=anthropic` and `ANTHROPIC_API_KEY`; untrusted runs still need `COVERSET_AI_REVIEW_UNTRUSTED`.
+- **`policy.ai_review`** sends the repository's changed functions to Anthropic at the instance's expense, so at repo scope it needs repository **admin**, like the other keys that change cost or exposure. The live reviewer still needs `COVERSET_AI=anthropic` and `ANTHROPIC_API_KEY`; untrusted runs still need `COVERSET_AI_REVIEW_UNTRUSTED`.
 - **`policy.test_tax_threshold`** is the number of added test statements per newly covered production line above which the verdict flags test bloat (the "95 lines of test scaffolding for one environment-variable check" case). It is enforced where the flag is computed and where it is read: `finalize_run` gets `EconomyInputs(policy=policy_from_scopes(effective_policy(...)))` from the runner and from the upload path (`orchestrator/runner.py`, `economy_inputs`), so the stored `run_economy` flag uses the repository's threshold, and the PR card, the sticky comment's tax line and the economy pages re-flag against the effective value when they read it (a threshold changed after a run applies to its pages at once).
 - **`policy.public_report`** is meant to let anonymous callers read a public repository's pages, and never applies to a private repository (`repos.private`), whatever the value. **Not yet enforced**: the access layer does not read `effective_policy(...).public_report` yet, so saving it has no effect today.
 - **`view.highlight`**: `missing` paints only lines that never ran or took one branch and leaves covered lines plain. **`view.map_module_weight`** controls how much room module-level code (imports, constants) gets in the coverage map, which otherwise over-weights it. The UI reads both through the `view_prefs` template variable.
@@ -78,7 +78,7 @@ Every change writes one `setting_changed` row to the audit log, with `{"op": "se
 
 ## How policy reaches the orchestrator
 
-`effective_policy(session, repo, settings) -> Policy` resolves every `policy.*` key for one repository in one cached read and returns a frozen dataclass. Its `sources` field records where each value came from (`repo`, `org`, `instance`, `config`, `deferred`, `default`, `repo-column`).
+`effective_policy(session, repo, settings) -> Policy` resolves every `policy.*` key for one repository in one cached read and returns a frozen dataclass. Its `sources` field records where each value came from (`repo`, `org`, `instance`, `config`, `deferred`, `default`).
 
 | Reader | Uses | Where |
 |---|---|---|

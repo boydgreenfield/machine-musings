@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import click
 
-from coverset.commands.demo import demo_command, seed_demo_command
+from coverset.commands.demo import demo_command
 from coverset.commands.facts import FACTS_DEBUG_COMMANDS, facts_query_command, shapes_command
 from coverset.commands.invariants import invariants_scan_command
 from coverset.commands.maintenance import (
@@ -33,7 +33,6 @@ def register_commands(
     """Add (or replace placeholders with) the orchestrator's commands on the CLI groups."""
     cli.add_command(run_command, "run")
     cli.add_command(warm_command, "warm")
-    cli.add_command(seed_demo_command, "seed-demo")
     cli.add_command(demo_command, "demo")
     cli.add_command(shapes_command, "shapes")
     cli.add_command(gc_command, "gc")

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="16" skipped="0" failures="1" errors="0" uuid="b740bda9-b0f9-467f-8dd9-2315e566254b" timestamp="2026-10-13T22:38:47.309-04:00" time="0.022">
+    <testsuite name="ledger" tests="11" skipped="0" errors="0" failures="0">
+        <testcase name="intervals::tests::merges_overlaps_in_any_order" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.015"/>
+        <testcase name="durations::tests::parses_hours_and_minutes" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.015"/>
+        <testcase name="intervals::tests::largest_of_floats_and_ints" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.015"/>
+        <testcase name="money::tests::refuses_to_overdraw" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.016"/>
+        <testcase name="money::tests::refuses_zero_weights" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="money::tests::allocates_the_remainder_to_the_largest_fractions" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="money::tests::allocates_by_weight" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="emailcheck::tests::returns_the_lowercased_domain" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="emailcheck::tests::rejects_a_missing_at_sign" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.019"/>
+        <testcase name="money::tests::formats_dollars_and_euros" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.020"/>
+        <testcase name="durations::tests::rejects_a_bare_number" classname="ledger" timestamp="2026-10-13T22:38:47.309-04:00" time="0.020"/>
+    </testsuite>
+    <testsuite name="ledger::ledger_flow" tests="5" skipped="0" errors="0" failures="1">
+        <testcase name="deliberately_fails" classname="ledger::ledger_flow" timestamp="2026-10-13T22:38:47.309-04:00" time="0.017">
+            <failure message="thread &apos;deliberately_fails&apos; (68761677) panicked at tests/ledger_flow.rs:48:5" type="test failure with exit code 101">thread &apos;deliberately_fails&apos; (68761677) panicked at tests/ledger_flow.rs:48:5:
+assertion `left == right` failed: remainder &lt;goes&gt; first
+  left: [34, 33, 33]
+ right: [33, 33, 34]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test deliberately_fails ... FAILED
+
+failures:
+
+failures:
+    deliberately_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;deliberately_fails&apos; (68761677) panicked at tests/ledger_flow.rs:48:5:
+assertion `left == right` failed: remainder &lt;goes&gt; first
+  left: [34, 33, 33]
+ right: [33, 33, 34]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="signup_rejects_a_bad_domain" classname="ledger::ledger_flow" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="splits_an_invoice_and_posts_every_share" classname="ledger::ledger_flow" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="billing_windows_merge_and_durations_parse" classname="ledger::ledger_flow" timestamp="2026-10-13T22:38:47.309-04:00" time="0.018"/>
+        <testcase name="a_failed_transfer_reports_the_shortfall" classname="ledger::ledger_flow" timestamp="2026-10-13T22:38:47.309-04:00" time="0.021"/>
+    </testsuite>
+</testsuites>

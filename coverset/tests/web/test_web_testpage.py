@@ -16,6 +16,7 @@ from web_helpers import HX, Demo, assert_csp_clean
 from coverset.facts import queries
 from coverset.lang.base import ShapeObs
 from coverset.orchestrator.history import nodeid_hash
+from coverset.units import line_ranges
 from coverset.web import testpage
 from coverset.web.render.flow import FlowEdge, FlowNode, TestCall, render_flow, render_test_flow
 
@@ -278,7 +279,7 @@ def test_test_decorations_reads_markers_and_given() -> None:
     assert plain is not None and not plain.hypothesis and plain.markers == ("slow", "parametrize")
     assert testpage.test_decorations(source, "tests/t.py::test_missing") is None
     assert testpage.test_decorations("def (", "tests/t.py::test_plain") is None
-    assert testpage.line_ranges([5, 1, 2, 3, 7, 8]) == [(1, 3), (5, 5), (7, 8)]
+    assert line_ranges([5, 1, 2, 3, 7, 8]) == [(1, 3), (5, 5), (7, 8)]
 
 
 # -- the flow's counts and size --------------------------------------------------------------------

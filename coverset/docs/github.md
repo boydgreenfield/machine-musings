@@ -165,7 +165,7 @@ stored by `/setup` or from the environment, or `COVERSET_GITHUB_TOKEN` is set, e
 forge), `github` or `fake`. The app's adapter is rebuilt when the stored App changes
 (`forge/registry.py`, `LiveForge`), so storing or forgetting the App switches between the fake
 forge and App mode without a restart. The fake forge parses the same GitHub-shaped payloads and records every call it would have
-made in the `forge_calls` table (`coverset forge calls`, and `/forge/outbox` in the UI). With the
+made in the `forge_calls` table (`/forge/outbox` in the UI). With the
 fake forge, `POST /webhooks/fake` is accepted as well as `/webhooks/github`.
 
 ## Webhook handling

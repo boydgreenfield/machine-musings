@@ -85,7 +85,7 @@ def test_create_app_configures_the_modules(monkeypatch: pytest.MonkeyPatch, tmp_
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("COVERSET_FACTS_THREADS", "3")
     before = (loaders.run_facts_entries(), loaders.run_facts_budget(), loaders.blob_budget())
-    assert before == (loaders.RUN_FACTS_ENTRIES, loaders.RUN_FACTS_BUDGET, loaders.BLOB_BUDGET)
+    assert before == (8, 384 * 1024 * 1024, 64 * 1024 * 1024), "the defaults"
     assert backends.context_cache_size() == backends.CONTEXT_CACHE and cache.threads() == 3
     settings = Settings.for_tests(
         data_dir=tmp_path / "data",
@@ -102,7 +102,7 @@ def test_create_app_configures_the_modules(monkeypatch: pytest.MonkeyPatch, tmp_
     assert backends.context_cache_size() == 7
     create_app(Settings.for_tests(data_dir=tmp_path / "data2"))
     assert cache.threads() == 3, "an app without the knob leaves the environment in charge"
-    assert loaders.run_facts_entries() == loaders.RUN_FACTS_ENTRIES
+    assert loaders.run_facts_entries() == 8
 
 
 def test_the_cli_context_configures_the_modules(tmp_path: Path) -> None:

@@ -14,8 +14,8 @@ tests that reach it, built from the run's facts:
 Two facts reached by exactly the same tests are interchangeable for a cover, so
 :func:`blocks` groups the facts of a scope by their test tuple first: the set-cover instance has one
 element per distinct tuple, typically 10-100x fewer than facts, and its answer is the same. The
-cover itself is :func:`coverset.analysis.cover.greedy_weighted_cover` followed by
-:func:`~coverset.analysis.cover.prune_redundant` (the rule wave 1 uses: most new elements per second
+cover itself is :func:`coverset.analysis.cover.greedy_cover_csr` followed by
+:func:`~coverset.analysis.cover.prune_csr` (the rule wave 1 uses: most new elements per second
 of the test's duration), or, with a time budget, :func:`budgeted_cover` (most new facts per second
 until the budget is spent).
 """
@@ -31,7 +31,7 @@ from typing import Final, Literal
 import numpy as np
 
 from coverset.agent.context import RunContext
-from coverset.analysis.cover import greedy_weighted_cover, prune_redundant
+from coverset.analysis.cover import csr_of, greedy_cover_csr, prune_csr
 
 __all__ = [
     "FACT_KINDS",
@@ -271,18 +271,17 @@ def solve(
 ) -> CoverResult:
     """Cover the ``selected`` facts with as few test-seconds as the greedy rule finds.
 
-    Without a budget: :func:`greedy_weighted_cover` then :func:`prune_redundant` over the blocks
-    (every fact stays covered). With ``budget_s``: :func:`budgeted_cover` (most facts per second
+    Without a budget: :func:`~coverset.analysis.cover.greedy_cover_csr` then
+    :func:`~coverset.analysis.cover.prune_csr` over the blocks (every fact stays covered). With ``budget_s``: :func:`budgeted_cover` (most facts per second
     within the budget; what it leaves out is reported as lost).
     """
     grouped = blocks(index, selected)
-    sets = {str(t): grouped.of_test[t] for t in grouped.of_test}
-    named = {str(t): max(weights.get(t, 0.0), _MIN_WEIGHT_S) for t in grouped.of_test}
     if budget_s is None:
-        chosen = greedy_weighted_cover(sets, named)
-        chosen = prune_redundant(chosen, sets, named)
-        kept = [int(k) for k in chosen]
-        return CoverResult(kept, frozenset(), grouped, True)
+        order = sorted(grouped.of_test)
+        offsets, elements = csr_of([grouped.of_test[t] for t in order])
+        seconds = np.array([max(weights.get(t, 0.0), _MIN_WEIGHT_S) for t in order])
+        chosen = prune_csr(greedy_cover_csr(offsets, elements, seconds), offsets, elements, seconds)
+        return CoverResult([order[i] for i in chosen], frozenset(), grouped, True)
     sizes = [len(m) for m in grouped.members]
     kept = budgeted_cover(grouped.of_test, sizes, weights, budget_s)
     covered: set[int] = set()

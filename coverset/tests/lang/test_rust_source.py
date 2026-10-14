@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from coverset.lang import LanguageAdapter, adapter_for_language
+from coverset.lang import adapter_for_language
+from coverset.lang.base import LanguageAdapter
 from coverset.lang.neutral import NEUTRAL_LANGUAGES, NotRunnableError
 from coverset.lang.rust import CrateIndex, RustAdapter, index_source, regions, tokenize, type_descriptor
 from coverset_model.types import to_json

@@ -891,8 +891,8 @@ def bench_cache_memory(work: Path, runs: int) -> dict[str, object]:
     return {
         "rss_mb_start": round(start, 1),
         "footprint_mb_start": start_footprint,
-        "entries": loaders.RUN_FACTS_ENTRIES,
-        "budget_mb": loaders.RUN_FACTS_BUDGET // 2**20,
+        "entries": loaders.run_facts_entries(),
+        "budget_mb": loaders.run_facts_budget() // 2**20,
         "steps": steps,
         "peak_rss_mb": peak_rss_mb(),
     }

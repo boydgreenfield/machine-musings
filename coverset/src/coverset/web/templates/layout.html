@@ -28,6 +28,7 @@
 {%- else %}{% set _hl = ('all', 'default') %}{% endif %}
 <meta name="coverset-view" content="" data-highlight="{{ _hl[0] }}" data-highlight-from="{{ _hl[1] }}"{% if _th_set and _th in ('light', 'dark', 'auto') %} data-theme="{{ _th }}" data-theme-from="prefs"{% endif %}{% if map_view is defined and map_view %} data-map-mode="{{ map_view.mode }}" data-map-mode-from="{{ map_view.mode_from }}" data-modules="{{ map_view.modules }}" data-modules-from="{{ map_view.modules_from }}"{% endif %}>
 {% if not no_scripts %}
+<script src="{{ url_for('static', filename='keys.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}" defer></script>
 <script src="{{ url_for('static', filename='vendor/idiomorph-ext.min.js') }}" defer></script>
@@ -70,9 +71,9 @@
 <div id="line-tests" class="popover" popover><div id="line-tests-body">Loading…</div></div>
 <dialog id="keys-help" aria-labelledby="keys-title">
   <h2 id="keys-title">Keys</h2>
-  {#- One row per key app.js binds (its KEYS table); data-scope says on which pages it applies and
-      the script hides the other rows when the dialog opens. tests/web/test_keys_table.py checks
-      that these rows, docs/ui.md and app.js agree. -#}
+  {#- One row per key keys.js and app.js bind (their KEYS tables); data-scope says on which pages it
+      applies and the script hides the other rows when the dialog opens. tests/web/test_keys_table.py
+      checks that these rows, docs/ui.md and the scripts agree. -#}
   <table>
     <tbody>
       <tr data-scope="any" data-keys="?"><td><kbd>?</kbd></td><td>This help: the keys of this page</td></tr>

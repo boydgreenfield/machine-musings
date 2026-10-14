@@ -395,7 +395,7 @@ def test_cached_run_facts_stay_within_the_byte_budget(
     one = cached_run_facts(facts, 1, "run-1")
     one.line_facts(MODULE_PATH)
     _ = one._lines  # load the per-line arrays: the entry now weighs something
-    monkeypatch.setattr(loaders, "RUN_FACTS_BUDGET", 1)
+    monkeypatch.setattr(loaders, "run_facts_budget", lambda: 1)
     two = cached_run_facts(facts, 1, "run-2")
     assert cached_run_facts(facts, 1, "run-2") is two  # the newest entry always stays
     assert cached_run_facts(facts, 1, "run-1") is not one  # evicted for the budget, rebuilt
@@ -411,7 +411,7 @@ def test_the_budget_is_checked_on_hits_too(facts: FactsStore, monkeypatch: pytes
     assert loaders.run_facts_weight()[0] == 2
     _ = one._lines, one._shape_rows, one.statics, one.regions  # a page fills run-1 after insertion
     two_weight = two.memory_bytes()
-    monkeypatch.setattr(loaders, "RUN_FACTS_BUDGET", two_weight + one.memory_bytes() - 1)
+    monkeypatch.setattr(loaders, "run_facts_budget", lambda: two_weight + one.memory_bytes() - 1)
     assert cached_run_facts(facts, 1, "run-2") is two  # a hit: nothing inserted
     assert loaders.run_facts_weight()[0] == 1  # run-1, least recently used, was evicted
     assert cached_run_facts(facts, 1, "run-1") is not one

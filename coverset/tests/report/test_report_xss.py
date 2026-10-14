@@ -79,7 +79,7 @@ class HostileBundle:
     sampling: tuple[FuncSampling, ...]
     durations: dict[str, float]
     functions: tuple[dict[str, Any], ...] = ()
-    types: dict[str, Any] = field(default_factory=dict)
+    types: dict[tuple[str, str, int], Any] = field(default_factory=dict)
 
 
 def hostile_bundle(repo: Path, outside: Path) -> HostileBundle:
@@ -159,7 +159,7 @@ def hostile_bundle(repo: Path, outside: Path) -> HostileBundle:
             },
         ),
         types={
-            "../../etc/passwd": {
+            (f"src/a{ATTR}.py", SCRIPT, 1): {
                 "role": {"kind": "enum", "name": "Role", "members": ["admin", SCRIPT]},
                 "return": {"kind": "literal", "values": [SCRIPT, JS]},
             }

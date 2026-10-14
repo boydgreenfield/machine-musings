@@ -81,8 +81,9 @@ def test_ini_options_survive_the_shard_argv(tmp_path: Path) -> None:
     assert meta["counts"]["failed"] == 1
 
 
-def test_the_split_form_loses_the_configfile(tmp_path: Path) -> None:
-    """Control: the same argv with ``--opt value`` words drops the repo's configuration (why ``=`` is used)."""
+def test_the_split_form_is_refused(tmp_path: Path) -> None:
+    """Control: the same argv with ``--opt value`` words would drop the repo's configuration (pytest
+    reads the existing value as a test path), so the plugin stops and names the one-word form."""
     pytest.importorskip("pytest_coverset")
     repo, run = _worker_layout(tmp_path)
     joined = PythonAdapter().test_command(
@@ -95,10 +96,9 @@ def test_the_split_form_loses_the_configfile(tmp_path: Path) -> None:
         part for word in joined for part in (word.split("=", 1) if word.startswith("--coverset") else [word])
     ]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTEST_", "COVERAGE_", "COVERSET_"))}
-    env["PYTHONPATH"] = str(repo / "src")  # the lost `pythonpath` setting would otherwise fail the import
     proc = subprocess.run(
         [*split, f"--rootdir={repo}", "-v"], cwd=repo, env=env, capture_output=True, text=True, timeout=120
     )
     output = proc.stdout + proc.stderr
-    assert "configfile:" not in output
-    assert proc.returncode == 0 and "1 xpassed" in output, output[-3000:]
+    assert proc.returncode == 4, output[-3000:]
+    assert "Write the option and its value as one word: --coverset-out=" in output

@@ -40,7 +40,7 @@ from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.economy import EconomyInputs, write_economy
 from coverset.facts.schema import CALLABLE_KINDS, ECONOMY_TABLES, SCHEMAS, SUMMARY_TABLES
 from coverset.facts.store import FactsStore, conform
-from coverset.facts.untrusted import BundleError, safe_rel_path
+from coverset.facts.untrusted import BundleError
 from coverset.lang.base import (
     IMPORT_CONTEXT,
     Catalogue,
@@ -51,6 +51,7 @@ from coverset.lang.base import (
     TypeDescriptor,
     func_key,
 )
+from coverset_model.io import safe_rel_path
 from coverset_model.types import to_json
 
 __all__ = [

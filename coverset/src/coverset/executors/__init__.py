@@ -8,39 +8,15 @@ local path never needs the Modal client).
 from __future__ import annotations
 
 from coverset.config import ExecutorKind, Settings
-from coverset.executors.base import (
-    Capabilities,
-    CapacityError,
-    EnvRef,
-    Executor,
-    ExecutorError,
-    Resources,
-    RunResult,
-    SnapshotRef,
-    Worker,
-    sanitize_env,
-)
+from coverset.executors.base import Executor, ExecutorError
 
-__all__ = [
-    "Capabilities",
-    "CapacityError",
-    "EnvRef",
-    "Executor",
-    "ExecutorError",
-    "Resources",
-    "RunResult",
-    "SnapshotRef",
-    "Worker",
-    "get_executor",
-    "sanitize_env",
-]
+__all__ = ["ExecutorError", "get_executor"]
 
 
 def get_executor(settings: Settings, kind: ExecutorKind | None = None) -> Executor:
     """Build the executor named ``kind`` (default ``settings.executor``).
 
-    ``modal`` needs :mod:`coverset.executors.modal_` (phase 5b); its absence is a clear
-    :class:`ExecutorError`, never an ImportError deep inside a run.
+    ``modal`` is imported only when chosen (the Modal client is a heavy import).
     """
     chosen = kind or settings.executor
     if chosen == "local":
@@ -48,12 +24,7 @@ def get_executor(settings: Settings, kind: ExecutorKind | None = None) -> Execut
 
         return LocalExecutor(settings)
     if chosen == "modal":
-        try:
-            from coverset.executors import modal_
-        except ImportError as exc:
-            raise ExecutorError(f"the Modal executor is not available: {exc}") from exc
-        factory = getattr(modal_, "ModalExecutor", None)
-        if factory is None:
-            raise ExecutorError("coverset.executors.modal_ defines no ModalExecutor")
-        return factory(settings)
+        from coverset.executors.modal_ import ModalExecutor
+
+        return ModalExecutor(settings)
     raise ExecutorError(f"unknown executor {chosen!r}")

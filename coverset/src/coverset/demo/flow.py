@@ -25,6 +25,7 @@ from coverset.db.models import Repo, Run
 from coverset.demo.seed import PR_OPENED_FIXTURE, demo_identity, read_shas, seed_demo_repo
 from coverset.orchestrator.history import SeededRun, seed_history
 from coverset.orchestrator.runner import OrchestratorContext
+from coverset.settings_scopes import apply_changes
 
 __all__ = [
     "DemoResult",
@@ -61,9 +62,10 @@ async def register_demo_repo(session: AsyncSession, demo_git: Path) -> Repo:
     repo.language = "python"
     repo.owner_id = ident.owner_id
     repo.installation_id = ident.installation_id
-    repo.ai_review_enabled = True
     repo.settings_json = {**(repo.settings_json or {}), "source": str(demo_git.resolve()), "demo": True}
     await session.flush()
+    # the demo shows the (fixture) AI review, which is a repository's opt-in
+    await apply_changes(session, {"policy.ai_review": True}, scope="repo", scope_id=repo.id, commit=False)
     return repo
 
 

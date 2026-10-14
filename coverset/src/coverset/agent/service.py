@@ -29,13 +29,12 @@ import logging
 import re
 import shlex
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
 from coverset.agent import cover
 from coverset.agent.backends import Backend
 from coverset.agent.context import RunContext
-from coverset.agent.economy import EconomyData, economy_for
 from coverset.agent.explain import explain_shape_key, fast_check_hint
 from coverset.agent.tools import (
     CANDIDATES_NOT_VERDICTS,
@@ -49,6 +48,8 @@ from coverset.agent.tools import (
 )
 from coverset.analysis.shapes import example_sort_key
 from coverset.lang.base import FunctionRegion
+from coverset.report.economy import EconomyView, redundancy_of
+from coverset.units import fmt_ranges
 from coverset.web.facts_view import FunctionView, reached_classes
 
 __all__ = ["HOW_TO_USE_EXAMPLES", "AgentService", "scrub_text"]
@@ -155,22 +156,6 @@ def _fn(region: FunctionRegion) -> str:
     return f"{region.path}::{region.qualname}"
 
 
-def _ranges(lines: Iterable[int], cap: int = MAX_ROWS) -> list[str]:
-    """Sorted lines as compact ranges (``["3-5", "9"]``), at most ``cap`` ranges."""
-    out: list[str] = []
-    start = prev = None
-    for line in sorted(set(lines)):
-        if prev is not None and line == prev + 1:
-            prev = line
-            continue
-        if start is not None:
-            out.append(f"{start}-{prev}" if start != prev else str(start))
-        start = prev = line
-    if start is not None:
-        out.append(f"{start}-{prev}" if start != prev else str(start))
-    return out[:cap]
-
-
 def _offset(cursor: str | None) -> int:
     if not cursor:
         return 0
@@ -189,6 +174,50 @@ def _page[T](items: Sequence[T], limit: int, cursor: str | None) -> tuple[list[T
 
 def _pct(part: int, whole: int) -> float | None:
     return round(100.0 * part / whole, 1) if whole else None
+
+
+def _fields(obj: Any) -> dict[str, Any] | None:
+    """A dataclass's fields as a flat dict (None stays None)."""
+    return None if obj is None else {name: getattr(obj, name) for name in obj.__dataclass_fields__}
+
+
+def economy_for(ctx: RunContext) -> tuple[EconomyView | None, str]:
+    """The run's economy (:mod:`coverset.report.economy`, the view every surface reads) through the
+    backend's ``economy_loader``, or None and why; cached on the context. Never raises."""
+    if "economy" in ctx.cache:
+        return ctx.cache["economy"]
+    loader: Callable[[], EconomyView | None] | None = ctx.cache.get("economy_loader")
+    result: tuple[EconomyView | None, str]
+    if loader is None:
+        result = (None, "this backend has no test-economy analysis")
+    else:
+        try:
+            view = loader()
+        except Exception as exc:  # an analysis bug must not take the agent tools down with it
+            log.exception("test economy failed for run %s", ctx.info.run_id)
+            result = (None, f"the test-economy analysis failed ({type(exc).__name__})")
+        else:
+            if view is None:
+                why = "the test economy was not computed for this run (it was finalized before the analysis existed)"
+                result = (None, why)
+            elif view.totals is None:
+                result = (
+                    None,
+                    "the test economy was skipped for this run: "
+                    + "; ".join(view.notes or ("no reason recorded",)),
+                )
+            else:
+                result = (view, "")
+    ctx.cache["economy"] = result
+    return result
+
+
+def _economy_source(view: EconomyView) -> str:
+    return (
+        "computed from the local bundle"
+        if view.run_id == "bundle"
+        else "facts store (computed when the run was finalized)"
+    )
 
 
 class AgentService:
@@ -604,7 +633,7 @@ class AgentService:
                 "line_pct": view.line_pct,
                 "branch_pct": view.branch_pct,
                 "body_statements": len(body),
-                "missing_lines": _ranges(missing),
+                "missing_lines": fmt_ranges(missing)[:MAX_ROWS],
                 "partial_branches": partial,
             },
             "input_classes": {
@@ -674,7 +703,7 @@ class AgentService:
                             "covered": fp.covered,
                             "total": fp.total,
                             "pct": round(fp.pct, 1) if fp.pct is not None else None,
-                            "missing_lines": _ranges(fp.missing),
+                            "missing_lines": fmt_ranges(fp.missing)[:MAX_ROWS],
                         }
                     )
             rows = list(patch.function_rows) if patch is not None else []
@@ -831,7 +860,7 @@ class AgentService:
                     "path": path,
                     "lines_run": len(ran),
                     "statements_run": len(live & set(ran)),
-                    "lines": _ranges(ran, 50),
+                    "lines": fmt_ranges(ran)[:50],
                 }
             )
             owners: dict[str, list[int]] = defaultdict(list)
@@ -1221,150 +1250,90 @@ class AgentService:
     async def tool_redundant_tests(
         self, run: str | None, repo: str | None, limit: int, cursor: str | None
     ) -> dict[str, Any]:
-        """``redundant_tests``: the test-economy analysis when the run has it, else the agent's own
-        grouping over the cover index (lines and input classes per test)."""
+        """``redundant_tests``: the test economy's equivalence groups, dominance and removable
+        candidates (:func:`coverset.report.economy.redundancy_of`)."""
         ctx = await self._ctx(run, repo)
-        data, why = await asyncio.to_thread(economy_for, ctx)
-        if data is not None:
-            return self._redundant_economy(ctx, data, limit, cursor)
-        out = await asyncio.to_thread(self._redundant, ctx, limit, cursor)
-        out["economy"] = why
-        return out
+        view, why = await asyncio.to_thread(economy_for, ctx)
+        if view is None:
+            return {
+                **self._head(ctx),
+                "available": False,
+                "reason": why,
+                "equivalent_groups": [],
+                "dominated": [],
+            }
+        found = redundancy_of(view)
+        rows = view.by_nodeid()
 
-    def _redundant_economy(
-        self, ctx: RunContext, data: EconomyData, limit: int, cursor: str | None
-    ) -> dict[str, Any]:
-        rows = {r["nodeid"]: r for r in data.tests}
+        def seconds(nodeid: str) -> float:
+            row = rows.get(nodeid)
+            return (row.duration_ms or 0.0) / 1000.0 if row is not None else 0.0
+
         groups = [
             {
-                "tests": g["tests"][:50],
-                "size": len(g["tests"]),
-                "keep": g["keep"],
-                "seconds_if_one_kept": round(
-                    sum((rows.get(n, {}).get("duration_ms") or 0.0) for n in g["tests"] if n != g["keep"])
-                    / 1000.0,
-                    4,
-                ),
+                "tests": list(g.nodeids[:50]),
+                "size": len(g.nodeids),
+                "keep": g.keep,
+                "seconds_if_one_kept": round(sum(seconds(n) for n in g.nodeids if n != g.keep), 4),
             }
-            for g in data.groups
+            for g in found.groups
         ]
         dominated = [
             {
                 "test": test,
                 "dominated_by": by,
-                "duration_s": (rows.get(test, {}).get("duration_ms") or 0.0) / 1000.0 or None,
-                "unique_facts": rows.get(test, {}).get("unique_facts"),
+                "duration_s": seconds(test) or None,
+                "unique_facts": rows[test].unique_facts if test in rows else None,
             }
-            for test, by in data.dominated
+            for test, by in found.dominated
         ]
         dominated.sort(key=lambda d: (-(d["duration_s"] or 0.0), d["test"]))
-        removable = sorted(
-            (r for r in data.tests if r.get("removable")),
-            key=lambda r: (-(r.get("duration_ms") or 0.0), r["nodeid"]),
-        )
         group_page, group_paging = _page(groups, limit, cursor)
         dom_page, dom_paging = _page(dominated, limit, cursor)
-        rem_page, rem_paging = _page(removable, limit, cursor)
-        totals = data.totals or {}
+        rem_page, rem_paging = _page(found.removable, limit, cursor)
         return {
             **self._head(ctx),
-            "source": f"test economy: {data.source}",
+            "available": True,
+            "source": f"test economy: {_economy_source(view)}",
             "equivalent_groups": group_page,
             "equivalent_groups_total": group_paging["total"],
             "dominated": dom_page,
             "dominated_total": dom_paging["total"],
             "removable_candidates": [
                 {
-                    "nodeid": r["nodeid"],
-                    "duration_ms": r.get("duration_ms"),
-                    "statements": r.get("statements"),
-                    "asserts": r.get("asserts"),
-                    "dominated_by": r.get("dominated_by"),
+                    "nodeid": r.nodeid,
+                    "duration_ms": r.duration_ms,
+                    "statements": r.statements,
+                    "asserts": r.asserts,
+                    "dominated_by": r.dominated_by,
                 }
                 for r in rem_page
             ],
             "removable_total": rem_paging["total"],
-            "collapsible_families": data.families[: min(limit, MAX_ROWS)],
-            "minimal_set_size": totals.get("minimal_set_size"),
-            "tests": totals.get("tests"),
+            "collapsible_families": [
+                {
+                    "family": f.family,
+                    "path": f.path,
+                    "cases": f.cases,
+                    "distinct_flows": f.distinct_flows,
+                    "redundant_cases": f.redundant_cases,
+                }
+                for f in view.families
+                if f.redundant_cases
+            ][: min(limit, MAX_ROWS)],
+            "minimal_set_size": found.minimal_set_size,
+            "tests": found.tests,
             "next_cursor": group_paging["next_cursor"]
             or dom_paging["next_cursor"]
             or rem_paging["next_cursor"],
-            "notes": data.notes,
+            "notes": list(view.notes),
             "caveats": [
                 CANDIDATES_NOT_VERDICTS,
-                *([data.caveat] if data.caveat else []),
+                found.caveat,
                 "Facts compared: lines, inferred branch arcs and shape observations per test; assertions, "
                 "mocks and expected exceptions are not facts coverset records.",
                 "minimal_set_size is the economy's cover over every distinct argument shape, finer than the "
                 "input classes minimal_test_set keeps, so minimal_test_set's set is usually smaller.",
-            ],
-        }
-
-    def _redundant(self, ctx: RunContext, limit: int, cursor: str | None) -> dict[str, Any]:
-        index = cover.cover_index(ctx)
-        selected = [i for i in range(len(index)) if index.kind[i] in ("lines", "classes")]
-        grouped = cover.blocks(index, selected)
-        weights = {i: ctx.duration(n) or ctx.median_duration for i, n in enumerate(index.nodeids)}
-        sets = {t: frozenset(b) for t, b in grouped.of_test.items() if b}
-        by_set: dict[frozenset[int], list[int]] = defaultdict(list)
-        for t, found in sets.items():
-            by_set[found].append(t)
-        groups = []
-        for found, members in by_set.items():
-            if len(members) < 2:
-                continue
-            ordered = sorted(members, key=lambda t: (weights[t], index.nodeids[t]))
-            facts = sum(len(grouped.members[b]) for b in found)
-            groups.append(
-                {
-                    "tests": [index.nodeids[t] for t in ordered][:50],
-                    "size": len(ordered),
-                    "keep": index.nodeids[ordered[0]],
-                    "facts": facts,
-                    "seconds_if_one_kept": round(sum(weights[t] for t in ordered[1:]), 4),
-                }
-            )
-        groups.sort(key=lambda g: (-g["size"], -g["seconds_if_one_kept"], g["keep"]))
-        in_group = {t for members in by_set.values() if len(members) > 1 for t in members}
-        dominated = []
-        for t, found in sets.items():
-            rarest = min(found, key=lambda b: (len(grouped.tests[b]), b))
-            best = None
-            for u in grouped.tests[rarest]:
-                if u == t or sets.get(u) is None or not found < sets[u]:
-                    continue
-                if best is None or (weights[u], index.nodeids[u]) < (weights[best], index.nodeids[best]):
-                    best = u
-            if best is not None:
-                extra = sum(len(grouped.members[b]) for b in sets[best] - found)
-                dominated.append(
-                    {
-                        "test": index.nodeids[t],
-                        "dominated_by": index.nodeids[best],
-                        "facts": sum(len(grouped.members[b]) for b in found),
-                        "dominator_extra_facts": extra,
-                        "duration_s": ctx.duration(index.nodeids[t]),
-                        "also_in_equivalence_group": t in in_group,
-                    }
-                )
-        dominated.sort(key=lambda d: (-(d["duration_s"] or 0.0), d["test"]))
-        group_page, group_paging = _page(groups, limit, cursor)
-        dom_page, dom_paging = _page(dominated, limit, cursor)
-        next_cursor = group_paging["next_cursor"] or dom_paging["next_cursor"]
-        return {
-            **self._head(ctx),
-            "source": "coverset.agent (lines and input classes per test)",
-            "equivalent_groups": group_page,
-            "equivalent_groups_total": group_paging["total"],
-            "dominated": dom_page,
-            "dominated_total": dom_paging["total"],
-            "next_cursor": next_cursor,
-            "caveats": [
-                CANDIDATES_NOT_VERDICTS,
-                "Facts compared: the lines each test ran and the input classes it passed in; assertions, "
-                "mocks and expected exceptions are not facts coverset records.",
-                SAMPLED,
             ],
         }
 
@@ -1373,22 +1342,25 @@ class AgentService:
     ) -> dict[str, Any]:
         """``test_tax``."""
         ctx = await self._ctx(run, repo)
-        data, why = await asyncio.to_thread(economy_for, ctx)
-        if data is None:
+        view, why = await asyncio.to_thread(economy_for, ctx)
+        if view is None:
             return {**self._head(ctx), "available": False, "reason": why, "pr_tax": None, "tests": []}
-        rows = list(data.tests)
+        rows = [
+            {**(_fields(r) or {}), "not_measured_reason": None if r.measured else r.reason}
+            for r in view.tests
+        ]
         if only == "assertion_free":
-            rows = [r for r in rows if r.get("assertion_free")]
+            rows = [r for r in rows if r["assertion_free"]]
         elif only == "removable":
-            rows = [r for r in rows if r.get("removable")]
+            rows = [r for r in rows if r["removable"]]
         elif only == "unmeasured":
-            rows = [r for r in rows if r.get("measured") is False]
+            rows = [r for r in rows if not r["measured"]]
         column, descending = _TAX_SORTS[sort]
-        present = sorted((r for r in rows if r.get(column) is not None), key=lambda r: r["nodeid"])
+        present = sorted((r for r in rows if r[column] is not None), key=lambda r: r["nodeid"])
         if sort == "leverage":  # among equal leverage, the longest test first
-            present.sort(key=lambda r: -((r.get("statements") or 0) + (r.get("helper_statements") or 0)))
+            present.sort(key=lambda r: -((r["statements"] or 0) + (r["helper_statements"] or 0)))
         present.sort(key=lambda r: r[column], reverse=descending)
-        rows = present + sorted((r for r in rows if r.get(column) is None), key=lambda r: r["nodeid"])
+        rows = present + sorted((r for r in rows if r[column] is None), key=lambda r: r["nodeid"])
         page, paging = _page(rows, limit, cursor)
         fields = (
             "nodeid", "statements", "helper_statements", "asserts", "fixtures", "cases", "unique_facts",
@@ -1398,15 +1370,15 @@ class AgentService:
         return {
             **self._head(ctx),
             "available": True,
-            "source": data.source,
-            "weights": data.weights,
-            "totals": data.totals,
-            "pr_tax": data.tax,
+            "source": _economy_source(view),
+            "weights": dict(view.weights),
+            "totals": _fields(view.totals),
+            "pr_tax": _fields(view.tax),
             "sort": sort,
             "only": only,
-            "tests": [{k: r.get(k) for k in fields} for r in page],
+            "tests": [{k: r[k] for k in fields} for r in page],
             **paging,
-            "notes": data.notes,
+            "notes": list(view.notes),
             "caveats": [
                 "Leverage is unique facts (lines + arcs + 3 x input classes no other test reaches) per test "
                 "statement (own plus helpers): a long test with low leverage costs review time for little.",

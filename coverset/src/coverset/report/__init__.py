@@ -9,17 +9,8 @@ bundle, or a run in the facts store). See ``docs/report.md``.
 
 from __future__ import annotations
 
-from coverset.report.build import BuildResult, build_report, default_out
-from coverset.report.facts import BundleFacts, ReportInput, TestInfo
+from coverset.report.build import build_report, default_out
+from coverset.report.facts import ReportInput
 from coverset.report.output import MARKER, OutDirError
 
-__all__ = [
-    "MARKER",
-    "BuildResult",
-    "BundleFacts",
-    "OutDirError",
-    "ReportInput",
-    "TestInfo",
-    "build_report",
-    "default_out",
-]
+__all__ = ["MARKER", "OutDirError", "ReportInput", "build_report", "default_out"]

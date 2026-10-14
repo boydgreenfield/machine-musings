@@ -384,5 +384,5 @@ created is left running; anything a crash leaves behind is ended by Modal's `idl
   Code: `commands/invariants.py`.
 * `coverset doctor --repo PATH [--json] [--no-collect] [--offline] [--write-config]`: what coverset
   would do with a repository, without running its tests ([docs/getting-started.md](getting-started.md)).
-* `coverset seed-demo`, `coverset warm`, `coverset facts query SQL`, `coverset shapes FUNC [--markdown] [--suggest]`,
+* `coverset warm`, `coverset facts query SQL`, `coverset shapes FUNC [--markdown] [--suggest]`,
   `coverset invariants check`, `coverset gc [--dry-run]`, `coverset repo purge NAME`, `coverset modal reap [--all]`.

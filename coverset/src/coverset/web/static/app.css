@@ -646,7 +646,6 @@ svg.spark { display: block; overflow: visible; font-family: var(--font); flex: n
 .spark-dot.spark-s2, .spark-end.spark-s2 { fill: var(--surface); stroke: var(--spark-2); stroke-width: 1.75; }
 .spark-val { font-size: 10px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
 .spark-base { stroke: var(--rule); stroke-width: 1; }
-.spark-ref { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 1 2.5; }
 .spark-current { stroke: var(--focus); stroke-width: 2; }
 .spark-hit { fill: var(--ink); fill-opacity: 0; }
 .spark-hit:hover { fill-opacity: 0.07; }

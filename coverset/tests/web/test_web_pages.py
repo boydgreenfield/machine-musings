@@ -79,7 +79,13 @@ async def test_setup_is_restyled_onto_the_layout(client: Client) -> None:
 
 async def test_layout_wiring(client: Client) -> None:
     html = await (await client.get("/")).get_data(as_text=True)
-    for script in ("app.js", "vendor/htmx.min.js", "vendor/idiomorph-ext.min.js", "vendor/sse.min.js"):
+    for script in (
+        "keys.js",
+        "app.js",
+        "vendor/htmx.min.js",
+        "vendor/idiomorph-ext.min.js",
+        "vendor/sse.min.js",
+    ):
         assert f"/static/{script}" in html
     assert 'hx-ext="morph,sse"' in html
     token = re.search(r'hx-headers=\'\{"X-CSRF-Token": "([^"]+)"\}\'', html)

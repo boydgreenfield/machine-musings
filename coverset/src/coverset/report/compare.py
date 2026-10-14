@@ -45,6 +45,7 @@ from typing import Any
 from coverset.facts.schema import CALLABLE_KINDS
 from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion
 from coverset.report.facts import NO_RESULT, NOT_RUN, ReportInput, TestInfo
+from coverset.units import plural
 from coverset.web.facts_view import FunctionView
 from coverset.web.render.source import LineFacts
 
@@ -324,9 +325,9 @@ class FnDelta:
                 f"{self.now_body[0]} of {self.now_body[1]}"
             )
         if self.lost_lines:
-            parts.append(f"{_plural(len(self.lost_lines), 'line')} newly uncovered")
+            parts.append(f"{plural(len(self.lost_lines), 'line')} newly uncovered")
         if self.gained_lines:
-            parts.append(f"{_plural(len(self.gained_lines), 'line')} newly covered")
+            parts.append(f"{plural(len(self.gained_lines), 'line')} newly covered")
         if self.classes_lost:
             parts.append("input classes lost: " + ", ".join(self.classes_lost))
         if self.classes_not_rerun:
@@ -411,12 +412,6 @@ class Comparison:
 
     def tests_of(self, kind: str) -> list[TestDelta]:
         return [t for t in self.tests if t.kind == kind]
-
-    def files_of(self, *status: str) -> list[FileDelta]:
-        return [f for f in self.files if f.status in status]
-
-    def functions_of(self, *status: str) -> list[FnDelta]:
-        return [f for f in self.functions if f.status in status]
 
 
 # -- comparing -----------------------------------------------------------------------------------
@@ -519,23 +514,23 @@ def compare(
     now_only = len(n.ran - b.ran)
     if changed_paths:
         notes.append(
-            f"{_plural(len(changed_paths), 'file')} changed between the two runs: lines there are compared "
+            f"{plural(len(changed_paths), 'file')} changed between the two runs: lines there are compared "
             "on function bodies with the same qualname, not on line numbers."
         )
     if unknown_paths:
         notes.append(
-            f"The functions of {_plural(len(unknown_paths), 'file')} could not be matched: one side has no "
+            f"The functions of {plural(len(unknown_paths), 'file')} could not be matched: one side has no "
             "function index for them (its sources were not read, or the base's were read from the local "
             "tree, which no longer matches the base's statements)."
         )
     if unindexed:
         notes.append(
-            f"The function and input-class totals leave out {_plural(len(unindexed), 'file')} on both "
+            f"The function and input-class totals leave out {plural(len(unindexed), 'file')} on both "
             "sides, as one side has no function index of its own for them."
         )
     if borrowed:
         notes.append(
-            f"The base's function index of {_plural(len(borrowed), 'changed file')} was read from the "
+            f"The base's function index of {plural(len(borrowed), 'changed file')} was read from the "
             "local tree, not from the base's own commit or rows it ships (a bundle.tar.gz carries "
             "none): its function boundaries are trusted only for files whose statements did not "
             "change."
@@ -845,7 +840,3 @@ def _total_rows(base: dict[str, Any], now: dict[str, Any]) -> list[TotalRow]:
 
 def _signed(value: int) -> str:
     return f"+{value}" if value > 0 else ("±0" if value == 0 else f"−{-value}")
-
-
-def _plural(count: int, word: str) -> str:
-    return f"{count} {word if count == 1 else word + 's'}"

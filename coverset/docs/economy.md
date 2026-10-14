@@ -344,25 +344,14 @@ run_economy(store, repo_id, run_id) -> RunEconomy | None
     # RunEconomy(run_id, totals: RunTotals | None, tax: TestTax | None,
     #            notes: tuple[str, ...], weights: Mapping[str, int], computed_ms: float | None)
 
-tests_economy(store, repo_id, run_id, sort="leverage", limit=50, *, only=None, path=None)
-    -> list[TestEconomyRow]
-    # sort: "leverage" (ascending: costliest first), "cost" (ms per unique fact, descending),
-    #       "statements", "duration" (descending), "unique" (ascending), "nodeid"; nulls last
-    # only: "removable", "assertion_free", "stale", "dominated", "grouped", "unmeasured"
-    # SORTS maps each sort name to (column, descending)
+tests_economy(store, repo_id, run_id) -> list[TestEconomyRow]
+    # every test, by node id
 
-redundancy(store, repo_id, run_id) -> Redundancy | None
-    # Redundancy(groups: tuple[EquivalenceGroup, ...]  (largest first; each with nodeids,
-    #            duration_ms and keep: the member the minimal set kept),
-    #            dominated: tuple[(test, dominated_by), ...],
-    #            removable: tuple[TestEconomyRow, ...] (slowest first),
-    #            minimal_set_size, tests, removable_duration_ms, caveat=REMOVABLE_CAVEAT)
-
-families(store, repo_id, run_id, *, collapsible_only=False) -> list[FamilyEconomy]
+families(store, repo_id, run_id) -> list[FamilyEconomy]
     # most redundant cases first; FamilyEconomy.redundant_cases is a property
 
-func_testing(store, repo_id, run_id, *, only=None, path=None) -> list[FunctionTesting]
-    # only: "indirect_only", "untested", "unexercised_handlers"; sorted by path, qualname
+func_testing(store, repo_id, run_id) -> list[FunctionTesting]
+    # sorted by path, qualname
 
 pr_test_tax(store, repo_id, run_id, *, threshold=None, min_statements=None) -> TestTax | None
     # re-flags with the effective policy when given; None without a base run
@@ -417,18 +406,15 @@ head)`, `find_handlers(path, source)`, `parse_nodeid`, `family_of`, `is_test_pat
 `conftest_paths`, `classes_of(param, shape_key)`, `observed_classes(shapes, functions)`,
 `tax_message(added, lines, classes)`, the constants `LINE_WEIGHT`, `ARC_WEIGHT`, `CLASS_WEIGHT`,
 `DEFAULT_TEST_TAX_THRESHOLD`, `DEFAULT_TEST_TAX_MIN_STATEMENTS`, `DEFAULT_DOMINANCE_SLOWDOWN`,
-`REMOVABLE_CAVEAT`, and, in `analysis/cover.py`, `greedy_cover_csr`, `prune_csr` (numpy) and
-`greedy_weighted_cover`, `prune_redundant` (any hashable sets: the "minimal set of good tests"
-an agent API can offer over its own sets).
+`REMOVABLE_CAVEAT`, and, in `analysis/cover.py`, `csr_of`, `greedy_cover_csr` and `prune_csr`
+(the one greedy cover: wave 1, the economy's minimal set and the agent's `minimal_test_set`).
 
 ### Recipes
 
-**The Economy page** (`/repos/<repo>/runs/<run>/economy`): `run_economy` for the tiles (tests,
-minimal set size and duration, removable candidates and their duration, groups, dominated,
-collapsible families, assertion-free, stale, indirect-only and untested functions, unexercised
-handlers), `notes` as a "not measured" strip, `tests_economy(sort=...)` for the table (with the
-`only` filter as tabs), `redundancy` for the groups and candidates (with `caveat`), `families`
-and `func_testing(only=...)` for the two lower sections.
+**The Economy page** (`/repos/<repo>/runs/<run>/economy`): `report.economy.view_from_store` reads
+the readers above into one `EconomyView`; `sort_tests` (with the `FILTERS` as tabs) orders the
+table, `redundancy_of` gives the groups, dominance and removable candidates (with `caveat`), and
+the view's `families` and `functions` fill the two lower sections.
 
 **The PR card and the sticky-comment line**: `pr_test_tax(..., threshold=policy.test_tax_threshold)`.
 When `flagged`: `"Test bloat: " + tax.message + f" ({tax.tax:.1f} statements per new fact, threshold
@@ -496,8 +482,6 @@ shape observation. The finalize hook is skipped above 25M rows (about 1.3 GB and
   should weight facts by production frequency, so "removable" also means "covers nothing production
   exercises that other tests do not", and the tax's denominator can count new *production-relevant*
   classes. `analyse_data` takes the facts as arrays, so a weight per fact id is a small extension.
-- An agent interface can expose `redundancy` and `greedy_weighted_cover` directly: "give me a
-  minimal set of tests covering these functions", "which of my new tests add nothing".
 
 ## Where you see it
 

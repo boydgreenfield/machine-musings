@@ -22,7 +22,7 @@ from coverset.forge.verdict import (
     MissingClass,
     VerdictSummary,
 )
-from coverset.units import fmt_secs
+from coverset.units import fmt_pct, fmt_secs, ordinal, plural
 
 COMMENT_LIMIT = 60_000
 """GitHub rejects comment bodies over 65,536 characters; stay well below it."""
@@ -120,11 +120,11 @@ def test_tax_line(tax: TestTaxLine | None) -> str | None:
     flow (nothing to say). Built from numbers only: no PR text reaches it."""
     if tax is None or (tax.added_statements <= 0 and tax.duplicate_count <= 0 and tax.statements_measured):
         return None
-    covered = _plural(tax.newly_covered_lines, "newly covered line", "newly covered lines")
+    covered = plural(tax.newly_covered_lines, "newly covered line", "newly covered lines")
     if tax.new_classes:
-        covered += f" and {_plural(tax.new_classes, 'input class', 'input classes')}"
+        covered += f" and {plural(tax.new_classes, 'input class', 'input classes')}"
     if tax.statements_measured:
-        statements = _plural(tax.added_statements, "test statement", "test statements")
+        statements = plural(tax.added_statements, "test statement", "test statements")
         text = f"Test tax: {statements} for {covered} (threshold {tax.threshold:g})"
     else:
         text = f"Test tax: test statements not measured, {covered}"
@@ -132,28 +132,13 @@ def test_tax_line(tax: TestTaxLine | None) -> str | None:
         text = f"**{text}**"
     if tax.duplicate_count:
         verb = "duplicates" if tax.duplicate_count == 1 else "duplicate"
-        text += f" · {_plural(tax.duplicate_count, 'new test', 'new tests')} {verb} existing flows"
+        text += f" · {plural(tax.duplicate_count, 'new test', 'new tests')} {verb} existing flows"
     if not tax.base_exact:
         text += " · compared with an earlier run, not the base commit"
     return text
 
 
 test_tax_line.__test__ = False  # type: ignore[attr-defined]  # a renderer, not a pytest test
-
-
-def _plural(count: int, singular: str, plural: str) -> str:
-    return f"{count} {singular if count == 1 else plural}"
-
-
-def _ordinal(number: int) -> str:
-    suffix = "th" if 10 <= number % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
-    return f"{number}{suffix}"
-
-
-def _pct(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.0f}%" if value == int(value) else f"{value:.1f}%"
 
 
 def _heading(summary: VerdictSummary) -> str:
@@ -181,22 +166,22 @@ def _headline(summary: VerdictSummary) -> str:
     parts = []
     if summary.patch_total:
         parts.append(
-            f"**Patch coverage {_pct(summary.patch_pct)}** "
-            f"({summary.patch_covered} of {_plural(summary.patch_total, 'changed line', 'changed lines')})"
+            f"**Patch coverage {fmt_pct(summary.patch_pct)}** "
+            f"({summary.patch_covered} of {plural(summary.patch_total, 'changed line', 'changed lines')})"
         )
     if summary.zero_test_functions:
         verb = "has" if summary.zero_test_functions == 1 else "have"
-        noun = _plural(summary.zero_test_functions, "changed function", "changed functions")
+        noun = plural(summary.zero_test_functions, "changed function", "changed functions")
         parts.append(f"**{noun} {verb} no covering test**")
     changed, elsewhere = missing_counts(summary.function_rows, summary.missing_input_classes)
     if changed:
-        noun = _plural(changed, "input class", "input classes")
+        noun = plural(changed, "input class", "input classes")
         parts.append(f"**{noun} never exercised in changed functions**")
     if elsewhere and changed:
         parts.append(f"{elsewhere} more in invariant targets")
     elif elsewhere:
         parts.append(
-            f"{_plural(elsewhere, 'input class', 'input classes')} never exercised in invariant targets"
+            f"{plural(elsewhere, 'input class', 'input classes')} never exercised in invariant targets"
         )
     return " · ".join(parts)
 
@@ -257,14 +242,14 @@ def lens_note(note: str | None, key: str) -> str:
 def _rank_line(summary: VerdictSummary) -> str | None:
     if summary.rank_coverset is None:
         return None
-    line = f"The first failing test ran {_ordinal(summary.rank_coverset)}"
+    line = f"The first failing test ran {ordinal(summary.rank_coverset)}"
     if summary.tests_total:
         line += f" of {summary.tests_total}"
     if summary.rank_file_order is not None:
         estimate = ""
         if summary.t_first_failure_file_order_est is not None:
             estimate = f", ~{fmt_secs(summary.t_first_failure_file_order_est)} {ESTIMATE_LABEL}"
-        line += f" (file order: {_ordinal(summary.rank_file_order)}{estimate})"
+        line += f" (file order: {ordinal(summary.rank_file_order)}{estimate})"
     return line + "."
 
 
@@ -340,7 +325,7 @@ def _function_table(rows: tuple[FunctionRow, ...]) -> Section:
         tests = "**0**" if row.tests == 0 else str(row.tests)
         items.append(
             [
-                f"| {code_span(row.qualname, in_table=True)} ({badge}) | {tests} | {_pct(row.line_pct)} "
+                f"| {code_span(row.qualname, in_table=True)} ({badge}) | {tests} | {fmt_pct(row.line_pct)} "
                 f"| {_classes_cell(row)} | {_invariant_cell(row.invariants)} |"
             ]
         )
@@ -353,7 +338,7 @@ def _function_table(rows: tuple[FunctionRow, ...]) -> Section:
 
 
 def _failures(summary: VerdictSummary) -> Section:
-    header = [f"**{_plural(len(summary.failures), 'failure', 'failures')}**", ""]
+    header = [f"**{plural(len(summary.failures), 'failure', 'failures')}**", ""]
     items = []
     for row in summary.failures[:MAX_FAILURES]:
         where = f" ({code_span(f'{row.path}:{row.line}')})" if row.path and row.line else ""

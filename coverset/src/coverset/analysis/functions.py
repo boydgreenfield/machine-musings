@@ -159,7 +159,7 @@ def _index_def(path: str, node: DefNode, qualname: str, ordinal: int, in_class: 
             "class",
         )
         return IndexedFunction(region, (), None)
-    rest = _strip_docstring(node.body)
+    rest = strip_docstring(node.body)
     body_start = _first_line(rest[0]) if rest else def_line  # docstring-only: the line a call records
     params, annotations = _params(node.args)
     sig_parts = [
@@ -199,7 +199,7 @@ def _params(args: ast.arguments) -> tuple[tuple[str, ...], tuple[str | None, ...
     return names, annotations
 
 
-def _strip_docstring(body: Sequence[ast.stmt]) -> Sequence[ast.stmt]:
+def strip_docstring(body: Sequence[ast.stmt]) -> Sequence[ast.stmt]:
     first = body[0] if body else None
     if (
         isinstance(first, ast.Expr)
@@ -212,7 +212,7 @@ def _strip_docstring(body: Sequence[ast.stmt]) -> Sequence[ast.stmt]:
 
 def _body_start(body: Sequence[ast.stmt], *, default: int) -> int:
     """Line of the first body statement after a leading docstring (the docstring if it is alone)."""
-    rest = _strip_docstring(body)
+    rest = strip_docstring(body)
     if rest:
         return _first_line(rest[0])
     return body[0].lineno if body else default
@@ -230,7 +230,7 @@ def _dump_body(body: Sequence[ast.stmt], *, skeleton: bool) -> str:
     With ``skeleton=True`` nested ``def``/``class`` statements are replaced by ``pass`` so they
     are hashed only by their own regions.
     """
-    stmts = _strip_docstring(body)
+    stmts = strip_docstring(body)
     if skeleton:
         stmts = [_skeleton(stmt) for stmt in stmts]
     return ",".join(ast.dump(stmt, annotate_fields=False) for stmt in stmts)

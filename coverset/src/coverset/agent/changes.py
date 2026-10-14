@@ -28,7 +28,7 @@ from coverset.orchestrator.repos import RepoError, git_env, read_blobs
 from coverset.report.facts import read_sources
 from coverset.report.load import tracked_files
 from coverset.web.facts_view import RunFacts
-from coverset.web.pr_view import analyse_diff
+from coverset.web.pr_view import analyse_diff, utf8_text
 
 __all__ = ["store_changes", "worktree_changes"]
 
@@ -116,7 +116,7 @@ def worktree_changes(root: Path, base: str, facts: RunFacts, *, bundle_mtime: fl
         base_blobs = read_blobs(git_dir, merge, [d.base_path for d in py.values()])
     except RepoError as exc:
         raise GitDiffError(str(exc)) from None
-    base_tree = {p: _text(b) for p, b in base_blobs.items()}
+    base_tree = {p: utf8_text(b) for p, b in base_blobs.items()}
     tracked = tracked_files(root)
     head_tree = read_sources(root, [d.path for d in py.values() if d.status != "deleted"], tracked=tracked)
     changes = changed_functions(PythonAdapter(), base_tree, head_tree, py)  # type: ignore[arg-type]
@@ -159,12 +159,3 @@ def worktree_changes(root: Path, base: str, facts: RunFacts, *, bundle_mtime: fl
         stale=stale,
         notes=notes,
     )
-
-
-def _text(data: bytes | None) -> str | None:
-    if data is None:
-        return None
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return None

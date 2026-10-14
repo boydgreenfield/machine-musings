@@ -23,7 +23,7 @@ threads (``asyncio.to_thread``) or worker processes wherever it is called from a
 blocking call here never sits on the event loop.
 
 **Keys** are checked by :func:`check_key` before any store sees them: the facts store's path rules
-(:func:`coverset.facts.untrusted.safe_rel_path`: relative, normalised, no ``..``, no backslash, no
+(:func:`coverset_model.io.safe_rel_path`: relative, normalised, no ``..``, no backslash, no
 NUL) plus no control characters, no segment that looks like a local temporary file, and at most
 1,024 UTF-8 bytes (S3's limit). Unicode and spaces are allowed as they are (source files may carry
 them; S3 keys are UTF-8 and boto3 escapes them on the wire), never rewritten, so a key round-trips
@@ -47,7 +47,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from coverset.facts.untrusted import safe_rel_path
+from coverset_model.io import safe_rel_path
 
 __all__ = [
     "MAX_KEY_BYTES",

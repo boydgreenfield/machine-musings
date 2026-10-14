@@ -59,7 +59,7 @@ The output directory must not be a symlink (even one to a directory) or a file, 
 | `--coverset-shape-settle N` | 64 | consecutive calls with no new shape before sampling stops |
 | `--coverset-full-trace-cap N` | 100000 | safety cap on sampled calls per full-trace function ([below](#adaptive-sampling-and-the-full-trace-list)) |
 
-Every option accepts both `--opt value` and `--opt=value` (`test_option_values_in_both_forms`).
+Every option accepts both `--opt value` and `--opt=value` (`test_option_values_in_both_forms`), with one exception, below: a separate value word that names an existing path and moves pytest's rootdir or configuration file stops the run.
 
 The orchestrator builds the command line through `PythonAdapter.test_command` (`src/coverset/lang/python.py`). It always adds `--continue-on-collection-errors -p no:cacheprovider -q`, plus `--numprocesses=0` when `pytest-xdist` is in the environment and `--no-cov` when `pytest-cov` is.
 
@@ -67,7 +67,9 @@ The orchestrator builds the command line through `PythonAdapter.test_command` (`
 
 `test_command` writes every option that takes a value as a single word: `--coverset-out=run/out`, never `--coverset-out run/out`. pytest looks for its configuration file (`_initini`) before entry-point plugins have registered their options. At that point `--coverset-out` is an unknown flag and the following word is taken for a positional argument; when that word is an existing path, pytest uses it to infer the rootdir. In a worker the scores file, the full-trace list and the output directory live in the sibling `run/` directory, so the inferred rootdir became the common ancestor of `repo/` and `run/`, no `pyproject.toml` or `pytest.ini` was found there, and `--rootdir=` suppressed the fallback search. Every setting of the target repository was then silently dropped in every shard: `xfail_strict`, `addopts`, `markers`, `pythonpath`, `filterwarnings`, `asyncio_mode`, plugin settings such as `DJANGO_SETTINGS_MODULE`. A repository with `xfail_strict = true` and a passing xfail ran `1 xpassed`, exit 0, under the old argv and `1 failed`, exit 1, under plain pytest and the `=` form. `--opt=value` words start with `-`, so the early lookup ignores them.
 
-Tests: `test_ini_options_survive_the_shard_argv` (`tests/analysis/test_analysis_test_command.py`) runs the exact shard argv against a worker-shaped layout and asserts exit 1 and `configfile: pyproject.toml`; `test_the_split_form_loses_the_configfile` is the control. `meta.json` records the configuration file pytest actually used as `configfile` (`null` when none was found).
+The plugin guards a hand-typed command line the same way. In its first hook it looks for a `--coverset-* VALUE` pair (on the command line or in `PYTEST_ADDOPTS`) whose value is an existing path, asks pytest's own `determine_setup` where the rootdir and configuration file would be without those words, and stops (exit 4) when the answer differs, naming the one-word form: `pytest --coverset-out ../out` run a second time, when `../out` exists, would otherwise lose the project's `pyproject.toml`. A value inside the project (`--coverset-out .coverset`) changes nothing and passes. An xdist controller also hands its workers every pair as one word, on their command line and in `PYTEST_ADDOPTS`: the workers parse the command line again after the controller has created the output directory (`test_a_separate_value_word_keeps_the_workers_configuration`).
+
+Tests: `test_ini_options_survive_the_shard_argv` (`tests/analysis/test_analysis_test_command.py`) runs the exact shard argv against a worker-shaped layout and asserts exit 1 and `configfile: pyproject.toml`; `test_the_split_form_is_refused` is the control (the `--opt value` form stops with exit 4). `meta.json` records the configuration file pytest actually used as `configfile` (`null` when none was found).
 
 ## Per-test coverage
 
@@ -417,6 +419,16 @@ What is equal to a serial run: on the plugin's fixture project the merged bundle
 Only local workers can be merged (their files on this disk, their names relative to this working directory): `--tx ssh=...`, `--tx socket=...`, `popen//chdir=...` and `--rsyncdir` are a usage error (exit 4) before any worker starts. `-n 0`, `--collect-only` and `-p no:xdist` are serial runs. `--coverset-stop-file` is checked by every worker before each of its tests; the first to see it stops, xdist stops the run (`Interrupted: coverset: stop requested`, exit 2), and the tests that never ran are `not_run` in the merged bundle, with `stop_requested: true`. `--coverset-scores` works too: every worker sorts its collection the same way, and xdist hands tests out in that order.
 
 Cost: the merge took 0.07 s for 1,200 tests on 4 workers and 0.10 s on 8 (`meta.xdist.merge_s`), plus the usual `coverage.json` and neutral export once on the merged data. Scaling numbers are under [Overhead](#overhead).
+
+### A suite whose tests run pytest
+
+coverset's own suite runs pytest inside its tests (pytester, the demo's `LocalExecutor`, `coverset-ci`, the report fixtures), starts the Quart app and spawns subprocesses, and `pytest --coverset -n 6` gives the same outcomes as the plain run ([docs/dogfood.md](dogfood.md)). What keeps the outer run and the inner ones apart:
+
+* **The environment.** In an instrumented run `COVERSET`, `COVERSET_EVENT_NONCE` and `COVERSET_XDIST` are removed in the plugin's first hook, before any conftest file is imported, so no test and no subprocess sees them. A pytest started by a test on a worker inherits `PYTEST_XDIST_WORKER` but not the token, so it is an ordinary run: instrumented only with options of its own, into its own directory, with workers of its own if it asks for them.
+* **In-process runs** (`pytest.main`, `pytester.runpytest_inprocess`) build a new configuration: the plugin's hooks run for it, find no `--coverset-*` option and stay inert. An instrumented in-process run cannot measure under an instrumented outer one (coverage's tracer is taken) and is a usage error.
+* **The configuration.** The workers see the controller's rootdir and configuration file (value words glued, above), and the merge compares each worker's `rootdir` and `configfile` with the controller's: a difference is an error in `meta.errors` and the worker directories are kept (`test_workers_with_another_configuration_are_an_error`). A run whose workers had lost the project's `pyproject.toml` used to merge into a bundle with no error at all.
+
+`test_tests_that_run_pytest_stay_out_of_the_run` runs, under `-n 2 --coverset-out=out`, tests that start pytest in subprocesses (plain, instrumented, with workers of their own) and in-process, and checks that the outer bundle holds exactly the outer tests and no error.
 
 ## Hypothesis
 

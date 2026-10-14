@@ -415,32 +415,23 @@ def test_solve_covers_a_small_instance_and_the_budget_cuts_it() -> None:
     assert not cut.exhaustive and sum(weights[t] for t in cut.kept) <= 2.0
 
 
-async def test_redundant_tests_from_the_economy_and_the_fallback(service: AgentService) -> None:
+async def test_redundant_tests_from_the_economy(service: AgentService) -> None:
     found = await call(service, "redundant_tests", limit=MAX_ROWS)
+    assert found["available"] and found["source"] == "test economy: computed from the local bundle"
     assert found["equivalent_groups"], "the demo has parametrized cases with identical facts"
     for group in found["equivalent_groups"]:
         assert group["keep"] in group["tests"] and group["size"] >= 2
+    for row in found["dominated"]:
+        assert row["test"] != row["dominated_by"]
     ctx = await service.backend.context(None, None)
     saved = ctx.cache.get("economy")
     ctx.cache["economy"] = (None, "switched off for this test")
     try:
-        fallback = await call(service, "redundant_tests", limit=MAX_ROWS)
+        off = await call(service, "redundant_tests", limit=MAX_ROWS)
     finally:
-        if saved is None:
-            ctx.cache.pop("economy", None)
-        else:
-            ctx.cache["economy"] = saved
-    assert (
-        fallback["source"].startswith("coverset.agent")
-        and fallback["economy"] == "switched off for this test"
-    )
-    assert fallback["equivalent_groups"]
-    merge = [
-        g for g in fallback["equivalent_groups"] if any("test_merge_intervals[" in t for t in g["tests"])
-    ]
-    assert merge, "the merge_intervals cases share one data flow"
-    for row in fallback["dominated"]:
-        assert row["test"] != row["dominated_by"]
+        ctx.cache["economy"] = saved
+    assert off["available"] is False and off["reason"] == "switched off for this test"
+    assert off["equivalent_groups"] == [] and off["dominated"] == []
 
 
 async def test_test_tax(service: AgentService) -> None:

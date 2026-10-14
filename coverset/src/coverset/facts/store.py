@@ -100,12 +100,10 @@ if TYPE_CHECKING:
     from coverset.config import Settings
 
 __all__ = [
-    "COMPACT_ENV",
     "MANIFEST_FILE",
     "FactsStore",
     "RunWriteConflict",
     "SqlNotAllowed",
-    "compact_layout",
     "conform",
     "facts_store",
 ]
@@ -136,16 +134,6 @@ class _Unset:
 
 
 _UNSET = _Unset()
-
-
-COMPACT_ENV = "COVERSET_FACTS_COMPACT"
-"""Set to ``1`` to write the compact layout ``test_file_bits`` (one numbits bitset per test and
-file) next to ``test_lines`` at ingest; readers use it wherever every shard of a run has it."""
-
-
-def compact_layout() -> bool:
-    """Whether ingest writes ``test_file_bits`` (:data:`COMPACT_ENV`; off by default in v1)."""
-    return os.environ.get(COMPACT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class SqlNotAllowed(ValueError):

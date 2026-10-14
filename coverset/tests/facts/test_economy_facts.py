@@ -45,7 +45,6 @@ from coverset.facts.economy import (
     func_testing,
     mirror_history,
     pr_test_tax,
-    redundancy,
     run_economy,
     tests_economy,
     write_economy,
@@ -53,6 +52,7 @@ from coverset.facts.economy import (
 from coverset.facts.ingest import finalize_run, ingest_shard
 from coverset.facts.store import FactsStore
 from coverset.lang.base import FunctionRegion, NeutralBundle
+from coverset.report.economy import redundancy_of, sort_tests, view_from_store
 from coverset.storage.testing import local_facts_store
 
 HEAD = "a" * 40
@@ -172,8 +172,10 @@ def test_redundancy_from_the_tables(
     store: FactsStore, bundle: NeutralBundle, functions: list[FunctionRegion]
 ) -> None:
     _finalize(store, bundle, functions)
-    found = redundancy(store, 1, "run-1")
-    assert found is not None and found.caveat == REMOVABLE_CAVEAT
+    view = view_from_store(store, 1, "run-1")
+    assert view is not None
+    found = redundancy_of(view)
+    assert found.caveat == REMOVABLE_CAVEAT
     # classify(5) runs a subset of what Box([1, 2]).total() runs, and Box is at most 2x slower
     assert found.dominated == ((T_POS, T_BOX),)
     assert [r.nodeid for r in found.removable] == [T_POS]
@@ -181,24 +183,23 @@ def test_redundancy_from_the_tables(
     assert found.removable_duration_ms == pytest.approx(30.0)
 
 
-def test_tests_economy_sorts_filters_and_resolves_ids(
+def test_tests_economy_resolves_ids_and_the_view_sorts_and_filters(
     store: FactsStore, bundle: NeutralBundle, functions: list[FunctionRegion]
 ) -> None:
     _finalize(store, bundle, functions)
-    rows = tests_economy(store, 1, "run-1", "unique", limit=None)
+    stored = tests_economy(store, 1, "run-1")
+    assert [r.nodeid for r in stored] == sorted(TESTS)
+    rows = sort_tests(stored, "unique")
     assert [r.nodeid for r in rows][0] == T_POS and rows[0].unique_facts == 0
-    assert {r.nodeid for r in rows} == set(TESTS)
     assert rows[0].dominated_by == T_BOX and rows[0].family == f"{TEST_FILE}::test_classify"
     assert rows[0].path == TEST_FILE and rows[0].cases == 2 and rows[0].reason == "no sources"
-    by_duration = tests_economy(store, 1, "run-1", "duration", limit=2)
-    assert [r.nodeid for r in by_duration] == [T_FAIL, T_BOX]
-    assert [r.nodeid for r in tests_economy(store, 1, "run-1", only="removable")] == [T_POS]
-    assert len(tests_economy(store, 1, "run-1", only="unmeasured", limit=None)) == 5
-    assert tests_economy(store, 1, "run-1", path="tests/other.py") == []
+    assert [r.nodeid for r in sort_tests(stored, "duration")][:2] == [T_FAIL, T_BOX]
+    assert [r.nodeid for r in sort_tests(stored, only="removable")] == [T_POS]
+    assert len(sort_tests(stored, only="unmeasured")) == 5
     with pytest.raises(ValueError, match="unknown sort"):
-        tests_economy(store, 1, "run-1", "fastest")  # type: ignore[arg-type]
+        sort_tests(stored, "fastest")
     with pytest.raises(ValueError, match="unknown filter"):
-        tests_economy(store, 1, "run-1", only="flaky")  # type: ignore[arg-type]
+        sort_tests(stored, only="flaky")
 
 
 def test_families_and_functions_from_the_tables(
@@ -207,18 +208,16 @@ def test_families_and_functions_from_the_tables(
     _finalize(store, bundle, functions)
     (family,) = families(store, 1, "run-1")
     assert (family.family, family.cases, family.distinct_flows) == (f"{TEST_FILE}::test_classify", 2, 2)
-    assert family.case_ids == (T_NEG, T_POS) and families(store, 1, "run-1", collapsible_only=True) == []
-    untested = func_testing(store, 1, "run-1", only="untested")
-    assert [f.qualname for f in untested] == ["never_called"]  # excluded() is "pragma: no cover"
+    assert family.case_ids == (T_NEG, T_POS) and family.redundant_cases == 0
     by_name = {f.qualname: f for f in func_testing(store, 1, "run-1")}
+    untested = [f.qualname for f in by_name.values() if f.untested]
+    assert untested == ["never_called"]  # excluded() is "pragma: no cover"
     assert by_name["classify"].direct_tests == 3 and by_name["classify"].indirect_tests == 1
     assert by_name["add"].handlers_total is None  # no source, so handlers were not looked for
-    with pytest.raises(ValueError, match="unknown filter"):
-        func_testing(store, 1, "run-1", only="slow")  # type: ignore[arg-type]
 
 
 def test_readers_return_nothing_for_a_run_without_economy(store: FactsStore) -> None:
-    assert run_economy(store, 1, "run-x") is None and redundancy(store, 1, "run-x") is None
+    assert run_economy(store, 1, "run-x") is None
     assert tests_economy(store, 1, "run-x") == [] and families(store, 1, "run-x") == []
     assert func_testing(store, 1, "run-x") == [] and pr_test_tax(store, 1, "run-x") is None
 
@@ -250,7 +249,7 @@ def test_weights_stale_tests_and_the_tax_with_history(store: FactsStore, bundle:
     ingest_shard(store, head_ctx, bundle, 0, functions)
     finalize_run(store, head_ctx, expected_shards=1, economy=EconomyInputs(history=history))
 
-    rows = {r.nodeid: r for r in tests_economy(store, 1, "run-head", limit=None)}
+    rows = {r.nodeid: r for r in tests_economy(store, 1, "run-head")}
     assert all(r.measured for r in rows.values())
     assert rows[T_ADD].statements == 1 and rows[T_ADD].asserts == 1 and rows[T_ADD].assertion_free is False
     assert rows[T_NEG].assertion_free is True and rows[T_NEG].fixtures == 0
@@ -376,7 +375,7 @@ def test_the_mirror_beside_the_store_is_used(
     ctx = make_ctx(head_sha=head)
     ingest_shard(store, ctx, bundle, 0, regions)
     finalize_run(store, ctx, expected_shards=1)
-    rows = {r.nodeid: r for r in tests_economy(store, 1, "run-1", limit=None)}
+    rows = {r.nodeid: r for r in tests_economy(store, 1, "run-1")}
     assert all(r.measured for r in rows.values())
     assert rows[T_ADD].stale is True and rows[T_BOX].stale is False
     economy = run_economy(store, 1, "run-1")

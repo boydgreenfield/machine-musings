@@ -153,7 +153,7 @@ def test_timeline_renderers() -> None:
         )
     )
     rows = [OrderRow(1, EVIL, 8.0, {"new_or_changed": 8.0}, EVIL, "failed", 66, True, True, tie=EVIL)]
-    assert_safe(render_why_order(rows, test_url=lambda n: JS_URL, rest=3, rest_note=EVIL))
+    assert_safe(render_why_order(rows, rest=3, rest_note=EVIL))
 
 
 @pytest.mark.parametrize(

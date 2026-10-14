@@ -90,7 +90,7 @@ What each kind of edit costs:
 | You edit | What happens | Measured |
 |---|---|---|
 | a template under `web/templates/` | no restart: the server re-reads a changed template on the next request (Quart's `TEMPLATES_AUTO_RELOAD` and Jinja's `auto_reload`, set only by the dev server) | visible on the next request, 0.02 s after saving |
-| `app.css`, `app.js`, `features.css` (`web/static/`) | no restart: static URLs carry a hash of the file's contents (`?v=`), recomputed when the file's mtime or size changes, so the next page load asks for the new URL instead of the year-long cached one | next page load |
+| `app.css`, `keys.js`, `app.js`, `features.css` (`web/static/`) | no restart: static URLs carry a hash of the file's contents (`?v=`), recomputed when the file's mtime or size changes, so the next page load asks for the new URL instead of the year-long cached one | next page load |
 | any `.py` under `src/coverset` or `packages/*/src` | the server process is replaced: SIGTERM, a 1 s graceful shutdown, a new process | 1.3 to 1.5 s from saving to the new server answering `/healthz` (0.7 to 0.9 s of it is the restart) |
 | a migration | not picked up by a reload: stop, `uv run coverset init-db`, start again | |
 
@@ -118,7 +118,8 @@ applied migration 0001 initial
 ...
 applied migration 0010 an index on run_events.at for the retention gc
 applied migration 0011 settings.value as text, for the vault's sealed GitHub App
-database ready (11 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
+applied migration 0012 repos.ai_review_enabled becomes a repository-scope policy.ai_review row
+database ready (12 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 $ uv run coverset init-db
 database ready (already at the latest revision): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 ```
@@ -420,7 +421,7 @@ It is the default whenever no App or token is configured.
 | a recorded webhook | `coverset replay <fixture> --server http://127.0.0.1:8123` posts `fixtures/webhooks/<fixture>.json`. The server refuses the fixtures' test secret outside `COVERSET_ENV=test`, so give the server and `replay` the same `COVERSET_GITHUB_WEBHOOK_SECRET` (16+ characters); `replay` re-signs with it | `ping` → `HTTP 202 {"status":"ignored_event"}`; `pr_synchronize --new-delivery` → `202 duplicate` (the demo already ran that head) |
 | runs from webhooks | the local executor refuses webhook-triggered runs unless `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true` (the demo sets it for its own process) | |
 | a run on a working tree | `coverset run --repo PATH --head main` (a path is registered on first use; `--base` for a PR-style change) | the demo repository's 97 tests, `completed: success`, 4.2 s |
-| what the forge was asked | `/forge/outbox` in the UI, or `coverset forge calls --limit 5` | `create_check`, `update_check`, `upsert_pr_comment` rows |
+| what the forge was asked | `/forge/outbox` in the UI | `create_check`, `update_check`, `upsert_pr_comment` rows |
 | upload mode | a repository token, `pytest --coverset` in the project, then `coverset-ci upload` against the dev server | verdict `success (97 passed)` in 0.9 s |
 
 The CLI prints run links with `COVERSET_BIND` (`http://127.0.0.1:8000/...` by default), not the
@@ -449,9 +450,11 @@ COVERSET_TOKEN=cst_... /path/to/coverset/.venv/bin/coverset-ci upload \
 - **Static files** (`app.js`, `app.css`, `features.css`) are served fresh as described above.
   `curl -I` showed `Cache-Control: public, max-age=31536000, immutable` for the current `?v=` URL
   and `no-cache` without one.
-- **Keys**: the keyboard shortcuts live in the `KEYS` table of `web/static/app.js`, the help
-  dialog in `layout.html`, and the Keys table of [ui.md](ui.md); the static report has its own in
-  `report/static/report.js`. `tests/web/test_keys_table.py` fails when they disagree.
+- **Keys**: the keyboard shortcuts live in the `KEYS` table of `web/static/keys.js` (shared with
+  the static report, whose `report.js` starts with a copy of it) plus the few keys `app.js` and
+  `report/static/report.js` bind for their own pages, the help dialogs in the two `layout.html`, and
+  the Keys tables of [ui.md](ui.md) and [report.md](report.md). `tests/web/test_keys_table.py` fails
+  when they disagree.
 - **The static report for the same data**: `coverset report --run <run_id> --out DIR` wrote 159
   pages for the uploaded run in 0.9 s; `coverset report .coverset` inside the project does the same
   from the plugin's output. Its templates are under `src/coverset/report/` and are read once per
@@ -502,7 +505,6 @@ refresh-reporter`); `test_rust_adapter.py` needs `cargo`, `rustc` and `llvm-tool
 | `coverset facts explain --repo coverset-demo/ledger --run <id>` | the run row, its timeline, shards and ingest log |
 | `coverset doctor --repo PATH [--no-collect]` | what coverset would do with a repository, without running its tests (0.6 s on the demo clone with `--no-collect`) |
 | `coverset deploy check --offline` | the configuration as a deployment sees it: on the dev data directory, 5 PASS and 7 WARN (open mode, local public URL, no App, no webhook secret) |
-| `coverset forge calls` | the fake forge's outbox from the shell |
 | `coverset mcp serve --source .coverset` | the agent tools over stdio against a local `pytest --coverset` output; an `initialize` plus `tools/list` probe listed 15 tools (`list_repos` … `explain_shape_key`) in 0.8 s; [mcp.md](mcp.md) has the client configuration |
 
 ## Conventions

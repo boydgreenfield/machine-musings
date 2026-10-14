@@ -3,6 +3,7 @@ and the orchestrator reading repository policy (intake, planner, verdict)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import uuid
@@ -12,11 +13,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from click.testing import CliRunner
 from pydantic import SecretStr
 from sqlalchemy import delete, func, select
 
 from coverset import settings_scopes as ss
-from coverset.config import Settings
+from coverset.cli import cli
+from coverset.config import Settings, get_settings
 from coverset.db.models import AuditEvent, Repo, Run, ScopedSetting
 from coverset.db.session import Database, init_db
 from coverset.facts.store import facts_store
@@ -28,11 +31,9 @@ from coverset.settings_scopes import (
     Policy,
     SettingError,
     apply_changes,
-    clear_value,
     effective_policy,
     resolve,
     resolve_all,
-    set_value,
     view_prefs,
 )
 
@@ -54,16 +55,13 @@ async def db(settings: Settings) -> AsyncIterator[Database]:
     await database.engine.dispose()
 
 
-async def _repo(
-    db: Database, full_name: str = "Acme/widgets", *, ai_column: bool = False, repo_id: int | None = None
-) -> Repo:
+async def _repo(db: Database, full_name: str = "Acme/widgets", *, repo_id: int | None = None) -> Repo:
     async with db.session() as session:
         repo = Repo(
             id=repo_id,
             forge="github",
             external_id=full_name,
             full_name=full_name,
-            ai_review_enabled=ai_column,
         )
         session.add(repo)
         await session.commit()
@@ -73,7 +71,7 @@ async def _repo(
 
 async def _set(db: Database, key: str, value: object, scope: ss.ScopeKind, scope_id: object = None) -> None:
     async with db.session() as session:
-        await set_value(session, key, value, scope=scope, scope_id=scope_id)  # type: ignore[arg-type]
+        await apply_changes(session, {key: value}, scope=scope, scope_id=scope_id)  # type: ignore[arg-type]
 
 
 # -- the catalogue ------------------------------------------------------------------------------
@@ -95,8 +93,8 @@ def test_catalogue_keeps_the_agreed_names_and_defaults() -> None:
         "policy.test_tax_threshold": 8.0,
         "policy.public_report": False,
     }
-    assert all(s.user_overridable for k, s in CATALOGUE.items() if k.startswith("view."))
-    assert not any(s.user_overridable for k, s in CATALOGUE.items() if k.startswith("policy."))
+    assert all("user" in s.scopes for k, s in CATALOGUE.items() if k.startswith("view."))
+    assert not any("user" in s.scopes for k, s in CATALOGUE.items() if k.startswith("policy."))
     assert CATALOGUE["view.highlight"].choices == ("all", "missing")
     assert CATALOGUE["view.map_mode"].choices == ("gap", "lines", "inputs")
     assert CATALOGUE["view.map_module_weight"].choices == ("full", "thin", "hidden")
@@ -218,7 +216,7 @@ async def test_policy_precedence_repo_org_instance_config(db: Database, settings
 async def test_users_cannot_override_policy(db: Database) -> None:
     async with db.session() as session:
         with pytest.raises(SettingError, match="cannot be set at user scope"):
-            await set_value(session, "policy.run_drafts", True, scope="user", scope_id=5)
+            await apply_changes(session, {"policy.run_drafts": True}, scope="user", scope_id=5)
         assert await session.scalar(select(func.count()).select_from(ScopedSetting)) == 0
 
 
@@ -242,27 +240,6 @@ async def test_token_mode_fallback_is_run_blocked_network(db: Database, settings
         layers = await ss.load_layers(session, repo=repo, settings=token)
     resolved = layers.resolve("policy.untrusted_pr_policy")
     assert resolved.value == "run_blocked_network" and "token-mode default" in resolved.detail
-
-
-async def test_ai_review_column_acts_as_an_implicit_repository_value(
-    db: Database, settings: Settings
-) -> None:
-    opted_in = await _repo(db, ai_column=True)
-    plain = await _repo(db, "Acme/plain")
-
-    async def ai(repo: Repo) -> tuple[bool, str]:
-        async with db.session() as session:
-            policy = await effective_policy(session, repo, settings)
-        return policy.ai_review, policy.sources["policy.ai_review"]
-
-    assert await ai(opted_in) == (True, "repo-column")
-    assert await ai(plain) == (False, "default")
-    await _set(db, "policy.ai_review", False, "org", "acme")
-    assert await ai(opted_in) == (True, "repo-column"), "an org default never undoes a repo opt-in"
-    await _set(db, "policy.ai_review", False, "repo", opted_in.id)
-    assert await ai(opted_in) == (False, "repo"), "an explicit repository row wins over the column"
-    await _set(db, "policy.ai_review", True, "instance")
-    assert await ai(plain) == (False, "org")
 
 
 async def test_resolve_all_and_unknown_key(db: Database, settings: Settings) -> None:
@@ -290,10 +267,14 @@ async def test_broader_than_is_what_a_reset_would_leave(db: Database, settings: 
 
 async def test_writes_are_audited_and_unchanged_values_are_not(db: Database) -> None:
     async with db.session() as session:
-        await set_value(session, "view.theme", "dark", scope="org", scope_id="Acme")
-        await set_value(session, "view.theme", "dark", scope="org", scope_id="acme")  # unchanged
-        assert await clear_value(session, "view.theme", scope="org", scope_id="acme")
-        assert not await clear_value(session, "view.theme", scope="org", scope_id="acme")
+        await apply_changes(session, {"view.theme": "dark"}, scope="org", scope_id="Acme")
+        await apply_changes(session, {"view.theme": "dark"}, scope="org", scope_id="acme")  # unchanged
+        assert "view.theme" in await apply_changes(
+            session, {"view.theme": None}, scope="org", scope_id="acme"
+        )
+        assert "view.theme" not in await apply_changes(
+            session, {"view.theme": None}, scope="org", scope_id="acme"
+        )
         events = list(await session.scalars(select(AuditEvent).order_by(AuditEvent.id)))
     assert [e.action for e in events] == ["setting_changed", "setting_changed"]
     assert events[0].details == {
@@ -559,3 +540,59 @@ async def test_forget_scope_deletes_the_rows_and_the_cache(db: Database, setting
         assert (await effective_policy(session, repo, settings)).run_drafts is False
         left = await session.scalar(select(func.count()).select_from(ScopedSetting))
     assert left == 1, "other scopes are untouched"
+
+
+# -- the shell ------------------------------------------------------------------------------------
+
+
+def test_the_settings_commands_set_read_and_clear(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
+    """``coverset settings`` in process: through Click's ``CliRunner``, not a subprocess, so the
+    run's coverage sees the command functions. Synchronous: the commands call ``asyncio.run``."""
+    monkeypatch.setenv("COVERSET_DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("COVERSET_DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+
+    async def make_repo() -> None:
+        database = Database.from_url(settings.database_url)
+        try:
+            await _repo(database)
+        finally:
+            await database.engine.dispose()
+
+    asyncio.run(make_repo())
+    runner = CliRunner()
+
+    def shell(*args: str) -> str:
+        result = runner.invoke(cli, ["settings", *args])
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    try:
+        assert shell("set", "policy.max_shards", "4") == "policy.max_shards = 4 at instance\n"
+        assert (
+            shell("set", "view.theme", "dark", "--repo", "Acme/widgets")
+            == "view.theme = dark at Acme/widgets\n"
+        )
+        assert shell("set", "policy.max_shards", "4") == "policy.max_shards: unchanged at instance\n"
+        assert shell("get", "policy.max_shards", "--value-only") == "4\n"
+        assert shell("get", "view.theme", "--repo", "Acme/widgets", "--value-only") == '"dark"\n'
+        assert shell("get", "view.theme").endswith(
+            "(built-in default)\n"
+        )  # the repository's is not the instance's
+        listed = shell("list", "--repo", "Acme/widgets").splitlines()
+        assert len(listed) == len(CATALOGUE) and any(line.startswith("view.theme ") for line in listed)
+        assert shell("clear", "policy.max_shards").startswith("policy.max_shards: cleared at instance; now ")
+        assert shell("get", "policy.max_shards", "--value-only") == "null\n"
+        assert shell("keys", "--markdown").strip() == ss.catalogue_markdown().strip()
+        assert runner.invoke(cli, ["settings", "set", "policy.max_shards", "0"]).exit_code != 0
+        assert runner.invoke(cli, ["settings", "get", "no.such.key"]).exit_code != 0
+        assert (
+            runner.invoke(
+                cli, ["settings", "set", "view.theme", "dark", "--org", "a", "--user", "b"]
+            ).exit_code
+            != 0
+        )
+    finally:
+        get_settings.cache_clear()

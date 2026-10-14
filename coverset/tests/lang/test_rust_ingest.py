@@ -18,7 +18,7 @@ from coverset.facts import queries
 from coverset.facts.ingest import RunContext, finalize_run
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang import adapter_for_language, read_any_bundle
-from coverset.orchestrator.bundles import IngestJob, adapter_for, ingest_one
+from coverset.orchestrator.bundles import IngestJob, ingest_one
 from coverset.storage.testing import local_blob_url, local_facts_store
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "bundles" / "neutral-rust"
@@ -64,10 +64,6 @@ def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[
     adapter = adapter_for_language("rust")
     finalized = finalize_run(store, ctx, expected_shards=1, catalogue=adapter.shape_catalogue())
     return {"store": store, "bundle": bundle, "outcome": outcome, "finalized": finalized, "job": job}
-
-
-def test_the_rust_adapter_serves_the_job(ingested: dict) -> None:  # type: ignore[type-arg]
-    assert type(adapter_for(ingested["job"])).__name__ == "RustAdapter"
 
 
 def test_the_shard_is_ingested_with_shipped_regions(ingested: dict) -> None:  # type: ignore[type-arg]

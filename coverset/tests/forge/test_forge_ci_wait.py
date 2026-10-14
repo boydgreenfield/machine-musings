@@ -186,7 +186,7 @@ def _invoke(args: list[str], env: dict[str, str]) -> Any:
         get_settings.cache_clear()
 
 
-async def test_replay_and_forge_calls(live_server: LiveServer, live_db: Database, tmp_path: Path) -> None:
+async def test_replay(live_server: LiveServer, live_db: Database, tmp_path: Path) -> None:
     settings = live_server.settings
     env = {
         "COVERSET_ENV": "test",
@@ -208,16 +208,12 @@ async def test_replay_and_forge_calls(live_server: LiveServer, live_db: Database
         async with live_db.session() as session:
             from sqlalchemy import select
 
-            if await session.scalar(select(ForgeCall.id)):
+            call = await session.scalar(select(ForgeCall).order_by(ForgeCall.id))
+            if call is not None:
                 break
         assert time.monotonic() < deadline
         await asyncio.sleep(0.05)
-    listed = await asyncio.to_thread(_invoke, ["forge", "calls", "--json"], env)
-    assert listed.exit_code == 0, listed.output
-    record = json.loads(listed.output.splitlines()[0])
-    assert record["method"] == "create_check" and record["target"] == "coverset-demo/ledger"
-    table = await asyncio.to_thread(_invoke, ["forge", "calls"], env)
-    assert "create_check" in table.output
+    assert call.method == "create_check" and call.target == "coverset-demo/ledger"
 
     resigned = await asyncio.to_thread(
         _invoke,

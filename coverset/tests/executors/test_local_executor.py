@@ -271,7 +271,7 @@ async def test_acquire_respects_max_workers_and_release(executor: LocalExecutor)
     env = await executor.ensure_env(spec())
     first = {"coverset_run": "run-1"}
     workers = await executor.acquire(env, 5, Resources(), 60, first)
-    assert len(workers) == 2 and executor.active_workers == 2
+    assert len(workers) == 2 and len(executor._workers) == 2
     assert all(Path(w.root).name.startswith(RUN_DIR_PREFIX) for w in workers)
     started = time.monotonic()
     assert await executor.acquire(env, 1, Resources(), 60, first) == []  # holds workers: no wait
@@ -279,7 +279,7 @@ async def test_acquire_respects_max_workers_and_release(executor: LocalExecutor)
     await workers[0].release()
     assert len(await executor.acquire(env, 1, Resources(), 60, first)) == 1
     await executor.close()
-    assert executor.active_workers == 0
+    assert len(executor._workers) == 0
     caps = executor.capabilities()
     assert (caps.egress, caps.warm_pool, caps.fs_snapshot, caps.max_workers) == (True, False, False, 2)
     assert executor.cost_usd(Resources(), 3600) == 0.0

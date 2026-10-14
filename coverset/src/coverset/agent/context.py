@@ -261,10 +261,6 @@ class RunContext:
                 out[path].add(line)
         return {path: sorted(found) for path, found in sorted(out.items())}
 
-    def nodeid_of(self, test_id: int) -> str:
-        """The nodeid of a facts test id."""
-        return self.facts.ids.nodeid(int(test_id))
-
     def duration(self, nodeid: str) -> float | None:
         """The test's duration in seconds, when recorded."""
         info = self.tests.get(nodeid)

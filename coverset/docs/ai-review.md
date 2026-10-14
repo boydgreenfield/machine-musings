@@ -18,11 +18,11 @@ never changes pass/fail and never overrides a `satisfied` or `violated` status d
 |---|---|---|---|
 | `off` | none | n/a | nothing; no findings are produced |
 | `fake` (default) | `FakeReviewClient`: stored fixtures, else a deterministic heuristic | `fixture` / `heuristic` | nothing; no network |
-| `anthropic` | `AnthropicReviewClient` (Claude Opus 5.5) | `anthropic` (shown as "Claude (anthropic)") | `ANTHROPIC_API_KEY`, and `ai_review_enabled` on the repo |
+| `anthropic` | `AnthropicReviewClient` (Claude Opus 5.5) | `anthropic` (shown as "Claude (anthropic)") | `ANTHROPIC_API_KEY`, and `policy.ai_review` on for the repo |
 
 `get_review_client(settings, repo_enabled=...)` picks the client. In `anthropic` mode a repository
-without `ai_review_enabled` gets the fake client, so no code leaves the machine for a repo that did
-not opt in; a missing key raises `coverset.ai.ConfigError`. Untrusted pull requests (forks, outside
+without `policy.ai_review` gets the fake client, so no code leaves the machine for a repo that did
+not opt in; a missing key raises `coverset.ai.client.ConfigError`. Untrusted pull requests (forks, outside
 contributors) are not reviewed at all unless `COVERSET_AI_REVIEW_UNTRUSTED=true`.
 
 ## What the reviewer sees
@@ -210,7 +210,3 @@ invariants currently `needs_review` (a reviewer `satisfied` gives `satisfied`; a
 `analysis.invariants.evaluate` accepts, which applies the same advisory rules and requires the
 finding's body hash to match the target's.
 
-`format_findings_markdown(rows)` renders the PR-comment section: a table of function, verdict,
-confidence, missing input classes and source label, notes for abstentions and violated or untested
-invariants, and the first suggested test per function in a collapsed block. Every value from code,
-tests or a model is HTML-escaped and markdown-escaped, or fenced.

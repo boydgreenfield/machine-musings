@@ -1,4 +1,4 @@
-"""``coverset seed-demo`` and ``coverset demo``: the end-to-end demo on the seeded ledger repository.
+"""``coverset demo``: the end-to-end demo on the seeded ledger repository.
 
 ``coverset demo`` is idempotent: run twice, it adds runs to the same database. ``--fresh`` first
 starts the state over (:func:`start_fresh`): it drops and recreates the database (only on a local
@@ -27,7 +27,6 @@ __all__ = [
     "DATA_DIR_MARKER",
     "demo_command",
     "demo_settings",
-    "seed_demo_command",
     "seed_demo_data",
     "start_fresh",
     "wipe_data_dir",
@@ -39,22 +38,6 @@ STARTUP_WAIT_S = 30.0
 DATA_DIR_MARKER = "runs"
 """A directory holding this directory (every coverset command creates it: ``Settings.runs_dir``), or
 nothing at all, is one ``--fresh`` may empty."""
-
-
-@click.command("seed-demo")
-@click.option("--out", type=click.Path(path_type=Path), default=None, help="Bare repository to (re)create.")
-def seed_demo_command(out: Path | None) -> None:
-    """Create the deterministic demo repository (six main commits, two PR branches) and print its SHAs."""
-    from coverset.demo.seed import seed_demo_repo
-
-    target = out or load().data_dir / "demo.git"
-    try:
-        shas = seed_demo_repo(target)
-    except (ValueError, RuntimeError) as exc:
-        raise click.ClickException(str(exc)) from None
-    for name, sha in {**shas["commits"], **shas["branches"]}.items():
-        click.echo(f"{sha}  {name}")
-    click.echo(f"wrote {target.with_name(target.name + '.shas.json')}")
 
 
 @click.command("demo")
@@ -77,11 +60,6 @@ def demo_command(
     executor: str, port: int, no_serve: bool, no_report: bool, verbose: bool, fresh: bool
 ) -> None:
     """Seed the demo repo, run its history and both PRs, replay the pr_opened webhook, then serve."""
-    if executor == "modal":
-        try:
-            import coverset.executors.modal_  # noqa: F401
-        except ImportError as exc:
-            raise click.ClickException(f"the Modal executor is not available in this build: {exc}") from None
     settings = demo_settings(executor, port=port)
     if fresh:
         for line in start_fresh(settings):

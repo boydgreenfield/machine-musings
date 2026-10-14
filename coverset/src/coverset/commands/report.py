@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 import click
 
+from coverset.units import plural
+
 if TYPE_CHECKING:
     from coverset.facts.untrusted import BundleError
     from coverset.report import ReportInput
@@ -149,9 +151,9 @@ def report_command(
     if result.changes is not None:
         c = result.changes
         click.echo(
-            f"changes since base: {_plural(c.lines_lost, 'line')} lost, "
-            f"{_plural(c.classes_lost, 'class', 'classes')} lost, "
-            f"{_plural(c.tests_changed, 'test')} changed (changes.html)",
+            f"changes since base: {plural(c.lines_lost, 'line')} lost, "
+            f"{plural(c.classes_lost, 'class', 'classes')} lost, "
+            f"{plural(c.tests_changed, 'test')} changed (changes.html)",
             err=True,
         )
         for note in c.warnings:
@@ -206,7 +208,3 @@ def _load_base(base: Path, repo_root: Path | None, *, trusted: bool = False) -> 
         raise click.ClickException(f"cannot read the base {base}: {limit_message(exc)}") from None
     except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
         raise click.ClickException(f"cannot read the base {base}: {exc}") from None
-
-
-def _plural(count: int, word: str, many: str | None = None) -> str:
-    return f"{count} {word if count == 1 else (many or word + 's')}"

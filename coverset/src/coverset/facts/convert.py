@@ -63,7 +63,6 @@ from coverset.facts.untrusted import (
     extract_bundle,
     iter_json_lines,
     open_regular,
-    safe_rel_path,
 )
 from coverset.lang.base import (
     IMPORT_CONTEXT,
@@ -76,6 +75,7 @@ from coverset.lang.base import (
     StaticFile,
     TestRow,
 )
+from coverset_model.io import safe_rel_path
 
 __all__ = [
     "BundleError",

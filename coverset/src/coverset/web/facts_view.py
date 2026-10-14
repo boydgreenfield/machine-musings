@@ -37,6 +37,7 @@ from coverset.analysis.shapes import (
     function_catalogue,
     function_catalogue_from_types,
 )
+from coverset.facts.cache import run_stamp
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.queries import FunctionPoint, TreeNode, treemap
 from coverset.facts.schema import CALLABLE_KINDS
@@ -67,25 +68,13 @@ SPECIFIC_FAMILIES = frozenset(
 MAX_CHIPS = 8
 
 
-def _stamp(store: FactsStore, repo_id: int, run_id: str) -> tuple[tuple[str, int, int], ...]:
-    run_dir = store.run_dir(repo_id, run_id)
-    if not run_dir.is_dir():
-        return ()
-    entries = []
-    for entry in run_dir.iterdir():
-        if entry.name.endswith(".parquet"):
-            st = entry.stat()
-            entries.append((entry.name, st.st_mtime_ns, st.st_size))
-    return tuple(sorted(entries))
-
-
 _cache: OrderedDict[tuple[str, int, str, tuple[Any, ...]], RunFacts] = OrderedDict()
 _lock = threading.Lock()
 
 
 def run_facts(store: FactsStore, repo_id: int, run_id: str) -> RunFacts:
     """The (cached) facts of one run."""
-    key = (str(store.root), repo_id, run_id, _stamp(store, repo_id, run_id))
+    key = (str(store.root), repo_id, run_id, run_stamp(store.run_dir(repo_id, run_id)))
     with _lock:
         found = _cache.get(key)
         if found is not None:
@@ -630,14 +619,6 @@ def _indexed(path: str, source: str) -> list[Any]:
             while len(_indexed_cache) > 64:
                 _indexed_cache.popitem(last=False)
     return found
-
-
-def group_missing(cov: FunctionInputCov) -> dict[str, list[InputClass]]:
-    """Missing classes by parameter."""
-    out: dict[str, list[InputClass]] = defaultdict(list)
-    for cls in cov.missing:
-        out[cls.param].append(cls)
-    return dict(out)
 
 
 # -- one test's view of a function (the test page) -------------------------------------------------

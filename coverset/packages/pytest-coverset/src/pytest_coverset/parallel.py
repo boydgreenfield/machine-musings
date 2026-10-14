@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import time
 import uuid
@@ -62,9 +63,10 @@ from pytest_coverset.merge import (
     read_workers,
 )
 from pytest_coverset.outcomes import TestResult, fail_signature, fold_reports, truncate_utf8
-from pytest_coverset.plugin import CoversetSession, Options
+from pytest_coverset.plugin import CoversetSession, Options, glue_values
 
 XDIST_ENV = "COVERSET_XDIST"
+ADDOPTS_ENV = "PYTEST_ADDOPTS"
 WORKER_ENV = "PYTEST_XDIST_WORKER"
 WORKERS_DIR = "workers"
 MARKER_FILE = ".coverset-xdist"
@@ -213,9 +215,20 @@ class XdistController(CoversetSession):
         self.functions_truncated = 0
 
     def start(self) -> None:
-        """Check the worker kinds, clear stale worker directories and publish the token."""
+        """Check the worker kinds, clear stale worker directories and publish the token.
+
+        Workers parse the controller's command line again, before the plugin's options exist, and
+        the output directory exists by then: ``--coverset-out DIR`` would give every worker another
+        rootdir than the controller's (no ``pyproject.toml``, so no ``testpaths``, ``asyncio_mode``,
+        ...). They get each ``--coverset-* VALUE`` pair as one ``--coverset-*=VALUE`` word instead,
+        on the command line and in ``PYTEST_ADDOPTS``.
+        """
         check_specs(self.config)
         self._claim_workers_dir()
+        params = self.config.invocation_params
+        self.config.invocation_params = replace(params, args=tuple(glue_values(params.args)))
+        if addopts := os.environ.get(ADDOPTS_ENV):
+            os.environ[ADDOPTS_ENV] = shlex.join(glue_values(shlex.split(addopts)))
         os.environ[XDIST_ENV] = self.token.dumps()
         self._install_sigterm_handler()
 
@@ -356,6 +369,12 @@ class XdistController(CoversetSession):
                 self._note_error(
                     f"xdist worker {worker.id}: ran in {worker_cwd}, not {self.start_cwd}: its coverage "
                     "names may not match"
+                )
+            setup = (meta.get("rootdir"), meta.get("configfile"))
+            if worker.meta is not None and setup != (self.rootdir_rel, self._configfile()):
+                self._note_error(
+                    f"xdist worker {worker.id}: rootdir {setup[0]} with configuration file {setup[1]}, "
+                    f"not the controller's {self.rootdir_rel} with {self._configfile()}"
                 )
         self.collected, self.collect_errors = merge_collect(workers)
         order = [item.nodeid for item in self.collected]

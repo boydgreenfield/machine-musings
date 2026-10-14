@@ -156,6 +156,7 @@ from coverset.orchestrator.verdict import (
     t0_of,
 )
 from coverset.storage import blob_url_of
+from coverset.units import plural
 
 __all__ = [
     "EXIT_CODES",
@@ -303,12 +304,9 @@ class OrchestratorContext:
         if self.forge is False:
             return None
         if self.forge is None:
-            try:
-                from coverset.forge.credentials import CredentialCache
-                from coverset.forge.registry import LiveForge
-            except ImportError:
-                self.forge = False
-                return None
+            from coverset.forge.credentials import CredentialCache
+            from coverset.forge.registry import LiveForge
+
             # The environment's credentials, else the App /setup stored (re-read when it changes).
             cache = CredentialCache(self.settings, self.db.sessionmaker)
             self.forge = LiveForge(self.settings, cache, self.db.sessionmaker)
@@ -1497,7 +1495,7 @@ class _Execution:
             test_id,
             outcome=outcome,
             failed_phase=phase,
-            fail_sig=_sig_bytes(sig),
+            fail_sig=fail_sig_bytes(sig),
             duration_ms=round(duration * 1000, 3),
             shard_id=state.spec.shard_id,
             attempts=1,
@@ -1642,7 +1640,7 @@ class _Execution:
         plan, sink = self.plan, self.sink
         assert plan is not None and sink is not None
         test.confirmed = True
-        sig = _sig_bytes(test.fail_sig)
+        sig = fail_sig_bytes(test.fail_sig)
         test.preexisting = sig is not None and sig in self.base_sigs
         sink.event(
             "failure",
@@ -1891,7 +1889,7 @@ class _Execution:
                     test_id,
                     outcome=row.outcome,
                     failed_phase=row.failed_phase if row.failed_phase in PHASES else None,
-                    fail_sig=_sig_bytes(row.fail_sig),
+                    fail_sig=fail_sig_bytes(row.fail_sig),
                     duration_ms=round(row.duration_s * 1000, 3),
                     shard_id=outcome.shard_id,
                     attempts=1,
@@ -2029,11 +2027,11 @@ class _Execution:
             if collect_errors:
                 parts.append(_collection_errors_text(collect_errors))
             if preexisting:
-                notes.append(_plural(len(preexisting), "pre-existing failure"))
+                notes.append(plural(len(preexisting), "pre-existing failure"))
             return "failure", "error" if errors else "completed", f"{', '.join(parts)}{_suffix(notes + tail)}"
         if errors:
             if preexisting:
-                notes.append(_plural(len(preexisting), "pre-existing failure"))
+                notes.append(plural(len(preexisting), "pre-existing failure"))
             return "neutral", "error", f"incomplete run{_suffix(notes + tail)}"
         if executed == 0:
             return "neutral", "completed", f"no tests ran{_suffix(notes + tail)}"
@@ -2232,10 +2230,8 @@ async def scan_after_baseline(
 
 def _app_forge(app: Any) -> Any:
     """The app's own forge adapter (shared with the webhook routes), or None to resolve lazily."""
-    try:
-        from coverset.forge.registry import forge_for_app
-    except ImportError:
-        return app.extensions.get("forge")
+    from coverset.forge.registry import forge_for_app
+
     try:
         return forge_for_app(app)
     except Exception as exc:  # misconfigured forge: verdicts are stored but not posted
@@ -2260,10 +2256,6 @@ def tracer_warning(meta: Mapping[str, Any]) -> str | None:
         return f"coverage lost its tracer at {where}; per-test contexts after it may be incomplete"
     name = str(convert.get("tracer") or meta.get("tracer") or "an unknown tracer")[:64]
     return f"coverage was collected with {name}; per-test contexts may be incomplete"
-
-
-def _plural(n: int, noun: str) -> str:
-    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _suffix(notes: list[str]) -> str:
@@ -2302,12 +2294,13 @@ def _parse_test(payload: Mapping[str, Any]) -> tuple[str, float, str | None, str
         str(outcome),
         seconds,
         phase if phase in PHASES else None,
-        sig if isinstance(sig, str) and _sig_bytes(sig) is not None else None,
+        sig if isinstance(sig, str) and fail_sig_bytes(sig) is not None else None,
         redact(longrepr[:MAX_LONGREPR_CHARS]) if isinstance(longrepr, str) else None,
     )
 
 
-def _sig_bytes(sig: str | None) -> bytes | None:
+def fail_sig_bytes(sig: str | None) -> bytes | None:
+    """A failure signature (16 hex characters in the bundle) as the 8 bytes ``fail_sig`` stores."""
     if not sig or len(sig) != 16:
         return None
     try:

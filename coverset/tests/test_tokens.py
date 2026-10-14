@@ -25,7 +25,6 @@ from coverset.web.auth import (
     LOGIN_LIMITER_EXTENSION,
     REJECTION_LOG_EXTENSION,
     RejectionLog,
-    hash_session_id,
 )
 
 pytestmark = pytest.mark.security
@@ -299,7 +298,7 @@ async def test_tokens_cannot_end_or_refresh_browser_sessions(app: Quart, client:
     _first, _second, _case, user = await seed(app)
     settings = app.extensions["settings"]
     now = settings.now()
-    session_id = hash_session_id("raw-browser-session-id")
+    session_id = tokens.hash_token("raw-browser-session-id")
     async with app.extensions["db"].session() as session:
         session.add(
             UserSession(

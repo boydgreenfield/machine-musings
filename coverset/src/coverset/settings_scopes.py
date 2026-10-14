@@ -18,17 +18,13 @@ default``; a user can never override it. Three policy keys (``fail_fast``, ``max
 ``target_shard_seconds``) have no instance configuration: unset everywhere, the repository's own
 ``[tool.coverset]`` decides, and ``max_shards`` is always clamped by ``COVERSET_MAX_SHARDS``.
 
-The legacy per-repository ``repos.ai_review_enabled`` column is folded into the chain of
-``policy.ai_review`` as an implicit repository-level ``true``: an explicit repository row wins over
-it, and it wins over the organization and instance values (it was always a per-repository opt-in).
-
 Who may edit (enforced by the pages and the CLI, described by :attr:`SettingSpec.repo_edit`):
 instance and org scopes need an instance admin; the repo scope needs write access to the
 repository (``admin`` for the keys that change cost or exposure); the user scope is the user's own.
 
 Reads go through a small per-process cache keyed by ``(engine, scope_kind, scope_id)``: each scope's
-rows are loaded once and kept for :data:`CACHE_TTL_S` seconds, or until :func:`set_value` /
-:func:`clear_value` in this process invalidates them. Another process (the CLI, a second ``serve``)
+rows are loaded once and kept for :data:`CACHE_TTL_S` seconds, or until :func:`apply_changes` in
+this process invalidates them. Another process (the CLI, a second ``serve``)
 sees a write within the TTL. Values are re-validated on read, so a row the catalogue no longer
 accepts falls through to the next scope instead of breaking a page or a run.
 """
@@ -50,11 +46,12 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coverset.db.models import ActorKind, AuditEvent, Repo, ScopedSetting, SettingScope
+from coverset.db.models import Repo, ScopedSetting, SettingScope
 from coverset.db.types import utc_now
 
 if TYPE_CHECKING:
     from coverset.config import Settings, UntrustedPrPolicy
+    from coverset.web.principal import Principal
 
 log = logging.getLogger(__name__)
 
@@ -63,8 +60,8 @@ Group = Literal["view", "policy"]
 ValueKind = Literal["enum", "bool", "int", "float"]
 RepoEdit = Literal["write", "admin"]
 FailFast = Literal["finish_in_background", "cancel_remaining"]
-Source = Literal["user", "repo", "repo-column", "org", "instance", "config", "deferred", "default"]
-"""Where a resolved value came from: a scope row, the legacy repo column, ``COVERSET_*``
+Source = Literal["user", "repo", "org", "instance", "config", "deferred", "default"]
+"""Where a resolved value came from: a scope row, ``COVERSET_*``
 configuration, the repository's ``[tool.coverset]`` (``deferred``: the value is None), or the
 catalogue default."""
 
@@ -78,7 +75,6 @@ POLICY_CHAIN: Final[tuple[ScopeKind, ...]] = ("repo", "org", "instance")
 SCOPE_LABELS: Final[Mapping[str, str]] = {
     "user": "user preference",
     "repo": "repository",
-    "repo-column": "repository opt-in (repos.ai_review_enabled)",
     "org": "organization",
     "instance": "instance",
     "config": "configuration",
@@ -99,9 +95,6 @@ class RepoLike(Protocol):
     @property
     def full_name(self) -> str: ...
 
-    @property
-    def ai_review_enabled(self) -> bool: ...
-
 
 @dataclass(frozen=True, slots=True)
 class RepoStub:
@@ -109,7 +102,6 @@ class RepoStub:
 
     id: int
     full_name: str
-    ai_review_enabled: bool = False
     created_at: datetime | None = None
     """When the row was created: repo-scope rows older than this belong to a purged predecessor."""
 
@@ -140,11 +132,6 @@ class SettingSpec:
     """The ``COVERSET_*`` variable that supplies the instance fallback, if any."""
     deferred_to: str | None = None
     """For keys whose default is None: what decides when nothing is set (shown in the UI)."""
-
-    @property
-    def user_overridable(self) -> bool:
-        """True when a user may set the key for themselves (view preferences only)."""
-        return "user" in self.scopes
 
     @property
     def chain(self) -> tuple[ScopeKind, ...]:
@@ -191,9 +178,6 @@ class SettingSpec:
         if self.kind == "enum":
             return self.choice_labels.get(value, value)
         return _num(value)
-
-    def editable_at(self, scope: ScopeKind) -> bool:
-        return scope in self.scopes
 
 
 def _parse_int(raw: object) -> int | None:
@@ -415,12 +399,6 @@ def keys_for_scope(scope: ScopeKind) -> list[SettingSpec]:
 # -- scope ids ------------------------------------------------------------------------------------
 
 
-def org_of(full_name: str) -> str | None:
-    """The org-scope id of a repository name (its owner, lower-cased), or None without an owner."""
-    owner, sep, _ = full_name.partition("/")
-    return owner.lower() if sep and owner else None
-
-
 def normalize_scope_id(scope: ScopeKind, scope_id: str | int | None) -> str:
     """The stored id for a scope (raises :class:`SettingError` on a malformed one)."""
     if scope == "instance":
@@ -613,7 +591,6 @@ class Layers:
     """Scope ids in play (``instance`` always; ``org``/``repo``/``user`` when known)."""
     values: Mapping[ScopeKind, Mapping[str, Any]]
     settings: Settings
-    repo_ai_review_column: bool = False
     org_name: str | None = None
 
     def at(self, scope: ScopeKind, key: str) -> Any:
@@ -627,17 +604,10 @@ class Layers:
         """``key``'s value following its chain; with ``broader_than``, skip that scope and every
         narrower one (what the key would be if that scope's row were reset)."""
         spec = spec_for(key)
-        chain: list[str] = list(spec.chain)
-        if key == "policy.ai_review":
-            chain.insert(chain.index("repo") + 1, "repo-column")
+        chain: list[ScopeKind] = list(spec.chain)
         if broader_than is not None and broader_than in chain:
             chain = chain[chain.index(broader_than) + 1 :]
-        for step in chain:
-            if step == "repo-column":
-                if self.repo_ai_review_column:
-                    return Resolved(key, True, "repo-column", SCOPE_LABELS["repo-column"])
-                continue
-            scope = cast(ScopeKind, step)
+        for scope in chain:
             if scope not in self.ids:
                 continue
             layer = self.values.get(scope, {})
@@ -707,7 +677,6 @@ async def load_layers(
         ids=ids,
         values={kind: loaded.get((kind, sid), {}) for kind, sid in ids.items()},
         settings=_settings(settings),
-        repo_ai_review_column=bool(repo is not None and repo.ai_review_enabled),
         org_name=org_name,
     )
 
@@ -741,76 +710,13 @@ async def resolve_all(
 # -- writes ---------------------------------------------------------------------------------------
 
 
-class AuditActor(Protocol):
-    """Who changes a setting: the web layer's ``Principal`` satisfies this; the CLI passes None."""
-
-    @property
-    def kind(self) -> str: ...
-
-    @property
-    def user_id(self) -> int | None: ...
-
-    @property
-    def label(self) -> str: ...
-
-
-_ACTOR_KINDS: Final[Mapping[str, ActorKind]] = {
-    "admin": "admin_token",
-    "user": "user",
-    "token": "api_token",
-    "oidc": "oidc",
-}
-
-
-async def set_value(
-    session: AsyncSession,
-    key: str,
-    raw: object,
-    *,
-    scope: ScopeKind,
-    scope_id: str | int | None = None,
-    actor: AuditActor | None = None,
-    repo_id: int | None = None,
-    commit: bool = True,
-) -> Any:
-    """Validate and store ``key`` at ``scope``; audit the change; return the stored value.
-
-    Authorization is the caller's job (:attr:`SettingSpec.repo_edit` and the scope rules in the
-    module docstring); this only refuses keys the scope does not accept. With ``commit`` (the
-    default) the change is committed before the cache is invalidated, so no concurrent reader can
-    re-cache the old value between the two. With ``commit=False`` the caller must commit promptly.
-    """
-    value = spec_for(key).parse(raw)
-    await apply_changes(
-        session, {key: value}, scope=scope, scope_id=scope_id, actor=actor, repo_id=repo_id, commit=commit
-    )
-    return value
-
-
-async def clear_value(
-    session: AsyncSession,
-    key: str,
-    *,
-    scope: ScopeKind,
-    scope_id: str | int | None = None,
-    actor: AuditActor | None = None,
-    repo_id: int | None = None,
-    commit: bool = True,
-) -> bool:
-    """Delete ``key``'s row at ``scope`` (back to inheriting); audit it. False if nothing was set."""
-    written = await apply_changes(
-        session, {key: None}, scope=scope, scope_id=scope_id, actor=actor, repo_id=repo_id, commit=commit
-    )
-    return key in written
-
-
 async def apply_changes(
     session: AsyncSession,
     changes: Mapping[str, object],
     *,
     scope: ScopeKind,
     scope_id: str | int | None = None,
-    actor: AuditActor | None = None,
+    actor: Principal | None = None,
     repo_id: int | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
@@ -820,6 +726,8 @@ async def apply_changes(
     changes nothing. Unchanged values are skipped (no row churn, no audit noise). Returns
     ``key -> new value`` for what changed (``None`` for a cleared key).
     """
+    from coverset.web.audit import record_audit  # the web layer imports this module
+
     sid = normalize_scope_id(scope, scope_id)
     parsed: dict[str, Any] = {}
     for key, raw in changes.items():
@@ -868,7 +776,7 @@ async def apply_changes(
             row.updated_by = actor.user_id if actor is not None else None
             row.updated_at = utc_now()
         written[key] = value
-        record(
+        record_audit(
             session,
             actor,
             "setting_changed",
@@ -923,54 +831,6 @@ async def forget_scope(
     if scope == "repo":
         _REPOS.invalidate(engine, int(sid))
     return int(getattr(result, "rowcount", 0) or 0)
-
-
-def record(
-    session: AsyncSession,
-    actor: AuditActor | None,
-    action: str,
-    *,
-    target_kind: str | None = None,
-    target_id: str | None = None,
-    repo_id: int | None = None,
-    details: Mapping[str, Any] | None = None,
-) -> None:
-    """Add one ``audit_log`` row to ``session`` (committed with the change it describes).
-
-    Uses the shared :func:`coverset.web.audit.record_audit` (which redacts secrets in ``details``
-    and records the client address) when it is importable; otherwise writes the row directly, so
-    the CLI and an install without the web layer still leave a trail. ``actor`` None is the CLI.
-    """
-    try:
-        from coverset.web.audit import record_audit
-        from coverset.web.principal import Principal
-    except ImportError:  # pragma: no cover - the web layer ships with coverset today
-        record_audit = None
-        Principal = None  # type: ignore[assignment,misc]  # noqa: N806
-    if record_audit is not None and Principal is not None and (actor is None or isinstance(actor, Principal)):
-        record_audit(
-            session,
-            actor,
-            action,
-            target_kind=target_kind,
-            target_id=target_id,
-            repo_id=repo_id,
-            details=dict(details or {}),
-        )
-        return
-    kind: ActorKind = _ACTOR_KINDS.get(actor.kind, "system") if actor is not None else "system"
-    session.add(
-        AuditEvent(
-            actor_kind=kind,
-            actor_id=f"user:{actor.user_id}" if actor is not None and actor.user_id is not None else None,
-            actor_label=((actor.label or actor.kind) if actor is not None else "cli")[:255],
-            action=action[:64],
-            target_kind=target_kind,
-            target_id=target_id,
-            repo_id=repo_id,
-            details=dict(details or {}),
-        )
-    )
 
 
 # -- the orchestrator's view ----------------------------------------------------------------------
@@ -1060,14 +920,10 @@ async def repo_stub(session: AsyncSession, repo_id: int) -> RepoStub | None:
     cached = _REPOS.get(engine, repo_id)
     if cached is not None:
         return cached
-    row = (
-        await session.execute(
-            select(Repo.full_name, Repo.ai_review_enabled, Repo.created_at).where(Repo.id == repo_id)
-        )
-    ).first()
+    row = (await session.execute(select(Repo.full_name, Repo.created_at).where(Repo.id == repo_id))).first()
     if row is None:
         return None
-    stub = RepoStub(id=repo_id, full_name=row[0], ai_review_enabled=bool(row[1]), created_at=row[2])
+    stub = RepoStub(id=repo_id, full_name=row[0], created_at=row[1])
     _REPOS.put(engine, repo_id, stub)
     return stub
 

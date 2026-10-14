@@ -32,7 +32,6 @@ spaces included). Node ids with a control character are left out: one line must 
 from __future__ import annotations
 
 import importlib.resources
-import json
 import logging
 import math
 import re
@@ -113,7 +112,6 @@ __all__ = [
     "dir_reader",
     "row_of",
     "summary_text",
-    "as_json",
     "local_history",
     "base_test_paths",
 ]
@@ -229,7 +227,7 @@ def view_from_store(
         totals=run.totals,
         tax=tax,
         notes=run.notes,
-        tests=tuple(tests_economy(store, repo_id, run_id, sort="nodeid", limit=None)),
+        tests=tuple(tests_economy(store, repo_id, run_id)),
         families=tuple(families(store, repo_id, run_id)),
         functions=tuple(func_testing(store, repo_id, run_id)),
         weights=dict(run.weights),
@@ -327,8 +325,7 @@ def sort_tests(
 
 def redundancy_of(view: EconomyView) -> Redundancy:
     """Equivalence groups (largest first, each naming the member the covering set keeps), dominated
-    pairs and removable candidates (slowest first): :func:`coverset.facts.economy.redundancy` over
-    rows already in memory."""
+    pairs and removable candidates (slowest first)."""
     by_group: dict[str, list[TestEconomyRow]] = defaultdict(list)
     for row in view.tests:
         if row.group_id is not None:
@@ -853,21 +850,3 @@ def summary_text(view: EconomyView) -> str:
     candidates = sum(1 for r in view.tests if r.removable)
     lead = f"leverage median {median:.2g}" if median is not None else "leverage not measured"
     return f"{lead}, {candidates} redundant candidate{'' if candidates == 1 else 's'}"
-
-
-def as_json(view: EconomyView) -> dict[str, Any]:
-    """The view as plain JSON values (``coverset tests ... --json``)."""
-    from dataclasses import asdict
-
-    return json.loads(
-        json.dumps(
-            {
-                "run_id": view.run_id,
-                "totals": asdict(view.totals) if view.totals else None,
-                "tax": asdict(view.tax) if view.tax else None,
-                "notes": list(view.notes),
-                "weights": dict(view.weights),
-            },
-            default=str,
-        )
-    )

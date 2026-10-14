@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 
 from coverset.analysis.functions import FunctionChange, FunctionRegion, own_lines
 from coverset.lang.base import IMPORT_CONTEXT, PriorRun
+from coverset.units import line_ranges
 
-__all__ = ["ImpactIndex", "line_ranges"]
+__all__ = ["ImpactIndex"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,17 +69,6 @@ class ImpactIndex:
     def impacted(self, nodeid: str) -> bool:
         """Whether ``nodeid`` touched a changed region or a changed file's module-level lines."""
         return nodeid in self.module_tests or any(nodeid in t for t in self.tests_by_region.values())
-
-
-def line_ranges(lines: Iterable[int]) -> list[tuple[int, int]]:
-    """Collapse line numbers into sorted inclusive ``(start, end)`` runs."""
-    ranges: list[tuple[int, int]] = []
-    for line in sorted(set(lines)):
-        if ranges and line == ranges[-1][1] + 1:
-            ranges[-1] = (ranges[-1][0], line)
-        else:
-            ranges.append((line, line))
-    return ranges
 
 
 def _resolve(change: FunctionChange, by_key: Mapping[str, FunctionRegion]) -> FunctionRegion | None:

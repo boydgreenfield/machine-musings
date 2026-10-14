@@ -8,12 +8,10 @@ to persist in ``review_findings`` (this module never touches the database).
 Findings are advisory. :func:`findings_to_invariant_statuses` and :func:`review_evidence` turn them
 into invariant input that can only move an invariant out of ``needs_review``: a test or property
 outcome (``satisfied``/``violated``) is never changed, and a review never yields ``violated``.
-:func:`format_findings_markdown` renders the PR-comment section.
 """
 
 from __future__ import annotations
 
-import html
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -34,7 +32,6 @@ __all__ = [
     "ExistingLookup",
     "ReviewFindingRow",
     "findings_to_invariant_statuses",
-    "format_findings_markdown",
     "review_changes",
     "review_evidence",
 ]
@@ -296,103 +293,3 @@ def review_evidence(findings: Iterable[ReviewFindingRow]) -> dict[str, ReviewEvi
         inv_id: ReviewEvidence(body_hash=row.body_hash, status=status, evidence=evidence, source=row.source)
         for inv_id, (status, evidence, row) in _reviewer_statuses(findings).items()
     }
-
-
-# --- markdown ----------------------------------------------------------------------------------
-
-_MD_SPECIAL: Final = "\\`*_[]|~"
-"""Characters that change inline rendering mid-line (``<``, ``>`` and ``&`` become HTML entities)."""
-
-
-def _escape(text: str) -> str:
-    """Plain text safe in GitHub-flavoured markdown: HTML-escaped, specials backslashed, one line."""
-    out = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    out = "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in out)
-    return " ".join(out.split())
-
-
-def _code_span(text: str) -> str:
-    """An inline code span safe inside a table cell (fence longer than any backtick run)."""
-    body = " ".join(text.split()).replace("|", "\\|")
-    longest = run = 0
-    for char in body:
-        run = run + 1 if char == "`" else 0
-        longest = max(longest, run)
-    fence = "`" * (longest + 1)
-    pad = " " if body.startswith("`") or body.endswith("`") else ""
-    return f"{fence}{pad}{body}{pad}{fence}"
-
-
-def _code_block(code: str, lang: str = "python") -> str:
-    longest = run = 0
-    for char in code:
-        run = run + 1 if char == "`" else 0
-        longest = max(longest, run)
-    fence = "`" * max(3, longest + 1)
-    return f"{fence}{lang}\n{code.rstrip()}\n{fence}"
-
-
-def format_findings_markdown(findings: Sequence[ReviewFindingRow], *, max_suggestions: int = 5) -> str:
-    """The "AI review" section of the sticky PR comment (GitHub-flavoured markdown).
-
-    Every value that came from code, tests or a model is escaped (text) or fenced (code), so the
-    section cannot inject HTML or break the table. Empty string when there are no findings.
-    """
-    if not findings:
-        return ""
-    sources = sorted({row.source for row in findings})
-    label = ", ".join(SOURCE_LABELS.get(s, s) for s in sources)
-    lines = [
-        f"### AI review ({_escape(label)})",
-        "",
-        "_Advisory: these findings never change pass/fail or invariant results decided by tests._",
-        "",
-        "| Function | Verdict | Confidence | Missing input classes | Source |",
-        "|---|---|---|---|---|",
-    ]
-    details: list[str] = []
-    for row in findings:
-        verdict = row.function_verdict
-        missing = verdict.missing_input_classes if verdict else []
-        names = ", ".join(_code_span(m.name) for m in missing[:4]) or "none"
-        if len(missing) > 4:
-            names += f" (+{len(missing) - 4})"
-        status = VERDICT_LABELS.get(row.verdict, row.verdict)
-        if row.reused:
-            status += " (reused)"
-        lines.append(
-            f"| {_code_span(row.qualname)} | {_escape(status)} | {_escape(row.confidence)} | {names} "
-            f"| {_escape(SOURCE_LABELS.get(row.source, row.source))} |"
-        )
-        if verdict is None:
-            continue
-        if verdict.verdict == "abstain" and verdict.abstain_reason:
-            details.append(f"- {_code_span(row.qualname)} abstained: {_escape(verdict.abstain_reason)}")
-        for finding in verdict.invariant_findings:
-            if finding.status in ("violated", "untested"):
-                details.append(
-                    f"- {_code_span(row.qualname)} invariant {_code_span(finding.invariant_id)}: "
-                    f"{_escape(finding.status)} (advisory). {_escape(finding.evidence)}"
-                )
-    if details:
-        lines += ["", *details]
-    shown = 0
-    for row in findings:
-        verdict = row.function_verdict
-        if verdict is None or shown >= max_suggestions:
-            continue
-        for test in verdict.suggested_tests[:1]:
-            shown += 1
-            summary = html.escape(
-                f"Suggested test for {row.qualname}: {test.name} ({test.style})", quote=True
-            )
-            lines += [
-                "",
-                "<details>",
-                f"<summary>{summary}</summary>",
-                "",
-                _code_block(test.code),
-                "",
-                "</details>",
-            ]
-    return "\n".join(lines) + "\n"

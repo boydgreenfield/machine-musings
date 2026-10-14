@@ -62,7 +62,7 @@ from typing import Final
 import numpy as np
 
 from coverset.analysis.cover import greedy_cover_csr, prune_csr
-from coverset.analysis.functions import index_functions
+from coverset.analysis.functions import index_functions, strip_docstring
 from coverset.lang.base import (
     IMPORT_CONTEXT,
     FunctionRegion,
@@ -356,19 +356,8 @@ def _parse_test_module(path: str, source: str) -> _TestModule | None:
     return module
 
 
-def _strip_docstring(body: Sequence[ast.stmt]) -> Sequence[ast.stmt]:
-    first = body[0] if body else None
-    if (
-        isinstance(first, ast.Expr)
-        and isinstance(first.value, ast.Constant)
-        and isinstance(first.value.value, str)
-    ):
-        return body[1:]
-    return body
-
-
 def _count_statements(node: _Def) -> int:
-    return sum(1 for stmt in _strip_docstring(node.body) for n in ast.walk(stmt) if isinstance(n, ast.stmt))
+    return sum(1 for stmt in strip_docstring(node.body) for n in ast.walk(stmt) if isinstance(n, ast.stmt))
 
 
 def _call_leaf(func: ast.expr) -> tuple[str, str | None]:

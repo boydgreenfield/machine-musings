@@ -1,6 +1,6 @@
 """The ``coverset`` command line.
 
-The groups, ``init-db``, ``serve``, ``replay`` and ``forge calls`` live here; the orchestrator's commands are
+The groups, ``init-db``, ``serve`` and ``replay`` live here; the orchestrator's commands are
 registered on these groups by :func:`coverset.commands.register_commands`.
 """
 
@@ -160,7 +160,7 @@ _register_modal_commands()
 
 
 def _register_orchestrator_commands() -> None:
-    """run, warm, seed-demo, demo, shapes, gc, facts query, invariants check|scan, repo purge, modal reap."""
+    """run, warm, demo, shapes, gc, facts query, invariants check|scan, repo purge, modal reap."""
     from coverset.commands import register_commands
 
     register_commands(cli, facts=facts, invariants=invariants, repo=repo, modal=modal)
@@ -239,54 +239,6 @@ def replay(fixture: str, server: str, forge_name: str, resign: bool | None, new_
     click.echo(text.strip())
     if status >= 400:
         raise SystemExit(1)
-
-
-@cli.group()
-def forge() -> None:
-    """Inspect the forge integration."""
-
-
-@forge.command("calls")
-@click.option("--limit", default=50, show_default=True, type=click.IntRange(1, 10_000))
-@click.option("--json", "as_json", is_flag=True, help="Print JSON lines instead of a table.")
-def forge_calls(limit: int, as_json: bool) -> None:
-    """List recorded forge calls (the fake forge's outbox), newest first."""
-    from coverset.db.models import ForgeCall
-    from coverset.db.session import Database
-
-    settings = load_settings()
-
-    async def fetch() -> list[ForgeCall]:
-        from sqlalchemy import select
-
-        database = Database.from_url(settings.database_url)
-        try:
-            async with database.session() as session:
-                rows = await session.scalars(select(ForgeCall).order_by(ForgeCall.id.desc()).limit(limit))
-                return list(rows)
-        finally:
-            await database.engine.dispose()
-
-    for call in asyncio.run(fetch()):
-        if as_json:
-            record = {
-                "id": call.id,
-                "created_at": call.created_at.isoformat(),
-                "forge": call.forge,
-                "method": call.method,
-                "target": call.target,
-                "repo_id": call.repo_id,
-                "run_id": call.run_id,
-                "status_code": call.status_code,
-                "request": call.request,
-                "response": call.response,
-            }
-            click.echo(json.dumps(record, sort_keys=True))
-        else:
-            when = call.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            click.echo(
-                f"{call.id:>6}  {when}  {call.method:<20} {call.target or '-':<30} {call.run_id or '-'}"
-            )
 
 
 def main() -> None:

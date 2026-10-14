@@ -117,7 +117,6 @@ class Repo(Base):
     language: Mapped[str] = mapped_column(String(32), default="python")
     installation_id: Mapped[int | None] = mapped_column(BigInteger)
     owner_id: Mapped[int | None] = mapped_column(BigInteger)
-    ai_review_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
 

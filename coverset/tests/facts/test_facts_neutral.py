@@ -19,7 +19,6 @@ from coverset.lang.neutral import (
     NeutralAdapter,
     NotRunnableError,
     merge_regions,
-    model_limits,
     register_language,
 )
 from coverset.lang.python import PythonAdapter
@@ -59,7 +58,7 @@ def test_read_any_bundle_applies_limits_and_the_head_tree(tmp_path: Path) -> Non
     assert bundle.meta["convert"]["dropped"]["files.paths_not_in_head"] == 2
     with pytest.raises(BundleError):
         read_any_bundle(tmp_path / "missing")
-    limits = model_limits(BundleLimits(max_tests=7, max_line_number=99))
+    limits = BundleLimits(max_tests=7, max_line_number=99)
     assert (limits.max_tests, limits.max_line_number, limits.max_functions) == (7, 99, 200_000)
 
 

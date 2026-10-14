@@ -89,8 +89,3 @@ def test_plugin_pins_join_the_requirements_and_the_hash(tmp_path: Path) -> None:
 def test_get_executor(tmp_path: Path) -> None:
     settings = Settings.for_tests(data_dir=tmp_path)
     assert isinstance(get_executor(settings, "local"), LocalExecutor)
-    try:
-        import coverset.executors.modal_  # noqa: F401
-    except ImportError:
-        with pytest.raises(ExecutorError, match="Modal executor is not available"):
-            get_executor(settings, "modal")

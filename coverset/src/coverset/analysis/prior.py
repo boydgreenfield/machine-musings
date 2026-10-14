@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from coverset.lang.base import FunctionRegion, PriorRun
+from coverset.lang.base import PriorRun
 
-__all__ = ["PriorCandidate", "PriorChoice", "PriorRun", "prior_regions_by_key", "select_prior_run"]
+__all__ = ["PriorCandidate", "PriorChoice", "PriorRun", "select_prior_run"]
 
 type PriorBasis = Literal["previous_head", "merge_base", "baseline"]
 
@@ -65,8 +65,3 @@ def select_prior_run(
         if cand.baseline and cand.branch == default_branch:
             return PriorChoice(cand.run_id, "baseline")
     return None
-
-
-def prior_regions_by_key(prior: PriorRun) -> dict[str, FunctionRegion]:
-    """The prior run's function regions keyed by ``func_key``."""
-    return {region.func_key: region for region in prior.functions()}

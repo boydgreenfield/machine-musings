@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import sys
 import threading
 from collections import OrderedDict
@@ -53,7 +52,7 @@ from coverset.db.models import (
     TestCase,
     TestResult,
 )
-from coverset.facts.cache import override, run_stamp
+from coverset.facts.cache import int_setting, run_stamp
 from coverset.facts.queries import summary_is_fresh
 from coverset.facts.store import FactsStore, facts_store
 from coverset.lang.base import FuncSampling, FunctionRegion, ShapeObs
@@ -130,43 +129,17 @@ async def diff_mirror(repo_id: int) -> Path:
 # -- run facts ---------------------------------------------------------------------------------------
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return max(1, int(os.environ.get(name, "") or default))
-    except ValueError:
-        return default
-
-
-def _configured_int(name: str) -> int | None:
-    """``name`` as configured by the app (``facts.cache.configure``: Settings, ``.env`` included),
-    or None, in which case the module constant read from the environment at import applies."""
-    raw = override(name)
-    try:
-        return max(1, int(raw)) if raw else None
-    except ValueError:
-        return None
-
-
-RUN_FACTS_ENTRIES = _env_int("COVERSET_RUN_FACTS_ENTRIES", 8)
-"""Runs whose :class:`IndexedRunFacts` stay cached (``COVERSET_RUN_FACTS_ENTRIES``)."""
-RUN_FACTS_BUDGET = _env_int("COVERSET_RUN_FACTS_MB", 384) * 1024 * 1024
-"""Estimated bytes the cached runs may hold together (``COVERSET_RUN_FACTS_MB``; see
-:meth:`IndexedRunFacts.memory_bytes`). The process's resident set grows by about 1.5 times this
-(allocator overhead, measured on the real bundle). The newest run is always kept, so one run larger
-than the budget still works."""
-
-
 def run_facts_entries() -> int:
-    """The run-facts cache's run count: the app's ``COVERSET_RUN_FACTS_ENTRIES``, else
-    :data:`RUN_FACTS_ENTRIES`."""
-    return _configured_int("COVERSET_RUN_FACTS_ENTRIES") or RUN_FACTS_ENTRIES
+    """Runs whose :class:`IndexedRunFacts` stay cached (``COVERSET_RUN_FACTS_ENTRIES``, default 8)."""
+    return int_setting("COVERSET_RUN_FACTS_ENTRIES", 8)
 
 
 def run_facts_budget() -> int:
-    """The run-facts cache's byte budget: the app's ``COVERSET_RUN_FACTS_MB``, else
-    :data:`RUN_FACTS_BUDGET`."""
-    mb = _configured_int("COVERSET_RUN_FACTS_MB")
-    return mb * 1024 * 1024 if mb else RUN_FACTS_BUDGET
+    """Estimated bytes the cached runs may hold together (``COVERSET_RUN_FACTS_MB``, default 384;
+    see :meth:`IndexedRunFacts.memory_bytes`). The process's resident set grows by about 1.5 times
+    this (allocator overhead, measured on the real bundle). The newest run is always kept, so one
+    run larger than the budget still works."""
+    return int_setting("COVERSET_RUN_FACTS_MB", 384) * 1024 * 1024
 
 
 _SAMPLE = 32
@@ -655,15 +628,10 @@ def run_facts_weight() -> tuple[int, int]:
 
 # -- source text ---------------------------------------------------------------------------------------
 
-BLOB_BUDGET = _env_int("COVERSET_SOURCE_CACHE_MB", 64) * 1024 * 1024
-"""Bytes of source text :func:`read_source` keeps (``COVERSET_SOURCE_CACHE_MB``)."""
-
 
 def blob_budget() -> int:
-    """The source-text cache's byte budget: the app's ``COVERSET_SOURCE_CACHE_MB``, else
-    :data:`BLOB_BUDGET`."""
-    mb = _configured_int("COVERSET_SOURCE_CACHE_MB")
-    return mb * 1024 * 1024 if mb else BLOB_BUDGET
+    """Bytes of source text :func:`read_source` keeps (``COVERSET_SOURCE_CACHE_MB``, default 64)."""
+    return int_setting("COVERSET_SOURCE_CACHE_MB", 64) * 1024 * 1024
 
 
 PREFETCH_MAX_PATHS = 2_000

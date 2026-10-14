@@ -1,6 +1,7 @@
 """The keys documented are the keys bound: the help dialogs, docs/ui.md and docs/report.md agree
-with the ``KEYS`` tables of ``app.js`` and ``report.js``, and the two scripts bind the same keys
-(less the pages the static report does not have).
+with the shared ``KEYS`` table of ``keys.js`` plus the ``KEYS`` each page script binds (``app.js``,
+``report.js``), and the two surfaces bind the same keys (less the pages the static report does not
+have).
 
 A key is a single key (``j``, ``Escape``, ``.``) or a go-to chord written ``g-o``. The dialogs mark
 each row with ``data-keys`` (space-separated) and ``data-scope``; the docs tables list keys in
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+KEYS_JS = ROOT / "src/coverset/web/static/keys.js"
 WEB_JS = ROOT / "src/coverset/web/static/app.js"
 REPORT_JS = ROOT / "src/coverset/report/static/report.js"
 WEB_LAYOUT = ROOT / "src/coverset/web/templates/layout.html"
@@ -23,13 +25,20 @@ WEB_ONLY = {"r", "g-e", "g-i"}
 """The run page, the economy page and the invariants page exist only on the live pages."""
 
 
+def table(script: Path) -> dict[str, str]:
+    """``key -> scope`` of a script's ``KEYS`` table."""
+    found = re.search(r"var KEYS = \{\n(.*?)\n  \};", script.read_text(), re.S)
+    assert found, f"no KEYS table in {script.name}"
+    return dict(re.findall(r'^\s+"([^"]+)": \{ scope: "(\w+)"', found.group(1), re.M))
+
+
 def bound(script: Path) -> dict[str, str]:
-    """``key -> scope`` from a script's ``KEYS`` table, plus ``g-<letter>`` (scope ``go``) for each
-    of its ``GO_KEYS``; ``g`` itself only starts a chord."""
+    """``key -> scope`` of the shared table plus the page script's own, plus ``g-<letter>`` (scope
+    ``go``) for each of the script's ``GO_KEYS``; ``g`` itself only starts a chord."""
     text = script.read_text()
-    table = re.search(r"var KEYS = \{\n(.*?)\n  \};", text, re.S)
-    assert table, f"no KEYS table in {script.name}"
-    keys = dict(re.findall(r'^\s+"([^"]+)": \{ scope: "(\w+)"', table.group(1), re.M))
+    shared, own = table(KEYS_JS), table(script)
+    assert not set(shared) & set(own), "a page script rebinds a shared key"
+    keys = {**shared, **own}
     assert keys.pop("g") == "go"
     go = re.search(r"var GO_KEYS = \[([^\]]*)\]", text)
     assert go, f"no GO_KEYS in {script.name}"
@@ -89,13 +98,12 @@ def test_the_report_binds_the_live_pages_keys() -> None:
 
 def test_every_scope_has_a_test_for_its_page() -> None:
     for script in (WEB_JS, REPORT_JS):
-        text = script.read_text()
+        text = KEYS_JS.read_text() + script.read_text()
         scopes = set(re.findall(r"^\s+(\w+): function \(\) \{ return", text, re.M))
         assert set(bound(script).values()) <= scopes, script.name
 
 
 def test_the_keys_are_ignored_while_typing_and_with_modifiers() -> None:
-    for script in (WEB_JS, REPORT_JS):
-        text = script.read_text()
-        assert "event.metaKey || event.ctrlKey || event.altKey" in text
-        assert "if (typing(event)) return;" in text
+    text = KEYS_JS.read_text()
+    assert "event.metaKey || event.ctrlKey || event.altKey" in text
+    assert "if (typing(event)) return;" in text

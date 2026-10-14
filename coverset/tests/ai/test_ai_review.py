@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +14,6 @@ from coverset.ai.fake import FakeReviewClient
 from coverset.ai.review import (
     ReviewFindingRow,
     findings_to_invariant_statuses,
-    format_findings_markdown,
     review_changes,
     review_evidence,
 )
@@ -247,80 +244,6 @@ invariants:
 
 
 # --- markdown ----------------------------------------------------------------------------------
-
-
-def test_markdown_lists_findings_with_source_labels(
-    email_bundle: BundleFactory, ai_settings: Settings, tmp_path: Path
-) -> None:
-    rows = review_changes(FakeReviewClient(), email_bundle(), untrusted=False, settings=ai_settings)
-    rows += review_changes(
-        FakeReviewClient(tmp_path), make_bundle(make_function()), untrusted=False, settings=ai_settings
-    )
-    text = format_findings_markdown(rows)
-    assert text.startswith("### AI review (fixture, heuristic)")
-    assert "Advisory" in text
-    assert "| `validate_email` | partially covered | high | `email:multi-label-domain`" in text
-    assert "| fixture |" in text and "| heuristic |" in text
-    assert "<summary>Suggested test for validate_email" in text
-    assert "```python\n" in text
-    assert format_findings_markdown([]) == ""
-
-
-def outside_code(markdown: str) -> str:
-    """``markdown`` without fenced code blocks and inline code spans."""
-    without_blocks = re.sub(r"^(`{3,})[^\n]*\n.*?^\1$", "", markdown, flags=re.DOTALL | re.MULTILINE)
-    return re.sub(r"(`+)(?:(?!\1).)+?\1", "", without_blocks)
-
-
-def test_markdown_escapes_everything_from_code_and_models() -> None:
-    hostile = verdict(
-        qualname="a|b<script>alert(1)</script>",
-        missing_input_classes=[
-            {
-                "name": "x:`tick`|pipe",
-                "description": "d",
-                "why_likely": "w",
-                "example_value": "e",
-                "severity": "high",
-                "hypothesis_strategy": "st.none()",
-            }
-        ],
-        suggested_tests=[
-            {"name": "test_<img src=x onerror=alert(1)>", "style": "example", "code": "s = '```'\nassert s\n"}
-        ],
-        invariant_findings=[
-            {"invariant_id": "inv", "status": "violated", "evidence": "<img src=x onerror=alert(1)> **bold**"}
-        ],
-    )
-    row = ReviewFindingRow(
-        func_key="k" * 16,
-        qualname=hostile.qualname,
-        body_hash="b" * 16,
-        bundle_hash="h" * 64,
-        source="anthropic",
-        verdict=hostile.verdict,
-        confidence=hostile.confidence,
-        payload={"verdict": hostile.model_dump(mode="json")},
-    )
-    text = format_findings_markdown([row])
-    prose = outside_code(text)
-    assert "<script" not in prose and "<img" not in prose
-    assert set(re.findall(r"</?([a-z]+)", prose)) == {"details", "summary"}  # only the tags we emit
-    assert "`a\\|b<script>alert(1)</script>`" in text  # code from the repo stays inside a code span
-    assert "&lt;img src=x onerror=alert(1)&gt;" in text
-    assert "\\*\\*bold\\*\\*" in text
-    table_rows = [line for line in text.splitlines() if line.startswith("| ") and "Function" not in line]
-    assert len(table_rows) == 1
-    assert table_rows[0].count(" | ") == 4  # pipes inside values are escaped
-    assert "````python\ns = '```'" in text  # the fence is longer than any backtick run in the code
-    assert "Claude (anthropic)" in text
-
-
-@pytest.mark.parametrize("reused", [True, False])
-def test_markdown_marks_reused_findings(reused: bool) -> None:
-    row = dataclasses.replace(row_with(), reused=reused)
-    text = format_findings_markdown([row])
-    assert ("(reused)" in text) is reused
 
 
 def test_function_verdict_is_none_for_a_corrupt_payload() -> None:

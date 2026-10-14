@@ -345,11 +345,6 @@ class LocalExecutor:
         async with freed:
             freed.notify_all()
 
-    @property
-    def active_workers(self) -> int:
-        """Workers acquired and not yet released."""
-        return len(self._workers)
-
     def capabilities(self) -> Capabilities:
         """Egress is unrestricted and there is no pool or snapshot support."""
         return Capabilities(

@@ -33,8 +33,8 @@ from coverset.facts.convert import (
     read_python_bundle,
     tracer_mismatch,
 )
-from coverset.facts.untrusted import safe_rel_path
 from coverset.lang.base import IMPORT_CONTEXT
+from coverset_model.io import safe_rel_path
 
 
 @given(st.sets(st.integers(min_value=1, max_value=20_000), max_size=300))

@@ -28,7 +28,8 @@ PREFIX_CHARS: Final = 8
 
 
 def hash_token(raw: str) -> str:
-    """sha256 hex of the whole raw token (the prefix is public, the secret is not)."""
+    """sha256 hex of a whole raw secret: an API token (its prefix is public, the secret is not) or a
+    session cookie id (``user_sessions.id``), so a database read-out cannot be replayed."""
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

@@ -24,8 +24,6 @@ import stat
 import tempfile
 from pathlib import Path
 
-from coverset.web.render.html import mark_bidi  # noqa: F401  (re-exported for the report's callers)
-
 __all__ = [
     "MARKER",
     "OutDirError",
@@ -33,7 +31,6 @@ __all__ = [
     "Writer",
     "check_out_dir",
     "hashed_name",
-    "mark_bidi",
     "neutralize",
     "prepare_out_dir",
     "staging_dir",

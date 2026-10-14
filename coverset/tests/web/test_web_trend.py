@@ -16,10 +16,10 @@ from web_helpers import HX, Demo, assert_csp_clean
 from coverset.facts import queries
 from coverset.facts.queries import FunctionPoint
 from coverset.facts.store import FactsStore
+from coverset.units import fmt_pct
 from coverset.web import files, repos
 from coverset.web.facts_view import history_losses
-from coverset.web.pages import pct
-from coverset.web.render.sparkline import SparkSeries, fmt_pct, render_spark_key, render_sparkline
+from coverset.web.render.sparkline import SparkSeries, render_spark_key, render_sparkline
 
 SCRIPT = "<script>alert(1)</script>"
 BREAKOUT = '"onmouseover="alert(1)'
@@ -56,8 +56,8 @@ async def test_repo_overview_tiles_equal_the_facts(client: Client, demo: Demo) -
     assert latest.run_id == demo.baseline_run
     tiles = dict(re.findall(r'data-tile="(\w+)"><div class="value">(.*?)</div>', overview))
     assert tiles["statements"] == str(latest.statements)
-    assert tiles["lines"] == html_lib.escape(pct(latest.line_pct))
-    assert tiles["branches"] == html_lib.escape(pct(latest.branch_pct))
+    assert tiles["lines"] == html_lib.escape(fmt_pct(latest.line_pct))
+    assert tiles["branches"] == html_lib.escape(fmt_pct(latest.branch_pct))
     assert (
         tiles["functions"] == f'{latest.functions_called} <span class="of">/ {latest.functions_total}</span>'
     )
@@ -321,12 +321,10 @@ def test_sparkline_edges() -> None:
         render_sparkline(
             [SparkSeries("x", (10.0, 20.0))],
             points=["a", "b"],
-            reference=15.0,
-            reference_label="base",
             current=1,
         )
     )
-    assert "<title>base: 15%</title>" in ref and 'class="spark-current"' in ref
+    assert 'class="spark-current"' in ref
     single_dashed = str(render_sparkline([SparkSeries("x", (1.0, 2.0), dashed=True)], points=["a", "b"]))
     assert "spark-line spark-s2" in single_dashed
     both_dashed = str(
@@ -351,8 +349,6 @@ def test_sparkline_escapes_hostile_labels() -> None:
         points=[EVIL, EVIL],
         label=EVIL,
         noun=EVIL,
-        reference=12.0,
-        reference_label=EVIL,
     )
     key = render_spark_key([SparkSeries(EVIL, ()), SparkSeries(EVIL, (), dashed=True)])
     for html in (svg, key):
@@ -523,13 +519,11 @@ def test_sparkline_clamps_values_and_strips_control_characters() -> None:
             points=["p\x00", "q\x1b", "r\nend"],
             label="l\x07",
             noun="run\x08",
-            reference=1e300,
-            reference_label="ref\x02",
         )
     )
     xml.dom.minidom.parseString(svg)  # well-formed
     assert not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", svg)
-    assert "r end" in svg and "<title>ref: 100%</title>" in svg
+    assert "r end" in svg
     assert "ab from 0% to 50%" in svg
     numbers = [float(n) for n in re.findall(r'(?:x|y|x1|x2|y1|y2|cx|cy|width)="([-0-9.e+]+)"', svg)]
     assert all(math.isfinite(n) and -1 <= n <= 240 for n in numbers)

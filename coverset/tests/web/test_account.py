@@ -26,7 +26,8 @@ from coverset.db.models import AuditEvent, Repo, RepoAccess, User, UserSession
 from coverset.forge.oauth import GitHubOAuth, permission_from_github
 from coverset.logging import redact
 from coverset.web.account import ACCESS_SYNC_EXTENSION, OAUTH_EXTENSION, refresh_access_task
-from coverset.web.auth import LOGIN_ATTEMPTS_PER_MINUTE, hash_session_id
+from coverset.web.auth import LOGIN_ATTEMPTS_PER_MINUTE
+from coverset.web.tokens import hash_token
 
 pytestmark = pytest.mark.security
 
@@ -305,7 +306,7 @@ async def test_sign_in_creates_user_session_and_access(
     assert "this session" in html and "/settings/tokens" in html
     assert_csp_clean(html)
     async with client.session_transaction() as cookie:
-        assert hash_session_id(cookie["sid"]) == rows[0].id
+        assert hash_token(cookie["sid"]) == rows[0].id
         assert cookie.get("admin") is None
     assert (await client.get("/")).status_code == 200
 
@@ -595,7 +596,7 @@ async def test_revoke_another_session(client: Client, github: FakeGitHub, app: Q
     async with app.extensions["db"].session() as session:
         rows = list(await session.scalars(select(UserSession)))
     async with client.session_transaction() as cookie:
-        mine = hash_session_id(cookie["sid"])
+        mine = hash_token(cookie["sid"])
     theirs = next(r.id for r in rows if r.id != mine)
     assert (
         await client.post(f"/account/sessions/{theirs}/revoke", form={"csrf_token": csrf})

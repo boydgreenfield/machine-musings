@@ -26,13 +26,14 @@ import json
 import subprocess
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from coverset.facts.convert import read_python_bundle
 from coverset.facts.untrusted import BundleError, BundleLimitError, BundleLimits, extract_bundle
+from coverset.lang import read_any_bundle
 from coverset.lang.base import IMPORT_CONTEXT, NeutralBundle
 from coverset.report.facts import (
     MAX_SOURCE_BYTES,
@@ -49,6 +50,7 @@ from coverset.report.facts import (
     read_sources,
     regions_with_owners,
 )
+from coverset_model.io import BundleRejected
 
 __all__ = [
     "BundleRead",
@@ -58,8 +60,6 @@ __all__ = [
     "load_bundle",
     "load_run",
     "model_cap",
-    "neutral_reader",
-    "read_bundle_path",
     "read_source",
     "report_limits",
     "source_access",
@@ -83,31 +83,6 @@ STRICT_LIMITS = (
 )
 TRUSTED_LIMITS = "local: passed with --trusted"
 RUN_LIMITS = "local: a run in the facts store, already checked under the strict limits when it was ingested"
-
-
-def neutral_reader() -> Callable[[Path], NeutralBundle] | None:
-    """The reader of neutral bundles: ``coverset.lang.read_any_bundle`` (picks the reader by the
-    manifest), else ``coverset_model.io.read_bundle``, else None in a build that has neither."""
-    try:
-        from coverset.lang import read_any_bundle  # type: ignore[attr-defined]
-    except ImportError:
-        pass
-    else:
-        return read_any_bundle  # type: ignore[no-any-return]
-    try:
-        from coverset_model.io import read_bundle  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    return read_bundle  # type: ignore[no-any-return]
-
-
-def _rejected() -> tuple[type[Exception], ...]:
-    """The neutral reader's refusal type (a ``ValueError``), when the model package is present."""
-    try:
-        from coverset_model.io import BundleRejected  # type: ignore[import-not-found]
-    except ImportError:
-        return ()
-    return (BundleRejected,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,12 +129,6 @@ def read_source(source: Path, *, trusted: bool = False) -> BundleRead:
         raise BundleError(f"{source} is neither a bundle directory nor a bundle archive")
     bundle, kind, read_from = _read_archive(source, limits)
     return BundleRead(bundle, kind, read_from, why)
-
-
-def read_bundle_path(source: Path, *, trusted: bool = False) -> tuple[NeutralBundle, str]:
-    """Read a bundle directory or archive: ``(bundle, kind)`` where kind is ``python`` or ``neutral``."""
-    read = read_source(source, trusted=trusted)
-    return read.bundle, read.kind
 
 
 def _read_archive(source: Path, limits: BundleLimits) -> tuple[NeutralBundle, str, str]:
@@ -222,18 +191,12 @@ def _read_neutral(root: Path, limits: BundleLimits) -> NeutralBundle:
     """A neutral bundle directory under ``limits``; a breached cap of the neutral reader is a
     :class:`BundleLimitError` (so the CLI can say how to lift it)."""
     try:
-        from coverset.lang import read_any_bundle
-    except ImportError:  # pragma: no cover - every build of coverset has coverset.lang
-        raise BundleError(f"{root} is a neutral bundle ({MANIFEST}), but this build cannot read it") from None
-    try:
         return read_any_bundle(root, limits=limits)
     except BundleError as exc:
         problem = getattr(exc.__cause__, "problem", None)
         if getattr(problem, "code", None) == "limit":
-            from coverset.lang.neutral import model_limits
-
             cap = model_cap(str(exc))
-            value = getattr(model_limits(limits), cap, None)
+            value = getattr(limits, cap, None)
             raise BundleLimitError(
                 f"{exc} ({cap} of the {limits.profile} limits)",
                 cap=cap,
@@ -242,7 +205,7 @@ def _read_neutral(root: Path, limits: BundleLimits) -> NeutralBundle:
                 profile=limits.profile,
             ) from exc
         raise
-    except _rejected() as exc:
+    except BundleRejected as exc:
         raise BundleError(f"neutral bundle refused: {exc}") from exc
 
 

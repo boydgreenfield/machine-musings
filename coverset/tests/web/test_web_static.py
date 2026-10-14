@@ -38,7 +38,7 @@ def test_stylesheet_theming_contract() -> None:
 
 
 def test_app_js_has_no_eval() -> None:
-    script = (STATIC / "app.js").read_text()
+    script = (STATIC / "app.js").read_text() + (STATIC / "keys.js").read_text()
     assert "eval(" not in script and "new Function" not in script and "innerHTML" not in script
 
 

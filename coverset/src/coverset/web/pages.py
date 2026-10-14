@@ -21,8 +21,9 @@ from werkzeug.exceptions import NotFound
 import coverset
 from coverset.db.models import Repo
 from coverset.forge.comment import LensParts, lens_parts
+from coverset.units import fmt_ms, fmt_pct, fmt_secs, ordinal, plural
 from coverset.web.context import app_db, app_settings
-from coverset.web.render.html import Markup, breakable, fmt_ms, fmt_secs
+from coverset.web.render.html import Markup, breakable
 
 __all__ = [
     "bp",
@@ -120,33 +121,11 @@ def stamp(moment: datetime | None) -> str:
     return moment.strftime("%Y-%m-%d %H:%M UTC") if moment is not None else ""
 
 
-@bp.app_template_filter("secs")
-def secs(value: float | None) -> str:
-    """``1.0 s``, ``41 s``, ``3 min`` (the one formatter for every duration and estimate)."""
-    return fmt_secs(value)
-
-
-@bp.app_template_filter("ms")
-def ms(value: float | None) -> str:
-    """Milliseconds as ``12 ms`` or ``1.4 s``."""
-    return fmt_ms(value)
-
-
-@bp.app_template_filter("pct")
-def pct(value: float | None) -> str:
-    """``71%`` (one decimal when needed), ``n/a`` for None."""
-    if value is None:
-        return "n/a"
-    return f"{value:.0f}%" if abs(value - round(value)) < 0.05 else f"{value:.1f}%"
-
-
-@bp.app_template_filter("ordinal")
-def ordinal(number: int | None) -> str:
-    """``1st``, ``66th``."""
-    if number is None:
-        return "–"
-    suffix = "th" if 10 <= number % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
-    return f"{number}{suffix}"
+bp.add_app_template_filter(fmt_secs, "secs")
+bp.add_app_template_filter(fmt_ms, "ms")
+bp.add_app_template_filter(fmt_pct, "pct")
+bp.add_app_template_filter(plural, "plural")
+bp.add_app_template_filter(ordinal, "ordinal")
 
 
 @bp.app_template_filter("sha")
@@ -171,12 +150,6 @@ def domid(value: str) -> str:
 def nodeid_filter(value: str | None) -> Markup:
     """A test id that wraps at ``::``, ``/``, ``[``, ``_`` and ``-`` (``<wbr>``; text escaped)."""
     return breakable(value)
-
-
-@bp.app_template_filter("plural")
-def plural(count: int, singular: str, plural_form: str | None = None) -> str:
-    """``1 test``, ``2 tests``."""
-    return f"{count} {singular if count == 1 else (plural_form or singular + 's')}"
 
 
 @bp.app_context_processor

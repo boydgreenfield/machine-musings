@@ -31,6 +31,7 @@ This page is the map. Each part has its own page:
 | [docs/economy.md](docs/economy.md) | the test economy: weight, value, leverage, redundancy candidates, the minimal covering set, families, handlers, stale tests, the PR test tax |
 | [docs/mcp.md](docs/mcp.md) | the MCP server and the `/v1/agent` API: tools, prompts, playbooks, trust notes |
 | [docs/production-flows.md](docs/production-flows.md) | production input shapes: the probe, privacy, archetypes, gaps, what is built and what is designed |
+| [docs/verification-records.md](docs/verification-records.md) | the design of the verification record: one test's evidence over function bodies at content hashes, invalidation by diff, carry-forward, verification progress, post-merge verification (designed, not built) |
 | [docs/rust.md](docs/rust.md) | `coverset rust run`: per-test Rust coverage via cargo-nextest and LLVM, the capture format, the cost model, limitations, the shape-tracer design |
 
 Status words used throughout: **verified** means read in the committed code on branch `boyd/testing` and covered by a test; **designed, not built** means the plan describes it and no code exists.
@@ -277,6 +278,10 @@ Each seam is a `typing.Protocol`. The how-to is [docs/extending.md](docs/extendi
 | LightGBM ranking stage | `analysis/scoring.score_tests` returns `ScoredTest`; `TestHistory` is where the extra features would come from. |
 | Result reuse and test skipping | The planner classifies `trivial`, `renamed` and `moved` changes and the patch report marks their rows inherited, but every collected test still runs. Skipping would sit in `planner._analyse` before sharding. |
 | Treemap minimap | UI. |
+| Calibration of the risk score and a confidence-against-time curve | Every run stores `rank_coverset`, `rank_executed`, `rank_file_order`, the timeline and the outcome (`runs`, `test_results`); the curve is a query over them plus a page. |
+| Extreme mutation on a PR's changed functions, as the validator for agent-written tests | A per-function body replacement run by the planner for the changed functions only, reported on the PR page and through `/v1/agent`; see README "Core features". |
+| An overlap matrix between open PRs and combined runs on merge-queue events | `analysis/impact.py` and the per-run `functions` tables have the data; `merge_group` is not in `forge/github_events.ALLOWED_EVENTS`. |
+| Failures grouped by root cause | `test_results.fail_sig` is stored per result; no page groups by it. |
 | `merge_group` (merge queues) | Not in `forge/github_events.ALLOWED_EVENTS`; see [docs/github.md](docs/github.md#future-work-merge-queues). |
 | Check-run buttons beyond `rerun-failed`, `rerun-all` and `approve-run` | `CheckAction` and `ACTION_IDENTIFIERS` in `forge/base.py`, dispatched in `intake._action_button`. |
 | `POST /v1/flows`, OpenTelemetry span attributes, the Sentry and Datadog integrations, the production toggle on the shape grid, a Flows page, production MCP tools | The probe's `HttpExporter` already speaks the wire format (gzipped JSON, bearer token); the importer is `facts/flows.py`; see [docs/production-flows.md](docs/production-flows.md). |

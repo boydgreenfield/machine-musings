@@ -21,7 +21,6 @@ from test_web_pages import page_urls
 from web_helpers import HX, Demo
 
 from coverset.db.models import AuditEvent, Repo, RepoAccess, Run, TestCase, User, UserSession
-from coverset.web.auth import hash_session_id
 from coverset.web.principal import (
     ADMIN,
     PUBLIC,
@@ -30,6 +29,7 @@ from coverset.web.principal import (
     set_principal,
     visible_repo_ids,
 )
+from coverset.web.tokens import hash_token
 
 pytestmark = pytest.mark.security
 
@@ -59,7 +59,7 @@ async def sign_in_as(
             session.add(RepoAccess(user_id=user.id, repo_id=repo_id, permission=permission))  # type: ignore[arg-type]
         session.add(
             UserSession(
-                id=hash_session_id(raw),
+                id=hash_token(raw),
                 user_id=user.id,
                 csrf="unused",
                 created_at=now,

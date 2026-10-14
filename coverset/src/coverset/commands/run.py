@@ -51,8 +51,6 @@ def run_command(
     verbose: bool,
 ) -> None:
     """Run a repository's tests for HEAD (or the change BASE...HEAD) and print the verdict."""
-    if executor == "modal":
-        _require_modal()
     settings = load(executor=executor)
     if settings.paused and wait:
         raise click.ClickException("COVERSET_PAUSED is set: no runs start")
@@ -64,13 +62,6 @@ def run_command(
         lambda: _run(settings, repo_spec, head, base, pr_number, shards, kind, wait, printer)
     )
     sys.exit(exit_code)
-
-
-def _require_modal() -> None:
-    try:
-        import coverset.executors.modal_  # noqa: F401
-    except ImportError as exc:
-        raise click.ClickException(f"the Modal executor is not available in this build: {exc}") from None
 
 
 async def _run(
@@ -149,8 +140,6 @@ def _is_sha(ref: str) -> bool:
 )
 def warm_command(repo_spec: str, branch: str | None, executor: str | None) -> None:
     """Build the test environment (and, on Modal, a trusted snapshot) for a branch head."""
-    if executor == "modal":
-        _require_modal()
     settings = load(executor=executor)
     run_async(lambda: _warm(settings, repo_spec, branch))
 

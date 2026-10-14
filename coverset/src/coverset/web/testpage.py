@@ -35,6 +35,7 @@ from coverset.db.models import PullRequest, Run, RunEvent, TestAttempt, TestCase
 from coverset.facts import queries
 from coverset.lang.base import ShapeObs
 from coverset.orchestrator.history import nodeid_hash
+from coverset.units import line_ranges
 from coverset.web.context import app_db
 from coverset.web.facts_view import ParamReach, RunFacts, param_reach, reached_classes, test_file
 from coverset.web.loaders import default_run, facts_for, invariant_rows, read_source, require_run, store
@@ -44,7 +45,7 @@ from coverset.web.render.flow import FlowNode, TestCall, render_test_flow
 from coverset.web.render.html import mark_bidi
 from coverset.web.render.shapegrid import render_strip
 
-__all__ = ["bp", "line_ranges", "split_nodeid", "test_decorations", "test_label"]
+__all__ = ["bp", "split_nodeid", "test_decorations", "test_label"]
 
 bp = Blueprint("testpage", __name__)
 
@@ -185,17 +186,6 @@ test_decorations.__test__ = False  # type: ignore[attr-defined]
 
 
 # -- helpers ---------------------------------------------------------------------------------------
-
-
-def line_ranges(lines: list[int] | tuple[int, ...]) -> list[tuple[int, int]]:
-    """Sorted lines folded into ``(first, last)`` runs."""
-    out: list[tuple[int, int]] = []
-    for line in sorted(set(lines)):
-        if out and line == out[-1][1] + 1:
-            out[-1] = (out[-1][0], line)
-        else:
-            out.append((line, line))
-    return out
 
 
 @dataclass(slots=True)

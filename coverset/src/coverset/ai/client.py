@@ -2,7 +2,7 @@
 
 ``COVERSET_AI`` picks the client: ``off`` (no review), ``fake`` (fixtures, then a deterministic
 heuristic; the default) or ``anthropic`` (Claude through the Anthropic SDK; needs
-``ANTHROPIC_API_KEY`` and a repo that opted in with ``ai_review_enabled``). Every outcome records
+``ANTHROPIC_API_KEY`` and a repo whose ``policy.ai_review`` setting is on). Every outcome records
 where its verdicts came from (``fixture``, ``heuristic`` or ``anthropic``) so the UI can label them;
 all of them are advisory.
 """
@@ -92,7 +92,7 @@ def get_review_client(
     """The client ``settings.ai`` asks for, or None when AI review is off.
 
     ``anthropic`` needs ``ANTHROPIC_API_KEY`` (else :class:`ConfigError`) and only applies to repos
-    with ``ai_review_enabled``: for any other repo (``repo_enabled=False``) the fake client is
+    whose ``policy.ai_review`` is on: for any other repo (``repo_enabled=False``) the fake client is
     returned, so no code leaves the machine for a repo that did not opt in.
     """
     mode = settings.ai

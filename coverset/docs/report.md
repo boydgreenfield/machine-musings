@@ -207,9 +207,9 @@ strips for the inputs, the lens for the lines.
 
 ## Keys
 
-The live pages' keys ([ui.md](ui.md#keys)), from a table in `report.js` that mirrors `app.js`'s
-(`tests/web/test_keys_table.py` checks that the help dialog, this table and both scripts agree; the
-report has no run, economy or invariants page, so it has no `r`, `g e` or `g i`). `?` lists only the
+The live pages' keys ([ui.md](ui.md#keys)), from the same table (`report.js` starts with the live
+pages' `keys.js`; `tests/web/test_keys_table.py` checks that the help dialog, this table and the
+scripts agree; the report has no run, economy or invariants page, so it has no `r`, `g e` or `g i`). `?` lists only the
 keys of the page it was opened on.
 
 | Key | Where | Action |
@@ -289,7 +289,8 @@ The report reuses the pages' code rather than re-implementing it: the bundle bec
 instead of Parquet), so line states, partial branches, covering tests, function views and
 `cap_hits` come from the same functions; the markup comes from `coverset.web.render` (source view,
 shape grid, inlay chips, ribbon, treemap). `report.css` is the pages' `app.css` plus a few report
-rules; `report.js` is one file with no dependencies. A build lexes each source file once (a file's
+rules; `report.js` is the pages' `keys.js` plus the report's own behaviour, one file with no
+dependencies. A build lexes each source file once (a file's
 page and its functions' pages are written in a row from one cached highlight) and the test pages
 share per-test indexes, so a run of 470 files, 3,648 functions and 5,098 tests writes its 9,218
 pages in about 37 s at about 800 MB peak memory.

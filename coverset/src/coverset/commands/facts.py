@@ -30,6 +30,7 @@ from sqlalchemy import select
 
 from coverset.commands.common import find_repo, load, prepare_db, run_async
 from coverset.config import Settings
+from coverset.units import fmt_ranges
 
 __all__ = ["ANY_BRANCH", "FACTS_DEBUG_COMMANDS", "facts_query_command", "shapes_command"]
 
@@ -356,16 +357,6 @@ def _require_facts(store: Any, repo: Any, run: Any) -> None:
         raise click.ClickException(f"run {run.id} has no facts (never ingested, or removed by retention)")
 
 
-def _ranges(lines: Any) -> str:
-    out: list[list[int]] = []
-    for line in sorted(set(lines)):
-        if out and line == out[-1][1] + 1:
-            out[-1][1] = line
-        else:
-            out.append([line, line])
-    return ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in out)
-
-
 def _size(n: int) -> str:
     for unit in ("B", "KiB", "MiB", "GiB"):
         if n < 1024 or unit == "GiB":
@@ -673,10 +664,10 @@ def facts_test_command(
         for fn in f["functions"]:
             lines.append(
                 f"    {fn['qualname']} (:{fn['def_line']}) ran {len(fn['lines'])} of {fn['body_statements']}"
-                f" body statements: {_ranges(fn['lines'])}"
+                f" body statements: {', '.join(fmt_ranges(fn['lines']))}"
             )
         if f["module_lines"]:
-            lines.append(f"    module-level: {_ranges(f['module_lines'])}")
+            lines.append(f"    module-level: {', '.join(fmt_ranges(f['module_lines']))}")
     if not data["files"]:
         lines.append("  (no measured line)")
     lines.append("passed in (samples count every test of a call_shapes row):")

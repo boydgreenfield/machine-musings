@@ -32,7 +32,7 @@ from coverset.app import create_app
 from coverset.config import Settings
 from coverset.db.models import AuditEvent, Repo, RepoAccess, User, UserSession
 from coverset.web.account import DEV_EXTERNAL_PREFIX, dev_login_problems
-from coverset.web.auth import hash_session_id
+from coverset.web.tokens import hash_token
 
 pytestmark = pytest.mark.security
 
@@ -238,7 +238,7 @@ async def test_open_mode_ignores_a_github_session(app: Quart, client: Client) ->
         await db.flush()
         db.add(
             UserSession(
-                id=hash_session_id(raw),
+                id=hash_token(raw),
                 user_id=user.id,
                 csrf="x",
                 created_at=now,

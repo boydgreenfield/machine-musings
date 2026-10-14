@@ -584,10 +584,8 @@ async def _stored_review_evidence(
     """Review evidence about ``inv`` from earlier findings for the target's current body, if any."""
     if region is None or not any(v.kind == "review" for v in inv.verify):
         return None
-    try:
-        from coverset.ai.review import ReviewFindingRow, review_evidence
-    except ImportError:
-        return None
+    from coverset.ai.review import ReviewFindingRow, review_evidence
+
     findings = await session.scalars(
         select(ReviewFinding)
         .where(ReviewFinding.func_key == region.func_key, ReviewFinding.body_hash == region.body_hash)
@@ -614,12 +612,10 @@ async def _ai_review(
         return "off", {}
     if not run.trusted and not settings.ai_review_untrusted:
         return "skipped", {}
-    try:
-        from coverset.ai.bundle import build_review_bundle
-        from coverset.ai.client import get_review_client
-        from coverset.ai.review import ReviewFindingRow, review_changes, review_evidence
-    except ImportError:
-        return "unavailable", {}
+    from coverset.ai.bundle import build_review_bundle
+    from coverset.ai.client import get_review_client
+    from coverset.ai.review import ReviewFindingRow, review_changes, review_evidence
+
     changed = [
         c for c in source_changes(plan) if c.region is not None and c.region.kind in ("function", "method")
     ]

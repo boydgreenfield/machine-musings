@@ -45,7 +45,7 @@ from coverset.forge.registry import credential_cache, webhook_forge
 from coverset.forge.signing import webhook_secret
 from coverset.orchestrator import enqueue_run
 from coverset.orchestrator.intake import IntakeResult, apply_forge_followups, delivery_seen, intake
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db, app_extension, app_settings
 
 log = logging.getLogger(__name__)
 
@@ -57,10 +57,7 @@ INTAKE_ATTEMPTS = 2
 
 def _intake_lock() -> asyncio.Lock:
     """The app's intake lock (kept per app so each test app and event loop gets its own)."""
-    lock = current_app.extensions.get(INTAKE_LOCK_EXTENSION)
-    if lock is None:
-        lock = current_app.extensions[INTAKE_LOCK_EXTENSION] = asyncio.Lock()
-    return lock
+    return app_extension(INTAKE_LOCK_EXTENSION, asyncio.Lock)
 
 
 def _answer(code: int, /, **body: object) -> tuple[Response, int]:

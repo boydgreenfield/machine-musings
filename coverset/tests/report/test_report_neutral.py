@@ -15,7 +15,7 @@ import pytest
 from report_helpers import all_pages, parse_page
 
 from coverset.report import build_report
-from coverset.report.load import load_bundle, neutral_reader
+from coverset.report.load import load_bundle
 
 PATH = "src/email.ts"
 T_OK = "src/email.test.ts > validateEmail > accepts plain"
@@ -32,8 +32,6 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 @pytest.fixture
 def neutral_dir(tmp_path: Path) -> Path:
-    if neutral_reader() is None:
-        pytest.skip("this build has no neutral bundle reader (coverset.lang.read_any_bundle)")
     root = tmp_path / "bundle"
     root.mkdir()
     (root / "manifest.json").write_text(

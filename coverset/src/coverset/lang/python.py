@@ -911,11 +911,6 @@ def _infer_sources(repo_root: Path, source_root: str, meta: ProjectMetadata) -> 
     return (), "nothing found: set [tool.coverset] source"
 
 
-def _infer_packages(repo_root: Path, source_root: str) -> tuple[str, ...]:
-    """Top-level importable packages under ``source_root`` (kept for callers of the old helper)."""
-    return _infer_sources(repo_root, source_root, ProjectMetadata())[0]
-
-
 def _str_list(value: object, key: str) -> list[str]:
     if isinstance(value, str):
         value = [value]

@@ -862,8 +862,8 @@ async def test_an_upload_finalizes_with_the_scoped_policy_and_warms_the_caches(
     from coverset.web import loaders
 
     async with app.extensions["db"].session() as session:
-        await settings_scopes.set_value(
-            session, "policy.test_tax_threshold", 3.0, scope="repo", scope_id=repo.id
+        await settings_scopes.apply_changes(
+            session, {"policy.test_tax_threshold": 3.0}, scope="repo", scope_id=repo.id
         )
     seen: list[Any] = []
     real = upload_module.finalize_run

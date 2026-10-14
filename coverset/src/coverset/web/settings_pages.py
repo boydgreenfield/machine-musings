@@ -62,11 +62,11 @@ from coverset.settings_scopes import (
     keys_for_scope,
     load_layers,
     normalize_scope_id,
-    record,
     repo_stub,
     view_prefs,
 )
 from coverset.web import tokens
+from coverset.web.audit import record_audit
 from coverset.web.context import app_db, app_settings
 from coverset.web.pages import MAX_DB_ID, is_fragment, render_page
 from coverset.web.principal import Principal, current_principal, require_instance_admin, require_repo
@@ -575,7 +575,7 @@ async def create_token() -> Response:
         )
         session.add(row)
         await session.flush()
-        record(
+        record_audit(
             session,
             principal,
             "token_created",
@@ -615,7 +615,7 @@ async def revoke_token(tid: int) -> Response:
             message = f"“{row.name}” was already revoked."
         else:
             row.revoked_at = now
-            record(
+            record_audit(
                 session,
                 principal,
                 "token_revoked",

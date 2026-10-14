@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import heapq
 import statistics
-from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final
@@ -28,10 +27,9 @@ from coverset.lang.base import CollectedItem, PriorRun
 __all__ = [
     "CoverSet",
     "change_covering_set",
+    "csr_of",
     "greedy_cover_csr",
-    "greedy_weighted_cover",
     "prune_csr",
-    "prune_redundant",
 ]
 
 _MIN_WEIGHT_S: Final = 1e-3
@@ -70,18 +68,18 @@ def change_covering_set(
 
     universe = {key: tests & collected for key, tests in impact.tests_by_region.items()}
     uncovered = sorted(impact.regions[k].qualname for k, tests in universe.items() if not tests)
-    remaining = {key for key, tests in universe.items() if tests}
     covers: dict[str, set[str]] = {}
     for key, tests in universe.items():
         for nodeid in tests:
             covers.setdefault(nodeid, set()).add(key)
+    names = sorted(covers)
+    key_ids = {key: i for i, key in enumerate(sorted({k for keys in covers.values() for k in keys}))}
+    offsets, elements = csr_of([[key_ids[k] for k in covers[n]] for n in names])
+    remaining = set(key_ids)
     tests: list[str] = []
     reasons: dict[str, str] = {}
-    while remaining:
-        best = min(
-            (n for n, keys in covers.items() if keys & remaining),
-            key=lambda n: (-len(covers[n] & remaining) / weight(n), n),
-        )
+    for i in greedy_cover_csr(offsets, elements, np.array([weight(n) for n in names])):
+        best = names[i]
         gained = sorted(impact.regions[k].qualname for k in covers[best] & remaining)
         tests.append(best)
         reasons[best] = f"covers {', '.join(gained)} (changed)"
@@ -104,68 +102,27 @@ def change_covering_set(
     return CoverSet(tests, reasons, uncovered)
 
 
-def greedy_weighted_cover[K: str, F](sets: Mapping[K, Collection[F]], weights: Mapping[K, float]) -> list[K]:
-    """A weighted set cover of every element of ``sets``: the greedy pick order.
-
-    The same rule as wave 1 (most newly covered elements per unit of weight, ties by name), over
-    arbitrary keys and elements, so the test-economy analysis (``analysis/economy.py``) can ask for
-    a minimal covering set of a whole run. Weights below 1 ms count as 1 ms; a key missing from
-    ``weights`` weighs the median. Evaluation is lazy: a key's gain only shrinks as elements get
-    covered, so a stale heap entry is re-scored only when it reaches the top, which keeps a
-    1,000-test run with 100,000 facts well under a second. Keys whose set is empty are never picked.
-    """
-    known = [w for w in weights.values() if w > 0]
-    median = statistics.median(known) if known else 1.0
-
-    def weight(key: K) -> float:
-        return max(weights.get(key, median), _MIN_WEIGHT_S)
-
-    members = {key: frozenset(elements) for key, elements in sets.items() if elements}
-    remaining: set[F] = set().union(*members.values()) if members else set()
-    heap = [(-len(elems) / weight(key), key) for key, elems in members.items()]
-    heapq.heapify(heap)
-    chosen: list[K] = []
-    while remaining and heap:
-        _, key = heapq.heappop(heap)
-        gain = len(members[key] & remaining)
-        if gain == 0:
-            continue
-        entry = (-gain / weight(key), key)
-        if heap and entry > heap[0]:
-            heapq.heappush(heap, entry)  # stale score: re-queue it and let a better key go first
-            continue
-        chosen.append(key)
-        remaining -= members[key]
-    return chosen
-
-
-def prune_redundant[K: str, F](
-    chosen: Sequence[K], sets: Mapping[K, Collection[F]], weights: Mapping[K, float]
-) -> list[K]:
-    """``chosen`` minus every key whose elements the other chosen keys still cover.
-
-    Greedy cover can pick a key early that later picks make redundant; dropping the heaviest such
-    keys first (ties by name) keeps the union intact and makes the set irredundant (no single key
-    can be removed). The order of the survivors is the order of ``chosen``.
-    """
-    holders: Counter[F] = Counter()
-    for key in chosen:
-        holders.update(set(sets[key]))
-    dropped: set[K] = set()
-    for key in sorted(chosen, key=lambda k: (-weights.get(k, 0.0), k)):
-        elements = set(sets[key])
-        if all(holders[e] >= 2 for e in elements):
-            holders.subtract(elements)
-            dropped.add(key)
-    return [key for key in chosen if key not in dropped]
+def csr_of(sets: Sequence[Collection[int]]) -> tuple[np.ndarray, np.ndarray]:
+    """``(offsets, elements)`` of ``sets`` for :func:`greedy_cover_csr`: set ``i`` is
+    ``elements[offsets[i]:offsets[i + 1]]``, sorted and unique."""
+    rows = [sorted(set(s)) for s in sets]
+    offsets = np.zeros(len(rows) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum([len(r) for r in rows])
+    elements = np.fromiter((e for r in rows for e in r), dtype=np.int64, count=int(offsets[-1]))
+    return offsets, elements
 
 
 def greedy_cover_csr(offsets: np.ndarray, elements: np.ndarray, weights: np.ndarray) -> list[int]:
-    """:func:`greedy_weighted_cover` over a CSR matrix of sets (numpy, for whole-run sizes).
+    """A weighted greedy set cover of every element: the pick order. The same rule as wave 1 (most
+    newly covered elements per unit of weight), over a CSR matrix of sets (numpy, for whole-run
+    sizes), so the test economy (``analysis/economy.py``) and the agent's ``minimal_test_set`` can
+    ask for a minimal covering set too. Evaluation is lazy: a set's gain only shrinks as elements
+    get covered, so a stale heap entry is re-scored only when it reaches the top, which keeps a
+    1,000-test run with 100,000 facts well under a second. Empty sets are never picked.
 
     Set ``i`` is ``elements[offsets[i]:offsets[i + 1]]``: sorted, unique, non-negative ints.
     ``weights[i]`` is its cost (floored at 1 ms like wave 1). Ties break by the lower index, so
-    callers that number their sets in name order get the same picks as the set-based version.
+    callers that number their sets in name order break ties by name.
     Coverage is a boolean mask over the elements, so re-scoring a set costs one gather.
     """
     n_sets = len(offsets) - 1
@@ -196,7 +153,12 @@ def greedy_cover_csr(offsets: np.ndarray, elements: np.ndarray, weights: np.ndar
 def prune_csr(
     chosen: Sequence[int], offsets: np.ndarray, elements: np.ndarray, weights: np.ndarray
 ) -> list[int]:
-    """:func:`prune_redundant` over the CSR sets of :func:`greedy_cover_csr` (heaviest dropped first)."""
+    """``chosen`` minus every set whose elements the other chosen sets still cover.
+
+    Greedy cover can pick a set early that later picks make redundant; dropping the heaviest such
+    sets first (ties by index) keeps the union intact and makes the result irredundant (no single
+    set can be removed). The order of the survivors is the order of ``chosen``.
+    """
     size = int(elements.max()) + 1 if elements.size else 0
     holders = np.zeros(size, dtype=np.int32)
     for i in chosen:

@@ -56,19 +56,17 @@ attempts per client address in any 60 s window (429 with ``Retry-After`` beyond 
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
 import re
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from functools import wraps
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlencode, urlsplit
 
-from quart import Blueprint, Response, current_app, g, jsonify, redirect, request, session
+from quart import Blueprint, Response, g, jsonify, redirect, request, session
 from quart.blueprints import BlueprintSetupState
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,7 +75,7 @@ from werkzeug.exceptions import Forbidden, MisdirectedRequest, Unauthorized
 from coverset.config import is_loopback_host
 from coverset.db.models import ApiToken, RepoAccess, User, UserSession
 from coverset.web import tokens
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db, app_extension, app_settings
 from coverset.web.principal import ADMIN, OPEN, PUBLIC, Principal, current_principal, set_principal
 
 if TYPE_CHECKING:
@@ -317,12 +315,6 @@ def _csrf_required(method: AuthMethod) -> bool:
 # -- resolving credentials -----------------------------------------------------------------------
 
 
-def hash_session_id(raw: str) -> str:
-    """The ``user_sessions.id`` of a raw cookie session id (sha256, so a database read-out cannot
-    be replayed as a cookie)."""
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
 async def load_repo_permissions(db: AsyncSession, user_id: int) -> dict[int, str]:
     """``repo_id -> permission`` from ``repo_access`` for one user (one query)."""
     rows = await db.execute(
@@ -358,7 +350,7 @@ async def _session_principal(raw_sid: str) -> Principal | None:
     user row on ``g`` for the account page."""
     if not isinstance(raw_sid, str) or not raw_sid:
         return None
-    digest = hash_session_id(raw_sid)
+    digest = tokens.hash_token(raw_sid)
     now = app_settings().now()
     async with app_db().session() as db:
         pair = (
@@ -464,10 +456,7 @@ class RejectionLog:
 
 def rejection_log() -> RejectionLog:
     """The per-app :class:`RejectionLog`."""
-    found = current_app.extensions.get(REJECTION_LOG_EXTENSION)
-    if found is None:
-        found = current_app.extensions[REJECTION_LOG_EXTENSION] = RejectionLog()
-    return found
+    return app_extension(REJECTION_LOG_EXTENSION, RejectionLog)
 
 
 async def _resolve() -> tuple[AuthMethod, Principal] | None:
@@ -571,22 +560,6 @@ async def access_guard() -> Response | None:
     return None
 
 
-def require_admin[**P, R](view: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-    """Decorate a view that must never be reachable as a public route.
-
-    The access guard already protects every non-public path; this is defence in depth for views
-    whose path could fall under a public prefix, e.g. under ``/webhooks/``.
-    """
-
-    @wraps(view)
-    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        if not is_admin():
-            raise Unauthorized()
-        return await view(*args, **kwargs)
-
-    return wrapper
-
-
 def safe_next(value: str | None) -> str:
     """A same-site path to redirect to after login, else ``/``.
 
@@ -605,12 +578,7 @@ def login_limiter() -> SlidingWindowLimiter:
     """The per-app limiter shared by ``POST /login`` and the GitHub sign-in routes."""
     from coverset.web.api import SlidingWindowLimiter
 
-    limiter = current_app.extensions.get(LOGIN_LIMITER_EXTENSION)
-    if limiter is None:
-        limiter = current_app.extensions[LOGIN_LIMITER_EXTENSION] = SlidingWindowLimiter(
-            LOGIN_ATTEMPTS_PER_MINUTE
-        )
-    return limiter
+    return app_extension(LOGIN_LIMITER_EXTENSION, lambda: SlidingWindowLimiter(LOGIN_ATTEMPTS_PER_MINUTE))
 
 
 def too_many_requests(retry_after: float) -> Response:
@@ -649,7 +617,7 @@ async def create_user_session(db: AsyncSession, user: User, *, now: datetime) ->
     csrf = csrf_token()
     db.add(
         UserSession(
-            id=hash_session_id(raw),
+            id=tokens.hash_token(raw),
             user_id=user.id,
             csrf=csrf,
             ip=(request.remote_addr or None) and request.remote_addr[:64],

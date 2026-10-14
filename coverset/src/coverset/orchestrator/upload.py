@@ -121,6 +121,7 @@ from coverset.orchestrator.repos import (
 from coverset.orchestrator.runner import (
     OrchestratorContext,
     economy_inputs,
+    fail_sig_bytes,
     finalize_crashed,
     schedule_warm_up,
 )
@@ -1161,7 +1162,7 @@ async def _conclude(
                     "failed_phase": state.failed_phase
                     if state.failed_phase in ("setup", "call", "teardown")
                     else None,
-                    "fail_sig": _sig(state.fail_sig),
+                    "fail_sig": fail_sig_bytes(state.fail_sig),
                     "duration_ms": duration,
                     "shard_id": state.shard_id,
                     "attempts": 1,
@@ -1251,16 +1252,6 @@ async def _conclude(
             await session.commit()
             for error in errors_posted:
                 log.warning("upload run %s: forge: %s", run_id, error)
-
-
-def _sig(value: str | None) -> bytes | None:
-    """A failure signature (16 hex characters in the bundle) as the 8 bytes ``fail_sig`` stores."""
-    if not value or len(value) != 16:
-        return None
-    try:
-        return bytes.fromhex(value)
-    except ValueError:
-        return None
 
 
 async def _report(

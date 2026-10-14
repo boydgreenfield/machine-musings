@@ -66,6 +66,7 @@ __all__ = [
     "compact_layout",
     "cache_max_bytes",
     "configure",
+    "int_setting",
     "memory_limit",
     "override",
     "run_stamp",
@@ -82,7 +83,7 @@ type RunStamp = tuple[tuple[str, int, int, int], ...]
 
 
 COMPACT_ENV = "COVERSET_FACTS_COMPACT"
-"""The compact-layout switch (``facts.store.COMPACT_ENV`` names the same variable)."""
+"""The compact-layout switch (:func:`compact_layout`)."""
 
 _overrides: dict[str, str] = {}
 
@@ -120,12 +121,10 @@ def compact_layout() -> bool:
     return setting(COMPACT_ENV).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_int(name: str, default: int, minimum: int = 1) -> int:
-    raw = setting(name)
-    try:
-        return max(minimum, int(raw)) if raw.strip() else default
-    except ValueError:
-        return default
+def int_setting(name: str, default: int) -> int:
+    """``name`` (:func:`setting`) as a positive integer, else ``default`` (unset or nonsense)."""
+    raw = setting(name).strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else default
 
 
 CACHE_MAX_GB_ENV = "COVERSET_CACHE_MAX_GB"
@@ -163,7 +162,7 @@ def memory_limit() -> str:
 
 def threads() -> int:
     """DuckDB worker threads of every facts connection (``COVERSET_FACTS_THREADS``)."""
-    return _env_int("COVERSET_FACTS_THREADS", min(4, os.cpu_count() or 1))
+    return int_setting("COVERSET_FACTS_THREADS", min(4, os.cpu_count() or 1))
 
 
 def run_stamp(run_dir: Path) -> RunStamp:
@@ -213,7 +212,7 @@ class ConnectionCache:
     @property
     def max_entries(self) -> int:
         """The bound (``COVERSET_FACTS_CACHE_ENTRIES`` unless set at construction)."""
-        return self._max if self._max is not None else _env_int("COVERSET_FACTS_CACHE_ENTRIES", 16)
+        return self._max if self._max is not None else int_setting("COVERSET_FACTS_CACHE_ENTRIES", 16)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -274,7 +273,7 @@ class ResultCache:
     @property
     def max_entries(self) -> int:
         """The bound (``COVERSET_FACTS_RESULT_ENTRIES`` unless set at construction)."""
-        return self._max if self._max is not None else _env_int("COVERSET_FACTS_RESULT_ENTRIES", 256)
+        return self._max if self._max is not None else int_setting("COVERSET_FACTS_RESULT_ENTRIES", 256)
 
     def __len__(self) -> int:
         return len(self._entries)

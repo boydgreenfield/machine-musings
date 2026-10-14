@@ -427,11 +427,6 @@ class Settings(BaseSettings):
         return split_bind(self.bind)[0]
 
     @property
-    def bind_port(self) -> int:
-        """The port part of :attr:`bind`."""
-        return split_bind(self.bind)[1]
-
-    @property
     def mirrors_dir(self) -> Path:
         """Bare git mirrors, one per repo: ``<cache_dir>/mirrors/<repo_id>.git`` (disposable: a
         missing mirror costs one clone, docs/object-store.md)."""

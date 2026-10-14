@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 import shutil
+import sys
 import tarfile
 from pathlib import Path
 
@@ -18,8 +19,7 @@ from report_helpers import DemoData, FixtureRun
 
 from coverset.cli import cli
 from coverset.facts.convert import read_python_bundle
-from coverset.facts.untrusted import NO_CAP, BundleError, BundleLimitError, BundleLimits
-from coverset.lang.neutral import model_limits
+from coverset.facts.untrusted import BundleError, BundleLimitError, BundleLimits
 from coverset.report import build_report
 from coverset.report.load import (
     LOCAL_LIMITS,
@@ -97,13 +97,13 @@ def _report(*args: str) -> tuple[int, str]:
 def test_the_local_profile() -> None:
     local = BundleLimits.local()
     assert local.profile == "local" and BundleLimits().profile == "strict"
-    assert local.max_bundle_bytes == NO_CAP
+    assert local.max_bundle_bytes == sys.maxsize
     assert local.max_coverage_cells == 100_000_000
     assert local.max_tests > BundleLimits().max_tests and local.max_paths > BundleLimits().max_paths
     assert local.max_shape_keys > BundleLimits().max_shape_keys
     assert local.gzip_cap(50 * 1024 * 1024) >= 1024**3
     # the neutral reader's matching profile: raised row caps, no wall-clock budget
-    assert model_limits(local) == Limits.local()
+    assert all(getattr(local, n) == getattr(Limits.local(), n) for n in Limits.__dataclass_fields__)
     assert Limits.local().max_seconds == float("inf") and Limits.local().max_rows > Limits().max_rows
     # per-value rules are not resource caps: they stay the strict profile's
     assert local.max_line_number == BundleLimits().max_line_number
@@ -117,7 +117,7 @@ def test_ingest_keeps_the_strict_limits() -> None:
 
     limits = bundle_limits(Settings.for_tests())
     assert limits == BundleLimits() and limits.profile == "strict"
-    assert model_limits(limits) == Limits()  # the neutral reader at ingest: the strict defaults
+    assert all(getattr(limits, n) == getattr(Limits(), n) for n in Limits.__dataclass_fields__)
     # every IngestJob the runner builds takes these limits
     assert "limits=bundle_limits(self.settings)" in inspect.getsource(runner)
 

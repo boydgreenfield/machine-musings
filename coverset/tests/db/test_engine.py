@@ -242,16 +242,6 @@ async def test_postgres_connections_carry_the_server_settings(settings: Settings
         await cli.engine.dispose()
 
 
-async def test_the_statement_timeout_cancels_a_long_statement(settings: Settings) -> None:
-    database = Database.from_url(settings.database_url, statement_timeout_s=0.2)
-    try:
-        async with database.engine.connect() as connection:
-            with pytest.raises(DBAPIError, match="statement timeout"):
-                await connection.execute(text("SELECT pg_sleep(2)"))
-    finally:
-        await database.engine.dispose()
-
-
 async def test_lifting_the_statement_timeout_lasts_one_transaction(settings: Settings) -> None:
     """The gc's bulk deletes run without the web timeout; the connection's next transaction has
     it back (``SET LOCAL``), so a pooled connection never leaks the lift into a request."""

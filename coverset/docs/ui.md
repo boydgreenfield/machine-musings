@@ -3,7 +3,7 @@
 Server-rendered pages from the control plane (Quart + Jinja), made live with htmx 2.0.11, its SSE
 extension and idiomorph, all vendored under `src/coverset/web/static/vendor/` (pinned, SRI-checked;
 see the README there). No build step, no Node, no inline scripts. Code: `src/coverset/web/`
-(blueprints), `templates/`, `static/app.css` and `static/app.js`, and `render/` (the only modules
+(blueprints), `templates/`, `static/app.css`, `static/keys.js` and `static/app.js`, and `render/` (the only modules
 that produce trusted markup).
 
 ## Pages
@@ -330,9 +330,9 @@ it relevant: an email-shaped string was seen, so the email sub-classes are expec
 
 ## Keys
 
-One table drives the keys on every page: `KEYS` in `static/app.js`, mirrored by `KEYS` in the
-static report's `report.js` (`tests/web/test_keys_table.py` checks that the help dialog, this table
-and both scripts agree). `?` opens the help dialog, which lists only the keys of the page it was
+One table drives the keys on every page: `KEYS` in `static/keys.js`, shared with the static report,
+plus the keys `app.js` binds for the live pages' own content (`tests/web/test_keys_table.py` checks
+that the help dialog, this table and the scripts agree). `?` opens the help dialog, which lists only the keys of the page it was
 opened on (a row whose kind of content is missing, say the source keys on the map, is hidden). Keys
 are ignored while typing in a form field and with Ctrl, Alt or Cmd held. A filter or search box
 takes `Enter` (open the first match) and `Esc` (clear it).

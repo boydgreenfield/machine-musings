@@ -38,7 +38,7 @@ Migrations are Alembic revisions under `src/coverset/db/migrations/versions/`. `
 
 | Table | Purpose | Key columns | Keys and indexes |
 |---|---|---|---|
-| `repos` | a repository under test, identified by its forge's stable id, never its name | `forge` (`github`, `fake`, `local`), `external_id`, `full_name`, `default_branch`, `private` (default true), `language`, `installation_id`, `owner_id`, `ai_review_enabled`, `settings_json` | unique `(forge, external_id)` |
+| `repos` | a repository under test, identified by its forge's stable id, never its name | `forge` (`github`, `fake`, `local`), `external_id`, `full_name`, `default_branch`, `private` (default true), `language`, `installation_id`, `owner_id`, `settings_json` | unique `(forge, external_id)` |
 | `envs` | a dependency environment keyed by its content hash | `env_hash`, `image_id`, `python` | primary key `env_hash` |
 | `snapshots` | a trusted filesystem snapshot of a default-branch commit (Modal), written by `coverset warm` and by the re-snapshot after a trusted default-branch baseline; the planner and the warm-pool maintainer read the newest `ready`, unexpired row | `repo_id`, `env_hash`, `sha`, `image_id`, `status` (`building`, `ready`, `failed`, `expired`), `expires_at` | index `(repo_id, status, created_at)`; index `env_hash` |
 | `commits` | commit metadata seen in a mirror | `repo_id`, `sha`, `parent_shas`, `subject`, `author_name`, `committed_at` | unique `(repo_id, sha)` |
@@ -210,6 +210,8 @@ There is no DuckDB database file. A connection is an in-memory database with vie
 1. `duckdb.connect` with `autoinstall_known_extensions` and `autoload_known_extensions` off.
 2. `SET allowed_directories` to the directories in scope (the facts root only for a connection that spans every repo; the repo's directory, or only its runs' directories, for a scoped one, so a scoped connection and the user SQL run on it can never `read_parquet` another repository's files; `test_a_scoped_connection_cannot_read_another_repository`) and `SET enable_external_access = false`.
 3. `SET memory_limit` and `SET threads` from `COVERSET_FACTS_MEMORY_LIMIT` (default `512MB`) and `COVERSET_FACTS_THREADS` (default `min(4, CPUs)`).
+
+A cache or thread knob whose value is not a positive integer (`0`, `-1`, `abc`) is ignored and the default applies; coverset does not clamp it.
 4. One view per requested table: `read_parquet([<explicit list of committed files>], hive_partitioning=true, union_by_name=true, hive_types={'repo': BIGINT, 'run': VARCHAR})`, with `repo_id` and `run_id` taken from the partition directories. A table with no files gets an empty view of the right schema.
 5. `SET lock_configuration = true`.
 
@@ -354,8 +356,7 @@ must follow the grammar in [docs/neutral-bundle.md](neutral-bundle.md#shape-keys
 and writes it. A worker's bundle is read by `coverset.lang.read_any_bundle`: a `manifest.json` that
 says `coverset-neutral` selects the neutral reader for any language, anything else is a
 pytest-coverset bundle for `facts/convert.read_python_bundle`. Both readers take the same
-`BundleLimits` (the neutral reader copies every field with a matching name into
-`coverset_model.io.Limits`) and the head tree as the path allow-list. The neutral reader refuses a
+`BundleLimits` (a `coverset_model.io.Limits` with the Python reader's extra caps) and the head tree as the path allow-list. The neutral reader refuses a
 bundle over the size, gzip-ratio, member, distinct-id, path, shape-key, function or cell limits,
 an unknown version, a missing required file, a file with more lines than its row cap or a read past
 its wall-clock budget (a `BundleError`, so the shard is recorded as failed

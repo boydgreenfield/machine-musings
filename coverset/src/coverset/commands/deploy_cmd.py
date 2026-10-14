@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 import click
 
 from coverset.config import MIN_ADMIN_TOKEN_CHARS, Settings, is_private_host
+from coverset.facts.cache import cache_max_bytes
 
 if TYPE_CHECKING:
     from coverset.forge.credentials import GitHubCredentials
@@ -87,19 +88,15 @@ def _in_modal_container(environ: Mapping[str, str]) -> bool:
     """
     if environ.get("MODAL_IS_REMOTE") == "1":
         return True
-    try:
-        import modal
-    except ImportError:  # pragma: no cover - modal is a dependency
-        return False
+    import modal
+
     return not modal.is_local()
 
 
 def _profile_has_token() -> bool:
     """True when the Modal client's config (``~/.modal.toml`` profile or env) holds a token."""
-    try:
-        from modal.config import config
-    except ImportError:  # pragma: no cover - modal is a dependency
-        return False
+    from modal.config import config
+
     return bool(config.get("token_id") and config.get("token_secret"))
 
 
@@ -179,18 +176,6 @@ def _cache_size(root: Path) -> tuple[int, int, bool]:
     return total, files, True
 
 
-def _cache_bound(settings: Settings) -> int | None:
-    """The cache's size bound in bytes (``COVERSET_CACHE_MAX_GB``), or None when this build has none."""
-    configured = getattr(settings, "cache_max_gb", None)
-    if configured is not None:
-        return int(float(configured) * 1_000_000_000)
-    try:
-        from coverset.facts.cache import cache_max_bytes
-    except ImportError:
-        return None
-    return cache_max_bytes()
-
-
 def _cache_check(settings: Settings) -> Check:
     """The disposable local cache (facts, fetched sources, mirrors): writable, its size against its
     bound (``COVERSET_CACHE_MAX_GB``, which gc and start-up evict to) and the free disk under it."""
@@ -203,14 +188,13 @@ def _cache_check(settings: Settings) -> Check:
         return Check("cache dir", "fail", f"{cache} is not writable: {exc}")
     size, files, complete = _cache_size(cache)
     free = shutil.disk_usage(cache).free
-    bound = _cache_bound(settings)
+    bound = cache_max_bytes()
     amount = f"{size / 1e9:.2f} GB in {files} files" + ("" if complete else "+")
-    limit = f"bound {bound / 1e9:g} GB" if bound is not None else "no bound"
-    detail = f"{cache}: {amount} ({limit}), {free / 1024**3:.1f} GiB free; disposable"
+    detail = f"{cache}: {amount} (bound {bound / 1e9:g} GB), {free / 1024**3:.1f} GiB free; disposable"
     status: Status = "pass"
     if free < LOW_DISK_BYTES:
         status = "warn"
-    elif bound is not None and bound > size + free:
+    elif bound > size + free:
         status = "warn"
         detail += "; the bound is larger than the disk can hold (lower COVERSET_CACHE_MAX_GB)"
     return Check("cache dir", status, detail)

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Final
@@ -973,12 +973,3 @@ class RustAdapter(NeutralAdapter):
         return NeutralAdapter("rust", functions=head, base_functions=base).changed_functions(
             path, old_src, new_src, added, removed
         )
-
-
-def iter_rust_files(root: Path) -> Iterator[Path]:
-    """Every ``.rs`` file under ``root`` outside ``target/`` and hidden directories."""
-    for path in sorted(root.rglob("*.rs")):
-        parts = path.relative_to(root).parts
-        if any(p == "target" or p.startswith(".") for p in parts[:-1]):
-            continue
-        yield path

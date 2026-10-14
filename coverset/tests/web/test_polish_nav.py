@@ -19,7 +19,7 @@ from web_helpers import assert_csp_clean
 
 from coverset.app import AVATAR_ORIGIN, CONTENT_SECURITY_POLICY
 from coverset.db.models import Repo, RepoAccess, User, UserSession
-from coverset.web.auth import hash_session_id
+from coverset.web.tokens import hash_token
 
 AVATAR = f"{AVATAR_ORIGIN}/u/4242?v=4"
 
@@ -58,7 +58,7 @@ async def sign_in(
             session.add(RepoAccess(user_id=user.id, repo_id=repo_id, permission=permission))  # type: ignore[arg-type]
         session.add(
             UserSession(
-                id=hash_session_id(raw),
+                id=hash_token(raw),
                 user_id=user.id,
                 csrf="unused",
                 created_at=now,

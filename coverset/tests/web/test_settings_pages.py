@@ -417,8 +417,8 @@ async def test_view_prefs_reach_templates_once_per_request(
     from coverset.web import settings_pages
 
     async with app.extensions["db"].session() as session:
-        await ss.set_value(session, "view.map_module_weight", "hidden", scope="org", scope_id="acme")
-        await ss.set_value(session, "view.theme", "dark", scope="user", scope_id=world["mona"])
+        await ss.apply_changes(session, {"view.map_module_weight": "hidden"}, scope="org", scope_id="acme")
+        await ss.apply_changes(session, {"view.theme": "dark"}, scope="user", scope_id=world["mona"])
     calls: list[int] = []
     real = settings_pages.view_prefs
 
@@ -446,8 +446,10 @@ async def test_an_invisible_repository_404s_like_a_missing_one(
     """View preferences of a repository the reader cannot see must not leak into its 404 page:
     otherwise the layout's theme/highlight attributes tell a hidden repository from a missing id."""
     async with app.extensions["db"].session() as session:
-        await ss.set_value(session, "view.theme", "dark", scope="org", scope_id="acme")
-        await ss.set_value(session, "view.highlight", "missing", scope="repo", scope_id=world["widgets"])
+        await ss.apply_changes(session, {"view.theme": "dark"}, scope="org", scope_id="acme")
+        await ss.apply_changes(
+            session, {"view.highlight": "missing"}, scope="repo", scope_id=world["widgets"]
+        )
     act_as(member(world, thing="read"))
     missing_id = world["thing"] + 100
     hidden = await client.get(f"/repos/{world['widgets']}")

@@ -11,8 +11,7 @@ branches, covering tests, function views with the input-class catalogue). The re
   (line state, partial note, covering tests, input classes, ``cap_hits``) comes from the same code.
 
 Function regions come from the sources (``index_functions``, as the ingest derives them for Python)
-or, for a file whose source is not available, from the bundle's own ``functions`` rows when the
-neutral model carries them (read with ``getattr``: older ``NeutralBundle`` builds have no such field).
+or, for a file whose source is not available, from the bundle's own ``functions`` rows.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ from typing import Any
 import numpy as np
 
 from coverset.analysis.functions import index_functions
-from coverset.analysis.shapes import Catalogue, FunctionCatalogue
-from coverset.facts.untrusted import BundleError, open_regular, safe_rel_path
+from coverset.analysis.shapes import Catalogue, FunctionCatalogue, function_catalogue_from_types
+from coverset.facts.untrusted import BundleError, open_regular
 from coverset.lang.base import (
     IMPORT_CONTEXT,
     FuncSampling,
@@ -42,13 +41,14 @@ from coverset.lang.base import (
     StaticFile,
 )
 from coverset.web.facts_view import FunctionView, RunFacts
+from coverset_model.io import safe_rel_path
+from coverset_model.types import DescriptorError, from_json
 
 __all__ = [
     "BundleFacts",
     "ReportInput",
     "TestInfo",
     "decode_source",
-    "descriptor_annotation",
     "read_sources",
 ]
 
@@ -295,7 +295,7 @@ def view_with_catalogue(facts: RunFacts, region: FunctionRegion, found: Function
     returned = [dataclasses.replace(o, param="returns") for o in observations if o.param == "return"]
     return_cells: tuple[Any, ...] = ()
     if returned:
-        info = ParamInfo("returns", return_annotation(found))
+        info = ParamInfo("returns", found.return_type())
         seen = catalogue.observed_classes(returned)
         ret_samples: dict[str, int] = defaultdict(int)
         for obs in returned:
@@ -327,79 +327,13 @@ def view_with_catalogue(facts: RunFacts, region: FunctionRegion, found: Function
 
 # -- type descriptors -------------------------------------------------------------------------------
 
-_SCALARS = {"int": "int", "float": "float", "str": "str", "bool": "bool", "bytes": "bytes", "none": "None"}
-
-
-def descriptor_annotation(desc: object, enums: dict[str, tuple[str, ...]] | None = None) -> str | None:
-    """A Python annotation text equivalent to a neutral type descriptor (None for ``any``/unknown).
-
-    The input-class catalogue reads annotation text; this gives a TypeScript (or any) bundle's
-    declared types the same treatment as Python annotations. ``enums`` collects enum members.
-    """
-    if not isinstance(desc, Mapping):
-        return None
-    kind = desc.get("kind")
-    if kind in _SCALARS:
-        return _SCALARS[str(kind)]
-    if kind in ("list", "set"):
-        elem = descriptor_annotation(desc.get("elem"), enums) or "object"
-        return f"{kind}[{elem}]"
-    if kind == "tuple":
-        elems = desc.get("elems")
-        if not isinstance(elems, list) or not elems:
-            return "tuple"
-        return "tuple[" + ", ".join(descriptor_annotation(e, enums) or "object" for e in elems[:16]) + "]"
-    if kind == "dict":
-        key = descriptor_annotation(desc.get("key"), enums) or "object"
-        value = descriptor_annotation(desc.get("value"), enums) or "object"
-        return f"dict[{key}, {value}]"
-    if kind == "union":
-        arms = desc.get("arms")
-        if not isinstance(arms, list):
-            return None
-        texts = [descriptor_annotation(a, enums) for a in arms[:16]]
-        if any(t is None for t in texts):
-            return None
-        return " | ".join(dict.fromkeys(t for t in texts if t))
-    if kind == "literal":
-        values = desc.get("values")
-        if not isinstance(values, list) or not values:
-            return None
-        parts = [repr(v) for v in values[:32] if isinstance(v, str | int | float | bool) or v is None]
-        return f"Literal[{', '.join(parts)}]" if parts else None
-    if kind == "enum":
-        name, members = desc.get("name"), desc.get("members")
-        if not isinstance(name, str) or not name.isidentifier():
-            return None
-        if enums is not None and isinstance(members, list):
-            enums[name] = tuple(str(m) for m in members if isinstance(m, str) and m.isidentifier())
-        return name
-    if kind == "object":
-        name = desc.get("name")
-        if isinstance(name, str) and all(part.isidentifier() for part in name.split(".")):
-            return name.rsplit(".", 1)[-1]
-    return None
-
 
 def catalogue_from_descriptors(region: FunctionRegion, types: Mapping[str, Any]) -> FunctionCatalogue:
-    """The :class:`FunctionCatalogue` of a function whose declared types came as descriptors.
-
-    With the neutral model (``coverset_model``) this is its ``function_catalogue_from_types``, so a
-    TypeScript bundle's declared types count exactly as they do at ingest; descriptors given as
-    JSON objects are parsed with ``coverset_model.types.from_json`` first (a malformed one counts as
-    undeclared). Without the model, the descriptors become annotation text for the catalogue.
+    """The :class:`FunctionCatalogue` of a function whose declared types came as descriptors: the
+    model's ``function_catalogue_from_types``, so a TypeScript bundle's declared types count exactly
+    as they do at ingest. A descriptor given as a JSON object is parsed with
+    ``coverset_model.types.from_json`` first (a malformed one counts as undeclared).
     """
-    try:
-        from coverset.analysis.shapes import function_catalogue_from_types  # type: ignore[attr-defined]
-        from coverset_model.types import DescriptorError, from_json  # type: ignore[import-not-found]
-    except ImportError:
-        enums: dict[str, tuple[str, ...]] = {}
-        annotations = {
-            p.lstrip("*"): descriptor_annotation(types.get(p.lstrip("*"), types.get(p)), enums)
-            for p in region.params
-        }
-        returns = descriptor_annotation(types.get("return"), enums)
-        return FunctionCatalogue(Catalogue(enums.get if enums else None), annotations, returns)
     parsed: dict[str, Any] = {}
     for name, desc in types.items():
         if isinstance(desc, Mapping):
@@ -408,13 +342,7 @@ def catalogue_from_descriptors(region: FunctionRegion, types: Mapping[str, Any])
             except DescriptorError:
                 desc = None
         parsed[str(name)] = desc
-    return function_catalogue_from_types(region, parsed)  # type: ignore[no-any-return]
-
-
-def return_annotation(found: FunctionCatalogue) -> Any:
-    """The declared return type the catalogue reads (a descriptor with the neutral model)."""
-    getter = getattr(found, "return_type", None)
-    return getter() if callable(getter) else found.returns
+    return function_catalogue_from_types(region, parsed)
 
 
 # -- sources ------------------------------------------------------------------------------------------
@@ -485,14 +413,6 @@ def decode_source(data: bytes, path: str = "") -> str:
     return data.decode("utf-8", "replace")
 
 
-def regions_for(
-    paths: Iterable[str], sources: Mapping[str, str | None], bundle: NeutralBundle | None = None
-) -> list[FunctionRegion]:
-    """Every region of the measured files: indexed from the source when there is one, else the
-    bundle's own ``functions`` rows for that path (neutral bundles)."""
-    return regions_with_owners(paths, sources, bundle)[0]
-
-
 def regions_with_owners(
     paths: Iterable[str],
     sources: Mapping[str, str | None],
@@ -500,8 +420,9 @@ def regions_with_owners(
     *,
     prefer_shipped: bool = False,
 ) -> tuple[list[FunctionRegion], frozenset[str]]:
-    """:func:`regions_for`, plus the paths whose regions are the bundle's own ``functions`` rows
-    (not indexed from a local text that may be another commit's). With ``prefer_shipped`` (a
+    """Every region of the measured files (indexed from the source when there is one, else the
+    bundle's own ``functions`` rows for that path), plus the paths whose regions are those shipped
+    rows (not indexed from a local text that may be another commit's). With ``prefer_shipped`` (a
     ``--compare`` base) a path's shipped rows win over indexing its local text."""
     shipped: dict[str, list[FunctionRegion]] = defaultdict(list)
     for region in bundle_regions(bundle):
@@ -579,29 +500,11 @@ def bundle_regions(bundle: object) -> list[FunctionRegion]:
     return out
 
 
-def bundle_types(bundle: object, regions: Iterable[FunctionRegion]) -> dict[str, dict[str, Any]]:
-    """func_key → parameter → type descriptor, from whatever form the neutral model ships them in.
-
-    Accepted: ``bundle.types`` keyed by func_key, by ``(path, qualname, def_line)`` or by
-    ``(path, qualname)``; or a ``types`` attribute (or key) on each ``bundle.functions`` row.
-    """
-    regions = list(regions)
-    out: dict[str, dict[str, Any]] = {}
-    table = getattr(bundle, "types", None)
-    if isinstance(table, Mapping):
-        for region in regions:
-            for key in (region.func_key, region.triple, region.triple[:2]):
-                found = table.get(key)
-                if isinstance(found, Mapping):
-                    out[region.func_key] = dict(found)
-                    break
-    by_key = {r.func_key: r for r in regions}
-    for row in getattr(bundle, "functions", None) or ():
-        types = _get(row, "types", None)
-        key = _get(row, "func_key", _get(row, "key", None))
-        if isinstance(types, Mapping) and key in by_key:
-            out.setdefault(str(key), dict(types))
-    return out
+def bundle_types(bundle: NeutralBundle, regions: Iterable[FunctionRegion]) -> dict[str, dict[str, Any]]:
+    """func_key → parameter → type descriptor, from the bundle's ``types`` (keyed by function triple)."""
+    return {
+        r.func_key: dict(found) for r in regions if isinstance(found := bundle.types.get(r.triple), Mapping)
+    }
 
 
 def _get(row: object, name: str, default: object = ...) -> Any:

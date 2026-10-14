@@ -46,7 +46,7 @@ import re
 import shutil
 from bisect import bisect_left, bisect_right
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Callable, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cached_property
@@ -74,8 +74,8 @@ from coverset.report.output import (
     staging_dir,
     swap_in,
 )
-from coverset.units import fmt_ms
-from coverset.web.facts_view import FunctionView, test_file
+from coverset.units import fmt_ms, fmt_pct, fmt_ranges, plural
+from coverset.web.facts_view import FunctionView, ParamReach, param_reach, reached_classes, test_file
 from coverset.web.render.html import breakable, json_data, relative_hrefs
 from coverset.web.render.ribbon import render_ribbon
 from coverset.web.render.shapegrid import GridCell, render_grid, render_inlay, render_strip
@@ -290,16 +290,6 @@ def _memo_text(render: Callable[[object], Markup], limit: int = 65_536) -> Calla
     return remembered
 
 
-def _pct(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.0f}%" if abs(value - round(value)) < 0.05 else f"{value:.1f}%"
-
-
-def _plural(count: int, singular: str, plural_form: str | None = None) -> str:
-    return f"{count} {singular if count == 1 else (plural_form or singular + 's')}"
-
-
 def _duration(seconds: float | None) -> str:
     return fmt_ms(seconds * 1000.0 if seconds is not None else None)
 
@@ -315,8 +305,8 @@ def environment() -> jinja2.Environment:
         keep_trailing_newline=True,
     )
     env.filters["nodeid"] = _memo_text(breakable)
-    env.filters["pct"] = _pct
-    env.filters["plural"] = _plural
+    env.filters["pct"] = fmt_pct
+    env.filters["plural"] = plural
     env.filters["duration"] = _duration
     return env
 
@@ -325,11 +315,20 @@ def _asset(name: str) -> str:
     return (importlib.resources.files("coverset.report") / "static" / name).read_text(encoding="utf-8")
 
 
+def _web_asset(name: str) -> str:
+    return (importlib.resources.files("coverset.web") / "static" / name).read_text(encoding="utf-8")
+
+
 def stylesheet() -> str:
     """``report.css``: the pages' ``app.css`` (same tokens, colours and components) plus the
     report's own rules."""
-    app = (importlib.resources.files("coverset.web") / "static" / "app.css").read_text(encoding="utf-8")
-    return app.rstrip("\n") + "\n\n" + _asset("report.css")
+    return _web_asset("app.css").rstrip("\n") + "\n\n" + _asset("report.css")
+
+
+def script() -> str:
+    """``report.js``: the pages' ``keys.js`` (the shared keys and navigation) plus the report's own
+    behaviour."""
+    return _web_asset("keys.js").rstrip("\n") + "\n\n" + _asset("report.js")
 
 
 # -- the build ------------------------------------------------------------------------------------
@@ -492,7 +491,7 @@ class _Builder:
 
     def write_all(self) -> dict[str, int]:
         self.writer.text("report.css", stylesheet())
-        self.writer.text("report.js", _asset("report.js"))
+        self.writer.text("report.js", script())
         self.writer.text("search-index.js", self.search_index())
         self.index_page()
         self.about_page()
@@ -854,7 +853,7 @@ class _Builder:
             lens_tests=[
                 (i, nodeid, self.outcome(nodeid), len(lines)) for i, (nodeid, lines) in enumerate(tests)
             ],
-            missed_lines=_ranges(missed_lines),
+            missed_lines=", ".join(fmt_ranges(missed_lines)),
             partial_lines=sorted(entry.facts.partial.items()),
             since=self.changes.marks.get(entry.path) if self.changes is not None else None,
             data=self.data_block(data),
@@ -1115,23 +1114,6 @@ def _within(lines: Sequence[int], lo: int, hi: int) -> list[int]:
     return list(lines[bisect_left(lines, lo) : bisect_right(lines, hi)]) if lo <= hi else []
 
 
-def _ranges(lines: Iterable[int]) -> str:
-    """``3-5, 9, 12-13``."""
-    out: list[str] = []
-    start = prev = None
-    for n in lines:
-        if start is None:
-            start = prev = n
-        elif n == prev + 1:  # type: ignore[operator]
-            prev = n
-        else:
-            out.append(f"{start}" if start == prev else f"{start}-{prev}")
-            start = prev = n
-    if start is not None:
-        out.append(f"{start}" if start == prev else f"{start}-{prev}")
-    return ", ".join(out)
-
-
 def _signature(region: FunctionRegion, view: FunctionView) -> str:
     """``validate_email(email: str) -> str`` from the region's parameters and their annotations."""
     parts = []
@@ -1145,55 +1127,9 @@ def _signature(region: FunctionRegion, view: FunctionView) -> str:
     return text
 
 
-@dataclass(frozen=True, slots=True)
-class Reach:
-    """One parameter's strips on a test page."""
-
-    param: str
-    this_test: tuple[GridCell, ...]
-    any_test: tuple[GridCell, ...]
-    reached: tuple[str, ...]
-
-
-def _param_reach(view: FunctionView, observations: list[Any]) -> list[Any]:
-    """Per parameter: the classes this test passed in (filled) next to the function's never-exercised
-    classes (hollow), and every expected class (filled when any test passed it).
-
-    The live test page's ``param_reach`` when this build has it (so both pages draw the same strips),
-    else the same rule here.
-    """
-    try:
-        from coverset.web.facts_view import param_reach, reached_classes  # type: ignore[attr-defined]
-    except ImportError:
-        pass
-    else:
-        return list(param_reach(view, reached_classes(view, observations)))
-    import dataclasses
-
-    expected = {c.name for c in view.cov.expected}
-    mine: dict[str, set[str]] = defaultdict(set)
-    for obs in observations:
-        if obs.param in ("<receiver>", "return"):
-            continue
-        mine[obs.param.lstrip("*")] |= view.catalogue.observed_classes([obs]) & expected
-    missing = {c.name for c in view.cov.missing}
-    params = [p.lstrip("*") for p in view.region.params]
-    params += [c.param for c in view.cov.expected if c.param not in params]
-    out = []
-    for param in dict.fromkeys(params):
-        cells = view.cells(param)
-        if not cells:
-            continue
-        reached = mine.get(param, set())
-        this_test = tuple(
-            dataclasses.replace(cell, observed=cell.name in reached)
-            for cell in cells
-            if cell.name in reached or cell.name in missing
-        )
-        out.append(
-            Reach(param, this_test, tuple(cells), tuple(sorted(c.short for c in cells if c.name in reached)))
-        )
-    return out
+def _param_reach(view: FunctionView, observations: list[Any]) -> list[ParamReach]:
+    """The live test page's strips for one test's ``observations`` of a function."""
+    return param_reach(view, reached_classes(view, observations))
 
 
 def default_out(source: Path | None) -> Path:

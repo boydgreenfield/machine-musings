@@ -13,7 +13,7 @@ What is accepted is deliberately narrow, because the archive arrives over the ne
   for), plus ``pyproject.toml`` and the configured invariants file (``[tool.coverset]`` and
   ``invariants.yaml`` drive what the verdict reports) — anything else in ``sources/`` is dropped and
   counted, so a client cannot use coverset as a file drop;
-* each path must be a normalised relative POSIX path (:func:`~coverset.facts.untrusted.safe_rel_path`:
+* each path must be a normalised relative POSIX path (:func:`~coverset_model.io.safe_rel_path`:
   no ``..``, no absolute paths, no backslashes), and every component is created by this module with
   ``O_NOFOLLOW``/``O_EXCL`` semantics so a pre-existing symlink cannot redirect a write;
 * a commit's sources are written once: the first complete upload of ``(repo, sha)`` wins and later
@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from coverset.facts.untrusted import safe_rel_path
+from coverset_model.io import safe_rel_path
 
 if TYPE_CHECKING:
     from coverset.config import Settings

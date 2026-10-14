@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from coverset.units import fmt_ms
+
 if TYPE_CHECKING:
     from coverset.report.economy import EconomyView
 
@@ -193,12 +195,6 @@ def _row(row: Any) -> dict[str, Any]:
     return dataclasses.asdict(row)
 
 
-def _ms(value: float | None) -> str:
-    from coverset.units import fmt_ms
-
-    return fmt_ms(value)
-
-
 def _notes(view: EconomyView) -> None:
     for note in view.notes:
         click.echo(f"not measured: {note}", err=True)
@@ -267,13 +263,13 @@ def economy_command(
     t = view.totals
     assert t is not None
     median = median_leverage(view.tests)
-    click.echo(f"Test economy · {t.tests} tests · {_ms(t.total_duration_ms)}")
+    click.echo(f"Test economy · {t.tests} tests · {fmt_ms(t.total_duration_ms)}")
     click.echo(
         f"  minimal set   {t.minimal_set_size} of {t.tests} tests keep every fact "
-        f"({_ms(t.minimal_set_duration_ms)} of {_ms(t.total_duration_ms)})"
+        f"({fmt_ms(t.minimal_set_duration_ms)} of {fmt_ms(t.total_duration_ms)})"
     )
     click.echo(
-        f"  removable     {t.removable_candidates} candidates ({_ms(t.removable_duration_ms)}): "
+        f"  removable     {t.removable_candidates} candidates ({fmt_ms(t.removable_duration_ms)}): "
         "covered by the others, candidates only"
     )
     click.echo(
@@ -305,10 +301,10 @@ def economy_command(
         lev = "–" if r.leverage is None else (f"{r.leverage:.2g}" if r.leverage < 10 else f"{r.leverage:.0f}")
         stmts = "n/m" if r.statements is None else str(r.statements + (r.helper_statements or 0))
         asserts = "–" if r.asserts is None else str(r.asserts)
-        cost = "∞" if r.cost_per_fact_ms is None and r.unique_facts == 0 else _ms(r.cost_per_fact_ms)
+        cost = "∞" if r.cost_per_fact_ms is None and r.unique_facts == 0 else fmt_ms(r.cost_per_fact_ms)
         flags = _flags(r)
         click.echo(
-            f"{lev:>8} {stmts:>6} {asserts:>7} {r.unique_facts:>6} {cost:>9} {_ms(r.duration_ms):>9}  "
+            f"{lev:>8} {stmts:>6} {asserts:>7} {r.unique_facts:>6} {cost:>9} {fmt_ms(r.duration_ms):>9}  "
             f"{r.nodeid}{'  [' + flags + ']' if flags else ''}"
         )
     _notes(view)
@@ -347,7 +343,7 @@ def redundant_command(
     click.echo("")
     click.echo(f"{len(red.groups)} groups of identical flows (same lines, arcs and input shapes)")
     for g in red.groups:
-        click.echo(f"  {len(g.nodeids)} tests, {_ms(g.duration_ms)} together:")
+        click.echo(f"  {len(g.nodeids)} tests, {fmt_ms(g.duration_ms)} together:")
         for nodeid in g.nodeids:
             click.echo(f"    {'keep ' if nodeid == g.keep else 'drop?'}  {nodeid}")
     click.echo("")
@@ -356,7 +352,7 @@ def redundant_command(
         click.echo(f"  {test}\n      <= {by}")
     click.echo("")
     click.echo(
-        f"{len(red.removable)} removable candidates ({_ms(red.removable_duration_ms)}); "
+        f"{len(red.removable)} removable candidates ({fmt_ms(red.removable_duration_ms)}); "
         f"the minimal set keeps {red.minimal_set_size} of {red.tests}: coverset tests minimal --write FILE"
     )
     _notes(view)
@@ -403,13 +399,13 @@ def minimal_command(
         )
         return
     total = len(view.tests)
-    click.echo(f"keeps {len(split.keep)} of {total} tests ({_ms(split.keep_ms)})")
-    click.echo(f"drops {len(split.drop)} removable candidates ({_ms(split.drop_ms)})")
+    click.echo(f"keeps {len(split.keep)} of {total} tests ({fmt_ms(split.keep_ms)})")
+    click.echo(f"drops {len(split.drop)} removable candidates ({fmt_ms(split.drop_ms)})")
     if split.uncompared:
         click.echo(f"{len(split.uncompared)} tests have no production fact and are never dropped")
     click.echo(REMOVABLE_CAVEAT)
     for row in split.drop:
-        click.echo(f"  drop?  {row.nodeid}  ({_ms(row.duration_ms)})")
+        click.echo(f"  drop?  {row.nodeid}  ({fmt_ms(row.duration_ms)})")
     if write_to is not None:
         click.echo(
             f"wrote {len(split.drop)} --deselect arguments to {write_to}: pytest @{write_to}", err=True

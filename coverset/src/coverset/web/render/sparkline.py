@@ -29,9 +29,10 @@ from dataclasses import dataclass
 
 from markupsafe import Markup
 
+from coverset.units import fmt_pct
 from coverset.web.render.html import attr, esc, num
 
-__all__ = ["MIN_SPAN", "SparkSeries", "fmt_pct", "render_spark_key", "render_sparkline"]
+__all__ = ["MIN_SPAN", "SparkSeries", "render_spark_key", "render_sparkline"]
 
 MIN_WIDTH = 160
 MAX_WIDTH = 240
@@ -65,17 +66,8 @@ def _styles(series: Sequence[SparkSeries]) -> list[str]:
     return styles
 
 
-def fmt_pct(value: float | None) -> str:
-    """``90%`` or ``33.8%`` (one decimal when it matters), ``n/a`` for None."""
-    if value is None or not math.isfinite(value):
-        return "n/a"
-    return f"{value:.0f}%" if abs(value - round(value)) < 0.05 else f"{value:.1f}%"
-
-
-def _domain(values: Sequence[float], reference: float | None) -> tuple[float, float]:
+def _domain(values: Sequence[float]) -> tuple[float, float]:
     found = [v for v in values if math.isfinite(v)]
-    if reference is not None and math.isfinite(reference):
-        found.append(reference)
     if not found:
         return 0.0, 100.0
     lo, hi = min(found), max(found)
@@ -126,8 +118,6 @@ def render_sparkline(
     height: int = HEIGHT,
     label: str = "",
     noun: str = "run",
-    reference: float | None = None,
-    reference_label: str = "",
     current: int | None = None,
 ) -> Markup:
     """The sparkline SVG for one or two series over ``points`` (one label per x position, used in
@@ -144,10 +134,9 @@ def render_sparkline(
     plot_t, plot_b = PAD_Y, height - PAD_Y
     series = [SparkSeries(_text(s.name), s.values, s.dashed) for s in series]
     points = [_text(p) for p in points]
-    label, reference_label, noun = _text(label), _text(reference_label), _text(noun)
-    reference = _clean(reference)
+    label, noun = _text(label), _text(noun)
     values = [[_clean(v) for v in s.values] for s in series]
-    lo, hi = _domain([v for vs in values for v in vs if v is not None], reference)
+    lo, hi = _domain([v for vs in values for v in vs if v is not None])
 
     def x_at(i: int) -> float:
         return plot_r if count <= 1 else plot_l + (plot_r - plot_l) * i / (count - 1)
@@ -164,13 +153,6 @@ def render_sparkline(
         f' role="img" aria-label="{attr(aria)}">',
         f'<line class="spark-base" x1="{num(plot_l)}" x2="{num(plot_r)}" y1="{num(plot_b)}" y2="{num(plot_b)}"/>',
     ]
-    if reference is not None and math.isfinite(reference):
-        y = y_at(reference)
-        ref_title = f"{reference_label or 'reference'}: {fmt_pct(reference)}"
-        parts.append(
-            f'<line class="spark-ref" x1="{num(plot_l)}" x2="{num(plot_r)}" y1="{num(y)}" y2="{num(y)}">'
-            f"<title>{esc(ref_title)}</title></line>"
-        )
     if current is not None and 0 <= current < count:
         x = x_at(current)
         parts.append(

@@ -43,12 +43,14 @@ if sys.version_info < (3, 12):  # noqa: UP036 - a clear error instead of a TypeE
     )
 
 import argparse
+import inspect
 import json
 import os
+import shlex
 import signal
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -101,6 +103,24 @@ DEFERRED_NONCE = pytest.StashKey[str | None]()
 """The event nonce of a deferred run, removed from the environment before conftest files load."""
 WORKER_TOKEN = pytest.StashKey[Any]()
 """This process is an xdist worker of an instrumented run: its :class:`parallel.WorkerToken`."""
+
+
+VALUE_OPTIONS = frozenset(
+    {
+        "--coverset-out",
+        "--coverset-scores",
+        "--coverset-source",
+        "--coverset-trace-module",
+        "--coverset-full-trace",
+        "--coverset-shapes",
+        "--coverset-repr-examples",
+        "--coverset-stop-file",
+        "--coverset-shape-samples",
+        "--coverset-shape-settle",
+        "--coverset-full-trace-cap",
+    }
+)
+"""The options that take a value: pytest reads ``--coverset-out DIR`` before it knows them (below)."""
 
 
 def _positive_int(text: str) -> int:
@@ -714,7 +734,7 @@ class CoversetSession:
             "git_root": str(self.git_root) if self.git_root is not None else None,
             "repo_root": self.repo_root,
             "rootdir": self.rootdir_rel,
-            "configfile": str(self.config.inipath) if self.config.inipath is not None else None,
+            "configfile": self._configfile(),
             "cwd": self.cwd_rel,
             "coverage_paths": self.coverage_paths,
             "sources": list(self.options.sources),
@@ -750,6 +770,10 @@ class CoversetSession:
             },
             "xdist": self._xdist_meta(),
         }
+
+    def _configfile(self) -> str | None:
+        """``meta.configfile``: pytest's configuration file, None without one."""
+        return str(self.config.inipath) if self.config.inipath is not None else None
 
     def _xdist_meta(self) -> dict[str, Any] | None:
         """``meta.xdist``: None for an undistributed run; a worker's id and working directory."""
@@ -896,7 +920,69 @@ def pytest_load_initial_conftests(
     early_config: pytest.Config, parser: pytest.Parser, args: list[str]
 ) -> None:
     """Start instrumentation before conftest files are imported, so their imports are measured."""
+    _check_value_words(early_config)
     _start_session(early_config, early_config.known_args_namespace, early=True)
+
+
+def glue_values(args: Sequence[str]) -> list[str]:
+    """``args`` with each ``--coverset-* VALUE`` pair written as the one word ``--coverset-*=VALUE``."""
+    glued: list[str] = []
+    words = iter(args)
+    for word in words:
+        if word == "--":
+            glued += [word, *words]
+        elif word in VALUE_OPTIONS:
+            value = next(words, None)
+            glued.append(word if value is None else f"{word}={value}")
+        else:
+            glued.append(word)
+    return glued
+
+
+def _check_value_words(config: pytest.Config) -> None:
+    """Refuse a run whose rootdir or configuration file a ``--coverset-* VALUE`` word moved.
+
+    pytest locates its configuration before entry-point plugins register their options, so the
+    value of ``--coverset-out DIR`` is taken for a test path when ``DIR`` exists, and the rootdir
+    becomes the common ancestor of ``DIR`` and the tests: outside the project, no ``pyproject.toml``
+    or ``pytest.ini`` is found there and every ini setting (``testpaths``, ``asyncio_mode``,
+    ``addopts``, ``xfail_strict``, ...) is silently dropped. Nothing can repair that once pytest has
+    chosen, so the run stops and names the one-word form. A value inside the project changes
+    nothing and passes; so does any run when pytest's private ``determine_setup`` is unavailable.
+    """
+    params = config.invocation_params
+    words = shlex.split(os.environ.get("PYTEST_ADDOPTS", "")) + list(params.args)
+    named = [
+        (option, value)
+        for option, value in zip(words, words[1:], strict=False)
+        if option in VALUE_OPTIONS and os.path.exists(params.dir / value)
+    ]
+    if not named:
+        return
+    namespace = config.known_args_namespace
+    candidates = {
+        "inifile": namespace.inifilename,
+        "override_ini": namespace.override_ini,
+        "args": namespace.file_or_dir,
+        "rootdir_cmd_arg": namespace.rootdir or None,
+        "invocation_dir": params.dir,
+    }
+    try:
+        from _pytest.config.findpaths import determine_setup
+
+        accepted = inspect.signature(determine_setup).parameters
+        rootpath, inipath = determine_setup(**{k: v for k, v in candidates.items() if k in accepted})[:2]
+    except Exception:
+        return
+    if (rootpath, inipath) == (config.rootpath, config.inipath):
+        return
+    option, value = named[0]
+    raise pytest.UsageError(
+        f"coverset: pytest looked for its configuration before {option} existed and took {value} for a "
+        f"test path: the rootdir is {config.rootpath} (configuration file: {config.inipath or 'none'}) "
+        f"instead of {rootpath} ({inipath or 'none'}). Write the option and its value as one word: "
+        f"{option}={value}"
+    )
 
 
 @pytest.hookimpl(trylast=True)

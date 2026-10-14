@@ -48,7 +48,6 @@ import json
 import re
 import shutil
 import uuid
-from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -85,7 +84,6 @@ __all__ = [
     "read_payload_file",
     "payload_sha256",
     "prod_dir",
-    "problems_summary",
     "read_prod",
     "resolve_functions",
     "run_functions_reached",
@@ -980,8 +978,3 @@ def run_has_shapes(store: FactsStore, repo_id: int, run_id: str) -> bool:
         return con.execute("SELECT EXISTS (SELECT 1 FROM call_shapes)").fetchone() == (True,)
     finally:
         con.close()
-
-
-def problems_summary(rejected: Sequence[tuple[int, list[str]]]) -> Counter[str]:
-    """How often each first problem occurred across rejected windows (for a one-line report)."""
-    return Counter(problems[0].split(":", 1)[0] for _, problems in rejected if problems)

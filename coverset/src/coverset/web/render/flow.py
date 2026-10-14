@@ -18,7 +18,7 @@ functions with the most sampled calls get a bar (the rest share one "+N more" ba
 :data:`MAX_FLOW_PARAMS` parameters per function, so the SVG stays a readable size.
 
 Every interpolated value is escaped (``esc``/``attr``) after its bidirectional controls are made
-visible (:func:`~coverset.report.output.mark_bidi`), and every URL passes ``safe_href``.
+visible (:func:`~coverset.web.render.html.mark_bidi`), and every URL passes ``safe_href``.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ from dataclasses import dataclass, field
 
 from markupsafe import Markup
 
-from coverset.report.output import mark_bidi
+from coverset.units import plural
 from coverset.web.render.html import attr as _attr
 from coverset.web.render.html import esc as _esc
-from coverset.web.render.html import num, safe_href, truncate
+from coverset.web.render.html import mark_bidi, num, safe_href, truncate
 
 __all__ = ["FlowEdge", "FlowNode", "TestCall", "build_test_flow", "render_flow", "render_test_flow"]
 
@@ -262,10 +262,6 @@ class TestCall:
     via: FlowNode | None = None
 
 
-def _plural(n: int, word: str, many: str | None = None) -> str:
-    return f"{n} {word if n == 1 else (many or word + 's')}"
-
-
 def build_test_flow(
     test: FlowNode,
     calls: Sequence[TestCall],
@@ -334,7 +330,7 @@ def build_test_flow(
         rows = sorted(by_function.get(fn, ()), key=lambda kv: -kv[1][0])
         for key, (samples, classes) in rows[:max_params]:
             name = key.split("\x00", 1)[1]
-            note = _plural(classes, "class", "classes")
+            note = plural(classes, "class", "classes")
             param_nodes.append(
                 FlowNode(
                     key=key,
@@ -374,9 +370,9 @@ def build_test_flow(
     edges = []
     for (a, b), (samples, classes) in weights.items():
         if b == (2, MORE_KEY):
-            what = f"{_plural(samples, 'sampled call')} into {len(hidden)} functions not drawn"
+            what = f"{plural(samples, 'sampled call')} into {len(hidden)} functions not drawn"
         elif samples:
-            what = f"{_plural(samples, 'sampled call')}, {_plural(classes, 'input class', 'input classes')}"
+            what = f"{plural(samples, 'sampled call')}, {plural(classes, 'input class', 'input classes')}"
         else:
             what = "its body ran; the tracer sampled no call for this test"
         title = f"{labels[a]} → {labels[b]}: {what}"

@@ -574,13 +574,13 @@ def test_a_python_base_uses_its_shipped_rows_over_the_local_text(tmp_path: Path)
 
 def test_load_base_reads_the_neutral_copy(fixture_out: FixtureRun) -> None:
     from coverset.report.facts import bundle_regions
-    from coverset.report.load import load_base, load_bundle, read_bundle_path
+    from coverset.report.load import load_base, load_bundle, read_source
 
     assert (fixture_out.out / "neutral" / "manifest.json").is_file()
     plain = load_bundle(fixture_out.out, repo_root=fixture_out.project)
     base = load_base(fixture_out.out, repo_root=fixture_out.project)
     assert not plain.own_regions  # SOURCE itself is indexed from the local text, as before
-    shipped = bundle_regions(read_bundle_path(fixture_out.out / "neutral")[0])
+    shipped = bundle_regions(read_source(fixture_out.out / "neutral").bundle)
     assert base.own_regions == {r.path for r in shipped} & set(base.facts.statics)
     triple = lambda r: (r.path, r.qualname, r.ordinal, r.def_line, r.end_line)  # noqa: E731
     assert {triple(r) for r in base.facts.regions} == {
@@ -659,7 +659,7 @@ def test_not_rerun_lines_of_a_changed_file_link_to_this_runs_lines(tmp_path: Pat
 
 
 def test_cli_summary_counts_are_pluralised() -> None:
-    from coverset.commands.report import _plural
+    from coverset.units import plural
 
-    assert _plural(1, "line") == "1 line" and _plural(2, "line") == "2 lines"
-    assert _plural(1, "class", "classes") == "1 class" and _plural(0, "class", "classes") == "0 classes"
+    assert plural(1, "line") == "1 line" and plural(2, "line") == "2 lines"
+    assert plural(1, "class", "classes") == "1 class" and plural(0, "class", "classes") == "0 classes"

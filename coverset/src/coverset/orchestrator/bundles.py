@@ -48,7 +48,7 @@ from coverset.config import Settings
 from coverset.facts.ingest import RunContext, ingest_shard, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleError, BundleLimits, extract_bundle
-from coverset.lang import adapter_for_language, read_any_bundle
+from coverset.lang import read_any_bundle
 from coverset.lang.base import (
     CollectedItem,
     FuncSampling,
@@ -159,13 +159,6 @@ def _deadline(seconds: float) -> Iterator[None]:
         if outer > 0:  # someone else's timer (a test runner's timeout) keeps running
             left = max(outer - (time.monotonic() - started), 0.001)
             signal.setitimer(signal.ITIMER_REAL, left, interval)
-
-
-def adapter_for(job: IngestJob) -> LanguageAdapter:
-    """The adapter serving ``job``'s language (its own adapter when it names one)."""
-    if job.adapter is not None:
-        return job.adapter
-    return adapter_for_language(job.language)
 
 
 def read_job_bundle(job: IngestJob, bundle_dir: Path) -> NeutralBundle:

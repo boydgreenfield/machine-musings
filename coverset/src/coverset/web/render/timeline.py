@@ -23,7 +23,8 @@ from datetime import datetime
 
 from markupsafe import Markup
 
-from coverset.web.render.html import attr, breakable, esc, fmt_secs, num, safe_href, truncate
+from coverset.units import fmt_secs, ordinal
+from coverset.web.render.html import attr, breakable, esc, num, truncate
 from coverset.web.runstate import Block
 
 __all__ = [
@@ -107,10 +108,6 @@ def milestones(
     return out, origin
 
 
-def _fmt_s(seconds: float) -> str:
-    return fmt_secs(seconds)
-
-
 def render_timeline(
     marks: Sequence[Milestone],
     *,
@@ -118,13 +115,12 @@ def render_timeline(
     ghost: float | None = None,
     ghost_label: str = "measured cold path",
     ghost_mark: float | None = None,
-    ghost_mark_label: str = "first failure",
     width: float = 1100.0,
 ) -> Markup:
     """The strip SVG plus an ordered list of the same milestones.
 
     ``ghost`` draws a grey bar of that many seconds under the strip (``ghost_label`` names it) and
-    ``ghost_mark`` a tick on it (``ghost_mark_label``, e.g. when the cold path saw its first
+    ``ghost_mark`` a tick on it ("first failure", when the cold path saw its first
     failure).
     """
     if not marks:
@@ -162,7 +158,7 @@ def render_timeline(
 
     for mark in marks:
         x = left + mark.at * scale
-        text_w = (len(mark.label) + len(_fmt_s(mark.at)) + 1) * 6.3
+        text_w = (len(mark.label) + len(fmt_secs(mark.at)) + 1) * 6.3
         lx = x + 4 if x + 4 + text_w <= right else x - 4 - text_w
         row = min(order, key=lambda y: (crosses(y, lx, lx + text_w, x), order.index(y)))
         placed.append((row, lx, lx + text_w, x))
@@ -176,7 +172,7 @@ def render_timeline(
         )
         parts.append(
             f'<text class="tl-label" x="{num(lx)}" y="{num(row)}">'
-            f'{esc(mark.label)} <tspan class="tl-num">{esc(_fmt_s(mark.at))}</tspan></text>'
+            f'{esc(mark.label)} <tspan class="tl-num">{esc(fmt_secs(mark.at))}</tspan></text>'
         )
     height = 94.0
     if ghost:
@@ -200,14 +196,14 @@ def render_timeline(
                 f'<line class="tl-tick is-failure" x1="{num(mx)}" x2="{num(mx)}"'
                 f' y1="{num(gy - 3)}" y2="{num(gy + 11)}"/>'
             )
-            mark_text = f" · {ghost_mark_label} {_fmt_s(ghost_mark)}"
+            mark_text = f" · first failure {fmt_secs(ghost_mark)}"
         parts.append(
             f'<text class="tl-label tl-ghost-label" x="{num(left)}" y="{num(gy + 22)}">'
-            f'{esc(ghost_label)} <tspan class="tl-num">{esc(_fmt_s(ghost))}</tspan>{esc(mark_text)}{esc(note)}</text>'
+            f'{esc(ghost_label)} <tspan class="tl-num">{esc(fmt_secs(ghost))}</tspan>{esc(mark_text)}{esc(note)}</text>'
         )
         height = 132.0
     items = "".join(
-        f'<li data-key="{attr(m.key)}"><span>{esc(m.label)}</span> <span class="num">{esc(_fmt_s(m.at))}</span></li>'
+        f'<li data-key="{attr(m.key)}"><span>{esc(m.label)}</span> <span class="num">{esc(fmt_secs(m.at))}</span></li>'
         for m in marks
     )
     return Markup(
@@ -297,7 +293,7 @@ def render_gantt(
             f'<line class="gt-grid" x1="{num(x)}" x2="{num(x)}" y1="{num(axis_h - 4)}" y2="{num(height)}"/>'
         )
         parts.append(
-            f'<text class="gt-axis" x="{num(x)}" y="{num(top + 12)}" text-anchor="middle">{esc(_fmt_s(tick))}</text>'
+            f'<text class="gt-axis" x="{num(x)}" y="{num(top + 12)}" text-anchor="middle">{esc(fmt_secs(tick))}</text>'
         )
     ordered_lanes = 0
     for row, shard in enumerate(shards):
@@ -325,7 +321,7 @@ def render_gantt(
         for block, x, w in placed:
             cls = _block_class(block)
             title = f"{block.nodeid}: {block.outcome}{' (flaky: passed on retry)' if block.flaky else ''}"
-            title += f" · reported at {_fmt_s(block.end)}"
+            title += f" · reported at {fmt_secs(block.end)}"
             (marked if cls in ("gt-fail", "gt-flaky") else parts).append(
                 f'<rect class="gt-block {cls}" x="{num(x)}" y="{num(y + 2)}" width="{num(w)}"'
                 f' height="{num(lane_h - 4)}" rx="1.5"><title>{esc(title)}</title></rect>'
@@ -345,7 +341,7 @@ def render_gantt(
     if top:
         assert failure_at is not None
         x = x_of(failure_at)
-        text = f"{failure_label} {_fmt_s(failure_at)}"
+        text = f"{failure_label} {fmt_secs(failure_at)}"
         anchor = "end" if x + len(text) * 6.2 > width - 2 else "start"
         tx = x - 4 if anchor == "end" else x + 4
         parts.append(
@@ -411,15 +407,9 @@ class OrderRow:
     """Whether the row is listed for its own sake (a risk signal), not only because it is pinned."""
 
 
-def _ordinal(n: int) -> str:
-    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
-
-
 def render_why_order(
     rows: Sequence[OrderRow],
     *,
-    test_url: Callable[[str], str] | None = None,
     width: float = 260.0,
     rest: int = 0,
     rest_note: str = "",
@@ -448,13 +438,11 @@ def render_why_order(
             f' role="img" aria-label="{attr(f"score {row.score:.2f}")}">{"".join(segs)}</svg>'
         )
         name = breakable(truncate(row.nodeid, 90))
-        if test_url is not None:
-            name = Markup(f'<a href="{attr(safe_href(test_url(row.nodeid)))}">{name}</a>')
         note = esc(row.text)
         if row.pinned and row.file_rank:
             tie = f" · {esc(row.tie)}" if row.tie else ""
             note = Markup(
-                f"<strong>ran {_ordinal(row.rank)}; file order would have run it {_ordinal(row.file_rank)}</strong>"
+                f"<strong>ran {ordinal(row.rank)}; file order would have run it {ordinal(row.file_rank)}</strong>"
                 f"{tie} · {esc(row.text)}"
             )
         outcome_cls = "is-fail" if row.outcome in ("failed", "error") else ""

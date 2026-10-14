@@ -4,6 +4,7 @@ __pycache__
 *.duckdb
 *.duckdb.wal
 data/
+!tests/lang/data/
 shots/
 node_modules
 dist

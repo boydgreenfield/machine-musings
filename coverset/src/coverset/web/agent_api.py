@@ -26,12 +26,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Final
 
-from quart import Blueprint, Response, current_app, jsonify, request
+from quart import Blueprint, Response, jsonify, request
 
 from coverset import __version__
 from coverset.agent.tools import MAX_ROWS, TOOLS, ToolError, tool_catalogue
 from coverset.web.api import SlidingWindowLimiter
-from coverset.web.context import app_db, app_settings
+from coverset.web.context import app_db, app_extension, app_settings
 from coverset.web.principal import Principal, current_principal, require_repo, visible_repo_ids
 
 if TYPE_CHECKING:
@@ -49,10 +49,7 @@ MAX_BODY_BYTES: Final = 64 * 1024
 
 
 def _limiter() -> SlidingWindowLimiter:
-    found = current_app.extensions.get(LIMITER_EXTENSION)
-    if found is None:
-        found = current_app.extensions[LIMITER_EXTENSION] = SlidingWindowLimiter(AGENT_RPM)
-    return found
+    return app_extension(LIMITER_EXTENSION, lambda: SlidingWindowLimiter(AGENT_RPM))
 
 
 def _principal_key(principal: Principal) -> str:

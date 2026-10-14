@@ -35,7 +35,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import numpy as np
 import pyarrow as pa
@@ -80,7 +80,6 @@ if TYPE_CHECKING:
 __all__ = [
     "ECONOMY_TABLES",
     "REMOVABLE_CAVEAT",
-    "SORTS",
     "EconomyInputs",
     "EquivalenceGroup",
     "GitHistory",
@@ -97,7 +96,6 @@ __all__ = [
     "mirror_history",
     "policy_from_scopes",
     "pr_test_tax",
-    "redundancy",
     "run_economy",
     "tests_economy",
     "write_economy",
@@ -970,20 +968,6 @@ class Redundancy:
     caveat: str = field(default=REMOVABLE_CAVEAT)
 
 
-type TestSort = Literal["leverage", "cost", "statements", "unique", "duration", "nodeid"]
-type TestFilter = Literal["removable", "assertion_free", "stale", "dominated", "grouped", "unmeasured"]
-
-SORTS: Final[Mapping[str, tuple[str, bool]]] = {
-    "leverage": ("leverage", False),
-    "cost": ("cost_per_fact_ms", True),
-    "statements": ("statements", True),
-    "unique": ("unique_facts", False),
-    "duration": ("duration_ms", True),
-    "nodeid": ("nodeid", False),
-}
-"""``sort`` name -> (column, descending). Nulls always sort last; ties break by nodeid."""
-
-
 def _economy_rows(store: FactsStore, repo_id: int, run_id: str) -> list[TestEconomyRow]:
     table = store.read_table(repo_id, run_id, "test_economy")
     if table.num_rows == 0:
@@ -1060,84 +1044,16 @@ def _tax_from_row(
     )
 
 
-def tests_economy(
-    store: FactsStore,
-    repo_id: int,
-    run_id: str,
-    sort: TestSort = "leverage",
-    limit: int | None = 50,
-    *,
-    only: TestFilter | None = None,
-    path: str | None = None,
-) -> list[TestEconomyRow]:
-    """Per-test rows sorted by ``sort`` (see :data:`SORTS`; leverage ascending puts the costliest
-    tests first), optionally only one kind (``only``) or one test file (``path``)."""
-    if sort not in SORTS:
-        raise ValueError(f"unknown sort {sort!r}: one of {', '.join(SORTS)}")
-    rows = _economy_rows(store, repo_id, run_id)
-    if path is not None:
-        rows = [r for r in rows if r.path == path]
-    if only is not None:
-        keep: dict[str, Callable[[TestEconomyRow], bool]] = {
-            "removable": lambda r: r.removable,
-            "assertion_free": lambda r: r.assertion_free is True,
-            "stale": lambda r: r.stale is True,
-            "dominated": lambda r: r.dominated_by is not None,
-            "grouped": lambda r: r.group_id is not None,
-            "unmeasured": lambda r: not r.measured,
-        }
-        if only not in keep:
-            raise ValueError(f"unknown filter {only!r}")
-        rows = [r for r in rows if keep[only](r)]
-    column, descending = SORTS[sort]
-    present = [r for r in rows if getattr(r, column) is not None]
-    missing = sorted((r for r in rows if getattr(r, column) is None), key=lambda r: r.nodeid)
-    present.sort(key=lambda r: r.nodeid)
-    present.sort(key=lambda r: getattr(r, column), reverse=descending)
-    ordered = present + missing
-    return ordered if limit is None else ordered[:limit]
+def tests_economy(store: FactsStore, repo_id: int, run_id: str) -> list[TestEconomyRow]:
+    """Every test's economy row, by node id (sorting and filters are the view model's:
+    :func:`coverset.report.economy.sort_tests`)."""
+    return sorted(_economy_rows(store, repo_id, run_id), key=lambda r: r.nodeid)
 
 
 tests_economy.__test__ = False  # type: ignore[attr-defined]  # a reader, not a pytest test
 
 
-def redundancy(store: FactsStore, repo_id: int, run_id: str) -> Redundancy | None:
-    """Equivalence groups (largest first), dominated pairs and removable candidates; None if absent."""
-    rows = _economy_rows(store, repo_id, run_id)
-    if not rows:
-        return None
-    by_group: dict[str, list[TestEconomyRow]] = defaultdict(list)
-    for r in rows:
-        if r.group_id is not None:
-            by_group[r.group_id].append(r)
-    groups = []
-    for group_id, members in by_group.items():
-        members.sort(key=lambda r: r.nodeid)
-        kept = [m for m in members if m.in_minimal_set]
-        keep = kept[0] if kept else min(members, key=lambda m: (m.duration_ms or 0.0, m.nodeid))
-        groups.append(
-            EquivalenceGroup(
-                group_id,
-                tuple(m.nodeid for m in members),
-                round(sum(m.duration_ms or 0.0 for m in members), 3),
-                keep.nodeid,
-            )
-        )
-    groups.sort(key=lambda g: (-len(g.nodeids), g.nodeids[0]))
-    removable = sorted((r for r in rows if r.removable), key=lambda r: (-(r.duration_ms or 0.0), r.nodeid))
-    return Redundancy(
-        groups=tuple(groups),
-        dominated=tuple(sorted((r.nodeid, r.dominated_by) for r in rows if r.dominated_by is not None)),
-        removable=tuple(removable),
-        minimal_set_size=sum(1 for r in rows if r.in_minimal_set),
-        tests=len(rows),
-        removable_duration_ms=round(sum(r.duration_ms or 0.0 for r in removable), 3),
-    )
-
-
-def families(
-    store: FactsStore, repo_id: int, run_id: str, *, collapsible_only: bool = False
-) -> list[FamilyEconomy]:
+def families(store: FactsStore, repo_id: int, run_id: str) -> list[FamilyEconomy]:
     """Parametrized families, most redundant cases first."""
     ids = store.dictionary(repo_id)
     found = [
@@ -1151,22 +1067,13 @@ def families(
         )
         for r in store.read_table(repo_id, run_id, "test_families").to_pylist()
     ]
-    if collapsible_only:
-        found = [f for f in found if f.redundant_cases > 0]
     return sorted(found, key=lambda f: (-f.redundant_cases, -f.cases, f.family))
 
 
-type FuncFilter = Literal["indirect_only", "untested", "unexercised_handlers"]
-
-
-def func_testing(
-    store: FactsStore, repo_id: int, run_id: str, *, only: FuncFilter | None = None, path: str | None = None
-) -> list[FunctionTesting]:
-    """How each production function is tested, by path and qualname; ``only`` narrows to one kind."""
+def func_testing(store: FactsStore, repo_id: int, run_id: str) -> list[FunctionTesting]:
+    """How each production function is tested, by path and qualname."""
     rows: list[FunctionTesting] = []
     for r in store.read_table(repo_id, run_id, "func_testing").to_pylist():
-        if path is not None and r["path"] != path:
-            continue
         handlers = tuple(
             Handler(r["path"], h["line"], h["body_line"], tuple(h["types"]), False, r["func_key"])
             for h in json.loads(r["handler_lines"] or "[]")
@@ -1188,14 +1095,6 @@ def func_testing(
                 handlers=handlers,
             )
         )
-    if only == "indirect_only":
-        rows = [f for f in rows if f.indirect_only]
-    elif only == "untested":
-        rows = [f for f in rows if f.untested]
-    elif only == "unexercised_handlers":
-        rows = [f for f in rows if f.handlers_unexercised]
-    elif only is not None:
-        raise ValueError(f"unknown filter {only!r}")
     return sorted(rows, key=lambda f: (f.path, f.qualname))
 
 

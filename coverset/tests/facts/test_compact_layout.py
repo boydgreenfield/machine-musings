@@ -1,6 +1,6 @@
 """The compact layout ``test_file_bits``: one numbits bitset per (test, file) next to ``test_lines``.
 
-Written at ingest when ``COVERSET_FACTS_COMPACT=1`` (``facts.store.compact_layout``); the long table
+Written at ingest when ``COVERSET_FACTS_COMPACT=1`` (``facts.cache.compact_layout``); the long table
 stays the source of truth, and readers use the bitsets only where every shard of a run has them.
 """
 
@@ -16,9 +16,10 @@ import pytest
 from facts_helpers import T_ADD, T_BOX, T_NEG, make_ctx, split_bundle
 
 from coverset.facts import cache, queries
+from coverset.facts.cache import COMPACT_ENV, compact_layout
 from coverset.facts.convert import bitsets_to_lines, lines_to_bitsets, numbits_to_lines, read_python_bundle
 from coverset.facts.ingest import ingest_shard
-from coverset.facts.store import COMPACT_ENV, FactsStore, compact_layout
+from coverset.facts.store import FactsStore
 from coverset.lang.base import FunctionRegion
 
 

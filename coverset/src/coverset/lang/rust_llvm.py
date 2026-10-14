@@ -1301,8 +1301,3 @@ def run_rust(
         outcomes[label] = outcomes.get(label, 0) + 1
     _write_capture(dataclasses.replace(capture, timings_s=timings))
     return RunSummary(out, work, root, runner, len(tests), outcomes, timings, archive)
-
-
-def iter_profiles(work: Path) -> Iterable[Path]:
-    """The per-test ``.profraw`` files a ``keep_profiles`` run left in its work directory."""
-    return sorted((work / "profiles" / "tests").glob("*.profraw"))

@@ -11,9 +11,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import re
 import stat
-import sys
 import tarfile
 import zlib
 from collections import Counter
@@ -22,8 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
+from coverset_model.io import Limits, safe_rel_path
+
 __all__ = [
-    "NO_CAP",
     "BundleError",
     "BundleLimitError",
     "BundleLimits",
@@ -32,15 +31,12 @@ __all__ = [
     "extract_bundle",
     "iter_json_lines",
     "open_regular",
-    "safe_rel_path",
 ]
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
-NO_CAP = sys.maxsize
 """A byte cap that is never reached (the local profile's ``max_bundle_bytes``)."""
 _COPY_CHUNK = 1 * MIB
-_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 class BundleError(ValueError):
@@ -67,40 +63,21 @@ class StreamCapError(BundleError):
 
 
 @dataclass(frozen=True, slots=True)
-class BundleLimits:
-    """Caps applied to an untrusted bundle.
+class BundleLimits(Limits):
+    """Caps applied to an untrusted bundle: the neutral reader's :class:`coverset_model.io.Limits`
+    (one set of numbers for both readers, ``docs/security.md`` section 7) plus what only the
+    pytest-coverset reader needs.
 
-    ``gzip_cap`` bounds every gzip stream at ``gzip_ratio`` times its compressed size, but never
-    below ``gzip_floor_bytes`` (SQLite pages compress far better than 10x, so a strict ratio would
-    reject honest bundles) and never above ``gzip_max_bytes``.
-
-    The remaining caps bound what a small bundle can expand into once decoded: line numbers above
-    ``max_line_number`` are dropped, and more than ``max_coverage_cells`` distinct (test, file,
-    line) cells, ``max_tests`` distinct nodeids, ``max_paths`` distinct paths or
-    ``max_shape_keys`` distinct shape keys reject the bundle. ``max_coverage_cells`` (4,000,000)
-    keeps one shard's ingest near 300 MB of memory (read plus the ``test_lines`` arrays, measured
-    in ``docs/security.md`` B14); the plan's sizing (10k tests x ~2k lines per run, 20M cells) fits
-    when the run has at least five shards (``scripts/bench_facts.py`` uses eight, 2.5M cells each).
+    ``max_coverage_cells`` (4,000,000) keeps one shard's ingest near 300 MB of memory (read plus
+    the ``test_lines`` arrays, measured in ``docs/security.md`` B14); the plan's sizing (10k tests x
+    ~2k lines per run, 20M cells) fits when the run has at least five shards
+    (``scripts/bench_facts.py`` uses eight, 2.5M cells each).
 
     These defaults are the **strict** profile, for a bundle a pull request produced (ingest, and
     ``coverset report`` of an archive or a neutral bundle). :meth:`local` is the profile for a
     directory the user's own ``pytest --coverset`` wrote; ``profile`` names which one a value is.
     """
 
-    max_bundle_bytes: int = 200 * MIB
-    gzip_ratio: int = 10
-    gzip_floor_bytes: int = 16 * MIB
-    gzip_max_bytes: int = 500 * MIB
-    max_json_line_bytes: int = 1 * MIB
-    max_nodeid_chars: int = 4096
-    max_repr_chars: int = 200
-    max_longrepr_chars: int = 8 * 1024
-    max_members: int = 256
-    max_line_number: int = 1_000_000
-    max_coverage_cells: int = 4_000_000
-    max_tests: int = 50_000
-    max_paths: int = 50_000
-    max_shape_keys: int = 20_000
     max_json_file_bytes: int = 64 * MIB
     """``coverage.json``, ``collect.json``, ``durations.json`` and ``meta.json`` are parsed whole;
     a larger one is skipped and counted (``<name>.oversized``)."""
@@ -111,32 +88,11 @@ class BundleLimits:
     @classmethod
     def local(cls) -> BundleLimits:
         """The profile for trusted input: a directory the user's own ``pytest --coverset`` wrote
-        (or an archive passed with ``coverset report --trusted``).
-
-        No byte cap on a directory (``max_bundle_bytes`` is :data:`NO_CAP`, so only the files that
-        are read count at all), a tarball may expand to 16 GiB with up to 4096 members, and
-        ``max_coverage_cells`` is 100,000,000: about 1 GB of memory at the compact 8 bytes per
-        cell the readers keep (one pointer per line into a shared pool of line numbers), plus the
-        report's own per-test sets. Tests and paths are capped at 2,000,000 and 1,000,000, shape
-        keys at 1,000,000, a JSON line at 64 MiB and a whole JSON file at 1 GiB. The neutral
-        reader's matching profile (``coverset_model.io.Limits.local``) also raises its row caps and
-        has no wall-clock budget. The per-value rules (line numbers, id and message lengths) are
-        the strict profile's: they decide what a value means, not how much work a bundle is.
-        """
-        return cls(
-            max_bundle_bytes=NO_CAP,
-            gzip_ratio=1000,
-            gzip_floor_bytes=1 * GIB,
-            gzip_max_bytes=16 * GIB,
-            max_json_line_bytes=64 * MIB,
-            max_members=4096,
-            max_coverage_cells=100_000_000,
-            max_tests=2_000_000,
-            max_paths=1_000_000,
-            max_shape_keys=1_000_000,
-            max_json_file_bytes=1 * GIB,
-            profile="local",
-        )
+        (or an archive passed with ``coverset report --trusted``): ``Limits.local()`` (no byte cap,
+        no wall-clock budget, generous row and cell caps), and whole JSON files up to 1 GiB."""
+        base = Limits.local()
+        shared = {name: getattr(base, name) for name in Limits.__dataclass_fields__}
+        return cls(**shared, max_json_file_bytes=1 * GIB, profile="local")
 
     def exceeded(
         self, message: str, *, cap: str, value: int | None = None, limit: int | None = None
@@ -150,27 +106,6 @@ class BundleLimits:
             limit=getattr(self, cap) if limit is None else limit,
             profile=self.profile,
         )
-
-    def gzip_cap(self, compressed_bytes: int) -> int:
-        """Maximum decompressed bytes allowed for a gzip stream of ``compressed_bytes``."""
-        ratio_cap = max(self.gzip_floor_bytes, self.gzip_ratio * compressed_bytes)
-        return min(self.gzip_max_bytes, ratio_cap)
-
-
-def safe_rel_path(value: object) -> str | None:
-    """Return ``value`` if it is a normalised, relative POSIX path, else None.
-
-    Rejected: non-strings, empty strings, NUL or backslash characters, absolute paths, drive
-    letters, and empty, ``.`` or ``..`` segments (so ``a//b``, ``./a`` and ``a/../b`` are refused,
-    not rewritten).
-    """
-    if not isinstance(value, str) or not value or "\0" in value or "\\" in value:
-        return None
-    if value.startswith("/") or _DRIVE.match(value):
-        return None
-    if any(part in ("", ".", "..") for part in value.split("/")):
-        return None
-    return value
 
 
 def open_regular(path: Path) -> IO[bytes]:

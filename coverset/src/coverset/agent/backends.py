@@ -34,13 +34,14 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from werkzeug.exceptions import HTTPException
 
-from coverset.agent import economy
 from coverset.agent.changes import store_changes, worktree_changes
 from coverset.agent.context import Changes, RunContext, RunInfo
 from coverset.agent.tools import ToolError
 from coverset.analysis.diff import GitDiffError
+from coverset.facts.cache import int_setting, run_stamp
 from coverset.facts.untrusted import BundleError
 from coverset.lang.base import FunctionRegion
+from coverset.report.economy import economy_for_input, view_from_store
 from coverset.report.facts import (
     MAX_SOURCE_BYTES,
     ReportInput,
@@ -81,12 +82,7 @@ def context_cache_size() -> int:
     The app's configured value (``Settings.agent_contexts``, handed to
     :func:`coverset.facts.cache.configure` by ``create_app``) wins over the environment.
     """
-    from coverset.facts.cache import setting
-
-    raw = setting(CONTEXT_CACHE_ENV).strip()
-    if raw.isdigit() and int(raw) > 0:
-        return int(raw)
-    return CONTEXT_CACHE
+    return int_setting(CONTEXT_CACHE_ENV, CONTEXT_CACHE)
 
 
 class Backend(Protocol):
@@ -116,22 +112,6 @@ def run_kind(trigger: str | None, pr_id: int | None) -> str:
     if pr_id is not None:
         return "pr"
     return trigger or "manual"
-
-
-def _run_stamp(store: Any, repo_id: int, run_id: str) -> tuple[tuple[str, int, int], ...]:
-    """The run directory's Parquet files with mtimes and sizes: the facts' cache key (empty: no facts).
-
-    The same stamp :func:`coverset.web.facts_view.run_facts` keys its cache on, so a run that is
-    still ingesting is re-read and a finished one is read once."""
-    run_dir = store.run_dir(repo_id, run_id)
-    if not run_dir.is_dir():
-        return ()
-    entries = []
-    for entry in run_dir.iterdir():
-        if entry.name.endswith(".parquet"):
-            st = entry.stat()
-            entries.append((entry.name, st.st_mtime_ns, st.st_size))
-    return tuple(sorted(entries))
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -313,7 +293,7 @@ class LocalBackend:
         )
         ctx.cache["notes"] = notes
         ctx.cache["messages"] = {t.nodeid: (t.message, t.failed_phase) for t in report.tests if t.message}
-        ctx.cache["economy_loader"] = lambda: economy.from_bundle(ctx, ctx.source)
+        ctx.cache["economy_loader"] = lambda: economy_for_input(report, history=False)
         return ctx
 
     def _read(self) -> ReportInput:
@@ -572,7 +552,7 @@ class StoreBackend:
                     if named.id != row.repo_id:
                         raise ToolError("not_found", "no such repository or run")
                 found_repo = await session.get(Repo, row.repo_id)
-            stamp = await asyncio.to_thread(_run_stamp, self.store, row.repo_id, row.id)
+            stamp = await asyncio.to_thread(run_stamp, self.store.run_dir(row.repo_id, row.id))
             if not stamp:
                 raise ToolError(
                     "not_found", f"run {row.id} has no facts (status {row.status}); pick a completed run"
@@ -695,7 +675,7 @@ class StoreBackend:
             changes_loader=changes,
             stamp=stamp,
         )
-        ctx.cache["economy_loader"] = lambda: economy.from_store(self.store, repo_id, run_id)
+        ctx.cache["economy_loader"] = lambda: view_from_store(self.store, repo_id, run_id)
         return ctx
 
     async def failure_message(self, ctx: RunContext, nodeid: str) -> tuple[str | None, str | None]:

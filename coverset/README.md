@@ -35,6 +35,23 @@ What is here, in one list: a control plane that runs a PR's tests on Modal sandb
 
 Screenshots: demo data from <!-- n:demo_runs -->8<!-- /n --> local runs (`coverset demo --executor local`: six `main` commits and two PRs), taken on <!-- n:screenshot_date -->2026-10-11<!-- /n --> with `scripts/screenshots.py`. Dark versions are next to them as `docs/*-dark.jpg`. The AI review in them comes from fixtures.
 
+## Core features
+
+Six capabilities, with where each one stands. **Implemented** means on the pages, in the comment or on the CLI today with tests; **partial** means a real subset is live and the rest is named; **planned** means designed and not built.
+
+| # | Capability | Status | What exists today | What is missing |
+|---|---|---|---|---|
+| 1 | **Change risk and confidence.** Every PR run says what changed, which tests exercise it, and whether the changed behaviour was actually tested. | Partial | Patch coverage, changed functions with no covering test, input classes the tests never passed in, a per-test risk score from failure history, flakiness and the change's footprint in the prior run, all in the comment, the check run and the PR page. | No commit-level pass probability, on purpose: the score is a heuristic with no calibration yet. Every run stores its planned order, executed order, first-failure rank and outcome, so the next step is an empirical curve per repository ("87% of first failures surfaced within 30 s over the last 50 runs"), not a number dressed as a probability. No static dependency graph in the score. |
+| 2 | **Predictive ordering and selection.** The tests most likely to fail run first; a useful signal arrives long before the suite ends. | Partial | Risk-ordered tests, the change-covering set first on every shard, priority-snake sharding, fail-fast with one retry, the early verdict, the "why this order" panel, the measured time to first failure against the file-order estimate. | No test selection (every collected test runs, by design, until the ordering is calibrated) and no confidence-against-elapsed-time curve with a residual risk when stopping early; both come from the same calibration data as row 1. |
+| 3 | **Semantic coverage and test quality.** Line and branch coverage can be 100% and still verify nothing; show what is not meaningfully verified. | Implemented, minus mutation | Changed-code coverage; input-class coverage from argument shapes (the data-flow overlay) with Hypothesis strategies for every class no test passed in; user-declared invariants verified by tests, properties or review; the test economy: leverage, duplicated flows, the minimal covering set, assertion-free tests, exception handlers nothing entered, the PR's test tax. | Mutation testing. Full mutation is too slow to be a default; the plan is extreme mutation on a PR's changed functions only (replace a body with a trivial return and ask whether any covering test fails), as the validator in row 4. |
+| 4 | **Agent-native test generation.** Agents ask what remains untested and get actionable work; the platform checks the tests they write. | Partial | The MCP server and `/v1/agent`: missing input classes with redacted example inputs and strategies, covering tests, the minimal set, redundant candidates, the test tax, search, and three playbooks (review a PR's tests, bootstrap tests for a function, shrink a suite). | Independent validation of new tests. Today the test tax, assertion-free and duplicate-flow checks catch only the crude cases; extreme mutation on changed functions (row 3) is the planned check against superficial tests. |
+| 5 | **Integration verification for parallel agents.** Verify combinations of concurrent changes, not only each PR alone. | Planned | Per-run changed-function indexes and covering tests for every open PR, which is the data an overlap matrix needs; untrusted-PR gating. | The overlap matrix between open PRs (same changed functions, same covering tests) to prioritise which pairs deserve a combined run, and combined runs on merge-queue events (`merge_group`). Combinations are prioritised by overlap, never enumerated. |
+| 6 | **Test suite observability.** Runtime, flakiness, coverage regressions, redundancy, cost and trends over time. | Mostly implemented | Per-test history (fail rate, flakiness, p50 and p95), quarantine, baseline trends for line and input-class coverage, function history, the repository overview, run timelines with cost, redundant tests and the test tax, all from one Parquet facts store per run. | Failures grouped by root cause (a failure signature is stored per result; there is no page for it), cost per verified change as a named metric, and cross-repository trends. |
+
+The next build is the **verification record** ([docs/verification-records.md](docs/verification-records.md)): one test's evidence over the function bodies it executed, at content hashes, under an environment hash. Diffs invalidate records exactly, valid records carry forward (the one sound basis for skipping tests), verification progress becomes a measurement instead of a prediction, and post-merge verification of the default branch replaces pairwise PR combinations. Rows 1, 2 and 5 above are restated in those terms once it lands.
+
+What this means for a reader of the comment on a PR today: "PASS with gaps" is a verified statement about coverage of the change and of its input space; it is not a prediction that the suite would pass, and the pages never claim one.
+
 ## Three functions at 100% coverage
 
 Each of these functions is at 100% line and branch coverage on `main`. Each table is the output of `coverset shapes <function> --markdown` on the default branch, which pools the last five baseline runs of the demo (demo data from <!-- n:shapes_runs -->5<!-- /n --> local runs). [docs/input-classes.md](docs/input-classes.md) explains how the expected classes are derived.
@@ -105,7 +122,7 @@ Each of these functions is at 100% line and branch coverage on `main`. Each tabl
 `coverset report` writes one test run as a folder of static pages, the rich equivalent of `coverage html`: lines and branches, the tests behind every line, a data-flow lens that dims what one test did not run, a page per test with the input classes it passed in, and every function's shape grid with Hypothesis strategies for the classes no test passed in. No server and no database: open `index.html` from disk.
 
 ```sh
-pytest --coverset                     # the bundle goes to .coverset/, sources from [tool.coverset] (or --coverset-out DIR --coverset-source PKG)
+pytest --coverset                     # the bundle goes to .coverset/, sources from [tool.coverset] (or --coverset-out=DIR --coverset-source=PKG)
 coverset report .coverset --open      # from a git checkout that tracks the measured files; also --run <run id> from the facts store
 coverset report .coverset --compare ../before/.coverset   # plus a Changes page: what this run gained or lost against a base
 coverset report bundle.tar.gz --repo-root ~/src/myrepo   # a CI bundle or a neutral bundle: sources only with --repo-root
@@ -126,7 +143,7 @@ coverset tests minimal .coverset --write deselect.txt && pytest @deselect.txt   
 coverset tests tax .coverset --compare base/.coverset --base-ref origin/main --check   # a CI gate
 ```
 
-Every surface reads one view model (`src/coverset/report/economy.py`), so the Economy page (`/repos/<id>/economy`, key `g e`), the PR card, the comment line, the static report and the CLI cannot disagree. Definitions, weights and caveats: [docs/economy.md](docs/economy.md).
+Every surface reads one view model (`src/coverset/report/economy.py`), so the Economy page (`/repos/<id>/economy`, key `g e`), the PR card, the comment line, the static report, the CLI and the MCP tools cannot disagree. Definitions, weights and caveats: [docs/economy.md](docs/economy.md).
 
 ## One model for every language
 
@@ -215,7 +232,7 @@ Sign in with GitHub through the App's own client id (the manifest flow registers
    **Route B, managed runs:** steps 3 and 4.
 3. Pick the executor: `COVERSET_EXECUTOR=modal` after `modal setup`, with `COVERSET_MODAL_DAILY_BUDGET_USD` as the daily cap, `COVERSET_MAX_RUN_COST_USD` (1.00) as the per-run cap, also enforced while the run executes, and `COVERSET_MAX_IMAGE_BUILDS_PER_DAY` (20). An untrusted PR whose lockfile has no image yet waits for approval, and its environment is never built from direct URL or VCS references. The local executor runs webhook-triggered runs only with `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true` and never runs untrusted PRs. `coverset warm --repo <name>` builds the environment (and on Modal a trusted snapshot) ahead of the first PR.
 4. In CI, replace the `pytest` step with the composite action in `src/coverset/forge/gha/`, which runs `coverset-ci wait`: it proves the repository with the job's OIDC token, waits for coverset's verdict, prints the results in pytest's format and exits with pytest's codes.
-5. Declare invariants in `invariants.yaml` and link tests to them with `@pytest.mark.invariant("<id>")` ([docs/invariants.md](docs/invariants.md)). `coverset invariants scan` reviews the review-kind invariants at the latest trusted baseline of the default branch through the configured review client (the offline fake unless `COVERSET_AI=anthropic` and the repo opted in) and records their statuses. It also runs automatically after every trusted, completed baseline of the default branch's tip (`COVERSET_SCAN_AFTER_BASELINE=false` turns that off).
+5. Declare invariants in `invariants.yaml` and link tests to them with `@pytest.mark.invariant("<id>")` ([docs/invariants.md](docs/invariants.md)). `coverset invariants scan` reviews the review-kind invariants at the latest trusted baseline of the default branch through the configured review client (the offline fake unless `COVERSET_AI=anthropic` and the repository's `policy.ai_review` setting is on) and records their statuses. It also runs automatically after every trusted, completed baseline of the default branch's tip (`COVERSET_SCAN_AFTER_BASELINE=false` turns that off).
 
 ## Keys
 
