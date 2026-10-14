@@ -8,6 +8,8 @@
 <title>{% block title %}coverset{% endblock %} · coverset</title>
 <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
 <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='features.css') }}">
+{% block head %}{% endblock %}
 {% if not no_scripts %}
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}" defer></script>
@@ -30,10 +32,14 @@
     {% if nav_repo %}
     <a href="{{ url_for('repos.tests_page', rid=nav_repo.id) }}"{% if endpoint == 'repos.tests_page' %} aria-current="page"{% endif %}>Tests</a>
     <a href="{{ url_for('repos.invariants_page', rid=nav_repo.id) }}"{% if endpoint == 'repos.invariants_page' %} aria-current="page"{% endif %}>Invariants</a>
+    {% include "_nav_repo_economy.html" ignore missing %}
+    {% include "_nav_repo_settings.html" ignore missing %}
     {% endif %}
     <a href="{{ url_for('outbox.outbox') }}"{% if endpoint == 'outbox.outbox' %} aria-current="page"{% endif %}>Outbox</a>
     <a href="{{ url_for('setup.index') }}"{% if endpoint.startswith('setup.') %} aria-current="page"{% endif %}>Setup</a>
+    {% include "_nav_admin.html" ignore missing %}
   </nav>
+  {% include "_nav_account.html" ignore missing %}
   {% if not no_scripts %}<button type="button" id="theme-toggle" class="theme-toggle">Theme</button>{% endif %}
 </header>
 {% if settings_paused %}<div class="banner" role="status">coverset is paused: webhooks are stored, no runs start.</div>{% endif %}

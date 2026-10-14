@@ -50,3 +50,12 @@ def register_commands(
     from coverset.commands.report import report_command
 
     cli.add_command(report_command, "report")
+    from coverset.commands.doctor import doctor_group
+    from coverset.commands.economy import economy_group
+    from coverset.commands.mcp import mcp_group
+    from coverset.commands.users import users_group
+
+    cli.add_command(doctor_group, "doctor")
+    cli.add_command(economy_group, "tests")
+    cli.add_command(mcp_group, "mcp")
+    cli.add_command(users_group, "users")

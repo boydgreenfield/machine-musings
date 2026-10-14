@@ -28,6 +28,7 @@ dependencies = [
   "anthropic>=1.13,<2",
   "pytest-coverset",
   "coverset-model",
+  "mcp>=2.3.0",
 ]
 
 [project.scripts]

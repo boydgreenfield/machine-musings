@@ -51,6 +51,7 @@ PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(_TOKEN_START + r"(gh[opsur]_)[A-Za-z0-9._-]{20,}"), r"\1[REDACTED]"),
     (re.compile(_TOKEN_START + r"(github_pat_)[A-Za-z0-9_]{20,}"), r"\1[REDACTED]"),
     (re.compile(_TOKEN_START + r"(sk-ant-)[A-Za-z0-9_-]{8,}"), r"\1[REDACTED]"),
+    (re.compile(_TOKEN_START + r"(cst_)[A-Za-z0-9_-]{8,}"), r"\1[REDACTED]"),
     # Modal token ids and secrets.
     (re.compile(_TOKEN_START + r"(a[ks]-)[A-Za-z0-9]{20,}"), r"\1[REDACTED]"),
     # user:password@ in any URL (x-access-token URLs were handled above).

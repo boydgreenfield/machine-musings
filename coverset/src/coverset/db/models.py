@@ -58,7 +58,7 @@ RunStatus = Literal[
     "error",
 ]
 Conclusion = Literal["success", "failure", "neutral", "cancelled", "timed_out"]
-RunTrigger = Literal["pull_request", "push", "baseline", "rerun", "manual"]
+RunTrigger = Literal["pull_request", "push", "baseline", "rerun", "manual", "upload"]
 PrState = Literal["open", "closed", "merged"]
 ShardStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 SnapshotStatus = Literal["building", "ready", "failed", "expired"]
@@ -483,4 +483,126 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(KEY_LEN), primary_key=True)
     value: Mapped[str] = mapped_column(String(SECRET_COLUMN_LEN))
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now, onupdate=utc_now)
+
+
+# --- Accounts, access control, tokens, audit and scoped settings (migration 0008) ------------------
+
+UserRole = Literal["admin", "member"]
+"""Instance role: ``admin`` sees and changes everything; ``member`` sees the repositories GitHub
+grants them (:class:`RepoAccess`)."""
+RepoPermission = Literal["read", "write", "admin"]
+"""GitHub's ``pull`` / ``push``+``maintain`` / ``admin`` collapsed to what coverset distinguishes."""
+TokenKind = Literal["personal", "repo"]
+ActorKind = Literal["user", "admin_token", "api_token", "oidc", "system"]
+SettingScope = Literal["instance", "org", "repo", "user"]
+
+
+class User(Base):
+    """A person who signed in through the forge (GitHub OAuth via the App's client id)."""
+
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("forge", "external_id", name="uq_users_forge_external"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    forge: Mapped[ForgeKind] = mapped_column(str_enum(ForgeKind))
+    external_id: Mapped[str] = mapped_column(String(KEY_LEN))
+    login: Mapped[str] = mapped_column(String(NAME_LEN), index=True)
+    name: Mapped[str | None] = mapped_column(String(NAME_LEN))
+    avatar_url: Mapped[str | None] = mapped_column(String(PATH_LEN))
+    role: Mapped[UserRole] = mapped_column(str_enum(UserRole), default="member")
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: the user's OAuth access token (used only to ask GitHub which repositories they may see)
+    oauth_token: Mapped[str | None] = mapped_column(String(SECRET_COLUMN_LEN))
+    oauth_refresh_token: Mapped[str | None] = mapped_column(String(SECRET_COLUMN_LEN))
+    oauth_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class UserSession(Base):
+    """A server-side login session; the cookie carries the raw id, the row stores its sha256."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(HASH_LEN), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    csrf: Mapped[str] = mapped_column(String(KEY_LEN))
+    ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(NAME_LEN))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class ApiToken(Base):
+    """A bearer token for the HTTP API, the MCP server and bundle uploads.
+
+    The raw token (``cst_<prefix>_<secret>``) is shown once; only its sha256 is stored. ``repo_id``
+    bounds a repository token; a personal token acts as its user. ``scopes`` is a subset of
+    ``read``, ``write``, ``upload``, ``admin``.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(HASH_LEN), unique=True)
+    prefix: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(NAME_LEN))
+    kind: Mapped[TokenKind] = mapped_column(str_enum(TokenKind), default="personal")
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    repo_id: Mapped[int | None] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"), index=True)
+    scopes: Mapped[list[str]] = mapped_column(JSONList, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class RepoAccess(Base):
+    """Cached answer to "may this user see this repository?", refreshed from the forge."""
+
+    __tablename__ = "repo_access"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    repo_id: Mapped[int] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    permission: Mapped[RepoPermission] = mapped_column(str_enum(RepoPermission))
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now)
+
+
+class AuditEvent(Base):
+    """Who did what: every state-changing request and every credential event."""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now, index=True)
+    actor_kind: Mapped[ActorKind] = mapped_column(str_enum(ActorKind))
+    actor_id: Mapped[str | None] = mapped_column(String(KEY_LEN))
+    actor_label: Mapped[str] = mapped_column(String(NAME_LEN), default="")
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target_kind: Mapped[str | None] = mapped_column(String(32))
+    target_id: Mapped[str | None] = mapped_column(String(KEY_LEN))
+    repo_id: Mapped[int | None] = mapped_column(ForeignKey("repos.id", ondelete="SET NULL"), index=True)
+    ip: Mapped[str | None] = mapped_column(String(64))
+    details: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict)
+
+
+class ScopedSetting(Base):
+    """One setting value at one scope; :mod:`coverset.settings_scopes` resolves the inheritance
+    (user > repo > org > instance > built-in default for view preferences; repo > org > instance for
+    policy keys, which users cannot override)."""
+
+    __tablename__ = "scoped_settings"
+    __table_args__ = (UniqueConstraint("scope_kind", "scope_id", "key", name="uq_scoped_settings"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_kind: Mapped[SettingScope] = mapped_column(str_enum(SettingScope))
+    scope_id: Mapped[str] = mapped_column(String(KEY_LEN), default="")
+    key: Mapped[str] = mapped_column(String(KEY_LEN))
+    value: Mapped[dict[str, Any]] = mapped_column(JSONDict, default=dict)
+    """``{"v": <json value>}`` so scalars round-trip."""
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now, onupdate=utc_now)

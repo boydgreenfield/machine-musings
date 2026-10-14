@@ -97,6 +97,20 @@ class Settings(BaseSettings):
     bind: str = "127.0.0.1:8000"
     public_url: str = Field(default="", description="External base URL; empty means http://<bind>.")
     admin_token: SecretStr | None = None
+    admins: CommaList = Field(
+        default_factory=list,
+        description="GitHub logins that are instance admins once signed in (the admin token always is).",
+    )
+    session_days: int = Field(default=30, gt=0, le=365, description="Lifetime of a login session.")
+    trust_proxy: bool = Field(
+        default=False,
+        description="Honour X-Forwarded-For/Proto from the immediate upstream (set behind Fly, Caddy, an ALB).",
+    )
+    secret_key: SecretStr | None = Field(
+        default=None, description="Cookie signing key; empty means a key file under the data dir."
+    )
+    uploads_enabled: bool = Field(default=True, description="Accept bundles at POST /v1/bundles.")
+    max_upload_bytes: int = Field(default=200 * MIB, gt=0, description="Largest accepted uploaded bundle.")
     data_dir: Path = Path("data")
     database_url: str = Field(default="", description="SQLAlchemy URL; empty means <data_dir>/coverset.db.")
 
@@ -160,7 +174,12 @@ class Settings(BaseSettings):
     skip_migrations: bool = False
 
     @field_validator(
-        "allowed_owners", "allowed_repos", "ai_exclude_globs", "sandbox_domain_allowlist", mode="before"
+        "allowed_owners",
+        "allowed_repos",
+        "ai_exclude_globs",
+        "sandbox_domain_allowlist",
+        "admins",
+        mode="before",
     )
     @classmethod
     def _split_comma_list(cls, value: Any) -> Any:
