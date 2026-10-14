@@ -20,7 +20,7 @@ uv run modal app stop coverset-web -e coverset              # stop it (the Secre
 **Postgres + an S3-compatible bucket is the hosted shape.** With `COVERSET_DATABASE_URL`
 (Postgres) and `COVERSET_BLOB_URL` (a bucket) set, nothing on the container's disk has to survive a
 restart, so any platform that runs a container works, a redeploy loses no run, fact or setting
-(only the reaper's sandbox tag; docs/deploy.md, "Scaling"), and a second
+(the GitHub App `/setup` stores and the reaper's sandbox tag are database rows too), and a second
 replica can share the database (the leader lease keeps the dispatcher, reaper and gc in one). The
 local Postgres plus blobs as files is the default for laptops, the demo, and a tunnel demo.
 
@@ -48,7 +48,7 @@ make, so give it a fresh database (or the new production one before first use).
 
 | | Modal | Fly.io | AWS: ECS Fargate + RDS + S3 | One VM (Lightsail) with compose |
 |---|---|---|---|---|
-| Set-up | Secret with the two URLs and the bucket keys, then `modal deploy` (below) | `deploy/fly/README.md`: no volume, Tigris + Managed Postgres or Neon | `docs/deploy.md`: task definition and IAM policy in `deploy/aws/` | `deploy/aws/user-data.sh` with `COVERSET_STATE=hosted`: Postgres and MinIO on the VM |
+| Set-up | Secret with the two URLs, the bucket keys, the admin token and `COVERSET_SECRET_KEY`, then `modal deploy` (below) | `deploy/fly/README.md`: no volume, Tigris + Managed Postgres or Neon | `docs/deploy.md`: task definition and IAM policy in `deploy/aws/` | `deploy/aws/user-data.sh` with `COVERSET_STATE=hosted`: Postgres and MinIO on the VM |
 | Cost (control plane) | about $23/month (inside the Starter credit) + the database | about $10-45/month | about $50/month | $24/month (4 GB) |
 | Modal token for the executor | not needed | `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | the same, in Secrets Manager | the same |
 | Verified | the container's checks with `modal` stubbed (`tests/test_deploy_hosted.py`); not deployed in this shape | config only | config only | compose file parsed; not run on a VM |
@@ -70,8 +70,16 @@ uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && co
 
 The new container creates the database when the server allows it (else create it once in the
 provider's console) and migrates it before it serves. A Secret without the database URL, the bucket
-URL, the bucket keys or the admin token stops the container at start with one line naming what is
-missing (`modal app logs coverset-web -e coverset`).
+URL, the bucket keys, the admin token or `COVERSET_SECRET_KEY` stops the container at start with one
+line naming what is missing (`modal app logs coverset-web -e coverset`). Keep `COVERSET_SECRET_KEY`
+in your password manager: the GitHub App `/setup` creates is stored in the database encrypted
+under it, and nothing else can open it. To rotate it later, re-encrypt first, from a container
+(`modal container exec --no-pty <id> -- env COVERSET_SECRET_KEY=<new> COVERSET_OLD_SECRET_KEY=<old>
+coverset secrets rekey`, the same as `coverset secrets rekey --old-key <old>`), then recreate the Secret with the new value and redeploy; between the two
+steps the running container cannot open the App (webhooks answer 503) and a `/setup` run there
+would seal a new App under the old key, so do them back to back and leave `/setup` alone until
+the redeploy. `COVERSET_SECRET_KEY` must be at least 32 characters (`openssl rand -hex 32` gives
+64).
 
 Two rules learned the hard way: redeploy a one-container app with `--strategy recreate` (a rolling deploy deadlocks with one container, which cost 25 minutes of downtime the
 first night), and deploy from a clean checkout (the Modal client refuses a build whose files change
@@ -89,10 +97,9 @@ Everything below happens in the browser against the deployed URL. No GitHub obje
 1. Redeploy from the committed branch (the command above) so the deployment has tonight's fixes.
 2. Open `<url>/login` and sign in with the admin token.
 3. Open `<url>/setup`. For an organization's repositories use `<url>/setup?org=<org>`; for your own repositories use the plain page. Press **Create the GitHub App**. GitHub shows the manifest (private App, minimal permissions: checks write, contents read, pull requests write, issues write, metadata read; events: pull_request, push, check_suite, check_run, installation; the webhook URL, the setup callback and the sign-in callback are all derived from `COVERSET_PUBLIC_URL`). Confirm.
-4. GitHub redirects back; coverset writes the App id, client id, client secret and webhook secret to `.env` and the private key to `secrets/github-app.pem` in its working directory, and sets `COVERSET_ALLOWED_OWNERS` to the App's owner when none is configured. That is the container's disk: **copy the values into the Secret now** (`modal container exec --no-pty <id> -- cat /root/coverset-data/.env /root/coverset-data/secrets/github-app.pem`), the key as `COVERSET_GITHUB_APP_PRIVATE_KEY` (PEM text; the module writes it back to the key path at every start), then recreate the Secret with all its keys.
-5. Restart so the settings are re-read: `uv run modal container list -e coverset`, then `uv run modal container stop -y <id>` (14 s), or the redeploy command.
-6. Install the App on the repositories you want (the success page links to the installation page). Add more owners later by adding `COVERSET_ALLOWED_OWNERS=a,b` to the Secret (`modal secret create coverset-web --force --from-dotenv <file> -e coverset`, keeping the existing admin token and secret key), then restart.
-7. Check: `uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && coverset deploy check'`. Every row should be PASS once the App exists.
+4. GitHub redirects back; coverset stores the App (id, client id, client secret, webhook secret, private key) in the database, encrypted under `COVERSET_SECRET_KEY`, and the page says "Credentials stored" with the App's name and the installation link. Nothing to copy and no restart: every container uses the App within about 5 s. With no `COVERSET_ALLOWED_OWNERS` only the App's owner is accepted. (The button is disabled, with the reason, while `COVERSET_SECRET_KEY` is missing from the Secret.)
+5. Install the App on the repositories you want (the success page links to the installation page). Add more owners later by adding `COVERSET_ALLOWED_OWNERS=a,b` to the Secret (`modal secret create coverset-web --force --from-dotenv <file> -e coverset`, keeping the existing admin token and secret key), then restart (that is an environment change).
+6. Check: `uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && coverset deploy check'`. Every row should be PASS once the App exists.
 
 Then sign in with GitHub: set `COVERSET_ADMINS=<your GitHub login>` in the Secret, restart, open `<url>/login` in a private window, press **Sign in with GitHub**. `/account` lists your repositories with their permissions; `/audit` shows the log. Collaborators sign in the same way and see exactly what GitHub lets them see. `docs/auth.md` has the details; `docs/github.md` the webhook side.
 
@@ -144,7 +151,7 @@ Cost guards for the Modal executor: `COVERSET_MODAL_DAILY_BUDGET_USD` (5.00) and
 
 | Symptom | Look at |
 |---|---|
-| The webhook answers 503 | the webhook secret is empty: `/setup` did not finish, or the container was not restarted |
+| The webhook answers 503 | no webhook secret: `/setup` did not finish (its page says why), or the stored App does not open with `COVERSET_SECRET_KEY` (the log says `the stored GitHub App is not usable`; `coverset secrets rekey --old-key <previous key>` after a key change) |
 | The webhook answers 202 and nothing runs | `/forge/outbox`, the run list on `/`, the dispatcher's log lines; `COVERSET_PAUSED`; the owner is not in `COVERSET_ALLOWED_OWNERS` (stored as `ignored_owner`) |
 | An upload answers 401 or 403 | the token's repository or scope; for OIDC the `--server` URL must equal `COVERSET_PUBLIC_URL` exactly (it is the audience) |
 | A run says "budget exhausted" | the daily budget in the Secret; `coverset modal reap --all` after an interrupted run |

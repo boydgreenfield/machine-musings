@@ -15,7 +15,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -42,6 +41,7 @@ from coverset.forge.base import (
     check_full_name,
     check_sha,
 )
+from coverset.forge.credentials import GitHubCredentials, from_environment
 from coverset.forge.github_events import ALLOWED_EVENTS, parse_github_event
 from coverset.forge.signing import verify_signature, webhook_secret
 from coverset.forge.throttle import TokenBucket
@@ -162,27 +162,36 @@ class GitHubForge:
     def from_settings(
         cls,
         settings: Settings,
+        credentials: GitHubCredentials | None = None,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         bucket: TokenBucket | None = None,
     ) -> GitHubForge:
-        """App mode when ``COVERSET_GITHUB_APP_ID`` is set, else token mode with ``COVERSET_GITHUB_TOKEN``."""
-        secret, _problem = webhook_secret(settings)
+        """App mode with ``credentials.app`` (the environment's, or the App ``/setup`` stored), else
+        token mode with ``COVERSET_GITHUB_TOKEN``. ``credentials`` default to the environment's."""
+        credentials = credentials if credentials is not None else from_environment(settings)
+        secret, _problem = webhook_secret(settings, credentials)
         common: dict[str, Any] = {"webhook_secret": secret, "transport": transport, "bucket": bucket}
-        if settings.github_app_id is not None:
-            key = _read_private_key(settings.github_app_private_key_path)
-            client_secret = settings.github_app_client_secret
+        app = credentials.app
+        if app is not None:
+            if not app.pem:
+                raise ValueError(
+                    "COVERSET_GITHUB_APP_ID is set but COVERSET_GITHUB_APP_PRIVATE_KEY (the PEM text "
+                    "itself; COVERSET_GITHUB_APP_PRIVATE_KEY_PATH is no longer read) is not"
+                )
             return cls(
                 mode="app",
-                app_id=settings.github_app_id,
-                private_key=key,
-                client_id=settings.github_app_client_id,
-                client_secret=client_secret.get_secret_value() if client_secret else None,
+                app_id=app.app_id,
+                private_key=app.pem,
+                client_id=app.client_id,
+                client_secret=app.client_secret,
                 **common,
             )
         if settings.github_token is not None and settings.github_token.get_secret_value():
             return cls(mode="token", token=settings.github_token.get_secret_value(), **common)
-        raise ValueError("GitHub forge needs COVERSET_GITHUB_APP_ID or COVERSET_GITHUB_TOKEN")
+        raise ValueError(
+            "GitHub forge needs a GitHub App (/setup, or COVERSET_GITHUB_APP_ID) or COVERSET_GITHUB_TOKEN"
+        )
 
     # -- clients ---------------------------------------------------------------------------------
 
@@ -535,12 +544,3 @@ def _parse_time(value: object) -> datetime | None:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except ValueError:
         return None
-
-
-def _read_private_key(path: Path) -> str:
-    try:
-        key = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ValueError(f"cannot read the GitHub App private key at {path}: {exc.strerror}") from None
-    register_secret(key)
-    return key

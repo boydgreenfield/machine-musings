@@ -14,7 +14,8 @@
 # creates the database when the server has none of its name, then migrates. Every replica may do
 # so: an advisory lock (coverset:migrate) runs them one after the other.
 # To migrate once per deploy instead, set it false and run `init-db` in a release step
-# (docs/deploy.md, "Migrations on deploy"). The entrypoint writes COVERSET_GITHUB_APP_PRIVATE_KEY (PEM text) to the key path when set.
+# (docs/deploy.md, "Migrations on deploy"). The GitHub App that /setup creates is stored in the
+# database, encrypted under COVERSET_SECRET_KEY: nothing on the container's disk holds a credential.
 #
 # The project is installed *editable* on purpose: the executors find the pytest-coverset sources and
 # coverset's own uv.lock relative to src/coverset (env_export.PLUGIN_DIR), and the demo seeds from
@@ -54,7 +55,6 @@ RUN apt-get update \
     && chown coverset:coverset /data /var/cache/coverset && chmod 700 /data /var/cache/coverset
 COPY --from=build /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=build --chown=root:root /app /app
-COPY --chmod=755 deploy/docker-entrypoint.sh /usr/local/bin/coverset-entrypoint
 
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -65,8 +65,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     COVERSET_CACHE_DIR=/var/cache/coverset \
     COVERSET_MIGRATE_ON_START=true
 USER coverset
-# The working directory holds the optional `.env` and `secrets/` (GitHub App key) that /setup
-# writes, so it lives on the data volume too; see docs/deploy.md.
+# The working directory is the data directory (an optional `.env` there is read like anywhere else).
 WORKDIR /data
 # Pre-build the pytest-coverset wheel into ~/.cache/coverset so the first run does not wait for it.
 RUN python -c "from coverset.executors.env_export import build_plugin_wheel; print(build_plugin_wheel())"
@@ -75,7 +74,7 @@ VOLUME ["/data"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"]
-# tini reaps git's and uv's children and forwards SIGTERM, so `serve` drains and stops the pool; the
-# entrypoint script execs `coverset "$@"` (so `docker run coverset init-db` works as before).
-ENTRYPOINT ["tini", "--", "coverset-entrypoint"]
+# tini reaps git's and uv's children and forwards SIGTERM, so `serve` drains and stops the pool;
+# arguments go to `coverset` (so `docker run coverset init-db` runs `coverset init-db`).
+ENTRYPOINT ["tini", "--", "coverset"]
 CMD ["serve", "--bind", "0.0.0.0:8000"]

@@ -26,7 +26,7 @@ that produce trusted markup).
 | `/repos/<rid>/tests/by-nodeid?nodeid=&run=` | Redirects (302) to the test page of that nodeid, keeping `run`. Every nodeid in the UI links through the `test_link` macro: the tests table, the run page's failures and "All tests", the PR page's tests, the line popover, a shape cell's tests and the function page's covering tests. |
 | `/repos/<rid>/invariants` | Every declared invariant: statement, status chip, the last 12 statuses, the coverage lens and per-verification evidence. `?run=<PR run>` adds the PR-vs-base comparison and "Invariants changed by this PR". |
 | `/forge/outbox` | (Instance admins; the header links it, and Setup, only for them.) Every recorded forge call, newest first; sticky comments and check-run summaries rendered as GitHub-flavoured markdown under "Would be posted to GitHub (fake forge)". `?method=` filters. |
-| `/setup` | GitHub App manifest flow, token mode, sandbox settings. Plain HTML, no scripts. The "Create the GitHub App" button is disabled, with the reason, while the public URL is a loopback address. |
+| `/setup` | GitHub App manifest flow (the App is stored in the database, encrypted; **Forget the App** deletes it), the credentials in force, token mode, sandbox settings. Plain HTML, no scripts. The "Create the GitHub App" button is disabled, with the reason, while the public URL is a loopback address, `COVERSET_SECRET_KEY` is unset or the environment holds GitHub credentials. |
 
 Every UI route renders only its `main` block when the request carries `HX-Request: true` without
 `HX-Boosted`, and the full layout otherwise (responses `Vary: HX-Request`). Unknown repos, runs,

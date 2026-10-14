@@ -235,8 +235,12 @@ async def _oidc_uploader(session: AsyncSession, raw: str, full_name: str, *, cre
 
 
 async def _create_from_claims(session: AsyncSession, claims: Claims) -> Repo | None:
-    """A ``repos`` row from a verified token, when ``COVERSET_ALLOWED_OWNERS`` lists its owner."""
-    settings = app_settings()
+    """A ``repos`` row from a verified token, when ``COVERSET_ALLOWED_OWNERS`` (or, when it is
+    empty, the owner of the App ``/setup`` stored) lists its owner."""
+    from coverset.forge.credentials import with_app_owner
+    from coverset.forge.registry import credential_cache
+
+    settings = with_app_owner(app_settings(), await credential_cache(current_app).refresh())
     owner = claims.raw.get("repository_owner")
     if not settings.allowed_owners or not isinstance(owner, str) or not claims.repository:
         return None

@@ -17,7 +17,7 @@ The login page (`/login`) offers up to two options, depending on what is configu
 
 | Option | Offered when | What it does |
 |---|---|---|
-| **Sign in with GitHub** | the App's client id and secret are set (`COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET`; `/setup` writes both) | the authorization-code flow of the GitHub App; creates a `users` row and a server-side session |
+| **Sign in with GitHub** | the App has a client id and secret: the App `/setup` stored (offered within seconds of storing it, no restart), or `COVERSET_GITHUB_APP_CLIENT_ID` and `COVERSET_GITHUB_APP_CLIENT_SECRET` in the environment | the authorization-code flow of the GitHub App; creates a `users` row and a server-side session |
 | **Admin token** | `COVERSET_ADMIN_TOKEN` is set | the form (or JSON `POST /login`) sets the admin flag in the cookie session; this is the operator |
 
 With neither configured coverset is in open mode (loopback only, no token): every caller on the
@@ -216,17 +216,18 @@ target, repository, client address and a details object whose every string went 
 redactor (`web/audit.py`, `record_audit`). Recorded: `login`, `login_failed`, `logout`,
 `session_revoked`, `token_rejected`, `access_refreshed`, `access_revoked`, `role_changed`,
 `user_disabled`, `user_enabled`, `token_created`, `token_revoked`, `approve`, `quarantine`,
-`setting_changed` (the settings pages) and `credentials_written` (setup). Instance admins read it at `/audit`
+`setting_changed` (the settings pages), `github_app_stored` and `github_app_forgotten` (setup) and
+`secrets_rekeyed` (`coverset secrets rekey`). Instance admins read it at `/audit`
 (newest 500, filters by action and repository). The CLI's events carry the actor `cli`.
 
 ## Configuration
 
 | Key | Default | Meaning |
 |---|---|---|
-| `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET` | from `/setup` | enable "Sign in with GitHub" |
+| `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET` | unset (the App `/setup` stored provides them) | enable "Sign in with GitHub" when you manage the App's credentials in the environment |
 | `COVERSET_ADMINS` | empty | GitHub logins that are instance admins at every sign-in |
 | `COVERSET_SESSION_DAYS` | 30 | lifetime of a login session |
 | `COVERSET_ADMIN_TOKEN` | unset (loopback only) | the operator's token; required for any non-loopback bind or public URL |
-| `COVERSET_SECRET_KEY` | derived | cookie signing key (set it when several replicas serve one URL) |
+| `COVERSET_SECRET_KEY` | derived | cookie signing key (set it when several replicas serve one URL), and the key of the vault that stores the GitHub App (required for `/setup`) |
 | `COVERSET_TRUST_PROXY` | false | take the client address and scheme from the nearest proxy's headers |
 | `COVERSET_PUBLIC_URL` | `http://<bind>` | base of the OAuth callback URL; must match the App's callback |

@@ -55,7 +55,7 @@ The local server is a development requirement:
 
 ```sh
 brew install postgresql@14 && brew services start postgresql@14
-uv run coverset init-db   # ... database ready (10 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
+uv run coverset init-db   # ... database ready (11 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 ```
 
 Any Postgres 14 or newer on `localhost:5432` that lets the current user in works the same way.
@@ -81,7 +81,7 @@ make services-psql       # psql in the container
 make test-pg             # the whole suite against this Postgres 17 (leaves it running)
 
 export COVERSET_DATABASE_URL=postgresql://coverset:coverset@127.0.0.1:55432/coverset
-uv run coverset init-db  # ... database ready (10 migration(s) applied): postgresql+asyncpg://coverset:***@127.0.0.1:55432/coverset (Postgres 17.11)
+uv run coverset init-db  # ... database ready (11 migration(s) applied): postgresql+asyncpg://coverset:***@127.0.0.1:55432/coverset (Postgres 17.11)
 ```
 
 `make dev-hosted` (`coverset dev --hosted`, [dev.md](dev.md)) starts the stack when it is down and
@@ -111,12 +111,14 @@ lease (a database the server does not have yet is a failing row that names `cove
 ```
 $ uv run coverset deploy check --offline
 ...
-PASS  database        Postgres 14.17, migrated to head 0010; 10 + 10 overflow connections per process; lease coverset:background: free (no process runs the background tasks right now)
+PASS  database        Postgres 14.17, migrated to head 0011; 10 + 10 overflow connections per process; lease coverset:background: free (no process runs the background tasks right now)
 ```
 
 `db.session.check_database(url)` is the same report as a value (it unpacks as `(status, detail)`
 and carries `server_version`, `current`, `heads`, `pool`, `leader`, `error`), and
-`db.leader.leader_status(engine)` the lease holder alone.
+`db.leader.leader_status(engine)` the lease holder alone (of this database: advisory locks are per
+database, and `pg_locks` lists every database's, so another installation's lease on the same
+server, a developer's `coverset dev` say, is not reported as this one's).
 
 ## What every connection gets
 
@@ -160,7 +162,7 @@ warns when the host looks like a transaction pooler (`-pooler.` in the name, or 
 
 ## Schema and migrations
 
-One Alembic chain (`0001`-`0010`) builds the schema. Every constraint has a name (the metadata's
+One Alembic chain (`0001`-`0011`) builds the schema. Every constraint has a name (the metadata's
 naming convention), and `tests/db/test_postgres_migrations.py` runs the whole chain on an empty
 database, compares the result with the models (what `alembic check` does), downgrades to base
 (only `alembic_version` is left, and no sequences) and upgrades again. Nothing in the schema or in
@@ -178,7 +180,10 @@ coverset's SQL needs more than Postgres 14 (no `MERGE`, no `CREATE DATABASE ... 
 **Why BIGINT ids:** a `SERIAL` is 32-bit and ids are never reused, while the web accepts any id up
 to 2**63 - 1 in a URL (a larger one must answer 404, not fail on an int4 overflow). Revision `0009`
 widens the columns in one `ALTER TABLE` per table. `0010` adds `ix_run_events_at`, the index the retention gc's `DELETE FROM run_events WHERE at <
-cutoff` uses (the largest table; without it the daily delete scanned all of it).
+cutoff` uses (the largest table; without it the daily delete scanned all of it). `0011` makes
+`settings.value` `text` (it was `VARCHAR(2048)`): the sealed GitHub App `/setup` stores, private key
+included, is about 2.7 KB ([security.md](security.md#5-secrets)); on Postgres the change rewrites no
+rows.
 
 **Why `json`, not `jsonb`:** coverset never filters, indexes or compares JSON in SQL (it reads whole
 documents), so `jsonb`'s operators and indexes would buy nothing yet. The one rule that follows:
@@ -250,6 +255,8 @@ What changes with several replicas:
 | caches (per process) | scoped settings for 30 s (a change made on another replica shows within 30 s), facts and page caches keyed by what they read ([object-store.md](object-store.md) for the blob side) |
 | SSE streams | poll `run_events` every 0.5 s, so any replica can serve any stream; no sticky sessions |
 | sign-in | sessions are rows (`user_sessions`); set the same `COVERSET_SECRET_KEY` on every replica so they accept one another's cookies |
+| the GitHub App `/setup` stores | a row of `settings`, sealed under `COVERSET_SECRET_KEY` (the same on every replica): the replica that stored it uses it at once, every other one within 5 s (one indexed read of the row's `updated_at` per check), without a restart |
+| the Modal executor's instance id | a row of `settings` too, so every replica tags its sandboxes alike and any replica's reaper finds them |
 
 ## Backups
 
@@ -289,9 +296,9 @@ Measured on 2026-10-14 (six workers, an M4 Max MacBook):
 
 | Server and blobs | Passed | Skipped | Failed | Time |
 |---|---|---|---|---|
-| Homebrew Postgres 14.17, local files (`make test`) | 3,048 | 7 | 0 | 161 s |
-| compose Postgres 17.11, local files (`make test-pg`) | 3,048 | 7 | 0 | 156 s |
-| Homebrew Postgres 14.17, MinIO (`COVERSET_TEST_BLOB_URL`) | 3,048 | 7 | 0 | 176 s |
+| Homebrew Postgres 14.17, local files (`make test`) | 3,071 | 7 | 0 | 143 s |
+| compose Postgres 17.11, local files (`COVERSET_TEST_DATABASE_URL=...@127.0.0.1:55432/coverset`) | 3,071 | 7 | 0 | 145 s |
+| Homebrew Postgres 14.17, MinIO (`COVERSET_TEST_BLOB_URL`; measured before the vault, with 3,048 tests) | 3,048 | 7 | 0 | 176 s |
 
 The skipped tests are opt-in (a live Modal account, a Docker image build, the package index). A
 clone of the template, with the drop of the previous test's, costs about 70 ms on Homebrew's 14 (it

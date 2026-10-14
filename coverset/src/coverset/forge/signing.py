@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from githubkit import webhooks
 
 from coverset.config import Settings
 from coverset.forge.base import header
+
+if TYPE_CHECKING:
+    from coverset.forge.credentials import GitHubCredentials
 
 TEST_WEBHOOK_SECRET = "coverset-test-secret"
 """The secret the recorded fixtures are signed with; accepted only when ``COVERSET_ENV=test``."""
@@ -40,9 +43,16 @@ def verify_signature(secret: str | None, headers: Mapping[str, str], raw_body: b
     return webhooks.verify(secret, raw_body, signature)
 
 
-def webhook_secret(settings: Settings) -> tuple[str | None, SecretProblem | None]:
-    """The usable webhook secret, or None and why not (webhooks then fail closed with 503)."""
-    secret = settings.github_webhook_secret.get_secret_value() if settings.github_webhook_secret else ""
+def webhook_secret(
+    settings: Settings, credentials: GitHubCredentials | None = None
+) -> tuple[str | None, SecretProblem | None]:
+    """The usable webhook secret of ``credentials`` (default: the environment's), or None and why
+    not (webhooks then fail closed with 503)."""
+    if credentials is None:
+        from coverset.forge.credentials import from_environment
+
+        credentials = from_environment(settings)
+    secret = credentials.webhook_secret or ""
     if not secret:
         return None, "unset"
     if settings.env != "test" and hmac.compare_digest(secret, TEST_WEBHOOK_SECRET):

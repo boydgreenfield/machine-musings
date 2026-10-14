@@ -1,91 +1,108 @@
-"""``instance_id`` on filesystems without hard links (Modal Volumes answer EPERM to ``os.link``)."""
+"""The installation's instance id: one ``instance_id`` row of ``settings``, the same for every process,
+container and replica, so the reaper finds sandboxes an earlier container created."""
 
 from __future__ import annotations
 
-import errno
-import os
-import threading
+import asyncio
 import uuid
-from pathlib import Path
+from typing import Any
 
 import pytest
+from sqlalchemy import select
 
-from coverset.executors import modal_
-from coverset.executors.modal_ import instance_id
-
-
-def _no_links(error: OSError) -> object:
-    def link(src: object, dst: object, *args: object, **kwargs: object) -> None:
-        raise error
-
-    return link
+from coverset.config import Settings
+from coverset.db.models import AppSetting
+from coverset.db.session import Database
+from coverset.executors.base import ExecutorError
+from coverset.executors.modal_ import INSTANCE_ROW, ModalExecutor, SandboxSlots, instance_id
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        PermissionError(errno.EPERM, "Operation not permitted"),
-        OSError(errno.ENOTSUP, "Operation not supported"),
-        OSError(errno.EOPNOTSUPP, "Operation not supported on socket"),
-    ],
-)
-def test_an_exclusive_create_replaces_the_hard_link(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: OSError
-) -> None:
-    monkeypatch.setattr(os, "link", _no_links(error))
-    first = instance_id(tmp_path / "data")
-    assert str(uuid.UUID(first)) == first
-    assert instance_id(tmp_path / "data") == first
-    assert (tmp_path / "data" / "instance_id").read_text().strip() == first
-    assert [p.name for p in (tmp_path / "data").iterdir()] == ["instance_id"], "no temporary file left"
-
-
-def test_other_link_errors_still_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "link", _no_links(OSError(errno.EIO, "I/O error")))
-    with pytest.raises(OSError, match="I/O error"):
-        instance_id(tmp_path / "data")
-
-
-def test_concurrent_creators_agree_without_hard_links(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every racer proposes its own UUID; the exclusive create lets exactly one win."""
-    monkeypatch.setattr(os, "link", _no_links(PermissionError(errno.EPERM, "Operation not permitted")))
-    barrier = threading.Barrier(8)
-    results: list[str] = []
-
-    def race() -> None:
-        barrier.wait()
-        results.append(instance_id(tmp_path / "data"))
-
-    threads = [threading.Thread(target=race) for _ in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert len(results) == 8 and len(set(results)) == 1
-
-
-def test_a_loser_waits_for_the_winners_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The file exists but is still empty (the winner created it and has not written yet)."""
-    data = tmp_path / "data"
-    data.mkdir()
-    path = data / "instance_id"
-    path.touch()
-    winner = str(uuid.uuid4())
-    monkeypatch.setattr(os, "link", _no_links(PermissionError(errno.EPERM, "Operation not permitted")))
-    timer = threading.Timer(0.05, lambda: path.write_text(winner + "\n"))
-    timer.start()
+async def _rows(settings: Settings) -> list[tuple[str, str]]:
+    database = Database.from_url(settings.database_url)
     try:
-        assert instance_id(data) == winner
+        async with database.session() as session:
+            result = await session.execute(select(AppSetting.key, AppSetting.value).order_by(AppSetting.key))
+            return [(key, value) for key, value in result.all()]
     finally:
-        timer.cancel()
+        await database.engine.dispose()
 
 
-def test_an_empty_file_that_stays_empty_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    data = tmp_path / "data"
-    data.mkdir()
-    (data / "instance_id").touch()
-    monkeypatch.setattr(modal_, "INSTANCE_WAIT_S", 0.05)
-    with pytest.raises(RuntimeError, match="holds no instance id"):
-        instance_id(data)
+async def test_the_first_call_creates_the_row(settings: Settings) -> None:
+    assert await _rows(settings) == []
+    database = Database.from_url(settings.database_url)
+    try:
+        async with database.session() as session:
+            first = await instance_id(session)
+        async with database.session() as session:
+            again = await instance_id(session)
+    finally:
+        await database.engine.dispose()
+    assert str(uuid.UUID(first)) == first and again == first
+    assert await _rows(settings) == [(INSTANCE_ROW, first)]
+
+
+async def test_concurrent_creators_on_two_connections_agree(settings: Settings) -> None:
+    """Each proposes its own UUID; ``ON CONFLICT DO NOTHING`` keeps the first and both read it back."""
+    database = Database.from_url(settings.database_url)
+    try:
+        async with database.session() as one, database.session() as two:
+            await one.connection()  # two separate connections, both open before either inserts
+            await two.connection()
+            found = await asyncio.gather(instance_id(one), instance_id(two))
+        results = await asyncio.gather(*(_fresh_call(database) for _ in range(8)))
+    finally:
+        await database.engine.dispose()
+    assert len(set(found)) == 1 and set(results) == set(found)
+    assert await _rows(settings) == [(INSTANCE_ROW, found[0])]
+
+
+async def _fresh_call(database: Database) -> str:
+    async with database.session() as session:
+        return await instance_id(session)
+
+
+async def test_the_id_is_stable_across_restarts(settings: Settings, fake_modal: Any) -> None:
+    """A new executor (a restarted container, the ``coverset modal reap`` CLI) reads the same id,
+    so a plain reap finds the sandboxes the earlier one tagged; the id is cached per executor."""
+    first = ModalExecutor(settings, client_factory=lambda: fake_modal, slots=SandboxSlots(4))
+    try:
+        mine = await first.instance()
+    finally:
+        await first.close()
+    restarted = ModalExecutor(settings, client_factory=lambda: fake_modal, slots=SandboxSlots(4))
+    try:
+        assert await restarted.instance() == mine
+        database = Database.from_url(settings.database_url)
+        try:
+            async with database.session() as session:  # changing the row does not move a live executor
+                row = await session.get(AppSetting, INSTANCE_ROW)
+                assert row is not None
+                row.value = str(uuid.uuid4())
+                await session.commit()
+        finally:
+            await database.engine.dispose()
+        assert await restarted.instance() == mine
+    finally:
+        await restarted.close()
+
+
+async def test_no_database_means_no_untagged_sandbox(tmp_path: Any, fake_modal: Any, world: Any) -> None:
+    """Without its id the executor creates nothing: an untagged sandbox could never be reaped."""
+    settings = Settings.for_tests(
+        data_dir=tmp_path / "data", database_url="postgresql+asyncpg://nobody@127.0.0.1:9/none"
+    )
+    executor = ModalExecutor(settings, client_factory=lambda: fake_modal, slots=SandboxSlots(4))
+    try:
+        with pytest.raises(ExecutorError, match="instance id"):
+            await executor.instance()
+        image = fake_modal.Image.debian_slim("3.13")
+        with pytest.raises(ExecutorError, match="instance id"):
+            await executor.create_sandbox(image, role="smoke")
+        assert world.create_calls == []
+    finally:
+        await executor.close()
+
+
+def test_the_executor_keeps_no_file(settings: Settings, fake_modal: Any) -> None:
+    ModalExecutor(settings, client_factory=lambda: fake_modal, slots=SandboxSlots(4))
+    assert not (settings.data_dir / "instance_id").exists()

@@ -10,8 +10,8 @@ Its rows are always in Postgres (`COVERSET_DATABASE_URL`, [postgres.md](postgres
 * **Hosted: an S3-compatible bucket.** `COVERSET_BLOB_URL` names a bucket (AWS S3, MinIO,
   Cloudflare R2, Tigris). Nothing on the container's disk has to survive a restart: the data
   directory is a disposable cache. Any platform that runs a container can host it, a redeploy loses
-  no run, fact or setting (the reaper's sandbox tag is the one exception, see [Scaling](#scaling)),
-  and a second replica can share the database (the leader lease keeps the background loops in one
+  no run, fact or setting (the GitHub App `/setup` creates and the reaper's sandbox tag are database
+  rows too), and a second replica can share the database (the leader lease keeps the background loops in one
   of them). **This is the shape for anything other people depend on.**
 * **Files under `COVERSET_DATA_DIR`.** No bucket to run, which is what the demo, the tests and
   `coverset dev` use. It works on a server too, as long as the data directory is a disk that
@@ -48,7 +48,7 @@ was used tonight).
 | **An S3-compatible bucket** (hosted) | Facts (Parquet), run manifests, the per-repository dictionary, uploads and uploaded sources. | `COVERSET_BLOB_URL=s3://bucket[/prefix]?endpoint_url=...&region=...` (no `endpoint_url` for AWS S3). Credentials from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE` or an instance/task role. The store must honour conditional writes (`If-Match`, `If-None-Match`); `coverset deploy check` probes it. |
 | **A public `https` URL** | GitHub's webhooks, the App's callbacks, the OIDC audience of uploads, `Secure` cookies and HSTS all derive from `COVERSET_PUBLIC_URL`. | The platform's TLS (Fly, Modal, an ALB with ACM) or Caddy on a VM. A public URL requires `COVERSET_ADMIN_TOKEN` (32+ characters): open mode is refused. |
 | **A disposable local cache** | DuckDB and pyarrow read local files, so facts are downloaded once into `COVERSET_CACHE_DIR`; git mirrors live there too. | On the container's own disk (`/var/cache/coverset` in the image); bounded by `COVERSET_CACHE_MAX_GB` (10 by default; gc and start-up evict beyond it). Lose it and the next request re-downloads. |
-| **Secrets** | Admin token, cookie key, GitHub App credentials, the database URL, bucket credentials. | The platform's secret store, never the image. The App's private key as PEM text in `COVERSET_GITHUB_APP_PRIVATE_KEY`: the image's entrypoint writes it to the key path at start (nothing `/setup` writes to disk survives a restart in the hosted shape). |
+| **Secrets** | Admin token, secret key, the database URL, bucket credentials. | The platform's secret store, never the image. `COVERSET_SECRET_KEY` is required for `/setup`: the GitHub App it creates (ids, client secret, webhook secret, private key) is stored in the database, encrypted under a key derived from it ([security.md](security.md#5-secrets)), so the platform's secrets never need the App's keys. An operator who prefers to keep them there sets `COVERSET_GITHUB_APP_*` (the key as PEM text in `COVERSET_GITHUB_APP_PRIVATE_KEY`) and `COVERSET_GITHUB_WEBHOOK_SECRET` instead, and `/setup` is then read-only. |
 | **A Modal token** (optional) | The executor creates sandboxes. | `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`; not needed on Modal itself, where the container runtime authenticates. Upload mode needs no executor at all. |
 
 ## Files or a bucket
@@ -188,11 +188,11 @@ Operating it is unchanged ([deploy/aws/README.md](../deploy/aws/README.md)): `do
 
 `deploy/modal/coverset_web.py` serves the app from an always-on Modal container that keeps no
 state: the Secret `coverset-web` must hold a Postgres `COVERSET_DATABASE_URL`, an `s3://`
-`COVERSET_BLOB_URL`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for the bucket and
-`COVERSET_ADMIN_TOKEN`, or the container refuses to start with one line naming what is missing. The
-data dir, the cache and the working directory are on the container's disk (`/root/coverset-data`);
-`COVERSET_GITHUB_APP_PRIVATE_KEY` (PEM text in the Secret) is written to `secrets/github-app.pem`
-there. `COVERSET_WEB_MAX_CONTAINERS=2` (deploy time) lets Modal run a second container; the leader
+`COVERSET_BLOB_URL`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for the bucket,
+`COVERSET_ADMIN_TOKEN` and `COVERSET_SECRET_KEY`, or the container refuses to start with one line
+naming what is missing. The data dir, the cache and the working directory are on the container's
+disk (`/root/coverset-data`); the GitHub App `/setup` creates is stored in the database, so the
+Secret carries no App keys (unless you choose to manage them there). `COVERSET_WEB_MAX_CONTAINERS=2` (deploy time) lets Modal run a second container; the leader
 lease keeps the background loops in one of them.
 
 ```sh
@@ -210,11 +210,10 @@ uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py
 uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && coverset deploy check'
 ```
 
-The image's environment carries the container's layout (`COVERSET_DATA_DIR`, `COVERSET_CACHE_DIR`
-and the key path under `/root/coverset-data`, `COVERSET_EXECUTOR=modal`, `COVERSET_ENV=prod`,
-`COVERSET_TRUST_PROXY=false`), so an exec shell checks what the server uses; the `cd` makes the
-`.env` that `/setup` writes there count too. A restart loses no run, fact or setting; the one thing
-it does not carry over is the reaper's sandbox tag ([Scaling](#scaling)).
+The image's environment carries the container's layout (`COVERSET_DATA_DIR` and `COVERSET_CACHE_DIR`
+under `/root/coverset-data`, `COVERSET_EXECUTOR=modal`, `COVERSET_ENV=prod`,
+`COVERSET_TRUST_PROXY=false`), so an exec shell checks what the server uses. A restart loses no run,
+fact, setting, GitHub App or sandbox tag: all of them are in the database or the bucket.
 
 ### Railway and Render
 
@@ -224,7 +223,7 @@ URL, which is normalised; use the internal hostname, and Render's or Railway's d
 than a pooled one). Neither has an S3-compatible bucket of its own that coverset has been tried
 with: use Cloudflare R2 (no egress fees; `endpoint_url=https://<account>.r2.cloudflarestorage.com`,
 `region=auto`) or S3, with an access key scoped to that bucket. Set `COVERSET_PUBLIC_URL` to the
-service URL, `COVERSET_TRUST_PROXY=true`, the admin token and cookie key, and keep one instance
+service URL, `COVERSET_TRUST_PROXY=true`, the admin token and secret key, and keep one instance
 (or more). Render's free web services sleep when idle, which does not fit (webhooks
 wait, the dispatcher stops); use a paid instance.
 
@@ -279,17 +278,16 @@ start with exit status 2.
 | Secret | Where it lives | Rotate |
 |---|---|---|
 | admin token (`COVERSET_ADMIN_TOKEN`) | platform secrets | set the new value, restart (Fly: `fly secrets set`, restarts; ECS: new secret version, force a new deployment; Modal: recreate the Secret, `modal deploy --strategy recreate`; VM: edit the env file, `docker compose up -d`). Signs every browser out. |
-| cookie key (`COVERSET_SECRET_KEY`) | platform secrets | the same; signs every browser out |
+| secret key (`COVERSET_SECRET_KEY`) | platform secrets | it also encrypts the stored GitHub App, so re-encrypt first: `COVERSET_SECRET_KEY=<new> coverset secrets rekey --old-key <old>` (one transaction; [security.md](security.md#5-secrets)), then give every replica the new value and restart them as above, back to back: a replica still on the old key cannot open the App, and a `/setup` run there would seal a new App under the old key, so use `/setup` only after the rollout. Signs every browser out. |
 | database password | the URL in `COVERSET_DATABASE_URL` | create the new password (RDS: a second user or a password change during a deploy window), update the secret, restart the replicas, then revoke the old one |
 | bucket credentials | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or none with a role | create a second access key, update the secret, restart, delete the old key. With a task or instance role there is nothing to rotate. |
-| GitHub App key / webhook secret | `COVERSET_GITHUB_APP_PRIVATE_KEY` + the App settings in secrets (hosted); `/data/.env` + `secrets/github-app.pem` (VM) | generate a new key in the App's settings, replace the secret, restart, delete the old key on GitHub |
+| GitHub App credentials | the database (stored by `/setup`, encrypted under `COVERSET_SECRET_KEY`); or `COVERSET_GITHUB_APP_*` + `COVERSET_GITHUB_WEBHOOK_SECRET` in platform secrets when you manage them | stored by `/setup`: replace the App (`/setup` again, signed in with the admin token; it asks before overwriting) or **Forget the App** there first; there is no command to swap the key of the stored App in place. In platform secrets: generate a new key in the App's settings, replace the secret, restart, delete the old key on GitHub |
 | Modal token | `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (none on Modal) | create a new token, update, restart, revoke the old one |
 
 `modal secret create --force` replaces the whole Secret, so keep its file (or your password manager)
-as the source of truth. In the hosted shape, `/setup` still writes the new App's values to `.env` and
-the key to `secrets/github-app.pem` in the working directory, which does not survive a restart:
-copy them into the platform's secrets right after the App is created (step 4 of
-[the GitHub App setup](#setting-up-the-github-app-on-the-public-url)).
+as the source of truth. Losing `COVERSET_SECRET_KEY` loses the stored GitHub App (nothing else can
+open it): keep the key with the other secrets, and after a loss forget the App on `/setup` and
+create it again.
 
 ## Backups
 
@@ -329,13 +327,12 @@ and to survive a host failure, not for throughput.
   run manifests; a store that ignores `If-Match` makes `coverset deploy check` warn, and then only
   one replica is safe.
 * **Each replica has its own cache** (`COVERSET_CACHE_DIR`), filled on first read.
-* **Sandbox reaping is per container for now.** With the Modal executor every container tags its
-  sandboxes with `<data_dir>/instance_id`, and in the hosted shape that file is on the disposable
-  disk, so each new container (a restart, a redeploy, a leader failover) gets a new id. The reaper
-  then does not see sandboxes the earlier container left behind, warm-pool ones included; they stop
-  at their own timeout. To stop them sooner run `coverset modal reap --any-instance` in a container
-  (it looks at every coverset sandbox in the runner App, other installations' such as a laptop's
-  included). Moving the id into the database is an open item.
+* **Sandbox reaping spans containers.** With the Modal executor every sandbox is tagged with the
+  installation's id, the `instance_id` row of the database's `settings` table (created once, the
+  first time any process needs it), so a new container (a restart, a redeploy, a leader failover)
+  and `coverset modal reap` both find the sandboxes an earlier container left behind, warm-pool
+  ones included. `coverset modal reap --any-instance` still reaches other installations' (a
+  laptop's, a benchmark's).
 * **Rate limits are per replica** (in memory): with two replicas a client gets up to twice the
   configured rate.
 * **Connections**: each replica opens up to 20 connections to Postgres (pool 10 + 10 overflow) plus
@@ -422,16 +419,17 @@ then the state rows:
 | `cache dir` | writable, its size against `COVERSET_CACHE_MAX_GB`, free disk under it; warns when the bound is larger than the disk |
 | `state` | `hosted` (a bucket: nothing under the data dir must survive), `local` (blobs as files under the data dir on a private URL), or a warning for files behind a public URL (that directory must be a disk that survives restarts) |
 
-then the executor and where the Modal client's credentials come from, GitHub App key and client
-credentials, webhook secret. `--json` prints one `{"name", "status", "detail"}` object per row.
+then the executor and where the Modal client's credentials come from, the GitHub App (from the
+environment, or the one `/setup` stored in the database, opened with `COVERSET_SECRET_KEY` as the
+server would; a stored App that does not open is a failing row) and its client credentials,
+webhook secret. `--json` prints one `{"name", "status", "detail"}` object per row.
 
 ## Docker image
 
 `Dockerfile` (multi-stage, `python:3.13-slim`, uv 0.10.7 from PyPI, `uv sync --frozen --no-dev`,
 git and the CA certificates, tini, non-root uid 10001, `HEALTHCHECK` on `/healthz`). Its
-entrypoint (`deploy/docker-entrypoint.sh`) writes `COVERSET_GITHUB_APP_PRIVATE_KEY` to the key path
-when it is set and then runs `coverset "$@"`, `serve --bind 0.0.0.0:8000` by default (so `docker run
-coverset init-db` works). `COVERSET_DATA_DIR=/data` is a volume and the working directory (without
+entrypoint is `tini -- coverset`, with `serve --bind 0.0.0.0:8000` as the default arguments (so
+`docker run coverset init-db` runs `coverset init-db`); nothing is written at start. `COVERSET_DATA_DIR=/data` is a volume and the working directory (without
 a bucket the blobs live there); the cache is `COVERSET_CACHE_DIR=/var/cache/coverset` on the
 container's own disk; `COVERSET_MIGRATE_ON_START=true`. 1.09 GB; a cold build takes about 2 min 45 s,
 a source-only rebuild seconds. The project is installed editable on purpose (the executors find
@@ -449,14 +447,15 @@ docker exec coverset coverset deploy check --offline
 
 Verified on 2026-10-14 with this image (built in about 3 min) against the dev stack's Postgres and
 MinIO (`host.docker.internal`, no volume for `/data`): the container printed nine `applied
-migration` lines and `database ready` before `serving on`, the key from
-`COVERSET_GITHUB_APP_PRIVATE_KEY` was in `secrets/github-app.pem` with mode 600, and `coverset
+migration` lines and `database ready` before `serving on`, and `coverset
 deploy check --offline` inside it gave 11 PASS and 4 WARN (public URL local, local executor, no
 GitHub App, no webhook secret; `state`: hosted). After `docker restart` it said "already at the
 latest revision" and served again. A second container on the same database migrated nothing,
 served, and left the leader lease to the first (the lease query named the holder); 17 s after
-the first was stopped, the second logged "leader lease coverset:background acquired". The
-entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_hosted.py`.
+the first was stopped, the second logged "leader lease coverset:background acquired". (That run
+predates the vault: the image's entrypoint then still wrote `COVERSET_GITHUB_APP_PRIVATE_KEY` to a
+key file; the image now runs `coverset` directly and was not rebuilt for this change.) The
+migrate-at-start path is also covered by `tests/test_deploy_hosted.py`.
 
 ## Proxies, cookies and HSTS
 
@@ -466,10 +465,11 @@ entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_
   are not IP addresses or `http`/`https` are ignored; `X-Forwarded-Host` is never honoured. Only
   set it when every request comes through a proxy that sets those headers. The headers stay visible,
   so the `/setup` "local operator" path stays closed behind a proxy (sign in instead).
-* `COVERSET_SECRET_KEY` (32+ characters) makes the cookie key independent of the data directory;
-  set it on every hosted deployment (otherwise the key derives from the admin token, which is
-  fine, or from a key file under the data dir, which is not: it changes with every container).
-  The admin token is still mixed in, so rotating either signs everyone out.
+* `COVERSET_SECRET_KEY` (32+ characters) makes the cookie key independent of the data directory
+  and is the key the stored GitHub App is encrypted under; set it on every hosted deployment
+  (without it the cookie key derives from the admin token, which is fine, or from a key file under
+  the data dir, which is not: it changes with every container; and `/setup` cannot store an App).
+  The admin token is still mixed into the cookie key, so rotating either signs everyone out.
 * With an `https://` `COVERSET_PUBLIC_URL` every response carries
   `Strict-Transport-Security: max-age=31536000` and cookies are `Secure`.
 
@@ -483,17 +483,15 @@ entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_
    behind a proxy (the "local operator" path needs a loopback connection without proxy headers).
 3. Open `<url>/setup` (or `/setup?org=<org>`), press **Create the GitHub App**, confirm on GitHub.
    The manifest uses `COVERSET_PUBLIC_URL` for the webhook, the setup redirect and the sign-in
-   callback (`/auth/github/callback`), so the public URL must be final before this step.
-4. coverset writes the private key to `secrets/github-app.pem` and the App's ids and secrets to
-   `.env` in its working directory. On a VM that is the data volume, and they persist. **In the
-   hosted shape (Modal included) copy them into the platform's secrets now**:
-   `COVERSET_GITHUB_APP_ID`, `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET`,
-   `COVERSET_GITHUB_WEBHOOK_SECRET`, `COVERSET_ALLOWED_OWNERS` from `.env`, and the PEM as
-   `COVERSET_GITHUB_APP_PRIVATE_KEY` (`fly secrets set COVERSET_GITHUB_APP_PRIVATE_KEY=- < key.pem`
-   reads it from stdin; read both files with the platform's shell, e.g. `fly ssh console -C "cat /data/.env"`).
-5. Restart so the settings are read again: Modal `modal container stop -y <id>`; Fly
-   `fly machine restart`; ECS a new deployment; VM `docker compose restart coverset`.
-6. Install the App on the repositories (the success page links to it). Pushes and pull requests
+   callback (`/auth/github/callback`), so the public URL must be final before this step. The button
+   is disabled, with the reason, while `COVERSET_SECRET_KEY` is unset or the environment holds
+   GitHub credentials.
+4. coverset exchanges the code and stores the App (ids, client secret, webhook secret, private key)
+   in the database, encrypted under `COVERSET_SECRET_KEY`. The success page shows the App's name,
+   the installation link and "Credentials stored". Every replica picks the App up within about 5 s
+   (no restart, no file to copy); with no `COVERSET_ALLOWED_OWNERS` only the App's owner is
+   accepted.
+5. Install the App on the repositories (the success page links to it). Pushes and pull requests
    now arrive at `/webhooks/github`; runs go to Modal.
 
 [github.md](github.md) has the details of the flow, token mode and the Actions step.
@@ -518,10 +516,10 @@ project (editable, as the Dockerfile does), with `.dockerignore` reused as the u
 plugin wheel is pre-built into the image. Deploy-time knobs: `COVERSET_WEB_CPU` (default 0.5 cores),
 `COVERSET_WEB_MEMORY_MIB` (1024) and `COVERSET_WEB_MAX_CONTAINERS` (1).
 
-`<data_dir>/instance_id` (the reaper's sandbox tag) is created by the executor on first use. It
-tries `os.link` first and, when a filesystem refuses it (EPERM, ENOTSUP), falls back to an exclusive
-`O_CREAT | O_EXCL` create, so concurrent processes still agree on one id (`executors/modal_.py`,
-`instance_id`).
+The reaper's sandbox tag is the `instance_id` row of the database's `settings` table, created by the
+first executor that needs it with `INSERT ... ON CONFLICT DO NOTHING` and read back, so concurrent
+containers agree on one id and every later container reuses it (`executors/modal_.py`,
+`instance_id`). Nothing about it is on the container's disk.
 
 ### Redeploys with one container must use `--strategy recreate`
 
@@ -560,16 +558,17 @@ old container first. With `COVERSET_WEB_MAX_CONTAINERS=2` a rolling deploy works
 | object store row fails with `PermanentRedirect`, `AuthorizationHeaderMalformed ... region` or a 301 | the bucket lives in another region than `region=` says: set the bucket's region in `COVERSET_BLOB_URL` (R2 and Tigris take `auto`) |
 | object store row fails with `AccessDenied` | the role or key lacks an action of `deploy/aws/iam-policy.json`, or the prefix in the URL is not the one the policy grants (`coverset/*`) |
 | `NoCredentialsError` / `Unable to locate credentials` | no `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE` or role in the container: on Fly they come from `fly storage create`, on ECS from the task role, elsewhere set them |
-| a hosted deployment lost its GitHub App after a restart | `/setup` wrote the key and `.env` to the container's disk: copy them into the platform's secrets (step 4 of the GitHub App setup) |
+| `/setup` says "COVERSET_SECRET_KEY is not set" (503) | the vault has no key: set `COVERSET_SECRET_KEY` (the same on every replica), restart, start `/setup` again; delete the App GitHub created meanwhile (its settings page) |
+| `/setup` says "GitHub credentials come from the environment" (409) | a `COVERSET_GITHUB_APP_*`, `COVERSET_GITHUB_TOKEN` or `COVERSET_GITHUB_WEBHOOK_SECRET` is set: remove them all (and restart) to let `/setup` store the App, or keep managing them yourself |
+| log line `the stored GitHub App is not usable: ... does not open with COVERSET_SECRET_KEY` | the key changed without a rekey: run `coverset secrets rekey --old-key <previous key>` with the new key in the environment, or forget the App on `/setup` and create it again |
 | the first boot takes long or the health check fails during it | migrations run before the port opens: give the health check a grace period of 60 s for an empty database (`fly.toml`, the ECS `startPeriod`) |
 | two replicas, and `coverset deploy check` shows no lease holder | the lease holder lost its connection; another replica takes over within about 30 s. With a transaction-mode pooler it never holds: see above |
 | Modal: `RuntimeError: coverset-web needs in the Modal Secret 'coverset-web': ...` | the Secret lacks one of the state's settings it names: recreate the Secret with them ([Modal](#modal)), redeploy |
 | Modal URL times out after a deploy, logs say "waiting to be scheduled on a CPU worker" | a rolling deploy deadlocked on `max_containers=1`: `modal container list -e coverset`, then `modal container stop -y <old id>`; deploy with `--strategy recreate` |
-| Modal: `ASGI lifespan startup failed` with `PermissionError ... os.link` | an image built before the executor's exclusive-create fallback for `instance_id`: redeploy |
 | Modal: every link is `http://` / login loops | `COVERSET_PUBLIC_URL` does not match the URL Modal printed (it contains the region, e.g. `.us-east.modal.run`) |
 | `curl` to the container dies with exit 132, or Python dies with "Illegal instruction" on import of `cryptography` | Docker Desktop on Apple M4: OpenSSL's ARM feature probe hits SIGILL in the VM. Run with `-e OPENSSL_armcap=0` locally; not needed on x86 or Graviton servers |
 | `docker build`/`pull` hangs at "docker-credential-desktop get" | the macOS keychain prompt cannot be answered from a script: run from a terminal, or with `DOCKER_CONFIG` pointing at a config without `credsStore` |
-| webhooks answer 503 `webhook_secret_unset` | no GitHub webhook secret yet: finish `/setup` (or set `COVERSET_GITHUB_WEBHOOK_SECRET`) and restart |
+| webhooks answer 503 `webhook_secret_unset` | no GitHub webhook secret yet: finish `/setup` (taken up within seconds), or set `COVERSET_GITHUB_WEBHOOK_SECRET` and restart |
 | webhooks answer 403 | signature mismatch: the App's webhook secret and coverset's differ; redeliver from the App's Advanced tab after fixing |
 | GitHub says the webhook URL is invalid | it must be the public `https://` URL, not loopback; check `COVERSET_PUBLIC_URL` |
 | `/setup/github/callback` answers 403 "Not allowed" | not signed in: sign in with the admin token first, then restart the flow at `/setup` |

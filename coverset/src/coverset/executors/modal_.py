@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import errno
 import itertools
 import json
 import logging
@@ -126,7 +125,6 @@ BUILD_RESERVE_S = 120.0
 MAX_GET_FILE_BYTES = 1024 * 1024 * 1024
 DB_RETRY_DELAYS_S = (1.0, 3.0, 10.0, 30.0)
 PYCACHE_DIR = ".pycache"
-INSTANCE_FILE = "instance_id"
 IMAGES_FILE = "images.json"
 
 _DRAIN_AFTER_EXIT_S = 5.0
@@ -233,79 +231,27 @@ def shared_slots(capacity: int) -> SandboxSlots:
 # -- small helpers ----------------------------------------------------------------------------------
 
 
-_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP})
-"""``os.link`` errors of filesystems without hard links (Modal Volumes answer EPERM)."""
-INSTANCE_WAIT_S = 5.0
-"""How long :func:`instance_id` waits for another process's exclusive create to be written."""
+INSTANCE_ROW = "instance_id"
+"""The ``settings`` row holding this installation's id (plain text, a UUID)."""
 
 
-def instance_id(data_dir: Path) -> str:
-    """This installation's id (``<data_dir>/instance_id``, a UUID created once, atomically).
+async def instance_id(session: Any) -> str:
+    """This installation's id: the ``instance_id`` row of ``settings``, created once.
 
-    Every process that finds no file proposes a fresh UUID; exactly one proposal wins and the others
-    read it. The winner is decided by ``os.link`` of a fully written temporary file (the file never
-    appears empty). Filesystems without hard links (Modal Volumes refuse them with EPERM; some
-    network filesystems with ENOTSUP) fall back to an exclusive create (``O_CREAT | O_EXCL``),
-    which keeps the one-winner guarantee; a loser that finds the file still empty waits up to
-    :data:`INSTANCE_WAIT_S` for the winner's write.
+    Every caller proposes a fresh UUID with ``INSERT ... ON CONFLICT DO NOTHING`` and then reads the
+    row back, so the first insert wins and every later or concurrent caller (another replica, the
+    CLI, a new container) reads the winner's value. Commits its own write.
     """
-    path = data_dir / INSTANCE_FILE
-    existing = _read_instance_id(path)
-    if existing is not None:
-        return existing
-    data_dir.mkdir(parents=True, exist_ok=True)
-    value = str(uuid.uuid4())
-    tmp = path.with_name(f".{INSTANCE_FILE}.{uuid.uuid4().hex}")
-    tmp.write_text(value + "\n", encoding="utf-8")
-    try:
-        os.link(tmp, path)  # fails if another process created it first
-    except FileExistsError:
-        return _await_instance_id(path)
-    except OSError as exc:
-        if not isinstance(exc, PermissionError) and exc.errno not in _NO_HARD_LINKS:
-            raise
-        if not _create_exclusive(path, value):
-            return _await_instance_id(path)
-    finally:
-        tmp.unlink(missing_ok=True)
-    return value
+    from sqlalchemy import select
+    from sqlalchemy.dialects.postgresql import insert
 
+    from coverset.db.models import AppSetting
 
-def _read_instance_id(path: Path) -> str | None:
-    """The UUID in ``path``, or None when it is missing, empty or not (yet) a UUID."""
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        return str(uuid.UUID(text)) if text else None
-    except (OSError, ValueError):
-        return None
-
-
-def _create_exclusive(path: Path, value: str) -> bool:
-    """Create ``path`` holding ``value`` only if it does not exist; False when another process won."""
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        return False
-    try:
-        os.write(fd, (value + "\n").encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    return True
-
-
-def _await_instance_id(path: Path) -> str:
-    """The id another process created (an exclusive create may still be writing it)."""
-    deadline = time.monotonic() + INSTANCE_WAIT_S
-    while True:
-        found = _read_instance_id(path)
-        if found is not None:
-            return found
-        if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f"{path} exists but holds no instance id; delete it if no coverset process is starting"
-            )
-        time.sleep(0.01)
+    proposal = insert(AppSetting).values(key=INSTANCE_ROW, value=str(uuid.uuid4()), updated_at=_now())
+    await session.execute(proposal.on_conflict_do_nothing(index_elements=["key"]))
+    await session.commit()
+    value = await session.scalar(select(AppSetting.value).where(AppSetting.key == INSTANCE_ROW))
+    return str(uuid.UUID(str(value)))
 
 
 def sandbox_options(
@@ -442,7 +388,7 @@ class ModalExecutor:
         self.settings = settings
         self.verbose = verbose
         self.kill_grace_s = kill_grace_s
-        self.instance_id = instance_id(settings.data_dir)
+        self._instance_id: str | None = None
         self.stats = ExecutorStats()
         self._factory = client_factory
         self._modal: ModuleType | None = None
@@ -885,9 +831,24 @@ class ModalExecutor:
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.shield(cleanup)
 
-    def _tags(self, repo: str, run: str, role: str, created: int) -> dict[str, str]:
+    async def instance(self) -> str:
+        """This installation's id, the ``coverset_instance`` tag of every sandbox (:func:`instance_id`,
+        the ``instance_id`` row of the database: the same for every process and container), read on
+        first use and kept for the executor's lifetime. :class:`ExecutorError` when the database
+        cannot answer: an untagged sandbox could never be reaped."""
+        if self._instance_id is None:
+            try:
+                async with self._database().session() as session:
+                    self._instance_id = await instance_id(session)
+            except Exception as exc:
+                raise ExecutorError(
+                    f"cannot read this installation's instance id from the database: {type(exc).__name__}: {exc}"
+                ) from exc
+        return self._instance_id
+
+    async def _tags(self, repo: str, run: str, role: str, created: int) -> dict[str, str]:
         return {
-            "coverset_instance": self.instance_id,
+            "coverset_instance": await self.instance(),
             "repo": repo,
             "run": run,
             "role": role,
@@ -912,7 +873,7 @@ class ModalExecutor:
         options = sandbox_options(
             self.settings,
             resources,
-            self._tags(repo, run, role, created),
+            await self._tags(repo, run, role, created),
             idle_timeout_s=idle_timeout_s,
             extra_timeout_s=extra_timeout_s,
         )
@@ -951,10 +912,10 @@ class ModalExecutor:
             timeout_s=min(600, self.settings.run_timeout_s),
         )
         await self._guard_budget(amount=self.cost_usd(res, min(res.timeout_s, self.settings.run_timeout_s)))
+        created = int(time.time())
+        tags = await self._tags(repo, run, role, created)  # before the slot: no id, no sandbox
         if not await self._slots.take(SLOT_WAIT_S):
             raise CapacityError(f"no sandbox slot (max_sandboxes={self._slots.capacity})")
-        created = int(time.time())
-        tags = self._tags(repo, run, role, created)
         options = sandbox_options(self.settings, res, tags, idle_timeout_s=self.settings.pool_ttl_s)
         try:
             sandbox = await self.modal.Sandbox.create.aio(app=await self.app(), image=image, **options)
@@ -1158,7 +1119,7 @@ class ModalExecutor:
             return False
 
     async def _retag(self, entry: _Live) -> None:
-        tags = self._tags(entry.repo, entry.run, "shard", entry.created_wall)
+        tags = await self._tags(entry.repo, entry.run, "shard", entry.created_wall)
         try:
             await entry.sandbox.set_tags.aio(tags)
         except Exception as exc:  # the reaper still keeps it: it is in this process's live set
@@ -1191,17 +1152,17 @@ class ModalExecutor:
         """Terminate sandboxes tagged with this instance that no active run (or this process) holds.
 
         Pool, snapshot, smoke and benchmark sandboxes younger than :meth:`natural_lifetime_s` are kept:
-        another process sharing the data dir (``serve``, ``coverset warm``, ``modal smoke``) may own
+        another process sharing the database (``serve``, ``coverset warm``, ``modal smoke``) may own
         them. With ``all``, terminate every one of them, including this process's pool and workers and
         other processes' young sandboxes. With ``any_instance``, look at every sandbox in the App that
-        carries a ``coverset_instance`` tag (other data dirs: benchmarks, scratch demos) instead of only
+        carries a ``coverset_instance`` tag (other installations: benchmarks, scratch demos) instead of only
         this installation's; their runs are unknown here, so their shards are terminated.
         """
         found = terminated = kept = 0
         errors: list[str] = []
         app = await self.app()
         mine = set() if all else set(self._live)
-        filters = {} if any_instance else {"tags": {"coverset_instance": self.instance_id}}
+        filters = {} if any_instance else {"tags": {"coverset_instance": await self.instance()}}
         listing = self.modal.Sandbox.list.aio(app_id=app.app_id, **filters)
         now = time.time()
         async for sandbox in listing:
@@ -1242,7 +1203,7 @@ class ModalExecutor:
         app = await self.app()
         rows: list[dict[str, Any]] = []
         async for sandbox in self.modal.Sandbox.list.aio(
-            app_id=app.app_id, tags={"coverset_instance": self.instance_id}
+            app_id=app.app_id, tags={"coverset_instance": await self.instance()}
         ):
             try:
                 if await sandbox.poll.aio() is not None:

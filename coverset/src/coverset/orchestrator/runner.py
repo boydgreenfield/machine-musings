@@ -304,17 +304,30 @@ class OrchestratorContext:
             return None
         if self.forge is None:
             try:
-                from coverset.forge.registry import get_forge
+                from coverset.forge.credentials import CredentialCache
+                from coverset.forge.registry import LiveForge
             except ImportError:
                 self.forge = False
                 return None
-            try:
-                self.forge = get_forge(self.settings, session_factory=self.db.sessionmaker)
-            except Exception as exc:  # misconfigured forge: runs still complete, nothing is posted
-                log.warning("no forge for posting verdicts: %s", exc)
-                self.forge = False
-                return None
+            # The environment's credentials, else the App /setup stored (re-read when it changes).
+            cache = CredentialCache(self.settings, self.db.sessionmaker)
+            self.forge = LiveForge(self.settings, cache, self.db.sessionmaker)
         return self.forge
+
+    async def current_forge(self) -> Any:
+        """:meth:`get_forge`'s concrete adapter for the credentials in force, or None.
+
+        A :class:`~coverset.forge.registry.LiveForge` re-checks the stored App first (at most one
+        indexed read every few seconds), so code that reads ``name`` or ``capabilities()`` before
+        posting sees the App ``/setup`` stored (or forgot) since the process started; nothing but
+        the web app's request hook refreshes it otherwise.
+        """
+        forge = self.get_forge()
+        if forge is None:
+            return None
+        from coverset.forge.registry import LiveForge
+
+        return await forge.current() if isinstance(forge, LiveForge) else forge
 
     def ingest_pool(self) -> IngestPool:
         """The bundle ingest pool (a shared process pool unless one was given)."""
@@ -1157,7 +1170,9 @@ class _Execution:
 
     async def _start_check(self, run: Run) -> None:
         """Create the ``in_progress`` verdict check of a PR run and store its id (best effort)."""
-        forge = self.ctx.get_forge() if run.pr_id is not None and run.check_run_id is None else None
+        if run.pr_id is None or run.check_run_id is not None:
+            return
+        forge = await self.ctx.current_forge()
         if forge is None:
             return
         from coverset.forge.verdict import start_check
@@ -1693,7 +1708,7 @@ class _Execution:
 
     async def _post(self, summary: Any) -> None:
         """Post ``summary`` through the forge (best effort; the run row keeps the check id)."""
-        forge = self.ctx.get_forge()
+        forge = await self.ctx.current_forge()
         if forge is None:
             return
         try:

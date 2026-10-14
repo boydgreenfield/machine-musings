@@ -141,8 +141,8 @@ def invariants_check_command(repo_path: Path) -> None:
 @click.option(
     "--any-instance",
     is_flag=True,
-    help="Look at every coverset sandbox in the App (any data dir, e.g. benchmarks), not only this "
-    "installation's; their shards are terminated because their runs are unknown here.",
+    help="Look at every coverset sandbox in the App (any installation, i.e. any database: benchmarks, "
+    "a laptop's), not only this one's; their shards are terminated because their runs are unknown here.",
 )
 def modal_reap_command(reap_all: bool, any_instance: bool) -> None:
     """Terminate coverset sandboxes not tied to an active run.

@@ -80,13 +80,13 @@ sudo REPO_URL=... bash /var/lib/cloud/instance/scripts/part-001   # EC2 user dat
 ```
 
 Settings live in `/opt/coverset/coverset.env` (root only); edit, then
-`docker compose --env-file /etc/coverset.compose.env up -d`. The GitHub App flow at `/setup` writes
-its key and `.env` into the data dir (the container's working directory is `/data`), so they survive
-rebuilds.
+`docker compose --env-file /etc/coverset.compose.env up -d`. The GitHub App flow at `/setup` stores
+the App in Postgres, encrypted under `COVERSET_SECRET_KEY` (which `user-data.sh` generates into
+`coverset.env`): keep that key, since the nightly `pg_dump` alone cannot open the App.
 
 The Postgres (and MinIO) passwords are in `/opt/coverset/services.env` (root only) and the matching
 URLs in `/opt/coverset/coverset.env`; `/srv/coverset/data` holds `app/` (coverset's data dir: the
-blobs without `COVERSET_STATE=hosted`, the cache and the `/setup` files), `postgres/`, `minio/` and
+blobs without `COVERSET_STATE=hosted`, and the cache), `postgres/`, `minio/` and
 `backups/` (a nightly `pg_dump`, 7 days). psql: `sudo docker compose --env-file /etc/coverset.compose.env exec postgres
 psql -U coverset coverset`. MinIO publishes no port; list the bucket from inside its container
 with `mc alias set vm http://localhost:9000 <MINIO_ROOT_USER> <MINIO_ROOT_PASSWORD>` and then

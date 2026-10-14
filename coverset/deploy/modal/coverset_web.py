@@ -10,17 +10,16 @@ stored). ``docs/deploy.md`` is the operator's guide; this docstring records the 
 
 **Nothing in the container must survive it.** The Modal Secret ``coverset-web`` names the state:
 a Postgres ``COVERSET_DATABASE_URL``, an ``s3://`` ``COVERSET_BLOB_URL`` with
-``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` for the bucket, and ``COVERSET_ADMIN_TOKEN`` (the
-container serves a public URL). :func:`build_web_app` refuses to start without them
+``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` for the bucket, ``COVERSET_ADMIN_TOKEN`` (the
+container serves a public URL) and ``COVERSET_SECRET_KEY`` (cookies that survive a new container,
+and the key of the database vault). :func:`build_web_app` refuses to start without them
 (:func:`missing_secrets`), with one line naming what is missing. The data dir, the cache (mirrors,
 downloaded facts and sources) and the working directory are on the container's own disk
-(:func:`container_environment`), so a restart or a redeploy loses no run, fact or setting. The
-GitHub App key comes from the Secret (``COVERSET_GITHUB_APP_PRIVATE_KEY``, PEM text) because
-nothing ``/setup`` writes to disk survives. One thing does not carry over yet:
-``<data_dir>/instance_id``, the tag the reaper uses to find its own sandboxes, is new in every
-container, so after a restart or a leader failover the earlier container's leftover sandboxes (warm-
-pool ones included) are only stopped by ``coverset modal reap --any-instance`` (until the id lives in
-the database).
+(:func:`container_environment`), so a restart or a redeploy loses no run, fact or setting: the
+GitHub App ``/setup`` creates is stored in the database, sealed under ``COVERSET_SECRET_KEY``, and
+the instance id the reaper tags sandboxes with is a database row too. The Secret carries no App keys
+unless the operator chooses to manage them there (``COVERSET_GITHUB_APP_ID``,
+``COVERSET_GITHUB_APP_PRIVATE_KEY`` as PEM text, ...; ``/setup`` is then read-only).
 
 **Containers.** ``min_containers=1`` keeps one warm so webhooks never wait for a cold start and the
 background tasks (dispatcher, reaper, warm-pool maintainer, gc) keep running between requests;
@@ -66,16 +65,16 @@ WEB_MEMORY_MIB = int(os.environ.get("COVERSET_WEB_MEMORY_MIB", "1024"))
 WEB_MAX_CONTAINERS = int(os.environ.get("COVERSET_WEB_MAX_CONTAINERS", "1"))
 """Deploy-time knob: containers Modal may run at once (the leader lease keeps the background loops
 in one of them; with more than one, a default rolling deploy no longer waits for the only slot)."""
-PRIVATE_KEY_ENV = "COVERSET_GITHUB_APP_PRIVATE_KEY"
-"""The GitHub App's PEM text in the Secret; written to a file at start (:func:`write_private_key`)."""
 REQUIRED_SECRETS = (
     "COVERSET_DATABASE_URL",
     "COVERSET_BLOB_URL",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "COVERSET_ADMIN_TOKEN",
+    "COVERSET_SECRET_KEY",
 )
-"""What the Secret must hold: the state's two URLs, the bucket's keys and the admin token."""
+"""What the Secret must hold: the state's two URLs, the bucket's keys, the admin token and the
+secret key (sessions across containers, and the vault that keeps the GitHub App)."""
 REQUEST_TIMEOUT_S = 24 * 3600
 """Per-input timeout. Every HTTP request is one input, so this caps one SSE stream, not the container."""
 MAX_CONCURRENT_REQUESTS = 256
@@ -136,7 +135,7 @@ def build_image() -> modal.Image:
         {
             "PATH": "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
             # The same values web() sets, so a `modal container exec ... coverset ...` shell sees the
-            # data dir, cache and key path the server uses (the Secret still overrides them).
+            # data dir and cache the server uses (the Secret still overrides them).
             **container_environment(),
         }
     )
@@ -151,7 +150,6 @@ def container_environment(local_dir: Path = LOCAL_DIR) -> dict[str, str]:
     return {
         "COVERSET_DATA_DIR": str(local_dir),
         "COVERSET_CACHE_DIR": str(local_dir / "cache"),
-        "COVERSET_GITHUB_APP_PRIVATE_KEY_PATH": str(local_dir / "secrets" / "github-app.pem"),
         # Measured 2026-10-13: Modal's ASGI runtime already puts the real client address and
         # ``https`` in the scope and strips client-sent X-Forwarded-For/-Proto, so there is no
         # header to trust; leaving it off means a future pass-through could not be spoofed.
@@ -173,24 +171,6 @@ def missing_secrets(environ: Mapping[str, str]) -> list[str]:
     if blob and not blob.startswith("s3://"):
         missing.append("COVERSET_BLOB_URL (an s3:// URL)")
     return missing
-
-
-def write_private_key(environ: Mapping[str, str]) -> Path | None:
-    """Write the GitHub App key from ``COVERSET_GITHUB_APP_PRIVATE_KEY`` (PEM text in the Secret) to
-    ``COVERSET_GITHUB_APP_PRIVATE_KEY_PATH`` with mode 0600; None when the Secret holds no key.
-
-    Nothing on the container's disk survives a restart, so the key that ``/setup`` would write to
-    the working directory has to live in the Secret; this puts it where the settings look for it.
-    """
-    pem = environ.get(PRIVATE_KEY_ENV, "").strip()
-    if not pem:
-        return None
-    path = Path(environ.get("COVERSET_GITHUB_APP_PRIVATE_KEY_PATH", "secrets/github-app.pem"))
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(pem + "\n")
-    return path
 
 
 def _fresh_settings() -> Any:
@@ -216,20 +196,17 @@ def build_web_app(
     if missing:
         raise RuntimeError(
             f"coverset-web needs in the Modal Secret {SECRET_NAME!r}: {', '.join(missing)} "
-            "(Postgres, an s3:// bucket with its keys, and the admin token; docs/modal.md)"
+            "(Postgres, an s3:// bucket with its keys, the admin token and the secret key; docs/modal.md)"
         )
     for key, value in container_environment(local_dir).items():
         environ.setdefault(key, value)
     local_dir.mkdir(parents=True, exist_ok=True)
-    os.chdir(local_dir)  # .env and secrets/ written by /setup: disposable, like the rest of the disk
-    key_path = write_private_key(environ)
+    os.chdir(local_dir)  # the container's own disk, disposable like the rest of it
     settings = load_settings()
     if create_app is None:
         from coverset.app import create_app
     quart_app = create_app(settings)  # configures logging, so report the layout afterwards
     log.info("coverset-web: Postgres + object store; data dir and cache on the container's disk")
-    if key_path is not None:
-        log.info("coverset-web: GitHub App key written from the Secret to %s", key_path)
     return quart_app
 
 

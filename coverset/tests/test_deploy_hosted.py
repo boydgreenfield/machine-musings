@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import stat
 import subprocess
 import sys
 import tomllib
@@ -616,7 +615,6 @@ def modal_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]
         "COVERSET_EXECUTOR",
         "COVERSET_MODAL_ENVIRONMENT",
         "COVERSET_ENV",
-        "COVERSET_GITHUB_APP_PRIVATE_KEY_PATH",
     )
     get_settings.cache_clear()
     yield tmp_path
@@ -630,6 +628,7 @@ def _secret(admin_token: str) -> dict[str, str]:
         "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE",
         "AWS_SECRET_ACCESS_KEY": "secret-example",
         "COVERSET_ADMIN_TOKEN": admin_token,
+        "COVERSET_SECRET_KEY": "modal-secret-key-0123456789abcdef0123456789",
         "COVERSET_PUBLIC_URL": PUBLIC_URL,
     }
 
@@ -642,9 +641,6 @@ def test_modal_container_is_stateless(
     local = modal_env / "local"
     for key, value in _secret(admin_token).items():
         monkeypatch.setenv(key, value)
-    monkeypatch.setenv(
-        web.PRIVATE_KEY_ENV, "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----"
-    )
 
     app = web.build_web_app(os.environ, local_dir=local, create_app=FakeApp)
 
@@ -654,10 +650,9 @@ def test_modal_container_is_stateless(
     assert app.settings.data_dir == local and app.settings.cache_dir == local / "cache"
     assert app.settings.executor == "modal" and app.settings.trust_proxy is False
     assert Path.cwd() == local, "the working directory is the container's disk"
-    key = local / "secrets" / "github-app.pem"
-    assert app.settings.github_app_private_key_path == key
-    assert key.read_text(encoding="utf-8").startswith("-----BEGIN RSA PRIVATE KEY-----")
-    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert app.settings.secret_key is not None, "the vault's key: the GitHub App lives in the database"
+    assert app.settings.github_app_private_key is None and not (local / "secrets").exists()
+    assert not hasattr(web, "write_private_key") and not hasattr(web, "PRIVATE_KEY_ENV")
 
 
 @pytest.mark.parametrize(
@@ -667,6 +662,7 @@ def test_modal_container_is_stateless(
         ({"COVERSET_BLOB_URL": ""}, "COVERSET_BLOB_URL"),
         ({"AWS_SECRET_ACCESS_KEY": ""}, "AWS_SECRET_ACCESS_KEY"),
         ({"COVERSET_ADMIN_TOKEN": ""}, "COVERSET_ADMIN_TOKEN"),
+        ({"COVERSET_SECRET_KEY": ""}, "COVERSET_SECRET_KEY"),
         ({"COVERSET_DATABASE_URL": "mysql://u:p@h/db"}, "COVERSET_DATABASE_URL (a Postgres URL)"),
         ({"COVERSET_BLOB_URL": "gs://bucket"}, "COVERSET_BLOB_URL (an s3:// URL)"),
     ],
@@ -696,7 +692,7 @@ def test_modal_exec_shells_see_the_servers_layout(
     monkeypatch: pytest.MonkeyPatch, modal_env: Path, admin_token: str
 ) -> None:
     """The image carries the layout web() uses, so `modal container exec ... coverset deploy check`
-    checks the server's data dir, cache and key path."""
+    checks the server's data dir and cache."""
     web, _ = _load_modal_web(monkeypatch)
     local = modal_env / "local"
     image_env = web.container_environment(local)
@@ -712,7 +708,6 @@ def test_modal_exec_shells_see_the_servers_layout(
     assert (
         (shell.data_dir, shell.cache_dir) == (served.data_dir, served.cache_dir) == (local, local / "cache")
     )
-    assert shell.github_app_private_key_path == served.github_app_private_key_path
     assert shell.hosted and served.hosted
 
 
@@ -795,48 +790,15 @@ def test_ecs_task_definition_keeps_secrets_out_of_the_environment() -> None:
     assert not any(name.startswith("AWS_") for name in plain | secret), "no static AWS keys on AWS"
 
 
-def test_dockerfile_runs_the_entrypoint_with_the_cache_on_the_container_disk() -> None:
+def test_dockerfile_runs_coverset_with_the_cache_on_the_container_disk() -> None:
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "git ca-certificates tini" in dockerfile
     assert "COVERSET_CACHE_DIR=/var/cache/coverset" in dockerfile
     assert 'VOLUME ["/data"]' in dockerfile and '/var/cache/coverset"]' not in dockerfile
     assert "COVERSET_MIGRATE_ON_START=true" in dockerfile
-    assert 'ENTRYPOINT ["tini", "--", "coverset-entrypoint"]' in dockerfile
-    assert "!deploy/docker-entrypoint.sh" in (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
-
-
-def test_entrypoint_writes_the_key_and_execs_coverset(tmp_path: Path) -> None:
-    """Run the entrypoint with a fake ``coverset`` on PATH."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "coverset"
-    fake.write_text('#!/bin/sh\necho "coverset $*"\n', encoding="utf-8")
-    fake.chmod(0o755)
-    env = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin",
-        "COVERSET_GITHUB_APP_PRIVATE_KEY": "-----BEGIN KEY-----\nline\n-----END KEY-----",
-        "COVERSET_GITHUB_APP_PRIVATE_KEY_PATH": str(tmp_path / "secrets" / "app.pem"),
-    }
-    done = subprocess.run(
-        ["sh", str(DEPLOY / "docker-entrypoint.sh"), "init-db"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert done.returncode == 0, done.stderr
-    assert done.stdout.strip() == "coverset init-db"
-    key = tmp_path / "secrets" / "app.pem"
-    assert key.read_text(encoding="utf-8") == "-----BEGIN KEY-----\nline\n-----END KEY-----\n"
-    assert stat.S_IMODE(key.stat().st_mode) == 0o600
-    bare = subprocess.run(
-        ["sh", str(DEPLOY / "docker-entrypoint.sh"), "serve"],
-        env={"PATH": env["PATH"]},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert bare.stdout.strip() == "coverset serve"
+    assert 'ENTRYPOINT ["tini", "--", "coverset"]' in dockerfile
+    assert not (DEPLOY / "docker-entrypoint.sh").exists(), "no key to write back at start any more"
+    assert "entrypoint" not in (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
 
 def test_hosted_dev_example_is_the_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

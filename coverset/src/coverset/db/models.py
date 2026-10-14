@@ -477,15 +477,16 @@ class ExecutorSpend(Base):
 
 
 class AppSetting(Base):
-    """Control-plane key/value state (e.g. the Modal instance uuid, setup progress).
+    """Control-plane key/value state: ``instance_id`` (the Modal executor's sandbox tag, plain text)
+    and ``github_app`` (the App ``/setup`` stored, sealed by :mod:`coverset.db.vault`).
 
-    ``value`` is sized for secrets so a stored token is never truncated.
+    ``value`` is text (revision ``0011``): a sealed App with its PEM private key is about 2.7 KB.
     """
 
     __tablename__ = "settings"
 
     key: Mapped[str] = mapped_column(String(KEY_LEN), primary_key=True)
-    value: Mapped[str] = mapped_column(String(SECRET_COLUMN_LEN))
+    value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utc_now, onupdate=utc_now)
 
 

@@ -31,12 +31,15 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import click
 
 from coverset.config import MIN_ADMIN_TOKEN_CHARS, Settings, is_private_host
+
+if TYPE_CHECKING:
+    from coverset.forge.credentials import GitHubCredentials
 
 __all__ = ["Check", "deploy_group", "deployment_checks", "probe_healthz"]
 
@@ -247,37 +250,75 @@ def _data_dir_check(settings: Settings) -> list[Check]:
     return checks
 
 
-def _github_checks(settings: Settings, environ: Mapping[str, str]) -> list[Check]:
+def _stored_credentials(settings: Settings) -> GitHubCredentials | None:
+    """The App ``/setup`` stored, as the server would load it; None when the database cannot be read
+    (the ``database`` row says why)."""
+    from coverset.db.session import Database
+    from coverset.forge.credentials import load
+
+    async def read() -> GitHubCredentials:
+        database = Database.from_url(settings.database_url)
+        try:
+            async with database.session() as session:
+                return await load(session, settings)
+        finally:
+            await database.engine.dispose()
+
+    try:
+        return asyncio.run(read())
+    except Exception:  # noqa: BLE001 - unreachable or unmigrated: reported by the database row
+        return None
+
+
+def _github_checks(
+    settings: Settings, environ: Mapping[str, str], stored: GitHubCredentials | None = None
+) -> list[Check]:
+    """The forge mode, the App and the webhook secret, from the environment or (``stored``) the App
+    ``/setup`` stored in the database (None: not read)."""
+    from coverset.forge.credentials import effective_owners, from_environment
     from coverset.forge.registry import forge_mode
     from coverset.forge.signing import webhook_secret
 
+    credentials = from_environment(settings)
+    environment = credentials.source == "environment"
+    if not environment and stored is not None:
+        credentials = stored
     try:
-        mode = forge_mode(settings, environ)
+        mode = forge_mode(settings, environ, credentials)
     except ValueError as exc:
         return [Check("github", "fail", str(exc))]
     checks: list[Check] = []
-    if mode == "fake":
-        checks.append(
-            Check("github", "warn", "no App or token: fake forge only (create the App at <public url>/setup)")
-        )
+    key_set = settings.secret_key is not None and bool(settings.secret_key.get_secret_value())
+    if credentials.problem:
+        checks.append(Check("github", "fail", f"the stored GitHub App cannot be used: {credentials.problem}"))
+    elif mode == "fake":
+        detail = "no App or token: fake forge only (create the App at <public url>/setup"
+        detail += ")" if key_set else "; it needs COVERSET_SECRET_KEY to store the App)"
+        if stored is None and not environment:
+            detail += "; the database was not read"
+        checks.append(Check("github", "warn", detail))
     elif mode == "github-app":
-        key = settings.github_app_private_key_path
-        if not key.is_file():
+        app = credentials.app
+        assert app is not None
+        where = "from the environment" if environment else "stored by /setup"
+        if not app.pem:
             checks.append(
-                Check("github", "fail", f"App {settings.github_app_id}: private key {key} is missing")
+                Check(
+                    "github",
+                    "fail",
+                    f"App {app.app_id}: COVERSET_GITHUB_APP_PRIVATE_KEY (the PEM text) is not set",
+                )
             )
-        elif not os.access(key, os.R_OK):
-            checks.append(Check("github", "fail", f"App {settings.github_app_id}: cannot read {key}"))
         else:
-            owners = ", ".join(settings.allowed_owners) or "-"
-            checks.append(Check("github", "pass", f"App {settings.github_app_id}, allowed owners: {owners}"))
-        if not settings.github_app_client_id or settings.github_app_client_secret is None:
+            owners = ", ".join(effective_owners(settings, credentials)) or "-"
+            checks.append(Check("github", "pass", f"App {app.app_id} ({where}), allowed owners: {owners}"))
+        if not app.client_id or not app.client_secret:
             checks.append(
                 Check("github login", "warn", "no App client id/secret: GitHub sign-in is unavailable")
             )
     else:
         checks.append(Check("github", "pass", "token mode (commit statuses and comments)"))
-    _secret, problem = webhook_secret(settings)
+    _secret, problem = webhook_secret(settings, credentials)
     if problem is None:
         checks.append(Check("webhook secret", "pass", "set (webhooks are verified)"))
     else:
@@ -430,7 +471,8 @@ def deployment_checks(
             )
         )
 
-    checks.extend(_github_checks(settings, env))
+    stored = _stored_credentials(settings) if check_database and database_probe is None else None
+    checks.extend(_github_checks(settings, env, stored))
     return checks
 
 

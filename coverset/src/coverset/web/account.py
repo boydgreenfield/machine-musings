@@ -99,7 +99,9 @@ log = logging.getLogger(__name__)
 bp = Blueprint("account", __name__)
 
 OAUTH_EXTENSION = "github_oauth"
-"""``app.extensions`` key: the :class:`GitHubOAuth` client (tests inject one with a fake transport)."""
+"""``app.extensions`` key: an injected :class:`GitHubOAuth` client (tests, with a fake transport)."""
+OAUTH_BUILT_EXTENSION = "github_oauth_built"
+"""``app.extensions`` key: the client built from the current App's id and secret, with them."""
 ACCESS_SYNC_EXTENSION = "repo_access_synced"
 """``app.extensions`` key: ``user_id -> when`` the repository access was last refreshed in this process."""
 ACCESS_SYNC_INTERVAL = timedelta(minutes=10)
@@ -130,17 +132,33 @@ DEV_PERMISSIONS = ("read", "write", "admin", "none")
 
 
 def github_oauth() -> GitHubOAuth | None:
-    """The App's OAuth client, or None when the client id or secret is not configured."""
+    """The App's OAuth client, or None when the App has no client id and secret.
+
+    The id and secret are the environment's or the stored App's (the snapshot the app refreshed
+    before this request), so an App stored by ``/setup`` offers "Sign in with GitHub" at once. An
+    injected client (tests) wins.
+    """
     client = current_app.extensions.get(OAUTH_EXTENSION)
     if client is not None:
         return client
-    settings = app_settings()
-    secret = settings.github_app_client_secret
-    if not settings.github_app_client_id or secret is None or not secret.get_secret_value():
+    from coverset.forge.registry import credential_cache
+
+    credentials = credential_cache(current_app).snapshot
+    if credentials.source == "environment":  # sign-in needs no App id, only the client pair
+        settings = app_settings()
+        secret = settings.github_app_client_secret
+        pair = (settings.github_app_client_id or "", secret.get_secret_value() if secret else "")
+    elif credentials.app is not None:
+        pair = (credentials.app.client_id or "", credentials.app.client_secret or "")
+    else:
         return None
-    client = GitHubOAuth(settings.github_app_client_id, secret.get_secret_value())
-    current_app.extensions[OAUTH_EXTENSION] = client
-    return client
+    if not all(pair):
+        return None
+    built = current_app.extensions.get(OAUTH_BUILT_EXTENSION)
+    if built is None or built[0] != pair:
+        built = (pair, GitHubOAuth(*pair))
+        current_app.extensions[OAUTH_BUILT_EXTENSION] = built
+    return built[1]
 
 
 def github_login_available() -> bool:

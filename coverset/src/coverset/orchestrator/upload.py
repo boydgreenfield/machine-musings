@@ -585,7 +585,7 @@ async def _head(ctx: OrchestratorContext, run: Run, repo: Repo, shard_dirs: Sequ
     # Stored whether or not the mirror answers: the pages keep working if access is lost later.
     await asyncio.to_thread(_store_uploaded_sources, settings, run, shard_dirs)
     mirror = mirror_path(settings, repo.id)
-    forge = ctx.get_forge()
+    forge = await ctx.current_forge()
     if _can_fetch(repo, forge):
         try:
             mirror = await ensure_mirror_async(settings, repo, forge=forge)
@@ -1241,7 +1241,7 @@ async def _conclude(
     summary = await run_transaction(ctx.db, verdict)
     if summary is None:
         return
-    forge = ctx.get_forge()
+    forge = await ctx.current_forge()
     if forge is None:
         return
     async with ctx.db.session() as session:

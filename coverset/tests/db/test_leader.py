@@ -11,8 +11,15 @@ import pytest
 from sqlalchemy import text
 
 from coverset.config import Settings
-from coverset.db.leader import LeaderLease, leader_status, run_while_leader, transaction_lock
+from coverset.db.leader import (
+    BACKGROUND_LEASE,
+    LeaderLease,
+    leader_status,
+    run_while_leader,
+    transaction_lock,
+)
 from coverset.db.session import Database, make_engine
+from coverset.db.testing import PostgresTestDatabases
 
 
 class _Switch:
@@ -215,3 +222,23 @@ async def test_transaction_locks_serialise_two_engines(settings: Settings) -> No
             await database.engine.dispose()
     (first_start, first_end), (second_start, _) = sorted(spans)
     assert second_start >= first_end
+
+
+async def test_a_lease_on_another_database_of_the_same_server_is_not_this_ones(
+    settings: Settings, postgres_databases: PostgresTestDatabases
+) -> None:
+    """Advisory locks are per database, but ``pg_locks`` lists every database's: another
+    installation's (or a developer's ``coverset dev``) lease must not show as held here."""
+    other_url = await asyncio.to_thread(postgres_databases.create)  # the harness runs its own loop
+    other_engine, this_engine = make_engine(other_url), make_engine(settings.database_url)
+    other = LeaderLease(other_engine, BACKGROUND_LEASE)
+    try:
+        assert await other.acquire()
+        assert (await leader_status(other_engine)).holder_pid is not None
+        here = await leader_status(this_engine)
+        assert here.holder_pid is None and "free" in here.detail
+    finally:
+        await other.release()
+        await other_engine.dispose()
+        await this_engine.dispose()
+        await asyncio.to_thread(postgres_databases.retire, other_url)

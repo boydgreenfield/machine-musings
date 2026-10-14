@@ -71,6 +71,6 @@ kill_timeout = 30
   # seconds of 502s; `fly scale count 2` removes them: on Postgres the leader lease runs the
   # dispatcher, reaper and gc in one Machine and the other serves requests (docs/deploy.md, "Scaling").
   strategy = "rolling"
-  # Migrate once per deploy in a temporary Machine from the new image (the image's entrypoint runs
-  # `coverset init-db`), with COVERSET_MIGRATE_ON_START = "false" above:
+  # Migrate once per deploy in a temporary Machine from the new image (the image's entrypoint is
+  # `coverset`, so this runs `coverset init-db`), with COVERSET_MIGRATE_ON_START = "false" above:
   # release_command = "init-db"

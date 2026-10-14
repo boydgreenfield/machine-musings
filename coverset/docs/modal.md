@@ -204,18 +204,22 @@ the run held each worker, from acquire to release.
 
 ## The reaper and cleanup
 
-Each installation has an id, a UUID created once in `<data_dir>/instance_id`, and tags every sandbox
-with it. `coverset modal reap` lists the App's sandboxes with that tag
+Each installation has an id, a UUID created once as the `instance_id` row of the database's
+`settings` table (the first executor that needs it inserts a proposal with `INSERT ... ON CONFLICT
+DO NOTHING` and every process reads the winner back; `executors/modal_.py`, `instance_id`), and tags
+every sandbox with it. Every process and container on the same database shares it, so a restarted
+or replaced container, and `coverset modal reap` run anywhere against that database, find the
+sandboxes an earlier one left behind. `coverset modal reap` lists the App's sandboxes with that tag
 (`Sandbox.list(app_id=..., tags={"coverset_instance": ...})`) and terminates every one whose `run`
 tag is not a queued or running run, except two kinds it keeps: the sandboxes its own process holds,
 and pool, snapshot, smoke and benchmark sandboxes younger than their natural lifetime (from their
 `created` tag: `COVERSET_POOL_TTL_S` + 60 s for the pool, `COVERSET_RUN_TIMEOUT_S` for the others),
-because another process sharing the data dir may own them: a `serve`'s pool, a `coverset warm`
+because another process sharing the database may own them: a `serve`'s pool, a `coverset warm`
 snapshot build, a `coverset modal smoke`. So a CLI reap never kills a running server's pool, and
 `serve`'s reaper never kills a concurrent `warm` or `smoke`. `--all` ignores both exceptions and
-terminates every sandbox of the installation, active runs included. The instance id is per data
-dir, so sandboxes of other data dirs (the benchmark's, a scratch demo's) are invisible to a plain
-reap; `--any-instance` looks at every sandbox in the App that has a `coverset_instance` tag instead,
+terminates every sandbox of the installation, active runs included. The instance id is per
+database, so sandboxes of other installations (the benchmark's, a scratch demo's) are invisible to a
+plain reap; `--any-instance` looks at every sandbox in the App that has a `coverset_instance` tag instead,
 applies the same rules, and therefore terminates those installations' shards (their runs are not in
 this database). `coverset serve` runs the plain pass (`orchestrator.reaper.reap_forever`) when its
 Modal executor starts and then every 60 s. Run
@@ -328,8 +332,13 @@ default (`min_containers=1`, `max_containers` from `COVERSET_WEB_MAX_CONTAINERS`
 `@modal.concurrent(max_inputs=256)`, 24 h per-request timeout, 0.5 core and 1 GiB reserved: about
 $0.76 a day) and keeps no state in it: the Secret `coverset-web` names Postgres
 (`COVERSET_DATABASE_URL`), a bucket (`COVERSET_BLOB_URL` with `AWS_ACCESS_KEY_ID`/
-`AWS_SECRET_ACCESS_KEY`) and the admin token, and a container whose Secret lacks any of them refuses
-to start, naming it. The data dir and the cache are on the container's own disk. From inside that
+`AWS_SECRET_ACCESS_KEY`), the admin token and `COVERSET_SECRET_KEY`, and a container whose Secret
+lacks any of them refuses to start, naming it. The data dir and the cache are on the container's own
+disk. The Secret carries no GitHub App keys: the App `/setup` creates is stored in the database,
+encrypted under `COVERSET_SECRET_KEY` ([security.md](security.md#5-secrets)), and every container
+picks it up within seconds. An operator who prefers to manage the App's keys in the Secret adds
+`COVERSET_GITHUB_APP_ID`, `..._CLIENT_ID`, `..._CLIENT_SECRET`, `COVERSET_GITHUB_APP_PRIVATE_KEY`
+(the PEM text) and `COVERSET_GITHUB_WEBHOOK_SECRET` instead; `/setup` is then read-only. From inside that
 container the Modal client is authenticated by the runtime, so the dispatcher creates shard
 sandboxes in `coverset-runner` with no token stored anywhere; a run queued there on 2026-10-13 built
 its env image and passed 97 tests.

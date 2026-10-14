@@ -28,8 +28,8 @@ services:
       COVERSET_DATA_DIR: /data
       COVERSET_TRUST_PROXY: "true"
     volumes:
-      # The data dir (blobs unless the "hosted" profile's bucket holds them, the cache with the git
-      # mirrors, .env and the App key written by /setup). On a VM point COVERSET_DATA_PATH at the
+      # The data dir (blobs unless the "hosted" profile's bucket holds them, and the cache with the
+      # git mirrors; the App /setup creates is in Postgres). On a VM point COVERSET_DATA_PATH at the
       # attached disk (deploy/aws/user-data.sh: /srv/coverset/data/app, owned by uid 10001).
       - ${COVERSET_DATA_PATH:-coverset-data}:/data
     depends_on:

@@ -127,8 +127,7 @@ if ! grep -q '^COVERSET_DATABASE_URL=' "$ENV_FILE"; then
   echo "COVERSET_DATABASE_URL=postgresql+asyncpg://coverset:$POSTGRES_PASSWORD@postgres:5432/coverset" >> "$ENV_FILE"
 fi
 if [ "$COVERSET_STATE" = "hosted" ] && ! grep -q '^COVERSET_BLOB_URL=' "$ENV_FILE"; then
-  # Blobs in MinIO beside coverset: coverset's own /data is then only a cache plus the .env and
-  # App key /setup writes.
+  # Blobs in MinIO beside coverset: coverset's own /data is then only a cache.
   cat >> "$ENV_FILE" <<EOF
 COVERSET_BLOB_URL=s3://coverset?endpoint_url=http://minio:9000&region=us-east-1
 AWS_ACCESS_KEY_ID=$MINIO_ROOT_USER

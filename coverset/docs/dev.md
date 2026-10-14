@@ -74,7 +74,7 @@ make dev            # or: uv run coverset dev
 ```
 $ COVERSET_DATA_DIR=/tmp/cs uv run coverset dev
 coverset dev: data directory /tmp/cs
-coverset dev: database postgresql+asyncpg://localhost/coverset (10 migration(s) applied)
+coverset dev: database postgresql+asyncpg://localhost/coverset (11 migration(s) applied)
 coverset dev: no repository yet, seeding the demo (about 25 s, once)
 ...
 coverset dev: demo seeded in 19.1 s
@@ -117,7 +117,8 @@ $ uv run coverset init-db
 applied migration 0001 initial
 ...
 applied migration 0010 an index on run_events.at for the retention gc
-database ready (10 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
+applied migration 0011 settings.value as text, for the vault's sealed GitHub App
+database ready (11 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 $ uv run coverset init-db
 database ready (already at the latest revision): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 ```

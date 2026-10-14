@@ -29,6 +29,9 @@ PRIVATE_DIR_MODE = 0o700
 
 log = logging.getLogger(__name__)
 MIN_ADMIN_TOKEN_CHARS = 32
+MIN_SECRET_KEY_CHARS = 32
+"""The vault's AES key is derived from ``COVERSET_SECRET_KEY`` with HKDF, not a password KDF: a short
+value could be brute-forced offline from a dump of the ``settings`` table."""
 MIN_WEBHOOK_SECRET_CHARS = 16
 MIN_GITHUB_TOKEN_CHARS = 16
 """GitHub tokens are 40+ characters; a short value is a mistake, and too short to redact safely."""
@@ -127,7 +130,12 @@ class Settings(BaseSettings):
         description="Honour X-Forwarded-For/Proto from the immediate upstream (set behind Fly, Caddy, an ALB).",
     )
     secret_key: SecretStr | None = Field(
-        default=None, description="Cookie signing key; empty means a key file under the data dir."
+        default=None,
+        description=(
+            "Cookie signing key, and what the database vault's encryption key is derived from (it "
+            "holds the GitHub App /setup stores); empty means a cookie key file under the data dir "
+            "and no vault."
+        ),
     )
     uploads_enabled: bool = Field(default=True, description="Accept bundles at POST /v1/bundles.")
     max_upload_bytes: int = Field(default=200 * MIB, gt=0, description="Largest accepted uploaded bundle.")
@@ -156,7 +164,13 @@ class Settings(BaseSettings):
     github_app_id: int | None = None
     github_app_client_id: str | None = None
     github_app_client_secret: SecretStr | None = None
-    github_app_private_key_path: Path = Path("secrets/github-app.pem")
+    github_app_private_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "The App's private key as PEM text, for operators who keep the App's credentials in the "
+            "environment (/setup otherwise stores them in the database)."
+        ),
+    )
     github_token: SecretStr | None = None
     allowed_owners: CommaList = Field(default_factory=list)
     allowed_repos: CommaList = Field(default_factory=list)
@@ -278,6 +292,14 @@ class Settings(BaseSettings):
             raise ValueError("COVERSET_FACTS_MEMORY_LIMIT must be a size such as 512MB or 1.5GiB")
         return value.strip()
 
+    @field_validator("github_app_private_key", mode="before")
+    @classmethod
+    def _pem_newlines(cls, value: Any) -> Any:
+        """Accept a PEM whose line breaks a secret store turned into literal ``\\n`` sequences."""
+        if isinstance(value, str) and "-----BEGIN" in value and "\n" not in value:
+            return value.replace("\\n", "\n")
+        return value
+
     @field_validator("bind")
     @classmethod
     def _check_bind(cls, value: str) -> str:
@@ -328,6 +350,12 @@ class Settings(BaseSettings):
         token = self.admin_token.get_secret_value() if self.admin_token else ""
         if self.admin_token is not None and len(token) < MIN_ADMIN_TOKEN_CHARS:
             raise ValueError(f"COVERSET_ADMIN_TOKEN must be at least {MIN_ADMIN_TOKEN_CHARS} characters")
+        secret_key = self.secret_key.get_secret_value() if self.secret_key else ""
+        if 0 < len(secret_key) < MIN_SECRET_KEY_CHARS:  # empty means unset
+            raise ValueError(
+                f"COVERSET_SECRET_KEY must be at least {MIN_SECRET_KEY_CHARS} characters "
+                "(`openssl rand -hex 32`): it encrypts the stored GitHub App"
+            )
         if not self.is_loopback and not token:
             raise ValueError(
                 f"COVERSET_BIND={self.bind} is not a loopback address: set COVERSET_ADMIN_TOKEN "

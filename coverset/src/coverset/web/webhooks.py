@@ -4,7 +4,9 @@ Order of checks (nothing is parsed or written before the signature is verified):
 
 1. unknown forge name ⇒ 404; no usable webhook secret ⇒ 503 (fail closed; the fixtures' test
    secret counts as unusable outside ``COVERSET_ENV=test``); bodies over ``MAX_CONTENT_LENGTH``
-   ⇒ 413 (before this view runs);
+   ⇒ 413 (before this view runs). The secret is the environment's ``COVERSET_GITHUB_WEBHOOK_SECRET``
+   or the one of the App ``/setup`` stored, re-read within seconds of a change
+   (:mod:`coverset.forge.credentials`);
 2. ``X-Hub-Signature-256`` verified over the raw bytes ⇒ 403 on a missing or bad signature, with
    no part of the body echoed;
 3. ``X-GitHub-Delivery`` must look like a GUID (400); a delivery already seen, by GUID or by the
@@ -36,9 +38,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.db.models import DeliveryStatus, ForgeKind, WebhookDelivery
-from coverset.forge.base import ForgeEventError
+from coverset.forge.base import ForgeError, ForgeEventError
+from coverset.forge.credentials import with_app_owner
 from coverset.forge.github_events import delivery_id, event_name
-from coverset.forge.registry import webhook_forge
+from coverset.forge.registry import credential_cache, webhook_forge
 from coverset.forge.signing import webhook_secret
 from coverset.orchestrator import enqueue_run
 from coverset.orchestrator.intake import IntakeResult, apply_forge_followups, delivery_seen, intake
@@ -67,15 +70,16 @@ def _answer(code: int, /, **body: object) -> tuple[Response, int]:
 @bp.post("/webhooks/<forge_name>")
 async def receive(forge_name: str) -> tuple[Response, int]:
     """Verify, deduplicate, record and act on one webhook delivery (see the module docstring)."""
-    settings = app_settings()
+    credentials = await credential_cache(current_app).refresh()
+    settings = with_app_owner(app_settings(), credentials)
     try:
-        forge = webhook_forge(current_app, forge_name)
-    except ValueError as exc:
+        forge = await webhook_forge(current_app, forge_name)
+    except (ForgeError, ValueError) as exc:
         log.error("webhook forge is misconfigured: %s", exc)
         return _answer(503, error="forge_misconfigured")
     if forge is None:
         return _answer(404, error="not_found")
-    _secret, problem = webhook_secret(settings)
+    _secret, problem = webhook_secret(settings, credentials)
     if problem is not None:
         if problem == "test_secret_outside_test":
             log.error("refusing webhooks: the fixtures' test secret is configured outside COVERSET_ENV=test")

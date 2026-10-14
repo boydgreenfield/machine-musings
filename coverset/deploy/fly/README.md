@@ -58,12 +58,10 @@ state").
 ## Then
 
 * **GitHub App:** sign in at `https://<app>.fly.dev/login` with the admin token, open `/setup`, and
-  follow [docs/github.md](../../docs/github.md#1-create-the-github-app-manifest-flow). The App's
-  values land in `/data/.env` and `/data/secrets/github-app.pem` on the Machine's disk, which a
-  restart loses: copy them into secrets right away (`fly ssh console -C "cat /data/.env"`, then
-  `fly secrets set COVERSET_GITHUB_APP_ID=... ...` and
-  `fly secrets set COVERSET_GITHUB_APP_PRIVATE_KEY=- < github-app.pem`, which the image's entrypoint
-  writes back to the key path at every start).
+  follow [docs/github.md](../../docs/github.md#1-create-the-github-app-manifest-flow). The App is
+  stored in the database, encrypted under `COVERSET_SECRET_KEY` (set above), so nothing needs
+  copying into Fly secrets and no restart is needed; keep `COVERSET_SECRET_KEY` in your password
+  manager (rotation: `coverset secrets rekey`, [docs/security.md](../../docs/security.md#5-secrets)).
 * **Logs:** `fly logs --app "$APP"`.
 * **Shell:** `fly ssh console --app "$APP"` (as root; the server runs as uid 10001).
 * **Backups:** the database's own (Managed Postgres and Neon keep point-in-time history) and

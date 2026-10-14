@@ -16,6 +16,7 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from coverset.config import Settings, get_settings, secure_data_dirs
 from coverset.db.session import WEB_STATEMENT_TIMEOUT_S, Database, init_db
 from coverset.facts.cache import configure as configure_caches
+from coverset.forge.registry import credential_cache
 from coverset.logging import configure_logging
 from coverset.web import register_blueprints
 from coverset.web.auth import session_lifetime
@@ -114,6 +115,13 @@ def create_app(settings: Settings | None = None) -> Quart:
         length = request.content_length
         if length is not None and length > MAX_CONTENT_LENGTH:
             raise RequestEntityTooLarge()
+
+    @app.before_request
+    async def _refresh_github_credentials() -> None:
+        # Request code that cannot await (the sign-in button, /setup's status) reads the snapshot
+        # this refreshes: at most one indexed read every few seconds, none with environment secrets.
+        if not request.path.startswith("/static/") and request.path != "/healthz":
+            await credential_cache(app).refresh()
 
     @app.after_request
     async def _security_headers(response: Response) -> Response:

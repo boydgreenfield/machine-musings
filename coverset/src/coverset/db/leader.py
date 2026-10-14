@@ -77,8 +77,11 @@ _HELD_QUERY = text(
 _HOLDER_QUERY = text(
     "SELECT l.pid, a.application_name, host(a.client_addr), a.backend_start FROM pg_locks l "
     "LEFT JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.locktype = 'advisory' AND l.granted "
+    "AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
     "AND l.classid::bigint = :hi AND l.objid::bigint = :lo AND l.objsubid = 1"
 )
+"""Advisory locks are per database, and ``pg_locks`` lists every database's: without the
+``database`` clause another installation's lease on the same server would show as this one's."""
 
 
 def _key_parts(key: int) -> dict[str, int]:

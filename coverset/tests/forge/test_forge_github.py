@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -315,15 +314,13 @@ async def test_repo_names_are_checked_before_use(github: MockGitHub, rsa_pem: st
         )
 
 
-def test_from_settings_modes(tmp_path: Path, rsa_pem: str) -> None:
-    key = tmp_path / "app.pem"
-    key.write_text(rsa_pem)
+def test_from_settings_modes(rsa_pem: str) -> None:
     app_settings = Settings.for_tests(
-        github_app_id=APP_ID, github_app_private_key_path=key, allowed_owners=["coverset-demo"]
+        github_app_id=APP_ID, github_app_private_key=SecretStr(rsa_pem), allowed_owners=["coverset-demo"]
     )
     assert GitHubForge.from_settings(app_settings).mode == "app"
-    missing = app_settings.model_copy(update={"github_app_private_key_path": tmp_path / "missing.pem"})
-    with pytest.raises(ValueError, match="private key"):
+    missing = app_settings.model_copy(update={"github_app_private_key": None})
+    with pytest.raises(ValueError, match="COVERSET_GITHUB_APP_PRIVATE_KEY"):
         GitHubForge.from_settings(missing)
     token_settings = Settings.for_tests(github_token=SecretStr("github_pat_" + "q" * 30))
     assert GitHubForge.from_settings(token_settings).mode == "token"
@@ -331,12 +328,22 @@ def test_from_settings_modes(tmp_path: Path, rsa_pem: str) -> None:
         GitHubForge.from_settings(Settings.for_tests())
 
 
-def test_registry_chooses_the_adapter(tmp_path: Path, rsa_pem: str) -> None:
-    key = tmp_path / "app.pem"
-    key.write_text(rsa_pem)
+def test_the_private_key_is_pem_text_with_escaped_newlines_accepted(rsa_pem: str) -> None:
+    """Secret stores that flatten line breaks to a literal backslash-n still give a usable key."""
+    flattened = rsa_pem.strip().replace("\n", "\\n")
+    assert "\n" not in flattened
+    settings = Settings.for_tests(github_app_private_key=flattened)
+    assert settings.github_app_private_key is not None
+    assert settings.github_app_private_key.get_secret_value() == rsa_pem.strip()
+    assert "BEGIN" not in repr(settings)
+
+
+def test_registry_chooses_the_adapter(rsa_pem: str) -> None:
+    from coverset.forge.credentials import AppCredentials, GitHubCredentials
+
     bare = Settings.for_tests()
     app_settings = Settings.for_tests(
-        github_app_id=APP_ID, github_app_private_key_path=key, allowed_owners=["coverset-demo"]
+        github_app_id=APP_ID, github_app_private_key=SecretStr(rsa_pem), allowed_owners=["coverset-demo"]
     )
     token_settings = Settings.for_tests(github_token=SecretStr("github_pat_" + "q" * 30))
     assert forge_mode(bare, {}) == "fake"
@@ -349,6 +356,17 @@ def test_registry_chooses_the_adapter(tmp_path: Path, rsa_pem: str) -> None:
         forge_mode(bare, {"COVERSET_FORGE": "gitlab"})
     assert isinstance(get_forge(bare, environ={}), FakeForge)
     assert isinstance(get_forge(app_settings, environ={}), GitHubForge)
+    stored = GitHubCredentials(
+        "database", app=AppCredentials(app_id=APP_ID, pem=rsa_pem), webhook_secret="w" * 20
+    )
+    assert forge_mode(bare, {}, stored) == "github-app", "an App stored by /setup"
+    with pytest.raises(ValueError, match="COVERSET_ALLOWED_OWNERS"):
+        get_forge(bare, credentials=stored, environ={})  # no owner and no list: refuse, never accept all
+    owned = GitHubCredentials(
+        "database", app=AppCredentials(app_id=APP_ID, pem=rsa_pem, owner="coverset-demo")
+    )
+    forge = get_forge(bare, credentials=owned, environ={})
+    assert isinstance(forge, GitHubForge) and forge.app_id == APP_ID
 
 
 def _failed(method: str, status: int, headers: dict[str, str] | None = None) -> RequestFailed:

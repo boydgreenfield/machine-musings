@@ -7,9 +7,11 @@
 <h2 id="status">Current configuration</h2>
 <dl>
   <dt>Forge mode</dt><dd><code>{{ mode }}</code></dd>
+  <dt>GitHub credentials</dt>
+  <dd>{% if environment_names %}from the environment ({% for name in environment_names %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}): this page cannot change them{% elif stored and stored.app %}the App <code>{{ stored.app.slug or stored.app.app_id }}</code> (id <code>{{ stored.app.app_id }}</code>), stored by this page{% if stored.app.created_at %} on {{ stored.app.created_at }}{% endif %}{% elif stored %}a stored App that cannot be used: {{ stored.problem }}{% else %}none{% endif %}</dd>
   <dt>Public URL</dt><dd><code>{{ public_url }}</code></dd>
   <dt>Allowed owners</dt>
-  <dd>{% if allowed_owners %}{% for owner in allowed_owners %}<code>{{ owner }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none configured (every owner is accepted outside App mode){% endif %}</dd>
+  <dd>{% if allowed_owners %}{% for owner in allowed_owners %}<code>{{ owner }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% if owners_from_app %} (the stored App's owner){% endif %}{% else %}none configured (every owner is accepted outside App mode){% endif %}</dd>
   {% if allowed_repos %}<dt>Allowed repositories</dt><dd>{% for repo in allowed_repos %}<code>{{ repo }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
   <dt>OIDC audience for <code>coverset-ci wait</code></dt><dd><code>{{ oidc_audience }}</code></dd>
 </dl>
@@ -31,13 +33,23 @@
 <p role="alert"><strong>{{ public_url }} is a loopback address.</strong> GitHub cannot deliver webhooks to it.
 Start a tunnel (smee or ngrok, see <code>docs/github.md</code>), set <code>COVERSET_ADMIN_TOKEN</code> (at least 32 characters), then set <code>COVERSET_PUBLIC_URL</code> to the tunnel URL and restart <code>coverset serve</code> before creating the App. coverset refuses a public URL without an admin token.</p>
 {% endif %}
-{% if existing %}
-<p role="status">Credentials are already stored ({% for item in existing %}<code>{{ item }}</code>{% if not loop.last %}, {% endif %}{% endfor %}). Finishing this flow asks before replacing them.</p>
+{% if environment_names %}
+<p role="status">GitHub credentials come from the environment ({% for name in environment_names %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}), so this page stores nothing. Remove them from the environment and restart to let it store an App instead.</p>
+{% elif not key_set %}
+<p role="alert"><strong><code>COVERSET_SECRET_KEY</code> is not set.</strong> coverset stores the App's credentials in its database, encrypted under a key derived from it. Set it (at least 32 random characters, the same on every replica, e.g. <code>openssl rand -hex 32</code>) and restart before creating the App.</p>
+{% endif %}
+{% if stored %}
+<p role="status">{% if stored.app %}The App <code>{{ stored.app.slug or stored.app.app_id }}</code> is stored. Finishing this flow asks before replacing it.{% else %}A stored App cannot be used: {{ stored.problem }}{% endif %}</p>
+<form method="post" action="{{ url_for('setup.github_forget') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <button class="btn" type="submit">Forget the App</button>
+  <span class="muted">Deletes the stored credentials (audited); the App itself stays on GitHub until you delete it there.</span>
+</form>
 {% endif %}
 <p>The button below sends this manifest to GitHub, which creates a <strong>private</strong> App owned by
 {% if organization %}the organization <code>{{ organization }}</code>{% else %}your account{% endif %}
-and sends you back here. coverset then writes the App id, client id and secrets to <code>{{ env_path }}</code>
-and the private key to <code>{{ key_path }}</code> (both readable only by you). Restart <code>coverset serve</code> afterwards.</p>
+and sends you back here. coverset then stores the App id, client id, secrets and private key in its
+database, encrypted under <code>COVERSET_SECRET_KEY</code>. Every replica picks them up within a few seconds: no restart.</p>
 <ul>
   <li>Permissions: {% for name, level in manifest.default_permissions.items() %}<code>{{ name }}: {{ level }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</li>
   <li>Events: {% for name in manifest.default_events %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %} (installation events are always delivered)</li>
@@ -46,8 +58,8 @@ and the private key to <code>{{ key_path }}</code> (both readable only by you). 
 </ul>
 <form method="post" action="{{ action }}">
   <input type="hidden" name="manifest" value="{{ manifest_json }}">
-  <button class="btn" type="submit"{% if not reachable %} disabled aria-describedby="app-disabled"{% endif %}>Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
-  {% if not reachable %}<p id="app-disabled" class="muted">Disabled: GitHub cannot reach {{ public_url }}. Set a public URL first (see above).</p>{% endif %}
+  <button class="btn" type="submit"{% if not can_create %} disabled aria-describedby="app-disabled"{% endif %}>Create the GitHub App{% if organization %} for {{ organization }}{% endif %}</button>
+  {% if not can_create %}<p id="app-disabled" class="muted">Disabled: {% if environment_names %}the environment holds the GitHub credentials.{% elif not key_set %}set <code>COVERSET_SECRET_KEY</code> first (see above).{% else %}GitHub cannot reach {{ public_url }}. Set a public URL first (see above).{% endif %}</p>{% endif %}
 </form>
 <p>For an organization, open <code>/setup?org=&lt;organization&gt;</code> instead.</p>
 <details>

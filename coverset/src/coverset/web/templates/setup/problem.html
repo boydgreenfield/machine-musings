@@ -4,9 +4,8 @@
 <section class="panel">
 <h1>{{ title }}</h1>
 <p>{{ message }}</p>
-{% if existing %}
-<p>Already stored:</p>
-<ul>{% for item in existing %}<li><code>{{ item }}</code></li>{% endfor %}</ul>
+{% if stored and stored.app %}
+<p>Stored: the App <code>{{ stored.app.slug or stored.app.app_id }}</code> (id <code>{{ stored.app.app_id }}</code>){% if stored.app.created_at %}, since {{ stored.app.created_at }}{% endif %}.</p>
 {% endif %}
 {% if confirm_action %}
 <form method="post" action="{{ confirm_action }}">

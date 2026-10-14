@@ -69,7 +69,8 @@ tests itself. The repository needs:
    error. The doctor lists them and the override that removes them.
 
 Then, on the control plane: coverset hosted where GitHub can reach it ([docs/deploy.md](deploy.md)),
-the GitHub App from `/setup` ([docs/github.md](github.md)), `COVERSET_EXECUTOR=modal` after `modal
+the GitHub App from `/setup` (with `COVERSET_SECRET_KEY` set: the App is stored in the database
+encrypted under it; [docs/github.md](github.md)), `COVERSET_EXECUTOR=modal` after `modal
 setup` ([docs/modal.md](modal.md)), and `coverset warm --repo OWNER/NAME`, which builds the
 environment image and the first trusted snapshot (where the project and the repository's own
 packages get installed) before the first pull request.

@@ -41,7 +41,6 @@ from coverset.executors.modal_ import (
     ModalExecutor,
     ModalWorker,
     SandboxSlots,
-    instance_id,
     rate_usd_per_s,
     sandbox_options,
 )
@@ -168,12 +167,6 @@ def test_network_policy(
         assert options.get(key) == expected.get(key)
 
 
-def test_instance_id_is_created_once_and_reused(tmp_path: Path) -> None:
-    first = instance_id(tmp_path / "data")
-    assert instance_id(tmp_path / "data") == first
-    assert (tmp_path / "data" / "instance_id").read_text().strip() == first
-
-
 def test_protocols_and_capabilities(settings: Settings, fake_modal: Any) -> None:
     executor = make_executor(settings, fake_modal)
     assert isinstance(executor, Executor)
@@ -293,7 +286,7 @@ async def test_acquire_creates_guarded_tagged_sandboxes(
         owner = tags.pop("owner")
         assert owner == executor.owner and owner.endswith(f":{os.getpid()}")
         assert tags == {
-            "coverset_instance": executor.instance_id,
+            "coverset_instance": await executor.instance(),
             "repo": "1",
             "run": "run_A",
             "role": "shard",
@@ -526,7 +519,9 @@ async def test_serve_fills_the_pool_reaps_and_drains_on_shutdown(
     ctx = OrchestratorContext.from_app(app)
     ctx.executor_factory = lambda kind: executor
     schedule_executor_upkeep(app, reap_interval_s=0.05, pool_interval_s=0.05)
-    orphan = world.add_foreign({"coverset_instance": executor.instance_id, "run": "gone", "role": "shard"})
+    orphan = world.add_foreign(
+        {"coverset_instance": await executor.instance(), "run": "gone", "role": "shard"}
+    )
 
     def pooled() -> list[Any]:
         return [sb for sb in world.live() if sb.tags.get("role") == "pool"]
@@ -824,7 +819,7 @@ async def test_reap_terminates_orphans_by_instance_tag(
     settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
 ) -> None:
     executor = make_executor(settings, fake_modal)
-    mine = executor.instance_id
+    mine = await executor.instance()
     active = world.add_foreign({"coverset_instance": mine, "run": "run_live", "role": "shard", "repo": "1"})
     orphan = world.add_foreign({"coverset_instance": mine, "run": "run_dead", "role": "shard", "repo": "1"})
     old_pool = world.add_foreign({"coverset_instance": mine, "run": "pool", "role": "pool", "repo": "1"})
@@ -847,7 +842,7 @@ async def test_reap_through_the_generic_orchestrator_helper(
     from coverset.orchestrator.reaper import reap
 
     executor = make_executor(settings, fake_modal)
-    world.add_foreign({"coverset_instance": executor.instance_id, "run": "r1", "role": "shard"})
+    world.add_foreign({"coverset_instance": await executor.instance(), "run": "r1", "role": "shard"})
     report = await reap(executor, all=True)
     assert report.terminated == 1 and world.live() == []
 
@@ -901,6 +896,7 @@ async def test_cancelled_acquire_leaves_no_sandbox_and_no_slot(
     settings: Settings, fake_modal: Any, world: Any, spec: EnvSpec
 ) -> None:
     executor = make_executor(settings, fake_modal)
+    await executor.instance()  # read once from the database, so the creates below take a few ticks
     await _gate_creates_after(fake_modal, 2)
     task = asyncio.create_task(executor.acquire(env_ref(spec), 4, RESOURCES, 600, LABELS))
     for _ in range(100):
@@ -1086,7 +1082,7 @@ async def test_a_plain_reap_keeps_other_processes_young_pool_and_snapshot_sandbo
     )
     old = int(time.time()) - settings.run_timeout_s - 1
     stale_pool = world.add_foreign(
-        {"coverset_instance": serve.instance_id, "run": "pool", "role": "pool", "created": str(old)}
+        {"coverset_instance": await serve.instance(), "run": "pool", "role": "pool", "created": str(old)}
     )
     cli = make_executor(settings, fake_modal)  # `coverset modal reap` in another process
     report = await cli.reap(active_run_ids=set())

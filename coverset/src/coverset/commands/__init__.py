@@ -70,6 +70,9 @@ def register_commands(
     from coverset.commands.settings_cmd import settings_group
 
     cli.add_command(settings_group, "settings")
+    from coverset.commands.secrets_cmd import secrets_group
+
+    cli.add_command(secrets_group, "secrets")
     from coverset.commands.dev import dev_command
 
     cli.add_command(dev_command, "dev")

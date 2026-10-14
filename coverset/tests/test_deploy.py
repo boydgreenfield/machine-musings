@@ -219,8 +219,6 @@ def test_deploy_check_on_a_ready_server(
     tmp_path: Path, admin_token: str, no_modal_profile: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("COVERSET_CACHE_MAX_GB", "0.01")  # a bound this machine's free disk holds
-    pem = tmp_path / "app.pem"
-    pem.write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
     settings = Settings.for_tests(
         env="prod",
         data_dir=tmp_path / "data",
@@ -233,7 +231,9 @@ def test_deploy_check_on_a_ready_server(
         github_app_id=123,
         github_app_client_id="Iv23liExample",
         github_app_client_secret=SecretStr("c" * 40),
-        github_app_private_key_path=pem,
+        github_app_private_key=SecretStr(
+            "-----BEGIN PRIVATE KEY-----\nMIIexample\n-----END PRIVATE KEY-----\n"
+        ),
         github_webhook_secret=SecretStr("w" * 32),
         allowed_owners=["octo-org"],
         database_url="postgresql+asyncpg://coverset:pw@db.internal/coverset",
@@ -273,7 +273,6 @@ def test_deploy_check_flags_what_is_missing(tmp_path: Path, admin_token: str, no
         admin_token=SecretStr(admin_token),
         executor="modal",
         github_app_id=7,
-        github_app_private_key_path=tmp_path / "missing.pem",
         allowed_owners=["me"],
     )
     rows = _rows(
@@ -290,7 +289,7 @@ def test_deploy_check_flags_what_is_missing(tmp_path: Path, admin_token: str, no
     assert rows["reachable"].status == "warn"
     assert rows["secret key"].status == "pass" and "derived" in rows["secret key"].detail
     assert rows["executor"].status == "fail"
-    assert rows["github"].status == "fail" and "missing.pem" in rows["github"].detail
+    assert rows["github"].status == "fail" and "COVERSET_GITHUB_APP_PRIVATE_KEY" in rows["github"].detail
     assert rows["github login"].status == "warn"
     assert rows["webhook secret"].status == "fail"
 
@@ -340,6 +339,47 @@ def test_deploy_check_database_rows(tmp_path: Path, postgres_databases: Postgres
         assert "lease coverset:background: free" in migrated.detail, "the lease holder, as db status had it"
     finally:
         postgres_databases.drop(url)
+
+
+def test_deploy_check_reads_the_app_setup_stored(tmp_path: Path, settings: Settings) -> None:
+    """Without GitHub credentials in the environment the github rows describe the App ``/setup``
+    sealed into the database; without COVERSET_SECRET_KEY they say /setup cannot store one."""
+    from coverset.db.session import Database
+    from coverset.forge.credentials import AppCredentials, store_app
+
+    keyed = settings.model_copy(update={"secret_key": SecretStr("k" * 40)})
+    assert (
+        "COVERSET_SECRET_KEY"
+        in _rows(deployment_checks(settings, environ={}, prober=None, in_modal=False))["github"].detail
+    )
+
+    async def store() -> None:
+        database = Database.from_url(settings.database_url)
+        try:
+            async with database.session() as session:
+                app = AppCredentials(
+                    app_id=4242,
+                    pem="-----BEGIN RSA PRIVATE KEY-----\nMII\n-----END RSA PRIVATE KEY-----\n",
+                    client_id="Iv1.x",
+                    client_secret="c" * 40,
+                    webhook_secret="w" * 32,
+                    owner="octo-org",
+                )
+                await store_app(session, keyed, app)
+                await session.commit()
+        finally:
+            await database.engine.dispose()
+
+    asyncio.run(store())
+    rows = _rows(deployment_checks(keyed, environ={}, prober=None, in_modal=False))
+    assert rows["github"].status == "pass" and "stored by /setup" in rows["github"].detail
+    assert "octo-org" in rows["github"].detail and rows["webhook secret"].status == "pass"
+    assert "github login" not in rows
+    other_key = keyed.model_copy(update={"secret_key": SecretStr("z" * 40)})
+    rows = _rows(deployment_checks(other_key, environ={}, prober=None, in_modal=False))
+    assert rows["github"].status == "fail" and "cannot be used" in rows["github"].detail
+    output = " ".join(row.detail for row in rows.values())
+    assert "c" * 40 not in output and "w" * 32 not in output
 
 
 def test_deploy_check_reports_an_unwritable_data_dir(tmp_path: Path) -> None:

@@ -41,7 +41,7 @@ def test_defaults(clean_env: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert settings.executor == "local"
     assert settings.untrusted_pr_policy == "approve"
     assert settings.sandbox_network == "blocked"
-    assert settings.github_app_private_key_path == Path("secrets/github-app.pem")
+    assert settings.github_app_private_key is None
     assert 1 <= settings.local_max_workers <= 8
     assert settings.max_bundle_bytes == 200 * 1024 * 1024
     assert settings.max_stdout_bytes == 50 * 1024 * 1024
@@ -133,6 +133,16 @@ def test_non_loopback_bind_requires_long_admin_token(bind: str) -> None:
 def test_short_admin_token_rejected_even_on_loopback() -> None:
     with pytest.raises(ValidationError, match="at least 32 characters"):
         Settings.for_tests(admin_token="short")
+
+
+@pytest.mark.security
+def test_short_secret_key_rejected() -> None:
+    """The vault's AES key is derived from COVERSET_SECRET_KEY with HKDF, so a short value could be
+    brute-forced offline from a dump of the settings table; empty still means unset."""
+    with pytest.raises(ValidationError, match="COVERSET_SECRET_KEY must be at least 32 characters"):
+        Settings.for_tests(secret_key="x" * 31)
+    assert Settings.for_tests(secret_key="x" * 32).secret_key is not None
+    assert Settings.for_tests(secret_key="").secret_key is not None, "empty: the key file, no vault"
 
 
 @pytest.mark.parametrize("bind", ["8000", "host:", ":8000", "host:99999", "host:http"])

@@ -20,7 +20,10 @@ There are two ways to connect a repository, and they combine:
 
 1. Make coverset reachable from GitHub (see [Local tunnels](#local-tunnels)): set
    `COVERSET_ADMIN_TOKEN` (at least 32 characters) first, then set `COVERSET_PUBLIC_URL` to the
-   public URL. coverset refuses to start with a public URL that is not loopback (or an RFC 6761
+   public URL. Set `COVERSET_SECRET_KEY` (at least 32 random characters, `openssl rand -hex 32`, the
+   same on every replica; coverset refuses to start with a shorter one): the App's credentials are
+   stored in the database encrypted under it, and
+   without it `/setup` disables its button and says so. coverset refuses to start with a public URL that is not loopback (or an RFC 6761
    name such as `*.test`) and no admin token, because the tunnel would hand every internet caller
    the operator's open-mode access. GitHub refuses webhook URLs on loopback addresses, and the
    `/setup` page warns when `COVERSET_PUBLIC_URL` is one.
@@ -46,30 +49,54 @@ There are two ways to connect a repository, and they combine:
    checks the `state`, moves the one-time code into your session and redirects to the code-free
    `/setup/github/finish` (so the code never stays in a logged or shared URL; access-log lines for
    the callback are redacted too). There it exchanges the code with
-   `POST /app-manifests/{code}/conversions` and writes:
-   * the private key to `COVERSET_GITHUB_APP_PRIVATE_KEY_PATH` (default `secrets/github-app.pem`);
-   * `COVERSET_GITHUB_APP_ID`, `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET`,
-     `COVERSET_GITHUB_WEBHOOK_SECRET` and the key path into `.env` (other lines are kept), plus
-     `COVERSET_ALLOWED_OWNERS=<App owner>` when no allowed owners are configured.
+   `POST /app-manifests/{code}/conversions` and stores the result as one row of the database's
+   `settings` table (`github_app`): the App id, client id, client secret, webhook secret, private
+   key, owner, slug and HTML URL and when it was stored, as one JSON document sealed with
+   AES-256-GCM under a key derived from `COVERSET_SECRET_KEY` ([security.md](security.md#5-secrets)).
+   No file is written. The success page shows the App's name, the installation link and
+   "Credentials stored"; the action is audited (`github_app_stored`).
 
-   The client id and secret are what "Sign in with GitHub" uses: after the restart the login page
-   offers it, and collaborators who sign in see the repositories GitHub grants them
+   **No restart.** Every replica re-checks the row at most every 5 s (one indexed read of its
+   `updated_at`; it is decrypted again only when that changed), so the forge adapter, webhook
+   verification and "Sign in with GitHub" switch to the new App within seconds everywhere; the
+   replica that ran `/setup` switches at once, and an orchestrator worker or a CLI run re-checks
+   the row before it refreshes a mirror or posts a check, so runs see the App without a restart
+   too. With no `COVERSET_ALLOWED_OWNERS`, only the App's own owner is accepted (an explicit list
+   wins).
+
+   The client id and secret are what "Sign in with GitHub" uses: the login page offers it as soon as
+   the App is stored, and collaborators who sign in see the repositories GitHub grants them
    ([docs/auth.md](auth.md)). Add your own login to `COVERSET_ADMINS` to be an instance admin
    when signed in with GitHub (the admin token always is). An App created before the manifest
    carried `callback_urls` needs `COVERSET_PUBLIC_URL/auth/github/callback` added under the App's
-   settings on GitHub ("Callback URL"), and a client secret generated there and written to `.env`.
+   settings on GitHub ("Callback URL").
 
-   Both files are written atomically with mode `0600`. If either already holds credentials the
-   finish step answers 409. Replacing them is a `POST` with `overwrite=1` and the CSRF token, and it
-   always needs an admin session (sign in with `COVERSET_ADMIN_TOKEN`); in open mode remove the old
-   key and `.env` entries yourself instead. Without an admin session the callback and finish steps
-   are accepted only from the local operator: a loopback client address, a loopback `Host` and no
+   If an App is already stored the finish step answers 409. Replacing it is a `POST` with
+   `overwrite=1` and the CSRF token, and it always needs an admin session (sign in with
+   `COVERSET_ADMIN_TOKEN`); in open mode press **Forget the App** on `/setup` first (a `POST` with the
+   CSRF token, accepted from an admin session or the local operator, audited as
+   `github_app_forgotten`; the App itself stays on GitHub until you delete it there). Of two
+   setups finishing at once, the insert lets exactly one store its App; the other page says which
+   App GitHub created anyway, so it can be deleted. Without an admin session the callback, finish
+   and forget steps are accepted only from the local operator: a loopback client address, a loopback `Host` and no
    proxy headers (`Via`, `True-Client-IP`, `CF-Connecting-IP`, or any header whose name contains
    `forwarded`, `client-ip`, `real-ip` or `proxy`, such as `X-Forwarded-For`, `X-Client-IP`,
    `Fastly-Client-IP` or `X-Original-Forwarded-For`). A tunnel also connects from 127.0.0.1, so the
    address alone proves nothing. A wrong or reused `state` is a 400, and a code is used once.
-5. Restart `coverset serve`, then install the App on the repositories coverset should watch
-   (the success page links to `https://github.com/apps/<slug>/installations/new`).
+5. Install the App on the repositories coverset should watch (the success page links to
+   `https://github.com/apps/<slug>/installations/new`).
+
+### Credentials from the environment instead
+
+Operators who keep secrets in their platform's store can skip the stored App and set
+`COVERSET_GITHUB_APP_ID`, `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET`,
+`COVERSET_GITHUB_APP_PRIVATE_KEY` (the PEM text itself; a value whose line breaks a secret store
+flattened to literal `\n` is accepted) and `COVERSET_GITHUB_WEBHOOK_SECRET`, with
+`COVERSET_ALLOWED_OWNERS` (required in this case). The GitHub credentials then come from exactly one
+place: while **any** of those names, or `COVERSET_GITHUB_TOKEN` (token mode, below), is set, the
+stored row is ignored and `/setup` is read-only: its page lists the names it found, its button is
+disabled, and the finish and forget steps answer 409 saying so. Changing environment credentials
+needs a restart, as any environment change does.
 
 App mode refuses to start without `COVERSET_ALLOWED_OWNERS`. Events for any other owner (or, with
 `COVERSET_ALLOWED_REPOS`, any other repository) are stored as `ignored_owner` without their payload,
@@ -133,9 +160,11 @@ accident.
 
 ## Choosing the adapter
 
-`COVERSET_FORGE` picks the adapter: `auto` (default: the GitHub adapter when
-`COVERSET_GITHUB_APP_ID` or `COVERSET_GITHUB_TOKEN` is set, else the fake forge), `github` or
-`fake`. The fake forge parses the same GitHub-shaped payloads and records every call it would have
+`COVERSET_FORGE` picks the adapter: `auto` (default: the GitHub adapter when there is an App,
+stored by `/setup` or from the environment, or `COVERSET_GITHUB_TOKEN` is set, else the fake
+forge), `github` or `fake`. The app's adapter is rebuilt when the stored App changes
+(`forge/registry.py`, `LiveForge`), so storing or forgetting the App switches between the fake
+forge and App mode without a restart. The fake forge parses the same GitHub-shaped payloads and records every call it would have
 made in the `forge_calls` table (`coverset forge calls`, and `/forge/outbox` in the UI). With the
 fake forge, `POST /webhooks/fake` is accepted as well as `/webhooks/github`.
 
@@ -143,8 +172,9 @@ fake forge, `POST /webhooks/fake` is accepted as well as `/webhooks/github`.
 
 `POST /webhooks/github` checks, in this order, before parsing or writing anything:
 
-1. A webhook secret is configured, else **503** (fail closed). The fixtures' secret
-   `coverset-test-secret` counts as unconfigured unless `COVERSET_ENV=test`.
+1. A webhook secret is configured (`COVERSET_GITHUB_WEBHOOK_SECRET`, or the stored App's), else
+   **503** (fail closed). The fixtures' secret `coverset-test-secret` counts as unconfigured
+   unless `COVERSET_ENV=test`.
 2. Bodies over 25 MiB are rejected with **413**.
 3. `X-Hub-Signature-256` is an HMAC-SHA256 of the raw body under the secret (constant-time
    comparison; the legacy SHA-1 header is ignored), else **403** with no part of the body echoed.
@@ -217,7 +247,9 @@ write conflict, 403 for a rotated secret).
 
 Locally, `coverset replay FIXTURE [--server http://127.0.0.1:8000]` posts a recorded fixture with
 its exact body and headers. When `COVERSET_GITHUB_WEBHOOK_SECRET` is set to something other than
-the fixtures' test secret, the body is re-signed with it (`--as-recorded` disables that).
+the fixtures' test secret, the body is re-signed with it (`--as-recorded` disables that); the
+secret of an App stored by `/setup` is not read, so replaying against such a server needs that
+variable set by hand.
 `--new-delivery` sends a fresh delivery id, but the body digest still marks the same fixture as a
 duplicate on a database that has seen it; start from a fresh `COVERSET_DATA_DIR` to replay it
 again. The fixtures are generated from the seeded demo SHAs by

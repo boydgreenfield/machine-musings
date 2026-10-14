@@ -9,8 +9,9 @@ details dict is masked in the row; the audit page shows the rows to instance adm
 
 Actions recorded by the account layer: ``login``, ``login_failed``, ``logout``, ``session_revoked``,
 ``token_rejected``, ``access_refreshed``, ``access_revoked``, ``role_changed``, ``user_disabled``,
-``user_enabled``, ``token_created``, ``token_revoked``, ``credentials_written``; by the views:
-``approve``, ``quarantine``; by the settings pages: ``setting_changed``.
+``user_enabled``, ``token_created``, ``token_revoked``; by the views: ``approve``, ``quarantine``,
+``github_app_stored``, ``github_app_forgotten`` (``/setup``); by the settings pages:
+``setting_changed``; by ``coverset secrets rekey``: ``secrets_rekeyed``.
 """
 
 from __future__ import annotations
