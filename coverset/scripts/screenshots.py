@@ -1,4 +1,4 @@
-"""Take the README screenshots: seven pages of the local demo and two pages of its static report,
+"""Take the README screenshots: eleven pages of the local demo and four pages of its static report,
 light (``docs/<name>.jpg``) and dark (``docs/<name>-dark.jpg``).
 
 Seeds a scratch demo with the LocalExecutor (``coverset demo --executor local --no-serve``), serves
@@ -54,7 +54,9 @@ QUALITY = 82
 MIN_QUALITY = 50
 MAX_BYTES = 250 * 1024
 READY = 'body[data-ready="1"]'
-SHOT_NAMES = ("pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test", "repo", "economy")
+SHOT_NAMES = (
+    "pr", "run-live", "why-order", "shapes", "source", "map", "comment", "test", "repo", "economy", "tests",
+)  # fmt: skip
 REPORT_SHOT_NAMES = ("report", "report-source", "report-changes", "report-economy")
 GROUPS = {"report": REPORT_SHOT_NAMES}
 """``--only`` names that stand for several shots."""
@@ -426,7 +428,13 @@ def shot_recipes(base: str, ids: DemoIds, func_key: str) -> dict[str, Callable[[
             clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": height},
         )
 
+    def tests(page: Any, path: Path) -> None:
+        # The tests page, riskiest first: the sort switch, the filter box under it and the table.
+        goto(page, f"{base}/repos/{rid}/tests")
+        shoot_page(page, path)
+
     return {
+        "tests": tests,
         "economy": economy,
         "pr": pr,
         "run-live": run_live,

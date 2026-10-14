@@ -75,8 +75,10 @@ Runs in flight when the container stops are marked abandoned at the next start (
 `COVERSET_REQUEUE_ON_BOOT=true` in the Secret to re-queue them). GitHub redelivers webhooks that got
 no answer.
 
-The module pre-creates `/data/instance_id` with a rename, because the executor's `os.link`-based
-creation fails on the Volume (see open issue in the executor).
+`/data/instance_id` (the reaper's sandbox tag) is created by the executor on first use. It tries
+`os.link` first and, when the Volume refuses it with EPERM (or a filesystem answers ENOTSUP), falls
+back to an exclusive `O_CREAT | O_EXCL` create, so concurrent processes still agree on one id
+(`executors/modal_.py`, `instance_id`). The module no longer pre-creates the file.
 
 ### Redeploys must use `--strategy recreate`
 
@@ -188,7 +190,7 @@ prints one object per row.
 | Symptom | Cause and fix |
 |---|---|
 | Modal URL times out after a deploy, logs say "waiting to be scheduled on a CPU worker" | a rolling deploy deadlocked on `max_containers=1`: `modal container list -e coverset`, then `modal container stop -y <old id>`; deploy with `--strategy recreate` |
-| Modal: `ASGI lifespan startup failed` with `PermissionError ... os.link` | the Volume refuses hard links; the module pre-creates `instance_id` (keep that call before `create_app`) |
+| Modal: `ASGI lifespan startup failed` with `PermissionError ... os.link` | an image built before the executor's exclusive-create fallback for `instance_id`: redeploy (the current executor handles Volumes without hard links) |
 | Modal: every link is `http://` / login loops | `COVERSET_PUBLIC_URL` does not match the URL Modal printed (it contains the region, e.g. `.us-east.modal.run`) |
 | `curl` to the container dies with exit 132, or Python dies with "Illegal instruction" on import of `cryptography` | Docker Desktop on Apple M4: OpenSSL's ARM feature probe hits SIGILL in the VM. Run with `-e OPENSSL_armcap=0` locally; not needed on x86 or Graviton servers |
 | `docker build`/`pull` hangs at "docker-credential-desktop get" | the macOS keychain prompt cannot be answered from a script: run from a terminal, or with `DOCKER_CONFIG` pointing at a config without `credsStore` |

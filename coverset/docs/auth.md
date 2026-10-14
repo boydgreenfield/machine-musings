@@ -97,12 +97,15 @@ starts with `require_repo(rid, "read" | "write")`:
 | **token**, personal | a `cst_` token tied to a user | the user's repositories, within the token's scopes | the user's writes, only with the `write` scope; the user's admin powers only with the `admin` scope (and the user must be an admin) |
 | **token**, repository | a `cst_` token tied to one repository | that repository only | `upload` or `write`: bundle uploads and writes on that repository |
 | **oidc** | a GitHub Actions job on the public `/v1` routes | the repository its OIDC token proves | nothing |
-
-The public `/v1` routes (`/v1/verdict`, `/v1/runs/<id>`, `/v1/runs/<id>/events`) answer a signed-in
-user or a `cst_` token for every repository it may read, with the full (non-public) view; a `cst_`
-bearer bound elsewhere is a 404 there and one that does not verify a 401, exactly like an OIDC
-token for another repository.
 | **public** | no credentials | only what the public routes answer themselves (webhooks, `/v1/verdict` for public repositories, `/login`) | nothing |
+
+The public `/v1` routes (`/v1/verdict`, `/v1/runs/<id>`, `/v1/runs/<id>/events`, JSON polling and
+the event stream alike) answer a signed-in user or a `cst_` token for every repository it may read,
+with the full (non-public) view: `log` events and the verdict's reason included. So `coverset-ci
+wait` can follow a run with the repository token a CI job already holds for `POST /v1/bundles`
+(any scope reads its repository), not only with an OIDC token. A `cst_` bearer bound elsewhere is a
+404 there, like a run that does not exist, and one that does not verify a 401, exactly like an OIDC
+token for another repository (`web/api.py` `authorize_repo`; `tests/web/test_polish_api.py`).
 
 A repository the principal cannot see answers **404**, with the same words as a repository that
 does not exist, so ids cannot be enumerated. A repository the principal can see but may not
@@ -147,8 +150,9 @@ standing (`/account` says so) and is retried at the next refresh.
   else derived from the admin token, else a key file in the data directory), `HttpOnly`,
   `SameSite=Lax`, and `Secure` when `COVERSET_PUBLIC_URL` is `https://`. It carries only the
   server-side session id, the CSRF token and (for the admin token) the admin flag. After a GitHub
-  sign-in it is a permanent cookie (`Max-Age` = `COVERSET_SESSION_DAYS`, the row's lifetime, set
-  as `PERMANENT_SESSION_LIFETIME` when the auth blueprint registers) so it outlives the browser;
+  sign-in it is a permanent cookie (`Max-Age` = `COVERSET_SESSION_DAYS`, the row's lifetime:
+  `create_app` sets `PERMANENT_SESSION_LIFETIME` next to the `SESSION_COOKIE_*` keys from the same
+  `session_lifetime` the row's expiry uses) so it outlives the browser;
   the admin-token cookie stays a browser-session cookie because it has no row to revoke.
 * `user_sessions` rows expire after `COVERSET_SESSION_DAYS` (30). `last_seen_at` is written at
   most every five minutes. The row's user must be enabled; a disabled user's sessions are
@@ -162,6 +166,17 @@ standing (`/account` says so) and is retried at the next refresh.
   header cross-site.
 * Behind a proxy set `COVERSET_TRUST_PROXY=true` so the client address in sessions, rate limits
   and the audit log is the caller's, not the proxy's (see `web/proxy.py`).
+
+## Avatars
+
+The header and `/account` show the signed-in user's GitHub avatar (`users.avatar_url`, refreshed
+at every sign-in). The CSP's `img-src` allows exactly one third-party origin for it,
+`https://avatars.githubusercontent.com` (`app.py` `AVATAR_ORIGIN`), and the templates render a
+stored URL only when it starts with that origin and a `/`; anything else (a GitHub Enterprise
+host, a lookalike such as `avatars.githubusercontent.com.evil.example`, no avatar) gets the initials
+badge instead. The image is requested with `referrerpolicy="no-referrer"`, so GitHub learns the
+viewer's address and nothing about the page. In the header a personal API token shows the initials
+(the guard loads no user row for a token); its `/account` page shows the image.
 
 ## API tokens
 

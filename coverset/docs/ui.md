@@ -18,14 +18,14 @@ that produce trusted markup).
 | `/runs/<run_id>/events` | The run page's SSE stream (HTML regions as named events). |
 | `/repos/<rid>/files/<path>` | Source view. `?run=` picks the run (default: the newest default-branch baseline), `?pr=<n>` uses the PR's latest run and marks changed lines, `?test=<test_id>` dims every line that test did not run (see [The test page](#the-test-page)), `?highlight=all\|missing` picks the highlight mode (see [View settings](#view-settings)). |
 | `/repos/<rid>/files/<path>/lines/<n>/tests` | Fragment: the tests that ran one line (the gutter popover). |
-| `/repos/<rid>/functions/<func_key>` | One function: its history over the last baselines (see [Function history](#function-history)), shape grid, flow ribbon, source with coverage, covering tests, invariants on it, AI finding. |
+| `/repos/<rid>/functions/<func_key>` | One function: its history over the last baselines (see [Function history](#function-history)), shape grid, flow ribbon, source with coverage (with the source view's **Highlight** toggle in the header, key `h`; its first state is the mode the layout resolved, `?highlight=` then the scoped `view.highlight`, so it agrees with the painted lines before scripts run), covering tests, invariants on it, AI finding. A parameter row without input classes says "never called by a test" only when no test ran a line of the body; a function whose tests ran it but recorded no argument shapes (a Rust bundle, a Python run without shape capture) says "called by N tests, no argument shapes recorded". |
 | `/repos/<rid>/functions/<func_key>/shapes` | Fragment: the shape grid; with `&cls=<param>:<class>` one cell's detail. |
 | `/repos/<rid>/map` | Treemap, `?mode=gap` (default) `\|lines\|inputs`, `?modules=thin` (default) `\|full\|hidden` (module-level code), `?layout=ordered` (default) `\|squarified`, `?path=` zooms into a directory or file, `?run=` (a PR run is drawn in its baseline's frame). A "largest gaps" table ranks called functions by gap, lists the functions no test called apart, and only counts what has nothing to compare (module-level code, functions that expect no input classes). |
-| `/repos/<rid>/tests` | Every test (each nodeid links to its test page): runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. |
+| `/repos/<rid>/tests` | Every test (each nodeid links to its test page): runs, fail rate, flaky retries, p50/p95, last failure, quarantine toggle (`POST /repos/<rid>/tests/<test_id>/quarantine`, admin + CSRF; the answer swaps the row (`tests_row.html`, the same markup the page's single row loop writes) and, out of band, the "N quarantined" count). `?sort=risk\|slow\|name`. 500 rows a page (`?page=N`, previous and next links above and below the table) with a "show all N" link (`?all=1`); the header counts every test. A filter box under the sort switch ("Filter tests  /", `/` focuses it) hides the rows of the page that do not contain every typed word; `Enter` opens the first match, `Esc` clears it. |
 | `/repos/<rid>/tests/<test_id>` | One test: identity, its result in `?run=` (default: the newest completed default-branch baseline), the last 12 results as squares, and its data flow in that run (see [The test page](#the-test-page)). `test_id` is the control database's test id (an id beyond 64 bits is a 404). |
 | `/repos/<rid>/tests/by-nodeid?nodeid=&run=` | Redirects (302) to the test page of that nodeid, keeping `run`. Every nodeid in the UI links through the `test_link` macro: the tests table, the run page's failures and "All tests", the PR page's tests, the line popover, a shape cell's tests and the function page's covering tests. |
 | `/repos/<rid>/invariants` | Every declared invariant: statement, status chip, the last 12 statuses, the coverage lens and per-verification evidence. `?run=<PR run>` adds the PR-vs-base comparison and "Invariants changed by this PR". |
-| `/forge/outbox` | Every recorded forge call, newest first; sticky comments and check-run summaries rendered as GitHub-flavoured markdown under "Would be posted to GitHub (fake forge)". `?method=` filters. |
+| `/forge/outbox` | (Instance admins; the header links it, and Setup, only for them.) Every recorded forge call, newest first; sticky comments and check-run summaries rendered as GitHub-flavoured markdown under "Would be posted to GitHub (fake forge)". `?method=` filters. |
 | `/setup` | GitHub App manifest flow, token mode, sandbox settings. Plain HTML, no scripts. The "Create the GitHub App" button is disabled, with the reason, while the public URL is a loopback address. |
 
 Every UI route renders only its `main` block when the request carries `HX-Request: true` without
@@ -341,7 +341,7 @@ takes `Enter` (open the first match) and `Esc` (clear it).
 |---|---|---|
 | `?` | everywhere | This help: the keys of this page |
 | `Esc` | everywhere | Close the help, the tests popover or the go-to hint |
-| `/` | pages with a search or filter box | Focus it (the source view's file list filter; the report's search) |
+| `/` | pages with a search or filter box | Focus it (the source view's file list filter, the tests page's filter; the report's search) |
 | `g o` | everywhere | Go to the repository overview |
 | `g t` | everywhere | Go to the tests page |
 | `g m` | everywhere | Go to the coverage map |
@@ -361,7 +361,11 @@ takes `Enter` (open the first match) and `Esc` (clear it).
 `g` waits 1.5 s for its letter and says so in a small hint at the bottom right ("g … o t m i"). The
 go-to targets are never URLs in the script: they are the links in the help dialog (`data-go` on
 each; the economy row wraps the economy feature's own nav include, so it exists exactly when that
-page does) and, for `r`, the run link the page itself carries (`data-go="r"`).
+page does) and, for `r`, the run link the page itself carries (`data-go="r"`): the source view,
+the map, the function page and the test page (the run they show), the PR page ("run page"), the
+repository page ("Latest baseline run") and the dashboard (the newest live run, else the newest
+recent run). The economy include is exactly one anchor with no `id` (the help dialog copies it
+into its row, and an `id` would then be on the page twice).
 
 ## View settings
 
@@ -500,6 +504,11 @@ stylesheet and line markup the live source view uses; before and after measured 
 
 Cumulative layout shift is 0 on all of them. On the server, rendering `spreadsheets.py` (Pygments
 lexing included) takes 63 ms; from the per-process lexing cache 3.8 ms (3.2 ms before gap blocks).
+The function page and the PR page's cards render the function's hunk from the same cache, so a
+file is lexed once per process, not once per card. Pages with thousands of links that differ in one
+value (the map's tiles, the tests page's rows) build each URL from a prefix made once per page
+(`repos.url_builder`, the same strings `url_for` returns), and the tests page writes its rows in one
+template loop, 500 to a page.
 
 ## Theming and accessibility
 
@@ -566,7 +575,7 @@ or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 
 | Shot | URL | Notes |
 |---|---|---|
-| `pr.jpg` (hero) | `/repos/1/prs/2` | PASS with gaps; the first card (the changed `check_if_new_user_signup_allowed`) is open. `/repos/1/prs/1` is the red, fast story. |
+| `pr.jpg` (hero) | `/repos/1/prs/2` | PASS with gaps; the Test tax card (within threshold, the new tests with the lowest leverage) fills the viewport under the head, and the "Needs attention" heading starts at the bottom edge (its first card, the changed `check_if_new_user_signup_allowed`, is open below the fold). `/repos/1/prs/1` is the red, fast story. |
 | `run-live.jpg` | `/runs/<PR 1 run>?replay=1&speed=0.25&freeze=<F>` with **F = timeline.verdict + 0.1** | F is the run's `timeline.verdict` in seconds from `timeline.webhook_received` (else `timeline.queued`), plus 0.1, rounded to 2 decimals (the demo's PR 1 lands near 1.1). Wait for `[data-replay="frozen"]` (attached; about 5 s at ¼ speed): FAIL posted, the first-failure rule across the lanes, the failing test pinned in "Why this order", lanes partly filled, queued tests hollow. |
 | `why-order.jpg` | `/runs/<PR 1 run>` | Clip to `#why-order` (the panel with its heading); the failing test is pinned "ran 1st; file order would have run it 66th · tied at 8.0 with 2 others; …" and one muted row sums up the tests with no risk signal. |
 | `shapes.jpg` | `/repos/1/functions/<validate_email func_key>?run=<PR 2 run>` | The History panel on top (six baselines and the PR run as the last square), then the shape grid (two hollow email classes) and flow ribbon; the Hypothesis box is below the fold. The func_key is in the card links on `/repos/1/prs/2` (`/prs/2/functions/<key>`). |
@@ -574,6 +583,7 @@ or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 | `map.jpg` | `/repos/1/map` | Gap mode is the default. Full-page shot clipped just above the "Largest gaps" table, so the whole treemap is in it. The pointer is parked at (1, 1) after every navigation: Playwright keeps it where the source shot's click left it, and a treemap tile under it would show its hover outline. |
 | `comment.jpg` | `/forge/outbox?method=upsert_pr_comment` | The rendered sticky comments. |
 | `repo.jpg` | `/repos/1` | The repository overview: tiles, the two trend sparklines over the six baselines, what changed since the previous baseline (`merge_intervals` gained `intervals:single`; the demo's sample cap can add a capped function), the Gap map thumbnail and the largest gaps. Full page clipped just under the overview section (`#overview`). |
+| `tests.jpg` | `/repos/1/tests` | The tests page, riskiest first: the sort switch, the filter box under it and the first rows of the table (PR #1's failing test and the flaky clock-skew test on top). Viewport shot. |
 | `test.jpg` | `/repos/1/tests/by-nodeid?nodeid=tests/test_refund.py::test_refund_partial&run=<PR 1 run>` | Follows the 302 to `/repos/1/tests/<id>?run=<PR 1 run>`. Wait for `body[data-ready="1"]` and `#test-flow svg.flow-test`. PR #1's failing test: failed, `cents_conserved` violated, the data flow test → `refund` → `allocate_cents` and both functions' strips. Full page at 1440 wide (about 1330 px tall). |
 
 Times on pages are relative to `settings.now()`, so `COVERSET_FAKE_NOW=2026-10-11T14:00:00Z` pins

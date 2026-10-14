@@ -23,7 +23,6 @@ import asyncio
 import dataclasses
 import gzip
 import json
-import os
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
@@ -77,8 +76,14 @@ CONTEXT_CACHE_ENV = "COVERSET_AGENT_CONTEXTS"
 
 
 def context_cache_size() -> int:
-    """How many store contexts to keep: ``COVERSET_AGENT_CONTEXTS`` when it is a positive integer."""
-    raw = os.environ.get(CONTEXT_CACHE_ENV, "").strip()
+    """How many store contexts to keep: ``COVERSET_AGENT_CONTEXTS`` when it is a positive integer.
+
+    The app's configured value (``Settings.agent_contexts``, handed to
+    :func:`coverset.facts.cache.configure` by ``create_app``) wins over the environment.
+    """
+    from coverset.facts.cache import setting
+
+    raw = setting(CONTEXT_CACHE_ENV).strip()
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
     return CONTEXT_CACHE

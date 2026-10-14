@@ -20,6 +20,19 @@ With neither configured (open mode without a GitHub App) ``/login`` is a 404: th
 to sign in with. In open mode a GitHub sign-in still works but changes nothing: every caller is the
 local operator already.
 
+A third way exists for development only: **Sign in as a local user** (``POST /login/dev``), offered
+when :func:`dev_login_enabled` holds: ``COVERSET_DEV_LOGIN=true``, ``COVERSET_ENV=dev``, open mode
+(no admin token: the form would otherwise be a way around it), a loopback bind, a private public
+URL, the fake forge with no GitHub credentials, and a loopback ``Host`` (:func:`dev_login_problems`
+names whichever fails). It creates or updates a ``users`` row with ``forge = "fake"`` and
+``external_id = "dev:<login>"``, sets a member's ``repo_access`` from the form's per-repository
+picker, and opens a session through :func:`open_user_session`, the GitHub callback's own path,
+auditing ``login`` with ``details.dev = true``. Such a session takes the place of the local
+operator (the access guard asks :func:`dev_session_allowed`), so a developer can click through the
+UI as a member and sign out to be the operator again. The sessions and API tokens of these users
+count only while the sign-in is enabled: the guard refuses them on any request for which it is not
+(:func:`dev_user_refused`), so none outlives the conditions that let it be created.
+
 ``POST /logout`` deletes the session row and clears the cookie. ``GET /account`` shows who you
 are, the repositories GitHub grants you (with a refresh button), your sessions (each revocable)
 and a link to the token pages. ``GET /audit`` (instance admins) lists the newest audit events with
@@ -42,7 +55,8 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from quart import Blueprint, Response, current_app, g, jsonify, redirect, render_template, request, session
 from sqlalchemy import select
@@ -60,12 +74,15 @@ from coverset.forge.oauth import (
 )
 from coverset.web.audit import PAGE_LIMIT, known_actions, recent_events, record_audit
 from coverset.web.auth import (
+    CSRF_FORM_FIELD,
     SESSION_ADMIN,
+    SESSION_CSRF,
     admin_token_configured,
     create_user_session,
     csrf_token,
     delete_user_session,
     rate_limited,
+    request_host_is_loopback,
     safe_next,
     token_matches,
     user_principal,
@@ -73,6 +90,9 @@ from coverset.web.auth import (
 from coverset.web.context import app_db, app_settings
 from coverset.web.pages import parse_int, render_page
 from coverset.web.principal import ADMIN, PUBLIC, Principal, current_principal, require_instance_admin
+
+if TYPE_CHECKING:
+    from coverset.config import Settings
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +117,13 @@ LOGIN_REASONS: dict[str, str] = {
     ),
 }
 """``/login?reason=`` slugs and the note shown for them (anything else shows nothing)."""
+DEV_EXTERNAL_PREFIX = "dev:"
+"""``users.external_id`` prefix of the development sign-in's users (``forge = "fake"``)."""
+DEV_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+"""A login for the development sign-in: GitHub's shape (letters, digits, hyphens, at most 39)."""
+DEV_ROLES = ("member", "admin")
+DEV_PERMISSIONS = ("read", "write", "admin", "none")
+"""Choices of the development sign-in's per-repository picker (``none`` = no ``repo_access`` row)."""
 
 
 # -- configuration ---------------------------------------------------------------------------------
@@ -123,7 +150,80 @@ def github_login_available() -> bool:
 
 def login_available() -> bool:
     """True when the login page has at least one option to offer."""
-    return github_login_available() or admin_token_configured()
+    return github_login_available() or admin_token_configured() or dev_login_enabled()
+
+
+def dev_login_problems(settings: Settings) -> list[str]:
+    """Why the development sign-in is off for ``settings`` (empty when its settings all allow it).
+
+    Every one must hold: ``COVERSET_DEV_LOGIN=true``, ``COVERSET_ENV=dev``, no admin token (open
+    mode: in token mode the form would make any local caller an instance admin without the token),
+    a loopback bind, a public URL nothing outside this machine can reach, no GitHub credentials (App
+    id, token or the App's client secret) and the fake forge.
+    """
+    from coverset.config import is_private_host
+    from coverset.forge.registry import forge_mode
+
+    problems: list[str] = []
+    if not settings.dev_login:
+        problems.append("COVERSET_DEV_LOGIN is not true")
+    if settings.env != "dev":
+        problems.append(f"COVERSET_ENV is {settings.env}, not dev")
+    if settings.admin_token is not None:  # what the access guard calls token mode
+        problems.append("COVERSET_ADMIN_TOKEN is set (the sign-in would bypass it; it needs open mode)")
+    if not settings.is_loopback:
+        problems.append(f"COVERSET_BIND={settings.bind} is not a loopback address")
+    if not is_private_host(urlsplit(settings.public_url).hostname):
+        problems.append(f"COVERSET_PUBLIC_URL={settings.public_url} is reachable from outside this machine")
+    secret = settings.github_app_client_secret
+    token = settings.github_token
+    credentials = [
+        name
+        for name, present in (
+            ("COVERSET_GITHUB_APP_ID", settings.github_app_id is not None),
+            ("COVERSET_GITHUB_TOKEN", token is not None and bool(token.get_secret_value())),
+            ("COVERSET_GITHUB_APP_CLIENT_SECRET", secret is not None and bool(secret.get_secret_value())),
+        )
+        if present
+    ]
+    if credentials:
+        problems.append(f"GitHub credentials are configured ({', '.join(credentials)})")
+    try:
+        mode: str = forge_mode(settings)
+    except ValueError as exc:
+        mode = f"misconfigured ({exc})"
+    if mode != "fake":
+        problems.append(f"the forge is {mode}, not the fake forge")
+    return problems
+
+
+def dev_login_enabled() -> bool:
+    """True when this request may see and use "Sign in as a local user": no
+    :func:`dev_login_problems`, no GitHub sign-in configured (an injected OAuth client counts) and a
+    loopback ``Host``."""
+    settings = app_settings()
+    if not settings.dev_login:  # the common case, decided without importing the forge registry
+        return False
+    return not dev_login_problems(settings) and not github_login_available() and request_host_is_loopback()
+
+
+def is_dev_user(user: User) -> bool:
+    """True when ``user`` was created by the development sign-in (``forge = "fake"``, ``dev:`` id)."""
+    return user.forge == "fake" and user.external_id.startswith(DEV_EXTERNAL_PREFIX)
+
+
+def dev_session_allowed(user: User) -> bool:
+    """True when ``user``'s session may replace the local operator in open mode: the development
+    sign-in is enabled and ``user`` is one of its users."""
+    return is_dev_user(user) and dev_login_enabled()
+
+
+def dev_user_refused(user: User) -> bool:
+    """True when ``user`` is a development sign-in user and the sign-in is not enabled for this
+    request: the access guard then treats their sessions and API tokens as no credentials at all,
+    whatever the mode, so turning the flag off, leaving ``COVERSET_ENV=dev``, setting an admin
+    token or binding beyond loopback ends them."""
+    return is_dev_user(user) and not dev_login_enabled()
 
 
 def callback_url() -> str:
@@ -137,6 +237,11 @@ def callback_url() -> str:
 async def _login_page(
     *, failed: bool, next_path: str, status: int = 200, message: str | None = None
 ) -> Response:
+    dev = dev_login_enabled()
+    dev_repos: list[Repo] = []
+    if dev:
+        async with app_db().session() as db:
+            dev_repos = list(await db.scalars(select(Repo).order_by(Repo.full_name)))
     body = await render_template(
         "account/login.html",
         failed=failed,
@@ -144,8 +249,14 @@ async def _login_page(
         message=message,
         github=github_login_available(),
         token=admin_token_configured(),
+        dev=dev,
+        dev_repos=dev_repos,
+        dev_permissions=DEV_PERMISSIONS,
     )
-    return Response(body, status=status, mimetype="text/html")
+    response = Response(body, status=status, mimetype="text/html")
+    if dev:
+        response.headers["Cache-Control"] = "no-store"  # the form carries the session's CSRF token
+    return response
 
 
 @bp.get("/login")
@@ -215,6 +326,118 @@ async def logout() -> Response:
     return redirect("/", code=303)  # type: ignore[return-value]
 
 
+# -- the development sign-in ---------------------------------------------------------------------
+
+
+@bp.post("/login/dev")
+async def dev_login() -> Response:
+    """Sign in as a local user (development only; 404 unless :func:`dev_login_enabled`).
+
+    Form fields: ``login``, ``role`` (``member`` or ``admin``), ``repo-<id>`` per repository
+    (``read``, ``write``, ``admin`` or ``none``; applied for members only, an admin sees everything),
+    ``next`` and the session's ``csrf_token`` (checked here: the route is public, so that a disabled
+    sign-in answers 404 in every mode rather than the guard's 401).
+    """
+    if not dev_login_enabled():
+        raise NotFound()
+    if (limited := rate_limited()) is not None:
+        return limited
+    form = await request.form
+    next_path = safe_next(form.get("next"))
+    supplied = form.get(CSRF_FORM_FIELD)
+    expected = session.get(SESSION_CSRF)
+    if not (
+        isinstance(supplied, str)
+        and isinstance(expected, str)
+        and expected
+        and hmac.compare_digest(supplied.encode(), expected.encode())
+    ):
+        raise Forbidden("The form expired; reload the sign-in page.")
+    login = (form.get("login") or "").strip()
+    role = form.get("role") or "member"
+    if not DEV_LOGIN_RE.fullmatch(login) or role not in DEV_ROLES:
+        return await _login_page(
+            failed=False,
+            next_path=next_path,
+            status=400,
+            message="Pick a login of letters, digits and hyphens (at most 39) and a role.",
+        )
+    now = app_settings().now()
+    async with app_db().session() as db:
+        repos = list(await db.scalars(select(Repo).order_by(Repo.id)))
+        wanted: dict[int, str] = {}
+        for repo in repos:
+            permission = form.get(f"repo-{repo.id}") or "none"
+            if permission not in DEV_PERMISSIONS:
+                return await _login_page(
+                    failed=False, next_path=next_path, status=400, message="Unknown permission."
+                )
+            if permission != "none":
+                wanted[repo.id] = permission
+        existing = await db.scalar(
+            select(User).where(User.forge == "fake", User.external_id == DEV_EXTERNAL_PREFIX + login)
+        )
+        if existing is not None and existing.disabled:  # refused before any field of the row changes
+            record_audit(db, PUBLIC, "login_failed", details={"via": "dev", "reason": "disabled"})
+            await db.commit()
+            return await _problem(
+                403, "Account disabled", f"@{login} is disabled on this coverset (coverset users enable)."
+            )
+        user = await upsert_dev_user(db, login, role, now=now)
+        if role == "member":
+            await set_repo_access(db, user, wanted, now=now)
+        await open_user_session(db, user, now=now, details={"via": "dev", "dev": True})
+    response = redirect(next_path, code=303)
+    response.headers["Cache-Control"] = "no-store"
+    return response  # type: ignore[return-value]
+
+
+async def upsert_dev_user(db: AsyncSession, login: str, role: str, *, now: datetime) -> User:
+    """Create or update the development sign-in's ``users`` row for ``login`` (flushed, not committed)."""
+    external_id = DEV_EXTERNAL_PREFIX + login
+    user = await db.scalar(select(User).where(User.forge == "fake", User.external_id == external_id))
+    if user is None:
+        user = User(forge="fake", external_id=external_id, login=login, created_at=now)
+        db.add(user)
+    user.login = login
+    user.role = role  # type: ignore[assignment]
+    user.last_login_at = now
+    await db.flush()
+    return user
+
+
+async def set_repo_access(db: AsyncSession, user: User, wanted: dict[int, str], *, now: datetime) -> None:
+    """Make ``user``'s ``repo_access`` rows exactly ``wanted`` (``repo_id -> permission``; flushed)."""
+    existing = {
+        row.repo_id: row for row in await db.scalars(select(RepoAccess).where(RepoAccess.user_id == user.id))
+    }
+    for repo_id, permission in wanted.items():
+        row = existing.pop(repo_id, None)
+        if row is None:
+            db.add(RepoAccess(user_id=user.id, repo_id=repo_id, permission=permission, checked_at=now))  # type: ignore[arg-type]
+        else:
+            row.permission = permission  # type: ignore[assignment]
+            row.checked_at = now
+    for row in existing.values():
+        await db.delete(row)
+    await db.flush()
+
+
+async def open_user_session(db: AsyncSession, user: User, *, now: datetime, details: dict[str, Any]) -> None:
+    """Sign ``user`` in: a server-side session (:func:`create_user_session`), the ``login`` audit
+    event with ``details``, and a commit. Shared by the GitHub callback and the development sign-in."""
+    await create_user_session(db, user, now=now)
+    record_audit(
+        db,
+        user_principal(user, {}),
+        "login",
+        target_kind="user",
+        target_id=user.id,
+        details=details,
+    )
+    await db.commit()
+
+
 # -- GitHub sign-in --------------------------------------------------------------------------------
 
 
@@ -276,16 +499,7 @@ async def github_callback() -> Response:
             return await _problem(
                 403, "Account disabled", f"@{user.login} is disabled on this coverset. Ask an instance admin."
             )
-        await create_user_session(db, user, now=now)
-        record_audit(
-            db,
-            user_principal(user, {}),
-            "login",
-            target_kind="user",
-            target_id=user.id,
-            details={"via": "github"},
-        )
-        await db.commit()
+        await open_user_session(db, user, now=now, details={"via": "github"})
         try:
             await sync_repo_access(db, user, oauth, now=now)
         except OAuthError as exc:

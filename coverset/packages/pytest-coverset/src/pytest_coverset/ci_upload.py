@@ -252,38 +252,61 @@ def _safe_rel(value: object) -> str | None:
     return value
 
 
-def measured_paths(bundle_dir: Path) -> list[str]:
-    """The paths of the neutral bundle's ``files`` table (``neutral/files.jsonl.gz`` or inside
-    ``neutral.tar.gz``); empty when the plugin wrote no neutral bundle."""
-    raw: bytes | None = None
-    direct = bundle_dir / "neutral" / "files.jsonl.gz"
-    if _regular_file(direct):
-        raw = direct.read_bytes()
-    elif _regular_file(bundle_dir / "neutral.tar.gz"):
-        try:
-            with tarfile.open(bundle_dir / "neutral.tar.gz", "r:gz") as tar:
-                for member in tar:
-                    if member.isfile() and member.name.rstrip("/").endswith("files.jsonl.gz"):
-                        extracted = tar.extractfile(member)
-                        raw = extracted.read(MAX_FILES_TABLE_BYTES) if extracted is not None else None
-                        break
-        except (tarfile.TarError, OSError, EOFError):
-            raw = None
-    if raw is None:
-        return []
-    paths: list[str] = []
+FILES_TABLES = ("files.jsonl.gz", "files.jsonl")
+"""The neutral bundle's ``files`` table: gzipped as pytest-coverset writes it, plain as Vitest's
+reporter (and a hand-made bundle) may."""
+
+
+def _files_table(bundle_dir: Path) -> tuple[bytes, bool] | None:
+    """``(raw bytes, gzipped)`` of the ``files`` table: ``neutral/files.jsonl[.gz]``, else the same
+    member inside ``neutral.tar.gz``; None when there is none."""
+    for name in FILES_TABLES:
+        direct = bundle_dir / "neutral" / name
+        if _regular_file(direct):
+            with direct.open("rb") as fh:
+                return fh.read(MAX_FILES_TABLE_BYTES), name.endswith(".gz")
+    if not _regular_file(bundle_dir / "neutral.tar.gz"):
+        return None
     try:
-        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as fh:
-            for line in fh.read(MAX_FILES_TABLE_BYTES).splitlines():
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                path = _safe_rel(row.get("path")) if isinstance(row, dict) else None
-                if path is not None:
-                    paths.append(path)
+        with tarfile.open(bundle_dir / "neutral.tar.gz", "r:gz") as tar:
+            found: dict[str, bytes] = {}
+            for member in tar:
+                base = member.name.rstrip("/").rsplit("/", 1)[-1]
+                if member.isfile() and base in FILES_TABLES and base not in found:
+                    extracted = tar.extractfile(member)
+                    if extracted is not None:
+                        found[base] = extracted.read(MAX_FILES_TABLE_BYTES)
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    for name in FILES_TABLES:
+        if name in found:
+            return found[name], name.endswith(".gz")
+    return None
+
+
+def measured_paths(bundle_dir: Path) -> list[str]:
+    """The paths of the neutral bundle's ``files`` table (``neutral/files.jsonl.gz`` or
+    ``neutral/files.jsonl``, or either inside ``neutral.tar.gz``); empty when the plugin wrote no
+    neutral bundle. Paths are relative to the bundle's repository root (:func:`_measured_root`)."""
+    table = _files_table(bundle_dir)
+    if table is None:
+        return []
+    raw, gzipped = table
+    try:
+        if gzipped:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as fh:
+                raw = fh.read(MAX_FILES_TABLE_BYTES)
     except (OSError, EOFError):
         return []
+    paths: list[str] = []
+    for line in raw.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        path = _safe_rel(row.get("path")) if isinstance(row, dict) else None
+        if path is not None:
+            paths.append(path)
     return sorted(set(paths))
 
 
@@ -332,7 +355,13 @@ def tracked(root: Path, paths: Iterable[str]) -> set[str]:
 
 
 def _measured_root(bundle_dir: Path, fallback: Path) -> Path:
-    """Where the bundle's paths are relative to: ``meta.json``'s ``repo_root`` when it exists."""
+    """Where the bundle's paths are relative to: ``meta.json``'s ``repo_root`` when it names a
+    directory on this machine, else ``fallback`` (the current directory).
+
+    pytest-coverset records ``repo_root`` (the git top level, else pytest's rootdir), so an upload
+    run from anywhere, ``--bundle sub/project/.coverset`` from the top of a monorepo included,
+    resolves the paths where the tests measured them. A relative ``repo_root`` is taken relative to
+    the bundle directory's parent (the directory pytest ran in, where ``.coverset`` lives)."""
     meta_path = bundle_dir / "meta.json"
     if _regular_file(meta_path):
         try:
@@ -340,8 +369,10 @@ def _measured_root(bundle_dir: Path, fallback: Path) -> Path:
         except (OSError, ValueError):
             meta = {}
         root = meta.get("repo_root") if isinstance(meta, dict) else None
-        if isinstance(root, str) and root and Path(root).is_dir():
-            return Path(root)
+        if isinstance(root, str) and root:
+            candidate = Path(root) if Path(root).is_absolute() else bundle_dir.parent / root
+            if candidate.is_dir():
+                return candidate
     return fallback
 
 

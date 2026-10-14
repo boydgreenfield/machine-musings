@@ -704,6 +704,7 @@ async def _collect(
         "--coverset-shapes=off",
         "--continue-on-collection-errors",
         *config.testpaths,
+        *config.pytest_args,  # validated options; the shards get the same (runner, ``_extra``)
     ]
     env = worker_env(worker, config, nonce, run.extra_env or {})
     result = await worker.run(

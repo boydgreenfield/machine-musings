@@ -15,8 +15,9 @@ entry:
    the run's ``call_shapes``/``func_sampling`` facts and the head sources' annotations, and its
    invariant links are the tests the run recorded as covering each invariant.
 3. **The review.** :func:`coverset.ai.review.review_changes` with
-   ``get_review_client(settings, repo_enabled=repo.ai_review_enabled)`` (the offline fake unless
-   ``COVERSET_AI=anthropic`` and the repo opted in). A finding stored earlier for the same
+   ``get_review_client(settings, repo_enabled=effective_policy(...).ai_review)`` (the offline fake
+   unless ``COVERSET_AI=anthropic`` and the repository's scoped ``policy.ai_review`` is on, as for a
+   run's review: docs/settings.md). A finding stored earlier for the same
    ``(func_key, bundle_hash)`` is reused; new findings are stored in ``review_findings`` under the
    baseline run.
 4. **The statuses.** Each review-kind invariant is evaluated by
@@ -273,8 +274,12 @@ async def _scan_checkout(
         _input_coverage, store, repo, run.id, callables, sources, adapter
     )
 
+    from coverset.settings_scopes import effective_policy  # policy.ai_review, as orchestrator/verdict.py
+
+    async with db.session() as session:
+        enabled = (await effective_policy(session, repo, settings)).ai_review
     factory = client_factory or (lambda s, enabled: get_review_client(s, repo_enabled=enabled))
-    client = factory(settings, bool(repo.ai_review_enabled))
+    client = factory(settings, bool(enabled))
     rows: list[ReviewFindingRow] = []
     if client is not None and callables:
         async with db.session() as session:

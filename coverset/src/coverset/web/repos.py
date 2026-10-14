@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 from markupsafe import Markup
 from quart import Blueprint, Response, g, redirect, request, url_for
@@ -49,7 +51,7 @@ from coverset.web.loaders import (
     run_counts,
     store,
 )
-from coverset.web.pages import MAX_DB_ID, get_repo, render_page
+from coverset.web.pages import MAX_DB_ID, get_repo, parse_int, render_page
 from coverset.web.pr_view import analyse_diff
 from coverset.web.principal import current_principal, require_repo
 from coverset.web.render.sparkline import SparkSeries, render_sparkline
@@ -74,6 +76,42 @@ from coverset.web.render.treemap import (
 from coverset.web.run_view import order_rows
 
 bp = Blueprint("repos", __name__)
+
+URL_SLOT = "coverset-url-slot-5f0c"
+"""The placeholder :func:`url_builder` puts where the varying value goes (unreserved characters
+only, so neither the path nor the query encoding changes it)."""
+URL_INT_SLOT = 9_007_199_254_740_993
+"""The placeholder for an ``<int:...>`` route variable (an int converter refuses a string); no
+database id comes near it."""
+_PATH_SAFE = "!$&'()*+,/:;=@"
+"""What werkzeug's path converters leave unquoted (``BaseConverter.to_url``)."""
+_QUERY_SAFE = "!$'()*,/:;?@"
+"""What werkzeug leaves unquoted in a query value (``urls._urlencode``)."""
+
+
+def url_builder(endpoint: str, **values: Any) -> Callable[[Any], str]:
+    """``url_for(endpoint, **values)`` as a function of the one value given as :data:`URL_SLOT` (or
+    :data:`URL_INT_SLOT` for an ``<int:...>`` variable, whose values must then be ints).
+
+    ``url_for`` runs once, for the placeholder; each call then quotes its value the way werkzeug
+    quotes a path variable or a query value and splices it in. A page with thousands of links that
+    differ in one value (5,400 treemap tiles, 500 test rows) builds them in microseconds instead of
+    one rule build each; the URLs are the same strings ``url_for`` returns.
+    """
+    slots = [v for v in values.values() if v == URL_SLOT or (type(v) is int and v == URL_INT_SLOT)]
+    if len(slots) != 1:
+        raise ValueError(f"url_builder({endpoint!r}) needs exactly one slot value")
+    marker = str(slots[0])
+    template = url_for(endpoint, **values)
+    if template.count(marker) != 1:
+        raise ValueError(f"url_builder({endpoint!r}): the slot is not in the URL exactly once")
+    head, tail = template.split(marker)
+    if slots[0] == URL_INT_SLOT:
+        return lambda value: head + str(int(value)) + tail
+    if "?" in head:
+        return lambda value: head + quote_plus(str(value), safe=_QUERY_SAFE) + tail
+    return lambda value: head + quote(str(value), safe=_PATH_SAFE) + tail
+
 
 HISTORY_RUNS = 12
 TOP_GAPS = 8
@@ -246,12 +284,14 @@ async def repo_overview(repo_row: Repo, module_weight: str = "thin") -> dict[str
     rid, run_id = repo_row.id, latest.run_id
     map_url = url_for("repos.map_page", rid=rid, run=run_id)
 
+    zoom_url = url_builder("repos.map_page", rid=rid, run=run_id, path=URL_SLOT)
+
     def dir_url(item: Any) -> str:
         # Every tile opens the map: a directory or file zoomed in, a function at its file.
-        return url_for("repos.map_page", rid=rid, run=run_id, path=item.path)
+        return zoom_url(item.path)
 
     def leaf_url(item: Any) -> str:
-        return url_for("repos.map_page", rid=rid, run=run_id, path=item.file)
+        return zoom_url(item.file)
 
     thumb = render_treemap(
         thumbnail_tree(weigh_modules(build_tree(found["nodes"]), weight), THUMB_W, THUMB_H),  # type: ignore[arg-type]
@@ -528,14 +568,16 @@ async def map_page(rid: int) -> Response:
                 tree, differs = anchor_to(tree, frame)
                 frame_from = baseline if differs else None
 
+    # one url_for per page, not per tile (5,400 tiles on a 470-file repository)
+    source_url = url_builder("files.source", rid=rid, path=URL_SLOT, run=run.id)
+    map_url = url_builder("repos.map_page", rid=rid, mode=mode, path=URL_SLOT, run=run.id, **keep)
+
     def leaf_url(item: Any) -> str:
         anchor = f"#L{item.def_line}" if item.def_line else ""
-        return url_for("files.source", rid=rid, path=item.file, run=run.id) + anchor
+        return source_url(item.file) + anchor
 
     def dir_url(item: Any) -> str:
-        if item.kind == "file":
-            return url_for("files.source", rid=rid, path=item.path, run=run.id)
-        return url_for("repos.map_page", rid=rid, mode=mode, path=item.path, run=run.id, **keep)
+        return source_url(item.path) if item.kind == "file" else map_url(item.path)
 
     svg = render_treemap(
         tree,
@@ -641,9 +683,17 @@ async def _test_rows(rid: int, test_id: int | None = None) -> list[dict[str, Any
     return out
 
 
+TESTS_PAGE = 500
+"""Rows per page of the tests page (``?page=N``; ``?all=1`` shows every test)."""
+
+
 @bp.get("/repos/<int:rid>/tests")
 async def tests_page(rid: int) -> Response:
-    """Every test with fail rate, flakiness, durations and the quarantine toggle."""
+    """Every test with fail rate, flakiness, durations and the quarantine toggle.
+
+    :data:`TESTS_PAGE` rows a page in the chosen order, with a "show all" link. The rows are
+    rendered in one template loop (``tests_row.html`` is the htmx fragment that re-renders one row
+    after a quarantine toggle; the two must render a row identically)."""
     require_repo(rid)
     repo_row = await get_repo(rid)
     rows = await _test_rows(rid)
@@ -662,8 +712,28 @@ async def tests_page(rid: int) -> Response:
                 r["nodeid"],
             )
         )
+    total = len(rows)
+    show_all = request.args.get("all") == "1"
+    pages = max(1, -(-total // TESTS_PAGE))
+    page = 1 if show_all else min(parse_int(request.args.get("page"), default=1, minimum=1) or 1, pages)
+    shown = rows if show_all else rows[(page - 1) * TESTS_PAGE : page * TESTS_PAGE]
     return await render_page(
-        "tests.html", repo=repo_row, rows=rows, sort=sort, can_quarantine=current_principal().can(rid, "write")
+        "tests.html",
+        repo=repo_row,
+        rows=shown,
+        total=total,
+        quarantined=sum(1 for r in rows if r["quarantined"]),
+        sort=sort,
+        page=page,
+        pages=1 if show_all else pages,
+        first=0 if show_all else (page - 1) * TESTS_PAGE,
+        show_all=show_all,
+        paged=total > TESTS_PAGE,
+        tests_per_page=TESTS_PAGE,
+        can_quarantine=current_principal().can(rid, "write"),
+        # one url_for per page for the per-row links (5,000 rows on a real repository)
+        test_href=url_builder("testpage.test_page", rid=rid, test_id=URL_INT_SLOT),
+        quarantine_url=url_builder("repos.toggle_quarantine", rid=rid, test_id=URL_INT_SLOT),
     )
 
 
@@ -679,7 +749,12 @@ async def toggle_quarantine(rid: int, test_id: int) -> Response:
         wanted = form.get("quarantined")
         case.quarantined = (wanted == "1") if wanted in ("0", "1") else not case.quarantined
         record_audit(
-            session, principal, "quarantine", target_kind="test", target_id=test_id, repo_id=rid,
+            session,
+            principal,
+            "quarantine",
+            target_kind="test",
+            target_id=test_id,
+            repo_id=rid,
             details={"quarantined": case.quarantined},
         )
         await session.commit()

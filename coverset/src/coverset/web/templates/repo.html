@@ -10,7 +10,7 @@
   <a class="btn secondary" href="{{ url_for('repos.map_page', rid=repo.id) }}">Coverage map</a>
   <a class="btn secondary" href="{{ url_for('repos.tests_page', rid=repo.id) }}">Tests</a>
   <a class="btn secondary" href="{{ url_for('repos.invariants_page', rid=repo.id) }}">Invariants</a>
-  {% if current %}<a class="btn secondary" href="{{ url_for('runs.run_page', run_id=current.id) }}">Latest baseline run</a>{% endif %}
+  {% if current %}<a class="btn secondary" href="{{ url_for('runs.run_page', run_id=current.id) }}" data-go="r">Latest baseline run</a>{% endif %}
 </p>
 
 <section class="panel overview" id="overview" aria-labelledby="overview-h">

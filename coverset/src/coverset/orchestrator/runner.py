@@ -39,12 +39,17 @@
    run on so the facts land. A newer queued run for the same PR cancels this one
    (``cancel_superseded``).
 5. **Ingest and verdict.** Bundles are pulled before the workers are released, converted and
-   ingested concurrently, the run is finalized, ``results.jsonl`` overrides streamed outcomes, then
+   ingested concurrently, the run is finalized (the test economy with the repository's scoped
+   ``policy.test_tax_threshold`` and the tests' ``test_stats`` p50s: :func:`economy_inputs`),
+   ``results.jsonl`` overrides streamed outcomes, then
    the patch report, input classes, invariants, AI review, ``test_stats`` and cost feed the final
    verdict. The status change, the verdict and the ``verdict`` and ``done`` events are written in
    one transaction (retried with backoff while the database is busy), then the verdict is posted.
    A shard whose ``meta.json`` names a tracer other than coverage.py's C tracer gets a ``log``
    event saying per-test contexts may be incomplete (``tracer_mismatch`` in its ``ingest_log``).
+   In ``serve`` (:attr:`OrchestratorContext.warm_caches`) the web's run-facts and source-text
+   caches are then warmed for the run in a background thread (:func:`schedule_warm_up`), so the
+   first page after an ingest is not a cold one.
 6. **Retention.** After a PR run, :func:`coverset.orchestrator.history.expire_pr_runs` applies the
    per-PR rule (outside ``COVERSET_ENV=test``).
 7. **Re-snapshot.** After a trusted baseline run of the default branch that completed (verdict
@@ -86,7 +91,7 @@ import socket
 import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +114,7 @@ from coverset.db.models import (
 from coverset.db.session import Database
 from coverset.executors.base import EnvRef, Executor, ExecutorError, Resources, RunResult, SnapshotRef
 from coverset.facts.convert import C_TRACERS
+from coverset.facts.economy import EconomyInputs, policy_from_scopes
 from coverset.facts.ingest import RunContext, finalize_run, record_shard_failure
 from coverset.facts.store import FactsStore
 from coverset.lang.base import LanguageAdapter
@@ -156,12 +162,14 @@ __all__ = [
     "OrchestratorContext",
     "RunOutcome",
     "create_run",
+    "economy_inputs",
     "execute_run",
     "exit_code_for",
     "finalize_crashed",
     "process_claimant",
     "resnapshot",
     "retry_env",
+    "schedule_warm_up",
 ]
 
 log = logging.getLogger(__name__)
@@ -230,10 +238,20 @@ class OrchestratorContext:
     """Post-run work still in flight (re-snapshots); :meth:`close` waits for it."""
     on_executor_built: Callable[[str, Executor], None] | None = None
     """Called with each executor :meth:`executor` builds (``serve`` starts its reaper and pool)."""
+    warm_caches: bool = False
+    """Warm the web's caches for each run after its ingest (:func:`schedule_warm_up`): true for the
+    app's context (``serve``), where pages read them; a CLI run would only pay for it."""
 
     @classmethod
     def from_settings(cls, settings: Settings, **overrides: Any) -> OrchestratorContext:
-        """A context with its own database engine (closed by :meth:`close`)."""
+        """A context with its own database engine (closed by :meth:`close`).
+
+        This is how the CLI's runs get a context, so it also hands the settings' cache knobs to
+        :func:`coverset.facts.cache.configure` (``create_app`` does the same for ``serve``).
+        """
+        from coverset.facts.cache import configure
+
+        configure(settings.cache_overrides())
         db = overrides.pop("db", None)
         owns = db is None
         return cls(
@@ -255,6 +273,7 @@ class OrchestratorContext:
                 db=app.extensions["db"],
                 store=FactsStore(settings.facts_dir),
                 claimant=process_claimant("serve"),
+                warm_caches=True,
             )
             existing.forge = _app_forge(app)
             app.extensions["orchestrator"] = existing
@@ -1318,6 +1337,7 @@ class _Execution:
             "shapes": shapes,
             "xdist": "pytest-xdist" in requirements,
             "pytest_cov": "pytest-cov" in requirements,
+            "pytest_args": config.pytest_args,  # appended last by the adapter, as at collection
         }
 
     async def _run_shard(self, state: _ShardState) -> None:
@@ -1786,6 +1806,7 @@ class _Execution:
                 keep_funcs=frozenset(r.triple for r in interest.values()),
                 language=self.ctx.adapter.name,
                 adapter=self.ctx.adapter,
+                cache_overrides=tuple(sorted(self.settings.cache_overrides().items())),
             )
             for shard_id, path in sorted(pulled.items())
         ]
@@ -1911,9 +1932,16 @@ class _Execution:
             await asyncio.gather(self.early_verdict, return_exceptions=True)
         rctx = await self._run_context(plan)
         catalogue = await asyncio.to_thread(_catalogue, self.ctx.adapter, plan.measured_sources)
+        economy = await economy_inputs(self.ctx.db, self.settings, plan.repo_id, plan.test_ids)
         finalized = await asyncio.to_thread(
-            finalize_run, self.ctx.store, rctx, expected_shards=len(plan.shards), catalogue=catalogue
+            finalize_run,
+            self.ctx.store,
+            rctx,
+            expected_shards=len(plan.shards),
+            catalogue=catalogue,
+            economy=economy,
         )
+        schedule_warm_up(self.ctx, plan.repo_id, self.run_id, plan.head_sha, plan.base_sha)
         await sink.flush()
         conclusion, status, reason = self._conclusion(plan)
         reason = redact(reason)  # shard errors quote worker-produced text
@@ -2056,6 +2084,59 @@ class _Execution:
         for kind, payload in notes:
             sink.notify(kind, payload)
         await self._post(summary)
+
+
+async def economy_inputs(
+    db: Database, settings: Settings, repo_id: int, nodeids: Iterable[str]
+) -> EconomyInputs | None:
+    """What ``finalize_run`` gives the test economy: the repository's scoped policy and p50s.
+
+    ``policy`` is :func:`~coverset.facts.economy.policy_from_scopes` of
+    :func:`coverset.settings_scopes.effective_policy` (so the stored test-tax flag uses the
+    repository's ``policy.test_tax_threshold``, not the built-in 8.0); ``durations`` are the p50
+    seconds ``test_stats`` holds for ``nodeids`` (tests without stats keep the run's own duration).
+    None when either cannot be read: the economy then uses its built-in defaults, and the run goes on.
+    """
+    from coverset.settings_scopes import effective_policy
+
+    try:
+        async with db.session() as session:
+            repo = await session.get(Repo, repo_id)
+            policy = await effective_policy(session, repo, settings) if repo is not None else None
+            durations = await history.p50_seconds(session, repo_id, nodeids)
+    except Exception:  # the economy is advisory: never fail a run over its inputs
+        log.warning("the test-economy inputs of repo %s could not be read", repo_id, exc_info=True)
+        return None
+    return EconomyInputs(policy=policy_from_scopes(policy), durations=durations or None)
+
+
+def schedule_warm_up(
+    ctx: OrchestratorContext, repo_id: int, run_id: str, head_sha: str, base_sha: str | None = None
+) -> asyncio.Task[Any] | None:
+    """Warm the web's caches for a run just finalized, in a background thread (``serve`` only).
+
+    :func:`coverset.web.loaders.warm_run` loads the run's :class:`~coverset.web.loaders.
+    IndexedRunFacts` into the run-facts cache, reads its measured sources into the source-text
+    cache and, for a run with a base (``base_sha``: a PR run), computes the PR page's diff analysis,
+    which a cold PR page otherwise pays for on its first request. The task is tracked in
+    :attr:`OrchestratorContext.background` and never fails the run (errors are logged). Returns the
+    task, or None when the context does not warm caches.
+    """
+    if not ctx.warm_caches:
+        return None
+    from coverset.orchestrator.repos import mirror_path
+
+    async def warm() -> None:
+        from coverset.web.loaders import warm_run
+
+        mirror = mirror_path(ctx.settings, repo_id)
+        await asyncio.to_thread(warm_run, ctx.store, repo_id, run_id, mirror, head_sha, base_sha)
+
+    try:
+        return ctx.spawn(warm(), name=f"cache warm-up of run {run_id}")
+    except Exception:  # no running loop or a closing context: the pages just start cold
+        log.warning("scheduling the cache warm-up of run %s failed", run_id, exc_info=True)
+        return None
 
 
 async def resnapshot(

@@ -657,6 +657,38 @@ async def test_a_pass_that_missed_a_new_shard_writes_nothing_final(
         assert statuses == ["completed", "completed"]
 
 
+async def test_a_pass_reads_the_neutral_manifests_once_off_the_event_loop(
+    app: Quart,
+    repo: Repo,
+    forge: FakeForge,
+    bundle_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding a neutral bundle's language may decompress the whole archive: a pass does it once per
+    shard, in a worker thread, and reuses the answer for the diff and the ingest jobs."""
+    import threading
+
+    from coverset.orchestrator import upload as upload_module
+    from coverset.orchestrator.upload import process_run
+
+    loop_thread = threading.get_ident()
+    calls: list[bool] = []
+    real = upload_module._neutral_language
+
+    def recording(tarball: Path) -> str:
+        calls.append(threading.get_ident() == loop_thread)
+        return real(tarball)
+
+    monkeypatch.setattr(upload_module, "_neutral_language", recording)
+    run_id = await _register(app, repo, make_archive(bundle_dir, python=False), "neutral", tmp_path)
+    await process_run(app.extensions["orchestrator"], run_id)
+    async with app.extensions["db"].session() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None and run.status == "completed"
+    assert calls == [False], "one read per shard, never on the event loop"
+
+
 # -- a control-plane restart ---------------------------------------------------------------------
 
 
@@ -684,8 +716,9 @@ async def test_a_restart_between_two_matrix_legs_does_not_strand_the_run(
     requeue: bool,
 ) -> None:
     """Leg A uploads with ``--shards 2``, the server restarts, leg B uploads: one run concludes with
-    both shards. With ``COVERSET_REQUEUE_ON_BOOT`` the takeover's queued copy is cancelled, never
-    executed as a managed run."""
+    both shards. The boot takeover skips upload runs (they are never executed, and one waiting for
+    its legs is ``running`` by design), so the run is neither abandoned nor copied, with or without
+    ``COVERSET_REQUEUE_ON_BOOT``; it was formerly abandoned and re-opened by leg B."""
     from coverset.orchestrator.runner import process_claimant
     from coverset.orchestrator.upload import process_run
 
@@ -698,12 +731,12 @@ async def test_a_restart_between_two_matrix_legs_does_not_strand_the_run(
         run = await session.get(Run, run_id)
         assert run is not None and (run.status, run.verdict) == ("running", None)
     touched = await _restart(app, monkeypatch, requeue=requeue)
-    assert run_id in touched
+    assert run_id not in touched
     async with db.session() as session:
         run = await session.get(Run, run_id)
-        assert run is not None and (run.status, run.verdict) == ("abandoned", "neutral")
+        assert run is not None and (run.status, run.verdict) == ("running", None)
         copies = list(await session.scalars(select(Run).where(Run.id != run_id, Run.head_sha == SHA)))
-        assert [c.status for c in copies] == (["queued"] if requeue else [])
+        assert copies == []
 
     joined = await _register(app, repo, make_archive(bundle_dir, python=False), "py312", tmp_path, shards=2)
     assert joined == run_id
@@ -711,7 +744,7 @@ async def test_a_restart_between_two_matrix_legs_does_not_strand_the_run(
     async with db.session() as session:
         run = await session.get(Run, run_id)
         assert run is not None and (run.status, run.verdict) == ("completed", "success")
-        assert run.shard_count == 2 and "finished" in (run.timeline or {}) and "reopened" in run.timeline
+        assert run.shard_count == 2 and "finished" in (run.timeline or {})
         statuses = list(await session.scalars(select(Shard.status).where(Shard.run_id == run_id)))
         assert statuses == ["completed", "completed"]
         kinds = list(
@@ -719,11 +752,66 @@ async def test_a_restart_between_two_matrix_legs_does_not_strand_the_run(
                 select(RunEvent.kind).where(RunEvent.run_id == run_id).order_by(RunEvent.seq)
             )
         )
-        assert kinds[-2:] == ["verdict", "done"] and kinds.count("done") == 2
+        assert kinds[-2:] == ["verdict", "done"] and kinds.count("done") == 1
         copies = list(await session.scalars(select(Run).where(Run.id != run_id, Run.head_sha == SHA)))
-        assert [c.status for c in copies] == (["cancelled"] if requeue else [])
-        if requeue:
-            assert "never executed" in (copies[0].reason or "")
+        assert copies == []
+
+
+async def test_a_pass_cut_off_by_a_restart_concludes_when_serve_resumes(
+    app: Quart,
+    repo: Repo,
+    forge: FakeForge,
+    bundle_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run whose every shard is on disk but whose pass never finished (the process died) is
+    ``running`` with nobody to schedule it: the boot takeover skips it, and the start-up resume
+    (:func:`~coverset.orchestrator.queue.resume_upload_runs`) concludes it. A ``--shards 2`` run with
+    one leg in gets the same pass and keeps waiting, with nothing posted."""
+    from coverset.orchestrator.queue import resume_upload_runs
+
+    db = app.extensions["db"]
+    done = await _register(app, repo, make_archive(bundle_dir), "py313", tmp_path)
+    async with db.session() as session:
+        other_repo = await session.get(Repo, await other_repo_id(app))
+        assert other_repo is not None
+    (tmp_path / "w").mkdir()
+    waiting = await _register(app, other_repo, make_archive(bundle_dir), "py313", tmp_path / "w", shards=2)
+    touched = await _restart(app, monkeypatch, requeue=False)
+    assert done not in touched and waiting not in touched
+    assert set(await resume_upload_runs(app)) == {done, waiting}
+    await settle(app)
+    async with db.session() as session:
+        run = await session.get(Run, done)
+        assert run is not None and (run.status, run.verdict) == ("completed", "success")
+        kinds = list(await session.scalars(select(RunEvent.kind).where(RunEvent.run_id == done)))
+        assert kinds.count("done") == 1
+        held = await session.get(Run, waiting)
+        assert held is not None and (held.status, held.verdict) == ("running", None)
+        held_kinds = list(await session.scalars(select(RunEvent.kind).where(RunEvent.run_id == waiting)))
+        assert "done" not in held_kinds
+    assert await resume_upload_runs(app) == [waiting], "a concluded run is not resumed again"
+    await settle(app)
+
+
+async def test_an_abandoned_upload_run_is_left_alone_and_a_new_upload_starts_a_fresh_run(
+    app: Quart, repo: Repo, forge: FakeForge, bundle_dir: Path, tmp_path: Path
+) -> None:
+    """An upload run an older version's boot takeover abandoned is terminal like an errored one: the
+    next upload of the commit starts a fresh run instead of re-opening it."""
+    db = app.extensions["db"]
+    run_id = await _register(app, repo, make_archive(bundle_dir), "py313", tmp_path, shards=2)
+    async with db.session() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None
+        run.status, run.verdict = "abandoned", "neutral"
+        await session.commit()
+    fresh = await _register(app, repo, make_archive(bundle_dir, python=False), "py312", tmp_path, shards=2)
+    assert fresh != run_id
+    async with db.session() as session:
+        old = await session.get(Run, run_id)
+        assert old is not None and old.status == "abandoned"
 
 
 async def test_the_status_route_answers_alike_for_unknown_and_foreign_runs(
@@ -747,3 +835,44 @@ async def test_the_status_route_answers_alike_for_unknown_and_foreign_runs(
     assert (
         await client.get(f"/v1/bundles/{run_id}", headers={"Authorization": f"Bearer {token}"})
     ).status_code == 200
+
+
+async def test_an_upload_finalizes_with_the_scoped_policy_and_warms_the_caches(
+    app: Quart,
+    repo: Repo,
+    forge: FakeForge,
+    bundle_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The upload path hands ``finalize_run`` the same economy inputs as a managed run (the
+    repository's ``policy.test_tax_threshold``), and, in ``serve``, schedules the cache warm-up."""
+    from coverset import settings_scopes
+    from coverset.orchestrator import upload as upload_module
+    from coverset.orchestrator.upload import process_run
+    from coverset.web import loaders
+
+    async with app.extensions["db"].session() as session:
+        await settings_scopes.set_value(
+            session, "policy.test_tax_threshold", 3.0, scope="repo", scope_id=repo.id
+        )
+    seen: list[Any] = []
+    real = upload_module.finalize_run
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("economy"))
+        return real(*args, **kwargs)
+
+    warmed: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(upload_module, "finalize_run", recording)
+    monkeypatch.setattr(loaders, "warm_run", lambda *args: warmed.append(args))
+    ctx = app.extensions["orchestrator"]
+    ctx.warm_caches = True
+    run_id = await _register(app, repo, make_archive(bundle_dir), "py313", tmp_path)
+    await process_run(ctx, run_id)
+    await ctx.finish_background()
+    assert len(seen) == 1 and seen[0] is not None and seen[0].policy.test_tax_threshold == 3.0
+    assert [args[2] for args in warmed] == [run_id]
+    async with app.extensions["db"].session() as session:
+        run = await session.get(Run, run_id)
+        assert run is not None and run.status == "completed"

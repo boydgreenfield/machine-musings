@@ -173,7 +173,7 @@ async def test_org_and_repo_pages_show_what_they_inherit(
     page = await (await client.get(f"/repos/{world['widgets']}/settings")).get_data(as_text=True)
     assert_csp_clean(page)
     assert "inherited from organization acme: <strong>run with the network blocked</strong>" in page
-    assert re.search(r'<a href="/repos/\d+/settings" aria-current="page">Settings</a>', page)
+    assert re.search(r'<a href="/repos/\d+/settings" aria-current="page">Repo settings</a>', page)
     assert (await client.get("/settings/org/not%2Fan-org")).status_code == 404
     assert await rows(app) == {
         ("instance", "", "policy.untrusted_pr_policy"): "skip",

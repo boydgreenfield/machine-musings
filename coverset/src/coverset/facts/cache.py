@@ -25,11 +25,15 @@ its cursors, which another thread may be using); it is dropped and freed when it
 :class:`ResultCache` memoises the results of run-scoped queries (the treemap, the overview's
 gaps and changes, a function's history) under the same stamps.
 
-Sizes come from the environment because the facts layer has no settings object of its own:
-``COVERSET_FACTS_CACHE_ENTRIES`` (cached databases, default 16), ``COVERSET_FACTS_MEMORY_LIMIT``
-(DuckDB ``memory_limit`` of each, default ``512MB``), ``COVERSET_FACTS_THREADS`` (DuckDB threads of
-each, default ``min(4, CPUs)``) and ``COVERSET_FACTS_RESULT_ENTRIES`` (memoised results, default
-256).
+Sizes are ``COVERSET_FACTS_CACHE_ENTRIES`` (cached databases, default 16),
+``COVERSET_FACTS_MEMORY_LIMIT`` (DuckDB ``memory_limit`` of each, default ``512MB``),
+``COVERSET_FACTS_THREADS`` (DuckDB threads of each, default ``min(4, CPUs)``) and
+``COVERSET_FACTS_RESULT_ENTRIES`` (memoised results, default 256). The facts layer has no settings
+object of its own, so each knob is read through :func:`setting`: the value the app configured
+(:func:`configure`, called by ``create_app`` and the CLI's orchestrator context with
+``Settings.cache_overrides()``), else the process environment, else the default. The same registry
+serves the web's and the agent's cache knobs (``COVERSET_RUN_FACTS_*``, ``COVERSET_SOURCE_CACHE_MB``,
+``COVERSET_AGENT_CONTEXTS``) and ``COVERSET_FACTS_COMPACT`` (:func:`compact_layout`).
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,9 +56,13 @@ __all__ = [
     "ConnectionCache",
     "ResultCache",
     "RunStamp",
+    "compact_layout",
+    "configure",
     "memory_limit",
+    "override",
     "run_stamp",
     "scope_key",
+    "setting",
     "threads",
 ]
 
@@ -64,8 +72,47 @@ type RunStamp = tuple[tuple[str, int, int, int], ...]
 """``(name, inode, size, mtime_ns)`` of every visible-candidate ``*.parquet`` file of a run, sorted."""
 
 
+COMPACT_ENV = "COVERSET_FACTS_COMPACT"
+"""The compact-layout switch (``facts.store.COMPACT_ENV`` names the same variable)."""
+
+_overrides: dict[str, str] = {}
+
+
+def configure(overrides: Mapping[str, object | None] | None) -> None:
+    """Prefer ``overrides`` (environment name -> value) over the environment for the cache knobs.
+
+    ``create_app`` and the CLI's orchestrator context pass ``Settings.cache_overrides()``, so a value
+    from ``.env`` or the settings object counts as well as one exported in the environment; a None
+    value is left out (the environment, then the default, applies). Each call replaces the previous
+    overrides; ``configure(None)`` forgets them.
+    """
+    global _overrides
+    _overrides = {name: str(value) for name, value in (overrides or {}).items() if value is not None}
+
+
+def override(name: str) -> str | None:
+    """The value :func:`configure` set for ``name``, or None."""
+    return _overrides.get(name)
+
+
+def overrides() -> dict[str, str]:
+    """Every configured override (a copy; ingest jobs carry it into their worker processes)."""
+    return dict(_overrides)
+
+
+def setting(name: str) -> str:
+    """``name``'s value: the configured override, else the environment (empty when neither)."""
+    found = _overrides.get(name)
+    return found if found is not None else os.environ.get(name, "")
+
+
+def compact_layout() -> bool:
+    """Whether ingest writes the compact ``test_file_bits`` layout (``COVERSET_FACTS_COMPACT``)."""
+    return setting(COMPACT_ENV).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
-    raw = os.environ.get(name, "")
+    raw = setting(name)
     try:
         return max(minimum, int(raw)) if raw.strip() else default
     except ValueError:
@@ -74,7 +121,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 
 def memory_limit() -> str:
     """DuckDB ``memory_limit`` of every facts connection (``COVERSET_FACTS_MEMORY_LIMIT``)."""
-    value = os.environ.get("COVERSET_FACTS_MEMORY_LIMIT", "").strip()
+    value = setting("COVERSET_FACTS_MEMORY_LIMIT").strip()
     # Only a plain size ("512MB", "2GB", "1.5GiB"): the value is interpolated into a SET.
     return value if _SIZE.fullmatch(value) else "512MB"
 

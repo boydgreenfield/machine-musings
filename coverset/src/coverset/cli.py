@@ -57,19 +57,32 @@ def init_db_command() -> None:
 
     settings = load_settings()
     secure_data_dirs(settings)
-    asyncio.run(init_db(settings))
+    applied = asyncio.run(init_db(settings))
     secure_data_dirs(settings)  # the database file init_db just created
+    for revision in applied:
+        click.echo(f"applied migration {revision}")
     url = make_url(settings.database_url).render_as_string(hide_password=True)
-    click.echo(f"database ready: {url}")
+    state = f"{len(applied)} migration(s) applied" if applied else "already at the latest revision"
+    click.echo(f"database ready ({state}): {url}")
 
 
 @cli.command()
 @click.option("--bind", help="host:port to listen on (overrides COVERSET_BIND).")
-def serve(bind: str | None) -> None:
+@click.option(
+    "--reload",
+    is_flag=True,
+    help="Development: restart on code changes, re-read templates per request (as coverset dev, unseeded).",
+)
+def serve(bind: str | None, reload: bool) -> None:
     """Serve the web UI, webhooks and API with Hypercorn until SIGINT/SIGTERM."""
+    settings = load_settings(bind=bind) if bind else load_settings()
+    if reload:
+        from coverset.commands.dev import run_reloader
+
+        run_reloader(settings.bind)
+        return
     from coverset.app import create_app
 
-    settings = load_settings(bind=bind) if bind else load_settings()
     app = create_app(settings)
     click.echo(f"coverset {__version__} serving on {settings.public_url} (bind {settings.bind})")
     asyncio.run(_serve(app, settings.bind))

@@ -121,6 +121,10 @@ class IngestJob:
     for a ``python`` job. Only upload mode sets it, when no head checkout exists (no mirror and no
     uploaded sources): the uploader is authenticated as the repository and nothing else describes
     its functions. Managed runs never set it."""
+    cache_overrides: tuple[tuple[str, str], ...] = ()
+    """The app's cache knobs (``Settings.cache_overrides()``, e.g. ``COVERSET_FACTS_COMPACT``),
+    applied in the worker before the ingest: a pool process does not share the parent's
+    :func:`coverset.facts.cache.configure` registry, only its environment."""
 
 
 class IngestTimeout(Exception):
@@ -192,6 +196,10 @@ class IngestOutcome:
 
 def ingest_one(job: IngestJob) -> IngestOutcome:
     """Extract, convert and ingest one shard bundle (runs in a pool worker)."""
+    if job.cache_overrides:
+        from coverset.facts.cache import configure
+
+        configure(dict(job.cache_overrides))
     store = FactsStore(Path(job.facts_dir))
     workdir = Path(tempfile.mkdtemp(prefix=f"coverset-ingest-{job.shard_id}-"))
     try:

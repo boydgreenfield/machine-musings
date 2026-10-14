@@ -20,7 +20,7 @@ from coverset.ai.review import SOURCE_LABELS, VERDICT_LABELS, ReviewFindingRow
 from coverset.db.models import Repo, ReviewFinding, Run
 from coverset.lang.base import FunctionChange, FunctionRegion
 from coverset.web.facts_view import FunctionView, RunFacts, test_file
-from coverset.web.loaders import read_source
+from coverset.web.loaders import read_source, source_cache
 from coverset.web.pr_view import DiffAnalysis
 from coverset.web.render.ribbon import render_ribbon
 from coverset.web.render.shapegrid import render_grid, render_strip
@@ -271,6 +271,7 @@ async def function_detail(
             removed={k: v for k, v in removed.items() if region.def_line <= k <= region.end_line + 1},
             tests_url=tests_url,
             anchor_prefix=f"F{region.func_key[:8]}-",
+            cache=source_cache(),  # the file is lexed once per process, not per card or page
         )
     target = f"sg-{region.func_key}"
     grid = render_grid(

@@ -521,3 +521,76 @@ def test_measured_paths_drop_unsafe_entries(tmp_path: Path) -> None:
         _files_jsonl(["ok/a.py", "../escape.py", "/abs.py", "a/./b.py", "ok/a.py"])
     )
     assert measured_paths(tmp_path) == ["ok/a.py"]
+
+
+def test_measured_paths_read_a_plain_files_table(tmp_path: Path) -> None:
+    """Vitest's reporter writes ``neutral/files.jsonl`` uncompressed; the gzipped name wins when both exist."""
+    (tmp_path / "neutral").mkdir()
+    rows = "".join(json.dumps({"path": p}) + "\n" for p in ["src/a.ts", "src/b.ts", "../x.ts"])
+    (tmp_path / "neutral" / "files.jsonl").write_text(rows)
+    assert measured_paths(tmp_path) == ["src/a.ts", "src/b.ts"]
+    (tmp_path / "neutral" / "files.jsonl.gz").write_bytes(_files_jsonl(["pkg/a.py"]))
+    assert measured_paths(tmp_path) == ["pkg/a.py"]
+
+
+@pytest.mark.parametrize("name", ["files.jsonl", "files.jsonl.gz"])
+def test_measured_paths_read_the_table_inside_neutral_tar_gz(tmp_path: Path, name: str) -> None:
+    rows = "".join(json.dumps({"path": p}) + "\n" for p in ["lib/x.rs", "lib/y.rs"]).encode()
+    data = gzip.compress(rows) if name.endswith(".gz") else rows
+    with tarfile.open(tmp_path / "neutral.tar.gz", "w:gz") as tar:
+        info = tarfile.TarInfo(f"neutral/{name}")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    assert measured_paths(tmp_path) == ["lib/x.rs", "lib/y.rs"]
+
+
+def _monorepo(tmp_path: Path) -> tuple[Path, Path]:
+    """A git checkout whose project (and ``.coverset``) lives in ``web/app``; paths are relative to it."""
+    top = tmp_path / "mono"
+    project = top / "web" / "app"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "a.ts").write_text("export const a = 1\n")
+    (project / "src" / "untracked.ts").write_text("export const b = 2\n")
+    (top / "README.md").write_text("mono\n")
+    _git(top, "init", "-q")
+    _git(top, "add", "README.md", "web/app/src/a.ts")
+    _git(top, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "init")
+    bundle = project / ".coverset"
+    (bundle / "neutral").mkdir(parents=True)
+    rows = "".join(json.dumps({"path": p}) + "\n" for p in ["src/a.ts", "src/untracked.ts"])
+    (bundle / "neutral" / "files.jsonl").write_text(rows)
+    return project, bundle
+
+
+@pytest.mark.parametrize("root", ["absolute", "relative"])
+def test_with_sources_resolves_paths_against_the_recorded_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    """A project in a subdirectory of the checkout: the bundle's paths are relative to the project,
+    ``meta.json`` says where that is, and the upload runs from somewhere else entirely."""
+    from pytest_coverset.ci_upload import collect_sources
+
+    project, bundle = _monorepo(tmp_path)
+    recorded = str(project) if root == "absolute" else "."
+    (bundle / "meta.json").write_text(json.dumps({"repo_root": recorded}))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    errors: list[str] = []
+    found_root, paths, skipped = collect_sources(bundle, err=errors.append)
+    assert found_root.resolve() == project.resolve()
+    assert paths == ["src/a.ts"] and skipped == {"untracked": 1} and errors == []
+
+
+def test_without_a_recorded_root_paths_resolve_against_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pytest_coverset.ci_upload import collect_sources
+
+    project, bundle = _monorepo(tmp_path)
+    monkeypatch.chdir(project)
+    root, paths, _ = collect_sources(bundle, err=lambda message: None)
+    assert root.resolve() == project.resolve() and paths == ["src/a.ts"]
+    monkeypatch.chdir(project.parent.parent)  # the checkout's top: src/a.ts is not there
+    _, paths, skipped = collect_sources(bundle, err=lambda message: None)
+    assert paths == [] and skipped == {"untracked": 2}

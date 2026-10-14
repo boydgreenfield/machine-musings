@@ -313,7 +313,7 @@ the newest completed default-branch baseline, as on the UI pages; required for `
 
 `coverset gc [--dry-run]` (`commands/maintenance.py`) deletes runs older than the cutoff that are not queued or running, deletes old `run_events`, nulls old delivery payloads, deletes delivery rows past `max(30, COVERSET_RETENTION_DELIVERIES_DAYS)` days, and removes expired facts directories with `facts/gc.py` (`expire_runs`). It always keeps the latest completed baseline per repo and the latest run per open PR. A facts run's age is its `runs_dim.created_at`, else the directory's mtime. A run directory is renamed to a hidden name before deletion, so readers never see half a run.
 
-`coverset repo purge NAME` deletes a repository's rows, its facts directory and its mirror.
+`coverset repo purge NAME` deletes a repository's rows (its scoped settings included), its facts directory, its mirror, its uploaded sources and its runs' upload archives.
 
 Production windows imported with `coverset flows import` live beside the runs, under `repo=<id>/prod/service=<service>/batch=<stamp>-<sha12>/` (tables `prod_windows`, `prod_funcs`, `prod_shapes`, `prod_calls`, `prod_flows`; `PROD_SCHEMAS` in `facts/schema.py`, kept out of `SCHEMAS`), never in a run directory, so the run views and `coverset gc` never see them. Their shape ids come from the same `dictionary.json` as `call_shapes`. Their retention is `coverset flows prune --older-than-days N` (default 30); `repo purge` removes them with the repo. See [production-flows.md](production-flows.md#data-model).
 

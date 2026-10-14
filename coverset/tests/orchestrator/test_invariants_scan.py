@@ -237,3 +237,30 @@ def test_scan_command_is_registered() -> None:
     group = cli.commands["invariants"]
     assert "scan" in group.commands  # type: ignore[attr-defined]
     assert "arrives in phase" not in (group.commands["scan"].help or "")  # type: ignore[attr-defined]
+
+
+async def test_scan_asks_the_scoped_policy_for_ai_review(
+    ctx: OrchestratorContext, repo: TestRepo, repo_id: int, script: Script, fixtures_dir: Path
+) -> None:
+    """The review client is built from ``effective_policy(...).ai_review``, as a run's review is,
+    not from the bare ``repos.ai_review_enabled`` column: a repository-scope ``policy.ai_review``
+    turns it on (and off again), whatever the column says."""
+    from coverset import settings_scopes
+
+    enabled: list[bool] = []
+
+    def factory(settings: Settings, repo_enabled: bool) -> FakeReviewClient:
+        enabled.append(repo_enabled)
+        return FakeReviewClient(fixtures_dir)
+
+    script.zero_passes = True
+    head = repo.commit({"invariants.yaml": REVIEW_INVARIANTS}, "review-kind invariants")
+    await run_baseline(ctx, repo_id, head)
+    await _scan(ctx, factory)
+    async with ctx.db.session() as session:
+        await settings_scopes.set_value(session, "policy.ai_review", True, scope="repo", scope_id=repo_id)
+    await _scan(ctx, factory)
+    async with ctx.db.session() as session:
+        await settings_scopes.set_value(session, "policy.ai_review", False, scope="repo", scope_id=repo_id)
+    await _scan(ctx, factory)
+    assert enabled == [False, True, False]

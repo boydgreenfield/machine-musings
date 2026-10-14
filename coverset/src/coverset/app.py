@@ -5,23 +5,34 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from quart import Quart, Response, jsonify, request, session
+from quart import Quart, Request, Response, jsonify, request, session
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from coverset.config import Settings, get_settings, secure_data_dirs
 from coverset.db.session import Database, init_db
+from coverset.facts.cache import configure as configure_caches
 from coverset.logging import configure_logging
 from coverset.web import register_blueprints
+from coverset.web.auth import session_lifetime
 from coverset.web.proxy import ProxyHeadersMiddleware
 
 MAX_CONTENT_LENGTH = 25 * 1024 * 1024
-"""Largest accepted request body (webhook payloads are capped well below this by GitHub)."""
+"""Largest accepted request body (webhook payloads are capped well below this by GitHub), except
+for :data:`UPLOAD_PATH`, whose limit is ``COVERSET_MAX_UPLOAD_BYTES``."""
+UPLOAD_PATH = "/v1/bundles"
+"""``POST`` here is a bundle upload (``web/uploads.py``): exempt from :data:`MAX_CONTENT_LENGTH`; its
+body may be as large as ``settings.max_upload_bytes``, which the view also enforces while it streams
+(the client sends chunked bodies, and a declared ``Content-Length`` after a proxy's 411)."""
 
+AVATAR_ORIGIN = "https://avatars.githubusercontent.com"
+"""The one third-party image origin: GitHub avatars in the header and on ``/account``."""
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+    f"img-src 'self' data: {AVATAR_ORIGIN}; connect-src 'self'; frame-ancestors 'none'"
 )
 SECURITY_HEADERS = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
@@ -54,8 +65,12 @@ def create_app(settings: Settings | None = None) -> Quart:
     settings = settings or get_settings()
     configure_logging(settings)
     secure_data_dirs(settings)
+    configure_caches(settings.cache_overrides())  # the cache knobs: Settings (and .env) over the environment
 
     app = Quart("coverset", static_folder="web/static", template_folder="web/templates")
+    app.request_class = _request_class(app.request_class, lambda: settings.max_upload_bytes)
+    # Templates show a stored avatar URL only under the origin the CSP's img-src allows.
+    app.jinja_env.globals["avatar_origin"] = AVATAR_ORIGIN + "/"
     app.extensions["settings"] = settings
     database = Database.from_url(settings.database_url)
     app.extensions["db"] = database
@@ -66,6 +81,8 @@ def create_app(settings: Settings | None = None) -> Quart:
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=settings.public_url.startswith("https://"),
+        # A GitHub sign-in's cookie lives exactly as long as its user_sessions row.
+        PERMANENT_SESSION_LIFETIME=session_lifetime(settings.session_days),
     )
     if settings.trust_proxy:
         # Client address and scheme from the nearest proxy's X-Forwarded-For/-Proto (web/proxy.py).
@@ -86,6 +103,10 @@ def create_app(settings: Settings | None = None) -> Quart:
 
     @app.before_request
     async def _reject_oversized_body() -> None:
+        if is_upload_request(request.method, request.path):
+            # The upload view authorizes first, then checks the declared length and the streamed
+            # bytes against settings.max_upload_bytes (the request's own limit, _request_class).
+            return
         length = request.content_length
         if length is not None and length > MAX_CONTENT_LENGTH:
             raise RequestEntityTooLarge()
@@ -219,6 +240,35 @@ def schedule_executor_upkeep(
             else:
                 app.logger.info("warm pool drained (%d workers)", drained)
         await ctx.close()
+
+
+def is_upload_request(method: str, path: str) -> bool:
+    """True for ``POST`` :data:`UPLOAD_PATH`, the one request exempt from :data:`MAX_CONTENT_LENGTH`."""
+    return method == "POST" and path == UPLOAD_PATH
+
+
+def _request_class(base: type[Request], upload_limit: Callable[[], int]) -> type[Request]:
+    """``base`` with the body limit of :data:`UPLOAD_PATH` raised to ``upload_limit()`` (read per
+    request, from the app's settings).
+
+    Quart sizes a request's body when it builds the request, from ``MAX_CONTENT_LENGTH``: a declared
+    ``Content-Length`` above it makes every read of the body fail with 413, so setting
+    ``request.max_content_length`` in a hook would come too late. An upload's request is therefore
+    built with its own limit (``request.max_content_length`` reports it too); every other request
+    keeps the app's.
+    """
+
+    class CoversetRequest(base):  # type: ignore[valid-type, misc]
+        def __init__(self, method: str, scheme: str, path: str, *args: Any, **kwargs: Any) -> None:
+            limit = upload_limit() if is_upload_request(method, path) else None
+            if limit is not None:
+                kwargs["max_content_length"] = limit
+            super().__init__(method, scheme, path, *args, **kwargs)
+            if limit is not None:
+                self.max_content_length = limit
+
+    CoversetRequest.__qualname__ = CoversetRequest.__name__
+    return CoversetRequest
 
 
 async def _http_error(error: HTTPException) -> HTTPException | tuple[Response, int]:

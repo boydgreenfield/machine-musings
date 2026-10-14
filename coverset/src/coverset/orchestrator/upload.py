@@ -13,10 +13,12 @@ archive's sha256 are kept in ``shards.worker_ref`` (``upload:<sha256 prefix>:<la
 uploads idempotent on ``(repository, commit, label, sha256)``: a replay of the same archive is
 answered with the existing run and changes nothing; a different archive under the same label
 replaces that shard (a re-run of the CI job), and a new label adds a shard. The archive's content
-is kept under ``<runs_dir>/<run_id>/upload/shard-<id>/`` for the processing pass. A run the
-dispatcher's boot takeover abandoned after a restart (typically one waiting for its matrix legs)
-is re-opened by the next upload rather than replaced, so the late legs conclude it
-(:func:`_reusable_run`).
+is kept under ``<runs_dir>/<run_id>/upload/shard-<id>/`` for the processing pass (and removed with
+the run by retention). An upload run is never executed, so the dispatcher's boot takeover leaves it
+alone (``orchestrator/queue.py``): a run waiting for its matrix legs when the server restarts stays
+``running``, and the late legs join it (:func:`_reusable_run`). At start-up ``serve`` schedules one
+pass for every upload run still ``running`` (:meth:`UploadWorker.resume`), so a pass that the restart
+cut off still concludes its run.
 
 **Processing** (:class:`UploadWorker`, in the background, one pass per run at a time; uploads that
 land during a pass trigger exactly one more): the pass is always computed from *every* shard of the
@@ -28,14 +30,18 @@ are replayed:
    to an existing mirror) and export the head commit; else use the uploaded sources
    (:mod:`coverset.facts.sources`, written here from each shard's ``sources/``); else nothing;
 2. the diff ``merge-base(base, head)...head`` on the mirror when both commits are there, classified
-   into changed functions exactly as the planner does (its own helpers);
+   into changed functions by the adapter of the bundles' language (:func:`_diff_language`): Python
+   exactly as the planner does (its own helpers), Rust by
+   :meth:`~coverset.lang.rust.RustAdapter.changed_functions` over both sides' ``.rs`` sources;
 3. ingest every shard (:func:`~coverset.orchestrator.bundles.ingest_one` on the ingest pool;
    re-ingesting an unchanged shard is a no-op in the facts store). With a head checkout the pytest
    bundle is ingested with coverset's own function index of the head sources, as in managed mode;
    without one the neutral bundle is ingested with the regions and declared types it ships
    (``IngestJob.regions_from_bundle``);
 4. :func:`~coverset.facts.ingest.finalize_run` with one expected shard per label (or the uploader's
-   ``--shards`` count), then results, test history, and the report and summary through the same
+   ``--shards`` count) and the same test-economy inputs as a managed run
+   (:func:`~coverset.orchestrator.runner.economy_inputs`: the scoped test-tax threshold and the
+   ``test_stats`` p50s), then results, test history, and the report and summary through the same
    :func:`~coverset.orchestrator.verdict.build_report` / ``build_summary`` / ``persist_verdict`` /
    ``post_summary`` as a managed run, fed by a :class:`~coverset.orchestrator.planner.RunPlan` with
    no workers. A run that names ``--shards N`` gets its verdict, events and forge post only once N
@@ -86,7 +92,7 @@ from coverset.facts import sources as source_store
 from coverset.facts.ingest import RunContext, finalize_run
 from coverset.facts.queries import top_gaps
 from coverset.facts.untrusted import BundleError, BundleLimits, extract_bundle
-from coverset.lang.base import Catalogue, CollectedItem
+from coverset.lang.base import Catalogue, CollectedItem, FunctionChange, LanguageAdapter
 from coverset.lang.python import CoversetConfig, PythonAdapter
 from coverset.logging import redact
 from coverset.orchestrator import history
@@ -106,10 +112,16 @@ from coverset.orchestrator.repos import (
     extract_archive,
     merge_base,
     mirror_path,
+    read_blobs,
     resolve_commit,
     tree_paths,
 )
-from coverset.orchestrator.runner import OrchestratorContext, finalize_crashed
+from coverset.orchestrator.runner import (
+    OrchestratorContext,
+    economy_inputs,
+    finalize_crashed,
+    schedule_warm_up,
+)
 from coverset.orchestrator.verdict import (
     RunReport,
     TestState,
@@ -156,13 +168,14 @@ FAILED = frozenset({"failed", "error"})
 UPLOAD_EXECUTOR = "local"
 """``runs.executor`` of an upload run (the column is required; nothing is executed or billed)."""
 TERMINAL = frozenset({"completed", "error", "cancelled", "abandoned", "skipped"})
-REUSABLE = frozenset({"running", "completed", "abandoned"})
-"""Statuses of an earlier upload run of the same commit that a new upload joins. An abandoned run
-is one the dispatcher's boot takeover found ``running`` after a restart (an upload run waiting for
-its matrix legs is exactly that): it is re-opened, with its shards, so the late legs conclude it
-instead of starting a run that can never complete. An errored or cancelled one is left as it is
-and a fresh run starts."""
-REOPEN_REASON = "re-opened after a control-plane restart"
+REUSABLE = frozenset({"running", "completed"})
+"""Statuses of an earlier upload run of the same commit that a new upload joins. A ``running`` one
+is waiting for more shards (or mid-pass), and stays so across a control-plane restart: the
+dispatcher's boot takeover skips upload runs. An errored, cancelled or (from an older version's
+takeover) abandoned one is left as it is, and a fresh run starts."""
+DIFF_SUFFIXES: dict[str, tuple[str, ...]] = {"rust": (".rs",)}
+"""Source suffixes whose diff a non-Python adapter classifies (:func:`_language_changes`); other
+neutral languages ship no source indexer, so their uploads get no changed-function table."""
 
 
 class UploadError(Exception):
@@ -341,53 +354,21 @@ async def _pull_request(session: AsyncSession, meta: UploadMeta, now: datetime) 
     return pr
 
 
-async def _reusable_run(session: AsyncSession, meta: UploadMeta, now: datetime) -> Run | None:
+async def _reusable_run(session: AsyncSession, meta: UploadMeta) -> Run | None:
     """The upload run of ``(repository, commit)`` a new upload joins, or None for a fresh one.
 
-    Upload runs are never executed, yet the dispatcher's boot takeover treats a ``running`` one like
-    any other orphan: it is abandoned, and with ``COVERSET_REQUEUE_ON_BOOT`` a copy (``timeline.
-    requeued_from``) is queued for the planner. Such a copy is cancelled here while it is still
-    queued (dispatched, it would plan a managed run for a repository that may have no executor),
-    and the newest run that is not a copy decides: ``running``/``completed``/``abandoned`` is
-    joined (the abandoned one re-opened by the caller), anything else starts a fresh run.
+    The newest upload run of the commit decides: ``running`` or ``completed`` is joined (a later
+    shard re-opens a completed run by setting it ``running``), anything else starts a fresh run.
+    The dispatcher never touches upload runs (``RunDispatcher.on_boot`` skips them), so a run
+    waiting for its matrix legs is still ``running`` after a restart.
     """
-    rows = await session.scalars(
+    run = await session.scalar(
         select(Run)
         .where(Run.repo_id == meta.repo_id, Run.head_sha == meta.head_sha, Run.trigger == "upload")
         .order_by(Run.created_at.desc(), Run.id.desc())
+        .limit(1)
     )
-    for run in rows:
-        if (run.timeline or {}).get("requeued_from"):
-            if run.status == "queued":
-                await _cancel_copy(session, run, now)
-            continue
-        return run if run.status in REUSABLE else None
-    return None
-
-
-async def _cancel_copy(session: AsyncSession, run: Run, now: datetime) -> None:
-    """Cancel a re-queued copy of an upload run, the way the dispatcher cancels a superseded one."""
-    reason = f"cancelled: an upload run is never executed; run {run.timeline['requeued_from']} is re-opened"
-    run.status = "cancelled"
-    run.verdict = "cancelled"
-    run.reason = reason
-    run.timeline = {**(run.timeline or {}), "finished": now.isoformat()}
-    await _event(session, run.id, "verdict", {"conclusion": "cancelled", "reason": reason}, now)
-    await _event(session, run.id, "done", {"conclusion": "cancelled", "exit_code": 2, "counts": {}}, now)
-
-
-def _reopen(run: Run, now: datetime) -> None:
-    """Put an abandoned upload run back to ``running`` so its remaining shards can conclude it.
-
-    The abandonment's ``verdict``/``done`` events stay in the log (they happened); the next pass
-    appends the real ones. ``finished`` leaves the timeline so the pages show the run as live.
-    """
-    run.status = "running"
-    run.verdict = None
-    run.reason = None
-    run.coverage_complete = False
-    timeline = {k: v for k, v in (run.timeline or {}).items() if k != "finished"}
-    run.timeline = {**timeline, "reopened": now.isoformat()}
+    return run if run is not None and run.status in REUSABLE else None
 
 
 async def register_upload(
@@ -403,11 +384,8 @@ async def register_upload(
     digest = meta.archive_sha256[:SHA256_PREFIX_CHARS]
 
     async def work(session: AsyncSession) -> tuple[Registration, Path | None]:
-        run = await _reusable_run(session, meta, now)
+        run = await _reusable_run(session, meta)
         created = run is None
-        if run is not None and run.status == "abandoned":
-            _reopen(run, now)
-            await _event(session, run.id, "log", {"shard": None, "text": REOPEN_REASON}, now)
         if created:
             pr = await _pull_request(session, meta, now)
             run = Run(
@@ -548,6 +526,30 @@ class UploadWorker:
         finally:
             self._tasks.pop(run_id, None)
 
+    async def resume(self) -> list[str]:
+        """Schedule a pass for every upload run left ``running``; returns their ids, oldest first.
+
+        ``coverset serve`` calls this at start-up, after the dispatcher's boot takeover (which skips
+        upload runs: :func:`~coverset.orchestrator.queue.install_run_queue`). A pass that a restart
+        or crash cut off left its run ``running`` with every shard on disk, and no upload may ever
+        come again to schedule it; this pass concludes it. A run still waiting for matrix legs
+        (``--shards N``) gets a pass that re-ingests what it has (a no-op in the facts store) and
+        writes nothing final, exactly as an upload's pass would.
+        """
+        async with self.ctx.db.session() as session:
+            run_ids = list(
+                await session.scalars(
+                    select(Run.id)
+                    .where(Run.trigger == "upload", Run.status == "running")
+                    .order_by(Run.created_at, Run.id)
+                )
+            )
+        for run_id in run_ids:
+            self.schedule(run_id)
+        if run_ids:
+            log.info("resuming %d upload run(s) left running: %s", len(run_ids), ", ".join(run_ids))
+        return run_ids
+
     async def idle(self) -> None:
         """Wait until no pass is running or scheduled (tests, shutdown)."""
         while self._tasks:
@@ -668,18 +670,90 @@ class _Diff:
     ok: bool = False
 
 
-async def _diff_for(head: _Head, run: Run, adapter: PythonAdapter) -> _Diff:
-    """``merge-base...head`` classified into function changes (empty without a mirror or base)."""
+def _neutral_languages(directories: Sequence[Path]) -> dict[Path, str]:
+    """``shard directory -> language`` of each shard's neutral bundle (:func:`_neutral_language`).
+
+    Blocking (it may decompress whole archives when a manifest comes late): a pass calls it once,
+    off the event loop, and hands the result to :func:`_diff_language` and the ingest jobs."""
+    return {
+        directory: _neutral_language(directory / "neutral.tar.gz")
+        for directory in directories
+        if (directory / "neutral.tar.gz").is_file()
+    }
+
+
+def _diff_language(directories: Sequence[Path], neutral: Mapping[Path, str] | None = None) -> str:
+    """The language whose adapter classifies the diff: the one language of the uploaded neutral
+    bundles when no shard carries a pytest bundle (a Rust crate's ``coverset rust run``), else
+    ``python`` (a mix, or anything unreadable, keeps the Python classification). ``neutral`` is
+    :func:`_neutral_languages` of the same directories when the caller already has it."""
+    known = neutral if neutral is not None else _neutral_languages(directories)
+    languages: set[str] = set()
+    for directory in directories:
+        if (directory / "bundle.tar.gz").is_file():
+            languages.add("python")
+        elif directory in known:
+            languages.add(known[directory])
+    return languages.pop() if len(languages) == 1 else "python"
+
+
+def _diff_adapter(language: str) -> LanguageAdapter:
+    """The adapter registered for ``language`` (``coverset.lang.adapter_for_language``), else Python's."""
+    from coverset.lang import adapter_for_language
+
+    try:
+        return adapter_for_language(language)
+    except BundleError:
+        return PythonAdapter()
+
+
+def _language_changes(
+    adapter: LanguageAdapter, mirror: Path, base: str, head_sha: str, diffs: Mapping[str, Any]
+) -> list[FunctionChange]:
+    """Function changes of the diff's files in ``adapter``'s language (:data:`DIFF_SUFFIXES`), each
+    file classified by ``adapter.changed_functions`` from both sides' text in the mirror."""
+    suffixes = DIFF_SUFFIXES.get(adapter.name, ())
+    files = {
+        p: d
+        for p, d in diffs.items()
+        if suffixes and (p.endswith(suffixes) or d.base_path.endswith(suffixes))
+    }
+    if not files:
+        return []
+    base_blobs = read_blobs(mirror, base, [d.base_path for d in files.values() if d.status != "added"])
+    head_blobs = read_blobs(mirror, head_sha, [d.path for d in files.values() if d.status != "deleted"])
+    changes: list[FunctionChange] = []
+    for path, d in sorted(files.items()):
+        old = base_blobs.get(d.base_path)
+        new = head_blobs.get(path)
+        changes += adapter.changed_functions(
+            path,
+            old.decode("utf-8", "replace") if old is not None else None,
+            new.decode("utf-8", "replace") if new is not None else None,
+            set(d.added),
+            set(d.removed),
+        )
+    return changes
+
+
+async def _diff_for(head: _Head, run: Run, adapter: LanguageAdapter) -> _Diff:
+    """``merge-base...head`` classified into function changes by ``adapter`` (empty without a
+    mirror or a base): the planner's own helper for Python, :func:`_language_changes` otherwise."""
     if not head.mirror_ok or not run.base_sha or head.head_paths is None:
         return _Diff()
     base = await asyncio.to_thread(merge_base, head.mirror, run.base_sha, run.head_sha) or run.base_sha
     try:
         await asyncio.to_thread(resolve_commit, head.mirror, base)
         diffs, diff_text = await asyncio.to_thread(_diff, head.mirror, base, run.head_sha)
-        changes = await asyncio.to_thread(
-            _changes, adapter, head.mirror, base, head.checkout, diffs, head.head_paths
-        )
-    except (RepoError, GitDiffError, OSError) as exc:
+        if isinstance(adapter, PythonAdapter):
+            changes = await asyncio.to_thread(
+                _changes, adapter, head.mirror, base, head.checkout, diffs, head.head_paths
+            )
+        else:
+            changes = await asyncio.to_thread(
+                _language_changes, adapter, head.mirror, base, run.head_sha, diffs
+            )
+    except (RepoError, GitDiffError, OSError, ValueError) as exc:  # ValueError: an unparsable batch
         log.info("upload run %s: no diff (%s)", run.id, exc)
         return _Diff()
     return _Diff(
@@ -829,7 +903,9 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
             measured, head_functions, invariant_targets = await asyncio.to_thread(
                 _index_head, adapter, head.checkout, config, paths
             )
-        diff = await _diff_for(head, run, adapter)
+        present = [d for d in dirs.values() if d.is_dir()]
+        neutral_languages = await asyncio.to_thread(_neutral_languages, present)
+        diff = await _diff_for(head, run, _diff_adapter(_diff_language(present, neutral_languages)))
         plan = RunPlan(
             run_id=run_id,
             repo_id=repo.id,
@@ -888,7 +964,10 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
             if use_checkout and python_bundle.is_file():
                 tarball, language, from_bundle = python_bundle, "python", False
             elif neutral_bundle.is_file():
-                tarball, language, from_bundle = neutral_bundle, _neutral_language(neutral_bundle), True
+                language = neutral_languages.get(directory) or await asyncio.to_thread(
+                    _neutral_language, neutral_bundle
+                )
+                tarball, from_bundle = neutral_bundle, True
             elif python_bundle.is_file():
                 tarball, language, from_bundle = python_bundle, "python", False
             else:
@@ -908,6 +987,7 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
                     keep_funcs=frozenset(r.triple for r in interest.values()),
                     language=language,
                     regions_from_bundle=from_bundle and language == "python",
+                    cache_overrides=tuple(sorted(settings.cache_overrides().items())),
                 )
             )
         outcomes = await ctx.ingest_pool().run(jobs) if jobs else []
@@ -1000,9 +1080,12 @@ async def _conclude(
     expected = max(len(shards.seen), declared or 0)
     received = shards.received
     catalogue = await asyncio.to_thread(_catalogue, language, plan.measured_sources, ok)
+    nodeids = {row.nodeid for o in ok for row in o.tests}
+    economy = await economy_inputs(ctx.db, settings, plan.repo_id, nodeids)
     finalized = await asyncio.to_thread(
-        finalize_run, ctx.store, rctx, expected_shards=expected, catalogue=catalogue
+        finalize_run, ctx.store, rctx, expected_shards=expected, catalogue=catalogue, economy=economy
     )
+    schedule_warm_up(ctx, plan.repo_id, run_id, plan.head_sha, plan.base_sha)
 
     async def register(session: AsyncSession) -> tuple[dict[str, int], set[str]]:
         nodeids = sorted(

@@ -255,6 +255,14 @@ def deployment_checks(
                 f"unset: set COVERSET_ADMIN_TOKEN (at least {MIN_ADMIN_TOKEN_CHARS} characters)",
             )
         )
+    if settings.dev_login:
+        checks.append(
+            Check(
+                "dev sign-in",
+                "fail" if settings.env == "prod" else "warn",
+                "COVERSET_DEV_LOGIN=true does not belong in a deployment (it is inert outside open mode on a loopback bind, but remove it)",
+            )
+        )
 
     secret_key = settings.secret_key.get_secret_value() if settings.secret_key else ""
     if secret_key:

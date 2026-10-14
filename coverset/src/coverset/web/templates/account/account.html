@@ -8,10 +8,11 @@
   <h2 id="who">Who you are</h2>
   {% if user %}
   <div class="account-card">
-    <span class="account-avatar big" aria-hidden="true">{{ user.login[:1]|upper }}</span>
+    {% if user.avatar_url and avatar_origin and user.avatar_url.startswith(avatar_origin) %}<img class="account-avatar big" src="{{ user.avatar_url }}" alt="" width="48" height="48" decoding="async" referrerpolicy="no-referrer">
+    {% else %}<span class="account-avatar big" aria-hidden="true">{{ user.login[:1]|upper }}</span>{% endif %}
     <dl class="facts-dl">
       <dt>Login</dt><dd><strong>@{{ user.login }}</strong>{% if user.name %} · {{ user.name }}{% endif %}</dd>
-      <dt>Signed in</dt><dd>{% if principal.kind == 'token' %}with an API token ({{ principal.label }}){% else %}through GitHub{% endif %}</dd>
+      <dt>Signed in</dt><dd>{% if principal.kind == 'token' %}with an API token ({{ principal.label }}){% elif account_user and account_user.forge == 'fake' %}as a local development user{% else %}through GitHub{% endif %}</dd>
       <dt>Role</dt><dd>{% if user.role == 'admin' %}<span class="badge">instance admin</span> sees and changes every repository{% else %}member: the repositories GitHub grants you{% endif %}</dd>
       {% if principal.kind == 'token' %}<dt>Scopes</dt><dd>{% for s in principal.scopes|sort %}<code>{{ s }}</code>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</dd>{% endif %}
       <dt>Last sign-in</dt><dd>{{ user.last_login_at|stamp }}</dd>

@@ -5,7 +5,11 @@
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / <a href="{{ detail.source_url }}">{{ region.path }}</a> / function</div>
 <div class="page-head">
   <h1><code>{{ region.qualname }}</code></h1>
-  <p class="meta"><span>{{ region.path }}:{{ region.def_line }}–{{ region.end_line }}</span><span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}"><code>{{ run.head_sha|sha }}</code></a></span><span>{{ detail.test_total }} covering test{{ '' if detail.test_total == 1 else 's' }}</span></p>
+  <p class="meta"><span>{{ region.path }}:{{ region.def_line }}–{{ region.end_line }}</span><span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r"><code>{{ run.head_sha|sha }}</code></a></span><span>{{ detail.test_total }} covering test{{ '' if detail.test_total == 1 else 's' }}</span>
+    {#- the source view's toggle (key h): app.js flips <html data-highlight> and keeps aria-pressed in step.
+        Its first state is the mode layout.html resolved for <meta name="coverset-view"> (_hl: ?highlight= >
+        the scoped settings > all), so the button agrees with the painted lines before scripts run. -#}
+    <span><button type="button" class="hl-toggle" data-highlight-toggle aria-pressed="{{ 'true' if (_hl is defined and _hl[0] == 'missing') else 'false' }}" title="Paint every measured line, or only what never ran or took one branch (key h)"><span class="hl-label hl-all">Highlight: all lines</span><span class="hl-label hl-missing">Highlight: missing only</span></button></span></p>
 </div>
 {% if invariants %}
 <section class="panel">

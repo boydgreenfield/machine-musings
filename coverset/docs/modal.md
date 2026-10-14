@@ -42,9 +42,19 @@ uv run coverset modal smoke            # one sandbox end to end (well under a ce
 
 ### Images: one per environment
 
-An environment is the target repo's locked third-party requirements (`uv export --frozen
---no-hashes --no-emit-project --all-groups`), the Python version from `[tool.coverset] python`, and
-the pytest-coverset wheel; `env_hash` hashes all three. Its image:
+An environment is the target repo's pinned third-party requirements, the Python version from
+`[tool.coverset] python`, and the pytest-coverset wheel; `env_hash` hashes all three. The
+requirements come from the first source that applies (`lang/python_env.py`, the same for every
+executor; [getting-started.md](getting-started.md#where-the-environment-comes-from)): `uv.lock`
+(`uv export --frozen --offline`), `[tool.coverset] requirements` or the repository's
+`requirements*.txt` files, `poetry.lock` or `Pipfile.lock` (converted without Poetry or Pipenv),
+the `pyproject.toml` `[project]` dependencies with every extra and the test/dev groups, or
+`setup.cfg`/`setup.py` read statically; all but the locks are pinned by `uv pip compile
+--no-build`. Packages that live in the repository (committed wheels, path dependencies, workspace
+members) are never requirements: each is recorded as a `# coverset-local: <file|dir|editable>
+<path> <name>` comment line, so it is part of `env_hash` and the image install skips it. With
+`[tool.coverset] install = "wheel"` or `"editable"` the build backend's `[build-system] requires`
+join the requirements, so the project can be built later without network. Its image:
 
 ```python
 modal.Image.debian_slim(python_version=spec.python)
@@ -55,8 +65,9 @@ modal.Image.debian_slim(python_version=spec.python)
   .run_commands("pip install --no-deps /opt/wheels/<name>")
 ```
 
-Everything goes into the system interpreter; tests import the project through `PYTHONPATH`, the
-project itself is never installed. The plugin wheel is installed with `--no-deps`, exactly as the
+Everything goes into the system interpreter; tests import the project through `PYTHONPATH`, and the
+image never installs the project or the `# coverset-local:` packages (they come from a commit's
+checkout: see Trusted snapshots). The plugin wheel is installed with `--no-deps`, exactly as the
 LocalExecutor installs it: a target's lockfile need not pin `coverage`, so the environment export
 appends an exact `coverage` pin (and `pytest` when the lock has none) to the requirements
 (`env_export.with_plugin_pins`, part of `env_hash`). The image id is kept in
@@ -88,10 +99,22 @@ verdict `success` or `failure`; see [orchestrator.md](orchestrator.md#how-a-run-
 `ModalExecutor.ensure_snapshot`, which reuses a ready, unexpired snapshot of the same commit and
 environment and otherwise builds one, only for a commit reachable from the repository's default
 branch; a PR head is refused. A sandbox from the env image receives
-the commit as a `git archive` tarball, runs `python -m pytest --collect-only -q -p no:cacheprovider`
-and `python -m compileall --invalidation-mode checked-hash` into `PYTHONPYCACHEPREFIX=/work/.pycache`
-(hash-checked bytecode survives the next checkout: unchanged files reuse it whatever their mtime),
-then `snapshot_filesystem(ttl=7 days)`. The image id goes into `snapshots` with `expires_at` one hour
+the commit as a `git archive` tarball. When the environment needs an install step
+(`install_needed(spec)`: `[tool.coverset] install` is `wheel` or `editable`, or the requirements carry
+`# coverset-local:` lines), it then runs, with the network blocked and before collection,
+`python -m pip install --no-deps --no-build-isolation --no-index` for the local packages first
+(regular ones as `name @ file:///work/repo/<path>` requirements, so their markers pick the right
+wheel; editable ones with `-e`), then for the project itself (`-e` for `editable`), and finally
+coverset's import-fallback writer for the source root (`snapshot_install_commands`; a failure fails
+the snapshot build, and runs keep the previous snapshot or the plain env image). Then it runs
+`python -m pytest --collect-only -q -p no:cacheprovider` and `python -m compileall
+--invalidation-mode checked-hash` into `PYTHONPYCACHEPREFIX=/work/.pycache` (hash-checked bytecode
+survives the next checkout: unchanged files reuse it whatever their mtime), then
+`snapshot_filesystem(ttl=7 days)`. The installed copy is the default branch's: `PYTHONPATH` still
+puts a run's own checkout first, so a PR's pure-Python changes are seen, while distribution metadata
+and compiled extensions come from the snapshot's build until the next one. A Modal run without a
+ready snapshot (on the plain env image) has no installed project; the LocalExecutor, which has no
+snapshots, installs it per commit instead (`LocalExecutor.install_project`). The image id goes into `snapshots` with `expires_at` one hour
 before Modal drops it. The planner uses the newest ready snapshot for the run's environment and
 never waits for one. A run on a snapshot still receives its own source: `put_tree` removes the
 snapshot's `repo/` before extracting, so files deleted since the snapshot cannot linger.

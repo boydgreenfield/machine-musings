@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import itertools
 import json
 import logging
@@ -232,15 +233,26 @@ def shared_slots(capacity: int) -> SandboxSlots:
 # -- small helpers ----------------------------------------------------------------------------------
 
 
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP})
+"""``os.link`` errors of filesystems without hard links (Modal Volumes answer EPERM)."""
+INSTANCE_WAIT_S = 5.0
+"""How long :func:`instance_id` waits for another process's exclusive create to be written."""
+
+
 def instance_id(data_dir: Path) -> str:
-    """This installation's id (``<data_dir>/instance_id``, a UUID created once, atomically)."""
+    """This installation's id (``<data_dir>/instance_id``, a UUID created once, atomically).
+
+    Every process that finds no file proposes a fresh UUID; exactly one proposal wins and the others
+    read it. The winner is decided by ``os.link`` of a fully written temporary file (the file never
+    appears empty). Filesystems without hard links (Modal Volumes refuse them with EPERM; some
+    network filesystems with ENOTSUP) fall back to an exclusive create (``O_CREAT | O_EXCL``),
+    which keeps the one-winner guarantee; a loser that finds the file still empty waits up to
+    :data:`INSTANCE_WAIT_S` for the winner's write.
+    """
     path = data_dir / INSTANCE_FILE
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            return str(uuid.UUID(text))
-    except (OSError, ValueError):
-        pass
+    existing = _read_instance_id(path)
+    if existing is not None:
+        return existing
     data_dir.mkdir(parents=True, exist_ok=True)
     value = str(uuid.uuid4())
     tmp = path.with_name(f".{INSTANCE_FILE}.{uuid.uuid4().hex}")
@@ -248,10 +260,52 @@ def instance_id(data_dir: Path) -> str:
     try:
         os.link(tmp, path)  # fails if another process created it first
     except FileExistsError:
-        return str(uuid.UUID(path.read_text(encoding="utf-8").strip()))
+        return _await_instance_id(path)
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and exc.errno not in _NO_HARD_LINKS:
+            raise
+        if not _create_exclusive(path, value):
+            return _await_instance_id(path)
     finally:
         tmp.unlink(missing_ok=True)
     return value
+
+
+def _read_instance_id(path: Path) -> str | None:
+    """The UUID in ``path``, or None when it is missing, empty or not (yet) a UUID."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        return str(uuid.UUID(text)) if text else None
+    except (OSError, ValueError):
+        return None
+
+
+def _create_exclusive(path: Path, value: str) -> bool:
+    """Create ``path`` holding ``value`` only if it does not exist; False when another process won."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, (value + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
+def _await_instance_id(path: Path) -> str:
+    """The id another process created (an exclusive create may still be writing it)."""
+    deadline = time.monotonic() + INSTANCE_WAIT_S
+    while True:
+        found = _read_instance_id(path)
+        if found is not None:
+            return found
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{path} exists but holds no instance id; delete it if no coverset process is starting"
+            )
+        time.sleep(0.01)
 
 
 def sandbox_options(

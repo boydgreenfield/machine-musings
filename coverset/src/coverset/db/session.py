@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from alembic import command
 from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, event
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -27,6 +31,11 @@ SQLITE_PRAGMAS = (
     "PRAGMA foreign_keys=ON",
 )
 """Applied to every new SQLite connection, in order."""
+
+log = logging.getLogger(__name__)
+
+LOG_LEVEL_ENV = "COVERSET_LOG_LEVEL"
+"""``COVERSET_LOG_LEVEL=DEBUG`` keeps Alembic's own INFO lines (see :func:`quiet_alembic`)."""
 
 
 def _is_sqlite(url: URL) -> bool:
@@ -158,30 +167,61 @@ async def run_schema_change(engine: AsyncEngine, change: Callable[[Connection], 
         await connection.run_sync(_run_schema_change_sync, change)
 
 
-def _upgrade_head(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), "head")
+def quiet_alembic() -> None:
+    """Keep Alembic's INFO lines ("Context impl SQLiteImpl.", "Will assume non-transactional DDL.",
+    "Running upgrade ...") out of every command's output.
+
+    Its logger is set to WARNING unless ``COVERSET_LOG_LEVEL=DEBUG``; real migration steps are not
+    lost: :func:`migrate` logs each revision it applies at INFO on coverset's own logger (so the
+    server's startup migration shows in its log) and returns them, and ``coverset init-db`` prints
+    them.
+    """
+    debug = os.environ.get(LOG_LEVEL_ENV, "").strip().upper() == "DEBUG"
+    logging.getLogger("alembic").setLevel(logging.DEBUG if debug else logging.WARNING)
 
 
-async def migrate(engine: AsyncEngine) -> None:
-    """Upgrade the database behind ``engine`` to the latest Alembic revision (atomically)."""
-    await run_schema_change(engine, _upgrade_head)
+def _upgrade_head(connection: Connection, applied: list[str]) -> None:
+    config = alembic_config(connection)
+    before = MigrationContext.configure(connection).get_current_heads()
+    command.upgrade(config, "head")
+    after = MigrationContext.configure(connection).get_current_heads()
+    if tuple(after) == tuple(before):
+        return
+    script = ScriptDirectory.from_config(config)
+    steps = script.iterate_revisions(tuple(after), tuple(before) or "base")
+    for revision in reversed(list(steps)):
+        doc = (revision.doc or "").strip().splitlines()
+        applied.append(f"{revision.revision} {doc[0]}" if doc else revision.revision)
 
 
-async def init_db(settings: Settings, engine: AsyncEngine | None = None) -> None:
+async def migrate(engine: AsyncEngine) -> list[str]:
+    """Upgrade the database behind ``engine`` to the latest Alembic revision (atomically).
+
+    Returns the applied revisions, oldest first, as ``"<id> <first line of its message>"`` (empty
+    when the database was already at head), and logs each at INFO as ``applied migration <rev>``.
+    """
+    quiet_alembic()
+    applied: list[str] = []
+    await run_schema_change(engine, lambda connection: _upgrade_head(connection, applied))
+    for revision in applied:
+        log.info("applied migration %s", revision)
+    return applied
+
+
+async def init_db(settings: Settings, engine: AsyncEngine | None = None) -> list[str]:
     """Create ``data_dir`` (and the SQLite file's directory) and migrate the database to head.
 
     Uses ``engine`` when given; otherwise a temporary engine for ``settings.database_url`` is
-    created and disposed.
+    created and disposed. Returns the applied revisions (see :func:`migrate`).
     """
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_file = sqlite_file_path(settings.database_url)
     if db_file is not None:
         db_file.parent.mkdir(parents=True, exist_ok=True)
     if engine is not None:
-        await migrate(engine)
-        return
+        return await migrate(engine)
     owned = make_engine(settings.database_url)
     try:
-        await migrate(owned)
+        return await migrate(owned)
     finally:
         await owned.dispose()

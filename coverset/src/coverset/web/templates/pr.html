@@ -28,7 +28,7 @@
     <span><code>{{ pr.head_ref or 'head' }}</code> → <code>{{ pr.base_ref or repo.default_branch }}</code></span>
     {% if pr.author %}<span>by {{ pr.author }}</span>{% endif %}
     <span>head <code>{{ pr.head_sha|sha }}</code></span>
-    {% if run %}<span><a href="{{ url_for('runs.run_page', run_id=run.id) }}">run page</a> · <a href="{{ url_for('runs.run_page', run_id=run.id, replay=1, speed=0.25) }}">replay</a></span>{% endif %}
+    {% if run %}<span><a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r">run page</a> · <a href="{{ url_for('runs.run_page', run_id=run.id, replay=1, speed=0.25) }}">replay</a></span>{% endif %}
     {% if run %}<span>{{ run.created_at|ago }}</span>{% endif %}
   </p>
 </div>

@@ -7,7 +7,7 @@
 .account-nav a:hover { background: var(--surface-2); color: var(--ink); }
 .account-nav a[aria-current="page"] { color: var(--ink); background: var(--surface-3); font-weight: 600; }
 .account-nav .account-who { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
-/* The avatar is an initials badge (GitHub's image is blocked by the CSP's img-src 'self' data:). */
+/* The avatar is GitHub's image when the user has one (the CSP allows avatars.githubusercontent.com), else an initials badge. */
 .account-avatar { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--rule-strong); background: var(--surface-2); color: var(--ink); font-size: 0.72rem; font-weight: 700; line-height: 1; }
 .account-avatar.big { width: 48px; height: 48px; font-size: 1.3rem; }
 .account-signout { display: inline; margin: 0; }

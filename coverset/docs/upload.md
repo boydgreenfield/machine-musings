@@ -47,8 +47,10 @@ coverset-ci upload --wait ◄── GET /v1/bundles/<run_id> ──  state, conc
 
 1. **The client** (`packages/pytest-coverset/src/pytest_coverset/ci_upload.py`, standard library
    only) packs `bundle.tar.gz`, the neutral bundle (`neutral.tar.gz` or `neutral/`), `meta.json`
-   and, with `--with-sources`, the measured source files under `sources/` into one gzipped tar.
-   The archive is reproducible (gzip mtime 0, ownerless and timeless members), so the same files
+   and, with `--with-sources`, the measured source files under `sources/` into one gzipped tar
+   (the paths of the neutral bundle's `files` table, `neutral/files.jsonl.gz` or the plain
+   `neutral/files.jsonl` Vitest writes, or either inside `neutral.tar.gz`; see "Sources from a
+   subdirectory" below for where they are read from). The archive is reproducible (gzip mtime 0, ownerless and timeless members), so the same files
    always give the same bytes and the same sha256. It streams the archive with
    `Transfer-Encoding: chunked`. If a proxy answers 411, the client sends it again with a
    `Content-Length`. The run is named in headers, so the server can authorize before reading the
@@ -90,13 +92,19 @@ coverset-ci upload --wait ◄── GET /v1/bundles/<run_id> ──  state, conc
      commit. If the mirror has no copy of the commit, it uses the uploaded sources instead. If there
      are none, there is no checkout;
    * **diff:** `merge-base(base, head)...head` on the mirror, classified into changed functions
-     with the planner's own helpers;
+     by the adapter of the uploaded bundles' language (`coverset.lang.adapter_for_language`): a
+     Python (or mixed) upload with the planner's own helpers, a Rust upload (only neutral bundles
+     whose manifest says `rust`) with `RustAdapter.changed_functions` over both sides' `.rs`
+     sources. Other neutral languages ship no source indexer, so their uploads get no
+     changed-function table;
    * **ingest:** each shard goes through `bundles.ingest_one`. With a head checkout, coverset
      ingests the pytest bundle with its own function index of the head sources, exactly as in
      managed mode. Without one, it ingests the neutral bundle with the regions and declared types
      the bundle ships (`IngestJob.regions_from_bundle`). A Vitest upload (only a neutral bundle)
      takes the neutral path in both cases;
-   * **verdict:** `finalize_run` expects one shard per label (or `--shards`). The pass then writes
+   * **verdict:** `finalize_run` expects one shard per label (or `--shards`) and gets the same
+     test-economy inputs as a managed run (the repository's `policy.test_tax_threshold` and the
+     tests' `test_stats` p50s; `orchestrator/runner.py`, `economy_inputs`). The pass then writes
      results and test history, runs `build_report`, `build_summary` and `persist_verdict`, and adds
      `verdict` and `done` events. Last, the forge posts the summary through `post_summary` (check run
      or commit status, and the sticky comment). These are the same functions a managed run uses.
@@ -105,6 +113,26 @@ coverset-ci upload --wait ◄── GET /v1/bundles/<run_id> ──  state, conc
    `{state, conclusion, exit_code, counts, summary, patch_pct, failures, shards}`.
    `coverset-ci upload --wait` polls it, starting at 0.25 s and backing off to 3 s, prints the
    verdict, patch coverage and failures, and exits with pytest's codes.
+
+### Sources from a subdirectory
+
+The bundle's paths are relative to the repository root it was measured in, and `--with-sources`
+reads the files from there: `meta.json`'s `repo_root` when it names a directory on the uploading
+machine (pytest-coverset records the git top level, else pytest's rootdir; a relative value is
+taken relative to the directory that holds `.coverset`), else the current directory. So
+`coverset-ci upload --dir services/api/.coverset --with-sources` from the top of a monorepo finds
+the files where pytest measured them. Each path is checked with `git ls-files` relative to the git
+top level (the root's prefix within the checkout is added), and is stored under the bundle's own
+path, so the server's source view matches the facts.
+
+When the paths are relative to a subdirectory of the checkout (a Vitest root in `web/app`, or a
+`meta.json` whose `repo_root` is the project directory rather than the git top), the uploaded
+sources and the facts agree with each other, but not with the repository's tree: with a mirror,
+coverset reads the head commit at the repository root, so the diff and patch coverage only line up
+when the bundle's paths are repository-relative. Run the tests (or point their root) at the
+repository root for those; without a mirror nothing else depends on the prefix. Without a
+`meta.json` (a bundle made elsewhere), run `coverset-ci upload` from the directory its paths are
+relative to.
 
 ## What is computed
 
@@ -136,11 +164,10 @@ instead of the changed functions' gaps.
 | `COVERSET_ALLOWED_REPOS` | none | further narrows auto-registration to these `owner/name`s |
 | `COVERSET_OIDC_AUDIENCE` | `COVERSET_PUBLIC_URL` | the audience OIDC tokens must carry; the client requests the server URL by default (`--audience` or `COVERSET_AUDIENCE` to change it) |
 
-The app's global body limit (`MAX_CONTENT_LENGTH`, 25 MiB) applies to requests that declare a
-`Content-Length`, and it rejects them before any view runs. The client therefore sends chunked
-bodies, and the upload view enforces `COVERSET_MAX_UPLOAD_BYTES` itself. A declared length above
-25 MiB, such as the 411 fallback behind a strict proxy, is refused with 413 until `/v1/bundles`
-is exempted from that global limit.
+The app's global body limit (`MAX_CONTENT_LENGTH`, 25 MiB) does not apply to `POST /v1/bundles`:
+that route is built with `COVERSET_MAX_UPLOAD_BYTES` as its own body limit and skips the global
+check, so both the chunked upload and the `Content-Length` fallback behind a strict proxy (411)
+succeed up to the upload cap. The upload view enforces the cap itself while streaming.
 
 When either cap trips while the body is still streaming, the server answers and closes the
 connection before the client has finished sending, so the client usually sees a dropped connection
@@ -217,13 +244,13 @@ first 32 hex characters of the sha256 in `shards.worker_ref` (`upload:<sha256>:<
 * Different archive, same label: that shard is replaced (a re-run of the CI job), and the run is
   processed again.
 * New label: a new shard (see below).
-* A run the control plane's boot-time takeover `abandoned` (it was `running`, waiting for its
-  matrix legs or mid-pass, when the server restarted) is re-opened by the next upload for the
-  commit: its shards are still on disk, so the late legs conclude the same run. With
-  `COVERSET_REQUEUE_ON_BOOT=true` the takeover also queues a copy for the planner; the next upload
-  cancels that copy while it is still queued (an upload run is never executed).
-* A run that ended in `error` or `cancelled` is left alone, and the next upload for the commit
-  starts a new run.
+* A control-plane restart does not touch upload runs: the dispatcher's boot takeover skips them
+  (they are never executed, and one waiting for its matrix legs is `running` by design), with or
+  without `COVERSET_REQUEUE_ON_BOOT`. The late legs join the same run and conclude it. Once
+  serving starts, every upload run still `running` gets one processing pass, so a pass the restart
+  cut off concludes its run without another upload; a run still waiting for legs keeps waiting.
+* A run that ended in `error` or `cancelled` (or `abandoned` by an older version's boot takeover)
+  is left alone, and the next upload for the commit starts a new run.
 
 ## How shards merge
 
@@ -280,11 +307,20 @@ a local Hypercorn server (`tests/e2e/test_upload_e2e.py` setup, 3 runs):
   fine for a matrix of a few jobs. Hundreds of shards per commit would need per-shard outcome
   caching.
 * Processing runs in the serving process. An upload that is being processed when the server
-  restarts leaves its run `running` until the boot-time takeover abandons it. The next upload of
-  any shard re-opens the run (see "Replay and idempotence"); until then the run reads `abandoned`
-  and `coverset-ci upload --wait` reports it as neutral with exit 2.
-* The check run that upload mode posts offers the usual buttons. "Re-run all" queues a managed run,
-  which needs an executor; in an upload-only setup, re-run the CI job instead.
-* The uploaded-source store is not covered by retention (`coverset gc`) yet.
+  restarts leaves its run `running` (the boot takeover skips upload runs) until the new server
+  starts and resumes it (`UploadWorker.resume`: one pass for each `running` upload run). Meanwhile
+  `coverset-ci upload --wait` keeps waiting, up to its `--timeout`. The one case resume cannot
+  finish is an upload cut off between its registration and the move of its files into place: that
+  shard stays pending without files and holds the verdict back until the CI step is re-run (a
+  replay of the same archive registers it again).
+* The check run of an upload run carries no buttons: "Re-run all" would queue a managed run, which
+  needs an executor, and "Re-run failed" has no worker to retry on. Re-run the CI job instead.
+  GitHub's own "Re-run" on the check still sends a `rerequested` event, which the intake turns into
+  a managed `rerun` run.
+* Retention covers what upload mode stores: when `coverset gc` (or the per-PR rule) expires a run,
+  its shard archives (`<runs_dir>/<run_id>/upload/`) go, and so do the uploaded sources of its head
+  commit (`<data_dir>/sources/<repo_id>/<sha>/`) once no remaining run of the repository has that
+  head. `coverset repo purge` removes the repository's whole `sources/<repo_id>/` directory and the
+  upload archives of its runs.
 * The OIDC token's `sha` claim is not bound to `X-Coverset-Sha`: for pull requests it names the
   merge commit, not the head. A job can therefore upload for any commit of its own repository.

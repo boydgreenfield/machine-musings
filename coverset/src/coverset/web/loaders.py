@@ -52,7 +52,7 @@ from coverset.db.models import (
     TestCase,
     TestResult,
 )
-from coverset.facts.cache import run_stamp
+from coverset.facts.cache import override, run_stamp
 from coverset.facts.queries import summary_is_fresh
 from coverset.facts.store import FactsStore
 from coverset.lang.base import FuncSampling, FunctionRegion, ShapeObs
@@ -76,6 +76,7 @@ __all__ = [
     "result_rows",
     "run_counts",
     "source_cache",
+    "warm_run",
 ]
 
 BASELINE_TRIGGERS = ("baseline", "push")
@@ -101,6 +102,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _configured_int(name: str) -> int | None:
+    """``name`` as configured by the app (``facts.cache.configure``: Settings, ``.env`` included),
+    or None, in which case the module constant read from the environment at import applies."""
+    raw = override(name)
+    try:
+        return max(1, int(raw)) if raw else None
+    except ValueError:
+        return None
+
+
 RUN_FACTS_ENTRIES = _env_int("COVERSET_RUN_FACTS_ENTRIES", 8)
 """Runs whose :class:`IndexedRunFacts` stay cached (``COVERSET_RUN_FACTS_ENTRIES``)."""
 RUN_FACTS_BUDGET = _env_int("COVERSET_RUN_FACTS_MB", 384) * 1024 * 1024
@@ -108,6 +119,20 @@ RUN_FACTS_BUDGET = _env_int("COVERSET_RUN_FACTS_MB", 384) * 1024 * 1024
 :meth:`IndexedRunFacts.memory_bytes`). The process's resident set grows by about 1.5 times this
 (allocator overhead, measured on the real bundle). The newest run is always kept, so one run larger
 than the budget still works."""
+
+
+def run_facts_entries() -> int:
+    """The run-facts cache's run count: the app's ``COVERSET_RUN_FACTS_ENTRIES``, else
+    :data:`RUN_FACTS_ENTRIES`."""
+    return _configured_int("COVERSET_RUN_FACTS_ENTRIES") or RUN_FACTS_ENTRIES
+
+
+def run_facts_budget() -> int:
+    """The run-facts cache's byte budget: the app's ``COVERSET_RUN_FACTS_MB``, else
+    :data:`RUN_FACTS_BUDGET`."""
+    mb = _configured_int("COVERSET_RUN_FACTS_MB")
+    return mb * 1024 * 1024 if mb else RUN_FACTS_BUDGET
+
 
 _SAMPLE = 32
 """Elements of a long container :func:`estimate_bytes` weighs before extrapolating to all of them."""
@@ -542,8 +567,8 @@ def cached_run_facts(facts_store: FactsStore, repo_id: int, run_id: str) -> Inde
     """The cached :class:`IndexedRunFacts` of one run (blocking; see the module docstring).
 
     The key is the run's stamp: a run that is still ingesting gets a new object after each commit
-    and a finished run is loaded once. Older entries are evicted beyond :data:`RUN_FACTS_ENTRIES`
-    runs or :data:`RUN_FACTS_BUDGET` estimated bytes, least recently used first. The budget is
+    and a finished run is loaded once. Older entries are evicted beyond :func:`run_facts_entries`
+    runs or :func:`run_facts_budget` estimated bytes, least recently used first. The budget is
     checked on every lookup, hits included: an entry loads lazily and weighs almost nothing when it
     is inserted, so what the previous requests loaded is counted by the next one.
     """
@@ -569,7 +594,7 @@ def cached_run_facts(facts_store: FactsStore, repo_id: int, run_id: str) -> Inde
 
 
 def _enforce_run_facts_budget() -> None:
-    """Evict least recently used runs beyond :data:`RUN_FACTS_ENTRIES` or :data:`RUN_FACTS_BUDGET`.
+    """Evict least recently used runs beyond :func:`run_facts_entries` or :func:`run_facts_budget`.
 
     The entries are weighed outside the lock (each weight is memoised, so this is cheap after the
     first weighing of a view); an entry added meanwhile counts as empty until the next lookup. The
@@ -578,9 +603,10 @@ def _enforce_run_facts_budget() -> None:
     with _run_facts_lock:
         entries = list(_run_facts.items())
     weights = {key: entry.memory_bytes() for key, (_stamp, entry) in entries}
+    entries_cap, budget = run_facts_entries(), run_facts_budget()
     with _run_facts_lock:
         total = sum(weights.get(key, 0) for key in _run_facts)
-        while len(_run_facts) > 1 and (len(_run_facts) > RUN_FACTS_ENTRIES or total > RUN_FACTS_BUDGET):
+        while len(_run_facts) > 1 and (len(_run_facts) > entries_cap or total > budget):
             old_key, _old = _run_facts.popitem(last=False)
             total -= weights.get(old_key, 0)
 
@@ -596,6 +622,15 @@ def run_facts_weight() -> tuple[int, int]:
 
 BLOB_BUDGET = _env_int("COVERSET_SOURCE_CACHE_MB", 64) * 1024 * 1024
 """Bytes of source text :func:`read_source` keeps (``COVERSET_SOURCE_CACHE_MB``)."""
+
+
+def blob_budget() -> int:
+    """The source-text cache's byte budget: the app's ``COVERSET_SOURCE_CACHE_MB``, else
+    :data:`BLOB_BUDGET`."""
+    mb = _configured_int("COVERSET_SOURCE_CACHE_MB")
+    return mb * 1024 * 1024 if mb else BLOB_BUDGET
+
+
 PREFETCH_MAX_PATHS = 2_000
 """A run with more measured sources than this reads them one by one instead of all at once."""
 
@@ -616,7 +651,8 @@ def _remember_blobs(mirror: Path, sha: str, found: dict[str, bytes]) -> None:
             text = data.decode("utf-8", "replace")
             _blobs[key] = text
             _blob_bytes += len(text)
-        while _blobs and _blob_bytes > BLOB_BUDGET:
+        budget = blob_budget()
+        while _blobs and _blob_bytes > budget:
             _old, text = _blobs.popitem(last=False)
             _blob_bytes -= len(text)
 
@@ -663,6 +699,46 @@ def _read_text(mirror: Path, sha: str, path: str, prefetch: Iterable[str]) -> st
         _remember_blobs(mirror, sha, {path: data})
         return data.decode("utf-8", "replace")
     return found
+
+
+def warm_run(
+    facts_store: FactsStore,
+    repo_id: int,
+    run_id: str,
+    mirror: Path,
+    head_sha: str,
+    base_sha: str | None = None,
+) -> None:
+    """Load a just-ingested run into the web's caches (blocking).
+
+    The orchestrator calls it in a background thread after ``finalize_run``
+    (``orchestrator.runner.schedule_warm_up``): the run's :class:`IndexedRunFacts` is cached with
+    its paths, static facts, executed lines and the per-file index of ``test_lines`` built (what the
+    PR, source and test pages read first); its measured sources are read from the mirror at
+    ``head_sha`` in one batch, as a page's first miss would; and with ``base_sha`` (a PR run) the PR
+    page's diff analysis is computed and cached (:func:`coverset.web.pr_view.analyse_diff`). A mirror
+    without the commit, or a run with more than :data:`PREFETCH_MAX_PATHS` measured sources, just
+    leaves the source cache cold.
+    """
+    facts = cached_run_facts(facts_store, repo_id, run_id)
+    if not facts.exists:
+        return
+    facts.union_lines()  # paths, statics and the per-file executed-line indexes
+    facts._bounds  # noqa: B018 - builds the sorted test_lines arrays and each file's row span
+    if not (mirror / "HEAD").is_file():
+        return
+    if base_sha:
+        from coverset.web.pr_view import analyse_diff
+
+        analyse_diff(mirror, base_sha, head_sha, facts)
+    if len(facts.statics) > PREFETCH_MAX_PATHS:
+        return
+    missing = [path for path in facts.statics if _cached_blob(mirror, head_sha, path) is None]
+    if missing:
+        try:
+            _remember_blobs(mirror, head_sha, read_blobs(mirror, head_sha, missing))
+        except (RepoError, ValueError):  # the page will read path by path, as it would anyway
+            return
 
 
 def source_cache() -> SourceCache:

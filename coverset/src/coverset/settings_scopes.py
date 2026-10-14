@@ -375,8 +375,7 @@ CATALOGUE: Final[Mapping[str, SettingSpec]] = {
             default=8.0,
             label="Test bloat threshold",
             description="Added test statements per newly covered production line above which the "
-            "PR verdict flags test bloat. Not yet enforced: the test-economy verdict still uses its "
-            "built-in 8.",
+            "PR verdict flags test bloat (the stored test-economy flag, the PR card and the comment).",
             scopes=_POLICY_SCOPES,
             minimum=0.5,
             maximum=1000,

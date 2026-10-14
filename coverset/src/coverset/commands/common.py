@@ -32,7 +32,11 @@ def load(**overrides: Any) -> Settings:
     from coverset.cli import load_settings
 
     clean = {k: v for k, v in overrides.items() if v is not None}
-    return load_settings(**clean)
+    settings = load_settings(**clean)
+    from coverset.facts import cache
+
+    cache.configure(settings.cache_overrides())  # the cache knobs from .env apply to every command
+    return settings
 
 
 SIGTERM_EXIT_CODE = 128 + signal.SIGTERM

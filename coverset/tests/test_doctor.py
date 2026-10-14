@@ -100,7 +100,7 @@ def test_suggested_config_round_trips_through_the_parser(tmp_path: Path) -> None
     errors = [f for f in report.findings if f.code == "addopts" and f.level == "error"]
     assert {f.message.split("'")[1] for f in errors} == {"--lf", "--cov=pkg"}
     assert any(f.code == "addopts" and f.level == "warning" and "'-x'" in f.message for f in report.findings)
-    # pytest_args are not forwarded to real runs yet: the fix is the repository's own addopts
+    # the fix is the repository's own addopts (it also holds for local pytest runs)
     assert errors[0].fix is not None and "remove it from addopts in setup.cfg" in errors[0].fix
     assert "-ra" in errors[0].fix and "override-ini" not in errors[0].fix
     assert report.verdict == "not ready"
@@ -112,8 +112,8 @@ def test_suggested_config_round_trips_through_the_parser(tmp_path: Path) -> None
 
 
 def test_the_doctor_runs_exactly_what_the_planner_and_runner_run(tmp_path: Path) -> None:
-    """pytest_args are not forwarded by the planner or the runner yet, so the doctor must not add
-    them to its collect or shard commands (a verdict about a run that never happens), and says so."""
+    """The planner and the runner append ``pytest_args`` last, so the doctor's collect and shard
+    commands carry them in the same place (no "pending" warning any more)."""
     repo = write(
         tmp_path / "repo",
         {
@@ -124,11 +124,10 @@ def test_the_doctor_runs_exactly_what_the_planner_and_runner_run(tmp_path: Path)
         },
     )
     report = diagnose(repo, adapter=fake_adapter(tmp_path), collect=False)
-    assert "no:randomly" not in report.commands["collect"]
-    assert "no:randomly" not in report.commands["shard"]
-    assert report.commands["collect"][-1] == "tests"
-    pending = [f for f in report.findings if f.code == "pytest-args-pending"]
-    assert pending and pending[0].level == "warning" and "-p no:randomly" in pending[0].message
+    assert report.commands["collect"][-3:] == ["tests", "-p", "no:randomly"]
+    shard = report.commands["shard"]
+    assert shard[-3:] == ["-p", "no:randomly", "--rootdir=repo"]  # last before the doctor's rootdir
+    assert "pytest-args-pending" not in codes(report)
     assert report.tests["pytest_args"] == ["-p", "no:randomly"]
     section = tomllib.loads(report.suggested_config)["tool"]["coverset"]
     assert section["pytest_args"] == ["-p", "no:randomly"]  # kept, so the section round-trips
@@ -146,7 +145,7 @@ def test_the_collect_command_matches_the_planner_source() -> None:
     start = source.index("cmd = [")
     planner_words = source[start : source.index("]", source.index("*config.testpaths"))]
     argv = _collect_argv("REPO", "OUT", CoversetConfig(testpaths=("tests",), pytest_args=("-ra",)))
-    assert argv[-1] == "tests" and "-ra" not in argv
+    assert argv[-2:] == ["tests", "-ra"]
     for word in (
         "--collect-only",
         "no:cacheprovider",
@@ -154,7 +153,8 @@ def test_the_collect_command_matches_the_planner_source() -> None:
         "--continue-on-collection-errors",
     ):
         assert word in planner_words and word in argv
-    assert "pytest_args" not in planner_words  # update the doctor when the planner starts passing them
+    assert "*config.pytest_args" in planner_words  # appended after the test paths, like the doctor
+    assert planner_words.index("*config.testpaths") < planner_words.index("*config.pytest_args")
 
 
 def test_a_repository_without_python_or_sources(tmp_path: Path) -> None:

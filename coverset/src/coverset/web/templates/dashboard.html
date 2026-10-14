@@ -50,7 +50,7 @@
     {% for run in live %}
       <tr>
         <td>{{ run_status(run) }}</td>
-        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}">{{ run_name(run, prs) }}</a></td>
+        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}"{% if loop.first %} data-go="r"{% endif %}>{{ run_name(run, prs) }}</a></td>
         <td>{{ count_line(counts.get(run.id)) }}</td>
         <td class="num muted">{{ run.created_at|ago }}</td>
       </tr>
@@ -72,7 +72,7 @@
       {% set ff = first_failure_s(run) %}
       <tr>
         <td>{{ run_status(run) }}</td>
-        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}">{{ run_name(run, prs) }}</a>{% if run.pr_id and prs.get(run.pr_id) %} · <a href="{{ url_for('repos.pr_page', rid=run.repo_id, n=prs[run.pr_id].number) }}">PR page</a>{% endif %}</td>
+        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}"{% if loop.first %} data-go="r"{% endif %}>{{ run_name(run, prs) }}</a>{% if run.pr_id and prs.get(run.pr_id) %} · <a href="{{ url_for('repos.pr_page', rid=run.repo_id, n=prs[run.pr_id].number) }}">PR page</a>{% endif %}</td>
         <td><code>{{ run.head_sha|sha }}</code></td>
         <td>{{ count_line(counts.get(run.id)) }}</td>
         <td class="num">{% if ff is not none %}{{ ff|secs }}{% else %}<span class="muted">–</span>{% endif %}</td>

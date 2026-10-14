@@ -81,7 +81,7 @@ Scoped settings ([docs/settings.md](settings.md)) outrank `fail_fast`, `max_shar
 | `python` | inferred | The Python version, 3.12 or later: `"3.13"`. Else `.python-version`, else the first of 3.13, 3.12, 3.14 that `requires-python` admits, else 3.13. |
 | `requirements` | auto | Requirement files that define the environment, overriding every lock: `["requirements/ci.txt"]`. |
 | `install` | `"auto"` | How the project itself is installed: `"none"` (imported from `PYTHONPATH` only), `"wheel"` (built and installed at snapshot time; the source still wins), `"editable"`, or `"auto"` (see [Installing the project](#installing-the-project)). |
-| `pytest_args` | `[]` | Extra pytest options for collection and every shard: `["-p", "no:randomly", "-m", "not slow"]` (**not forwarded to runs yet**, see below). Options only. The options known to conflict with how coverset runs pytest are refused: writing outside the worker or moving pytest's root (`--basetemp`, `--rootdir`, `-c`, `--junitxml`, `--log-file`, `--report-log`), choosing tests by name or path or stopping a shard early (`-k`, `--deselect`, `--ignore*`, `--pyargs`, `-x`, `--maxfail`, `--lf`, `--sw`), coverset's own (`-n`, `--cov*`, `--coverset-*`, `-q`/`-v`, which change the collect listing), `-p` other than `-p no:NAME`, and `-o` keys that write files or change collection (`log_file`, `cache_dir`, `python_files`/`_classes`/`_functions`, `testpaths`, `norecursedirs`, `pythonpath`, `verbosity*`); an `-o addopts=...` value is checked word by word by the same rules. `-m` is allowed: a marker expression filters the suite identically at collection and in every shard. The list stops mistakes; it is not a sandbox (the repository's `conftest.py` runs in the worker anyway). |
+| `pytest_args` | `[]` | Extra pytest options for collection and every shard: `["-p", "no:randomly", "-m", "not slow"]`, appended after the test paths at collection and last in every shard's command (before `--rootdir`), exactly as `coverset doctor` shows them. Options only. The options known to conflict with how coverset runs pytest are refused: writing outside the worker or moving pytest's root (`--basetemp`, `--rootdir`, `-c`, `--junitxml`, `--log-file`, `--report-log`), choosing tests by name or path or stopping a shard early (`-k`, `--deselect`, `--ignore*`, `--pyargs`, `-x`, `--maxfail`, `--lf`, `--sw`), coverset's own (`-n`, `--cov*`, `--coverset-*`, `-q`/`-v`, which change the collect listing), `-p` other than `-p no:NAME`, and `-o` keys that write files or change collection (`log_file`, `cache_dir`, `python_files`/`_classes`/`_functions`, `testpaths`, `norecursedirs`, `pythonpath`, `verbosity*`); an `-o addopts=...` value is checked word by word by the same rules. `-m` is allowed: a marker expression filters the suite identically at collection and in every shard. The list stops mistakes; it is not a sandbox (the repository's `conftest.py` runs in the worker anyway). |
 | `invariants` | `"invariants.yaml"` | The invariants file ([docs/invariants.md](invariants.md)). |
 | `trace_modules` | `[]` | Extra modules whose calls are traced for argument shapes. |
 | `tracked_globs` | inferred | Paths whose change marks every test impacted: `uv.lock`, `conftest.py`, plus the environment's input files (`poetry.lock`, `Pipfile.lock` or the requirement files) when there is no `uv.lock`. |
@@ -89,14 +89,6 @@ Scoped settings ([docs/settings.md](settings.md)) outrank `fail_fast`, `max_shar
 | `target_shard_seconds` | `20` | Shard size target: `K = ceil(sum of test p50s / target_shard_seconds)`. |
 | `fail_fast` | `"finish_in_background"` | After the first confirmed failure: keep running the rest (`finish_in_background`) or stop (`cancel_remaining`). |
 | `reorder` | `true` | Run tests in priority order (false: collection order, still sharded). |
-
-`pytest_args` status: validated, and appended by `PythonAdapter.test_command` when its `extra` carries
-the key, but the runner (`_extra()`) and the planner (`_collect`) do not pass `config.pytest_args` yet,
-so real collects and shards run without them. The doctor therefore shows and runs exactly the
-planner's and runner's commands, without `pytest_args`, and reports a `pytest-args-pending` warning
-when they are set; put such options in the repository's own pytest `addopts` until the wiring lands
-(then delete this note, add `*config.pytest_args` back to the doctor's `_collect_argv` and
-`_describe_commands`, and drop the guard in `tests/test_doctor.py`).
 
 ## Where the environment comes from
 
@@ -226,7 +218,7 @@ markers, `filterwarnings` and plugins. Words of `addopts` that clash:
 | `environment` | error | no environment source, or the resolver failed (message and fix from uv) |
 | `no-source` | error | no source packages inferred: coverage would measure nothing |
 | `testpaths` | error | configured test paths that do not exist |
-| `addopts` | error/warning | an `addopts` word from the table above; the fix edits the repository's `addopts` (an `--override-ini` in `pytest_args` would not reach real runs yet) |
+| `addopts` | error/warning | an `addopts` word from the table above; the fix edits the repository's `addopts` (which also fixes local pytest runs; `pytest_args = ["--override-ini=addopts=..."]` would fix coverset's runs only) |
 | `lfs-local-packages` | error | local packages stored with Git LFS |
 | `import` | error | `import <package>` fails from `PYTHONPATH` in the built environment |
 | `collect-usage`, `collect-timeout`, `no-tests` | error | pytest stopped, timed out or collected nothing |
@@ -235,7 +227,6 @@ markers, `filterwarnings` and plugins. Words of `addopts` that clash:
 | `direct-references` | warning | URL/VCS requirements: untrusted pull requests that change the environment are never built |
 | `compiled` | warning | compiled extensions: re-snapshot after merging native changes |
 | `large-repo` | warning | over 20,000 files or 200 MB as `git archive` exports them (Git LFS files count as pointers); the largest files are named |
-| `pytest-args-pending` | warning | `[tool.coverset] pytest_args` are set but not yet forwarded to real collects and shards |
 | `no-testpaths`, `unknown-keys`, `python` | warning | pytest collects from the root; keys this version ignores; `requires-python` excludes 3.12+ |
 | `env-note`, `extras`, `xdist`, `pytest-cov`, `no-pytest`, `install`, `local-packages`, `console-scripts`, `root-conftest`, `invariants`, `many-tests` | info | what coverset adjusted or will do, with the fix where one applies |
 

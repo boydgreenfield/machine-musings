@@ -7,12 +7,20 @@ from typing import Any
 
 import pytest
 from pydantic import SecretStr
-from quart import Quart
+from quart import Quart, request
 from quart.typing import TestClientProtocol as Client
 from sqlalchemy import inspect
 
 from coverset import __version__
-from coverset.app import CONTENT_SECURITY_POLICY, MAX_CONTENT_LENGTH, SECRET_KEY_FILE, create_app
+from coverset.app import (
+    AVATAR_ORIGIN,
+    CONTENT_SECURITY_POLICY,
+    MAX_CONTENT_LENGTH,
+    SECRET_KEY_FILE,
+    UPLOAD_PATH,
+    create_app,
+    is_upload_request,
+)
 from coverset.config import Settings
 from coverset.db.session import Database, sqlite_file_path
 
@@ -81,6 +89,76 @@ def test_extensions_hold_settings_and_db(settings: Settings) -> None:
     assert app.extensions["settings"] is settings
     assert isinstance(app.extensions["db"], Database)
     assert app.config["MAX_CONTENT_LENGTH"] == 25 * 1024 * 1024
+
+
+@pytest.mark.parametrize("days", [1, 30, 31, 365])
+def test_the_session_lifetime_is_set_with_the_cookie_keys(settings: Settings, days: int) -> None:
+    """``PERMANENT_SESSION_LIFETIME`` comes from ``COVERSET_SESSION_DAYS`` in ``create_app`` (31 days,
+    Quart's own default, included); the auth blueprint's fallback hook agrees with it."""
+    from datetime import timedelta
+
+    from coverset.web.auth import session_lifetime
+
+    app = create_app(settings.model_copy(update={"session_days": days}))
+    assert app.config["PERMANENT_SESSION_LIFETIME"] == timedelta(days=days) == session_lifetime(days)
+    assert app.config["SESSION_COOKIE_NAME"] == "coverset_session"
+
+
+@pytest.mark.security
+def test_the_csp_allows_github_avatars_and_nothing_else_third_party() -> None:
+    directives = dict(d.strip().split(" ", 1) for d in CONTENT_SECURITY_POLICY.split(";"))
+    assert directives["img-src"] == f"'self' data: {AVATAR_ORIGIN}"
+    assert AVATAR_ORIGIN == "https://avatars.githubusercontent.com"
+    others = {k: v for k, v in directives.items() if k != "img-src"}
+    assert not any("http" in v for v in others.values()), others
+
+
+@pytest.mark.security
+async def test_only_bundle_uploads_skip_the_global_body_limit(app: Quart, client: Client) -> None:
+    """``POST /v1/bundles`` is exempt (its request carries ``max_upload_bytes``); every other path
+    and method keeps the 25 MiB check."""
+    assert is_upload_request("POST", UPLOAD_PATH)
+    assert not is_upload_request("GET", UPLOAD_PATH)
+    assert not is_upload_request("POST", UPLOAD_PATH + "/x")
+    assert not is_upload_request("POST", "/webhooks/github")
+    size = MAX_CONTENT_LENGTH + 1
+    for path in ("/v1/bundles/run_1", "/webhooks/github", "/login"):
+        response = await client.post(path, data=b"x" * size, headers={"Content-Length": str(size)})
+        assert response.status_code == 413, path
+    limit = app.extensions["settings"].max_upload_bytes
+    async with app.test_request_context(UPLOAD_PATH, method="POST"):
+        assert request.max_content_length == limit
+    async with app.test_request_context("/webhooks/github", method="POST"):
+        assert request.max_content_length == MAX_CONTENT_LENGTH
+    request_class = app.request_class
+    upload = _request(request_class, "POST", UPLOAD_PATH, size)
+    assert upload.max_content_length == limit and upload.body._must_raise is None
+    other = _request(request_class, "POST", "/webhooks/github", size)
+    assert other.body._must_raise is not None, "Quart refuses the declared length up front"
+
+
+def _request(request_class: Any, method: str, path: str, length: int) -> Any:
+    from functools import partial
+
+    from werkzeug.datastructures import Headers
+
+    async def push(*_args: Any) -> None:
+        return None
+
+    headers = Headers({"Content-Length": str(length)})
+    return request_class(
+        method,
+        "http",
+        path,
+        b"",
+        headers,
+        "",
+        "1.1",
+        {"type": "http"},
+        max_content_length=MAX_CONTENT_LENGTH,
+        body_timeout=None,
+        send_push_promise=partial(push),
+    )
 
 
 @pytest.mark.security

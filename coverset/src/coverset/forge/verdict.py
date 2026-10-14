@@ -173,8 +173,15 @@ def failure_annotations(summary: VerdictSummary) -> tuple[Annotation, ...]:
     return tuple(annotations[:MAX_ANNOTATIONS])
 
 
-def verdict_actions(summary: VerdictSummary) -> tuple[CheckAction, ...]:
-    """Buttons on a finished check run."""
+def verdict_actions(summary: VerdictSummary, *, trigger: str | None = None) -> tuple[CheckAction, ...]:
+    """Buttons on a finished check run.
+
+    An upload run (``trigger == "upload"``) gets none: its tests ran in the repository's own CI, so
+    "Re-run all" would queue a managed run that may have no executor, and "Re-run failed" has no
+    worker to retry on; the way to re-run is the CI job (docs/upload.md).
+    """
+    if trigger == "upload":
+        return ()
     return (RERUN_FAILED, RERUN_ALL) if summary.conclusion == "failure" else (RERUN_ALL,)
 
 
@@ -204,11 +211,13 @@ async def post_verdict(
     check_id: int | None,
     comment_id: int | None,
     external_id: str | None = None,
+    trigger: str | None = None,
 ) -> PostedVerdict:
     """Complete the check run (or post a commit status) and upsert the sticky comment.
 
-    ``check_id``/``comment_id`` are the stored ids (None creates them). A forge failure in one step
-    is logged and reported in ``errors``; the other step still runs.
+    ``check_id``/``comment_id`` are the stored ids (None creates them). ``trigger`` is the run's
+    (``runs.trigger``): an upload run's check carries no re-run buttons (:func:`verdict_actions`).
+    A forge failure in one step is logged and reported in ``errors``; the other step still runs.
     """
     from coverset.forge.comment import render_check_summary, render_sticky_comment
 
@@ -222,7 +231,7 @@ async def post_verdict(
             summary=render_check_summary(summary),
             annotations=failure_annotations(summary),
         )
-        actions = verdict_actions(summary) if capabilities.check_actions else ()
+        actions = verdict_actions(summary, trigger=trigger) if capabilities.check_actions else ()
         try:
             if check_id is None:
                 check_id = await forge.create_check(

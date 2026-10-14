@@ -56,10 +56,18 @@ async def index() -> Response:
                 .limit(RECENT_RUNS)
             )
         )
-        prs = {pr.id: pr for pr in await session.scalars(select(PullRequest).where(PullRequest.repo_id.in_(rids)))}
+        prs = {
+            pr.id: pr
+            for pr in await session.scalars(select(PullRequest).where(PullRequest.repo_id.in_(rids)))
+        }
         counts = await run_counts(session, [r.id for r in live + recent])
-        total_runs = await session.scalar(select(func.count()).select_from(Run).where(Run.repo_id.in_(rids))) or 0
-        tests = await session.scalar(select(func.count()).select_from(TestCase).where(TestCase.repo_id.in_(rids))) or 0
+        total_runs = (
+            await session.scalar(select(func.count()).select_from(Run).where(Run.repo_id.in_(rids))) or 0
+        )
+        tests = (
+            await session.scalar(select(func.count()).select_from(TestCase).where(TestCase.repo_id.in_(rids)))
+            or 0
+        )
         per_repo = dict(
             (
                 await session.execute(

@@ -911,6 +911,7 @@ async def post_summary(session: AsyncSession, run: Run, summary: VerdictSummary,
             check_id=run.check_run_id,
             comment_id=pr.comment_id,
             external_id=run.id,
+            trigger=run.trigger,  # an upload run's check offers no re-run buttons
         )
     except Exception as exc:  # never let the forge fail a run
         log.warning("posting the verdict of run %s failed: %s", run.id, exc)

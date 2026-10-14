@@ -67,7 +67,6 @@ import shutil
 import sqlite3
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -356,25 +355,15 @@ def install_backups(
 
 
 def ensure_instance_id(data_dir: Path) -> str:
-    """Create ``<data_dir>/instance_id`` (the reaper's sandbox tag) if missing, without hard links.
+    """``<data_dir>/instance_id`` (the reaper's sandbox tag), created if missing.
 
-    coverset creates it with ``os.link`` so concurrent processes agree on one id, but Modal's
-    (v1) Volumes refuse hard links with EPERM. This container is the only writer, so an exclusive
-    create is enough; the executor then just reads the file.
+    Kept for callers of this module only: ``web()`` no longer pre-creates the file, because
+    :func:`coverset.executors.modal_.instance_id` now falls back to an exclusive create when the
+    Volume refuses its ``os.link`` with EPERM.
     """
-    path = data_dir / "instance_id"
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            return str(uuid.UUID(text))
-    except (OSError, ValueError):
-        pass
-    data_dir.mkdir(parents=True, exist_ok=True)
-    value = str(uuid.uuid4())
-    staging = path.with_name(f".instance_id.{uuid.uuid4().hex}")
-    staging.write_text(value + "\n", encoding="utf-8")
-    os.replace(staging, path)
-    return value
+    from coverset.executors.modal_ import instance_id
+
+    return instance_id(data_dir)
 
 
 def container_environment() -> dict[str, str]:
@@ -424,7 +413,6 @@ def web() -> Any:
     if settings.database_url == container_environment()["COVERSET_DATABASE_URL"]:
         backup = SQLiteVolumeBackup(LOCAL_DB, BACKUP_DIR, commit=volume.commit)
         outcome = backup.restore()  # before create_app, which may touch the database file
-    ensure_instance_id(settings.data_dir)
     quart_app = create_app(settings)  # configures logging, so report the restore afterwards
     log.info("coverset-web database: %s", outcome)
     if backup is not None:

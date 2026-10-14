@@ -11,6 +11,11 @@ and never look at credentials themselves. The credentials it understands, in the
   would otherwise be same-origin with coverset and could read pages and CSRF tokens. The
   ``COVERSET_PUBLIC_URL`` host is deliberately not accepted (configuration refuses a public URL
   without a token): a tunnel forwarding that host would make every internet caller the operator.
+  One exception, for development: while the development sign-in is enabled
+  (:func:`coverset.web.account.dev_login_enabled`), a session it opened takes the operator's place,
+  so a developer can browse as a member (signing out makes them the operator again). In every mode
+  the sessions and tokens of that sign-in's users grant nothing on a request for which it is not
+  enabled, so none outlives the conditions it was created under.
 * ``Authorization: Bearer <admin token>``: the instance admin.
 * ``Authorization: Bearer cst_...``: an API token (:mod:`coverset.web.tokens`); a personal token
   acts as its user within its scopes, a repository token on its one repository. A ``cst_`` token
@@ -143,6 +148,7 @@ def is_public(method: str, path: str) -> bool:
         or (reading and path in ("/v1/verdict", "/healthz"))
         or (reading and _PUBLIC_RUN_PATH.fullmatch(path) is not None)
         or (path == "/login" and (reading or method == "POST"))
+        or (path == "/login/dev" and method == "POST")  # 404 unless enabled; checks its own CSRF
         or (reading and path in _OAUTH_PATHS)
         or (path == "/v1/bundles" and method == "POST")
         or (reading and path.startswith("/v1/bundles/"))
@@ -338,9 +344,18 @@ def user_principal(user: User, permissions: dict[int, str], *, session_id: str |
     )
 
 
+def _dev_user_refused(user: User) -> bool:
+    """True for a development sign-in user while that sign-in is off for this request
+    (:func:`coverset.web.account.dev_user_refused`): their sessions and tokens then grant nothing."""
+    from coverset.web.account import dev_user_refused  # the account module imports this one
+
+    return dev_user_refused(user)
+
+
 async def _session_principal(raw_sid: str) -> Principal | None:
-    """The principal of a ``user_sessions`` row, or None when the row is gone, expired or its user
-    is disabled. Caches the user row on ``g`` for the account page."""
+    """The principal of a ``user_sessions`` row, or None when the row is gone, expired, its user
+    is disabled, or its user is a development sign-in user while that sign-in is off. Caches the
+    user row on ``g`` for the account page."""
     if not isinstance(raw_sid, str) or not raw_sid:
         return None
     digest = hash_session_id(raw_sid)
@@ -356,7 +371,7 @@ async def _session_principal(raw_sid: str) -> Principal | None:
         if pair is None:
             return None
         row, user = pair
-        if row.expires_at <= now or user.disabled:
+        if row.expires_at <= now or user.disabled or _dev_user_refused(user):
             return None
         if now - row.last_seen_at >= SESSION_TOUCH_INTERVAL:
             row.last_seen_at = now
@@ -399,7 +414,7 @@ async def _principal_for_token(db: AsyncSession, row: ApiToken) -> Principal | N
             token_id=row.id,
         )
     user = await db.get(User, row.user_id) if row.user_id is not None else None
-    if user is None or user.disabled:
+    if user is None or user.disabled or _dev_user_refused(user):
         return None
     permissions = await load_repo_permissions(db, user.id)
     return Principal(
@@ -464,6 +479,14 @@ async def _resolve() -> tuple[AuthMethod, Principal] | None:
     audited through :class:`RejectionLog`.
     """
     if _expected_token() is None:
+        if (sid := session.get(SESSION_ID)) is not None and app_settings().dev_login:
+            from coverset.web.account import dev_session_allowed  # imports this module
+
+            principal = await _session_principal(sid)
+            user = g.pop("coverset_user", None)
+            if principal is not None and user is not None and dev_session_allowed(user):
+                g.coverset_user = user
+                return "user", principal
         return "open", OPEN
     if (bearer := _bearer_token()) is not None:
         if token_matches(bearer):
@@ -615,8 +638,9 @@ async def create_user_session(db: AsyncSession, user: User, *, now: datetime) ->
     The caller commits. The cookie session is reset too (session fixation: a session id chosen
     before sign-in never survives it) and gets a fresh CSRF token, which the row also stores. The
     cookie is made permanent (``Max-Age``/``Expires`` from ``PERMANENT_SESSION_LIFETIME``, which
-    the app sets from ``COVERSET_SESSION_DAYS``) so it outlives the browser like the row does;
-    the admin-token cookie stays a browser-session cookie on purpose, it has no row to revoke.
+    ``create_app`` sets from ``COVERSET_SESSION_DAYS``, :func:`session_lifetime`) so it outlives the
+    browser like the row does; the admin-token cookie stays a browser-session cookie on purpose, it
+    has no row to revoke.
     """
     raw = secrets.token_urlsafe(32)
     session.clear()
@@ -632,7 +656,7 @@ async def create_user_session(db: AsyncSession, user: User, *, now: datetime) ->
             user_agent=(request.headers.get("User-Agent") or "")[:255] or None,
             created_at=now,
             last_seen_at=now,
-            expires_at=now + timedelta(days=app_settings().session_days),
+            expires_at=now + session_lifetime(app_settings().session_days),
         )
     )
     return raw
@@ -652,12 +676,22 @@ def _inject_csrf() -> dict[str, Callable[[], str]]:
     return {"csrf_token": csrf_token}
 
 
+def session_lifetime(session_days: int) -> timedelta:
+    """How long a GitHub sign-in lasts: the ``user_sessions`` row and the permanent cookie alike.
+
+    The one formula for both: ``create_app`` sets ``PERMANENT_SESSION_LIFETIME`` from it next to
+    the other ``SESSION_COOKIE_*`` keys, and :func:`create_user_session` dates the row with it.
+    """
+    return timedelta(days=session_days)
+
+
 @bp.record_once
 def _align_cookie_lifetime(state: BlueprintSetupState) -> None:
-    """Make the permanent cookie last exactly as long as a ``user_sessions`` row
-    (``COVERSET_SESSION_DAYS``) unless the app configured a lifetime itself (Quart's own default
-    is 31 days, which is what "not configured" looks like here)."""
+    """Fallback for an app not built by ``create_app``: make the permanent cookie last exactly as
+    long as a ``user_sessions`` row (``COVERSET_SESSION_DAYS``, :func:`session_lifetime`) unless the
+    app configured a lifetime itself (Quart's own default is 31 days, which is what "not
+    configured" looks like here)."""
     settings = state.app.extensions.get("settings")
     configured = state.app.config.get("PERMANENT_SESSION_LIFETIME")
     if settings is not None and configured in (None, timedelta(days=31)):
-        state.app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=settings.session_days)
+        state.app.config["PERMANENT_SESSION_LIFETIME"] = session_lifetime(settings.session_days)

@@ -4,7 +4,7 @@
 <div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / tests</div>
 <div class="page-head">
   <h1>Tests</h1>
-  <p class="meta"><span>{{ rows|length }} tests</span>{% set quarantined = rows|selectattr('quarantined')|list|length %}{% include "tests_count.html" %}<span>statistics over each test's last 50 executed results</span></p>
+  <p class="meta"><span>{{ total }} tests</span>{% include "tests_count.html" %}<span>statistics over each test's last 50 executed results</span></p>
 </div>
 <div class="map-tools">
   <span class="seg" role="group" aria-label="Sort by">
@@ -14,14 +14,43 @@
   </span>
   <span class="muted">Quarantined tests still run; their failures never fail a pull request.{% if not can_quarantine %} Sign in as admin to change quarantine.{% endif %}</span>
 </div>
+<label class="filter-box tests-filter"><span class="sr">Filter tests</span><input type="search" data-filter=".tests-table tbody tr" data-filter-count="#tests-filter-count" placeholder="Filter tests  /" autocomplete="off" spellcheck="false"></label>
+<span id="tests-filter-count" class="sr" aria-live="polite"></span>
+{%- macro pager() %}
+{% if paged %}
+<p class="tests-pager muted">{% if show_all %}All {{ total }} tests.{% if rows %} <a href="{{ url_for('repos.tests_page', rid=repo.id, sort=sort) }}">Show {{ tests_per_page }} a page</a>{% endif %}{% else %}Tests {{ first + 1 }}–{{ first + rows|length }} of {{ total }}{% if page > 1 %} · <a href="{{ url_for('repos.tests_page', rid=repo.id, sort=sort, page=page - 1) }}" rel="prev">previous</a>{% endif %}{% if page < pages %} · <a href="{{ url_for('repos.tests_page', rid=repo.id, sort=sort, page=page + 1) }}" rel="next">next</a>{% endif %} · <a href="{{ url_for('repos.tests_page', rid=repo.id, sort=sort, all=1) }}" data-show-all>show all {{ total }}</a> (the filter searches the rows on this page){% endif %}</p>
+{% endif %}
+{%- endmacro %}
+{{ pager() }}
 <section class="panel">
 <div class="table-scroll">
 <table class="tests-table">
   <thead><tr><th>Test</th><th class="num">Runs</th><th class="num">Fail rate</th><th class="num">Flaky</th><th class="num">p50</th><th class="num">p95</th><th class="num">Last failed</th><th>Quarantine</th></tr></thead>
   <tbody>
-  {% for row in rows %}{% include "tests_row.html" %}{% endfor %}
+  {#- One loop, no include per row: an include costs a context per row (300 ms at 5,000 tests).
+      tests_row.html renders the same row for the htmx swap after a quarantine toggle; keep the
+      two identical (tests/web/test_polish_tests_page.py compares them). #}
+  {% for row in rows %}<tr id="test-{{ row.id }}"{% if row.quarantined %} class="is-quarantined"{% endif %}>
+  <td class="nodeid"><a class="nodeid test-link" href="{{ test_href(row.id) }}">{{ row.nodeid|nodeid }}</a></td>
+  <td class="num">{{ row.runs }}</td>
+  <td class="num">{% if row.fail_rate is not none %}{{ (100 * row.fail_rate)|pct }}{% else %}–{% endif %}</td>
+  <td class="num">{% if row.flaky_n %}{{ row.flaky_n }}× <span class="muted">({{ '%.2f'|format(row.flaky_score) }})</span>{% else %}–{% endif %}</td>
+  <td class="num">{{ row.p50|ms }}</td>
+  <td class="num">{{ row.p95|ms }}</td>
+  <td class="num">{{ row.last_fail_at|ago if row.last_fail_at else '–' }}</td>
+  <td>
+    {% if can_quarantine %}
+    <button type="button" class="toggle-q" aria-pressed="{{ 'true' if row.quarantined else 'false' }}"
+      hx-post="{{ quarantine_url(row.id) }}"
+      hx-vals='{"quarantined": "{{ '0' if row.quarantined else '1' }}"}'
+      hx-target="#test-{{ row.id }}" hx-swap="outerHTML">{{ 'Quarantined' if row.quarantined else 'Quarantine' }}</button>
+    {% else %}{{ 'quarantined' if row.quarantined else '' }}{% endif %}
+  </td>
+</tr>
+{% endfor %}
   </tbody>
 </table>
 </div>
 </section>
+{{ pager() }}
 {% endblock %}

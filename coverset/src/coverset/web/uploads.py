@@ -160,6 +160,14 @@ async def _repo_by_name(session: AsyncSession, full_name: str) -> Repo | None:
     return rows[0] if rows else None
 
 
+def _dev_user_refused(user: User) -> bool:
+    """True for a development sign-in user while the dev sign-in's conditions do not hold (their
+    tokens must not outlast it; see :func:`coverset.web.account.dev_user_refused`)."""
+    from coverset.web.account import dev_user_refused
+
+    return dev_user_refused(user)
+
+
 async def _token_uploader(session: AsyncSession, raw: str, full_name: str) -> Uploader:
     row: ApiToken | None = await tokens.verify(session, raw, now=app_settings().now())
     if row is None:
@@ -175,7 +183,7 @@ async def _token_uploader(session: AsyncSession, raw: str, full_name: str) -> Up
             raise UploadError(403, "wrong_repository", "this token uploads for another repository")
         return Uploader(repo, f"repo token {row.prefix}")
     user = await session.get(User, row.user_id) if row.user_id is not None else None
-    if user is None or user.disabled:
+    if user is None or user.disabled or _dev_user_refused(user):
         raise UploadError(401, "invalid_token")
     repo = await _repo_by_name(session, full_name)
     if repo is None:

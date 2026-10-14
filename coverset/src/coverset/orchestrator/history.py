@@ -7,10 +7,12 @@
   :class:`~coverset.analysis.scoring.TestHistory` for scoring (with a parametrize-``family``
   fallback for new ids).
 * :func:`update_test_stats` recomputes ``test_stats`` over each test's last 50 executed results
-  (``not_run`` never counts; untrusted runs never update priors) and writes them in one upsert.
+  (``not_run`` never counts; untrusted runs never update priors) and writes them in one upsert;
+  :func:`p50_seconds` reads the p50s back by nodeid for the test economy at finalize.
 * :func:`seed_history` replays the six demo ``main`` commits as baseline runs and then both demo
   PRs through the normal planner and runner.
-* Retention: :func:`collect_garbage` is what ``coverset gc`` does (expired runs and their facts, old
+* Retention: :func:`collect_garbage` is what ``coverset gc`` does (expired runs and their facts,
+  their upload archives and the uploaded sources of commits no remaining run has as its head, old
   run events, old webhook payloads and delivery rows; the latest completed baseline per repo and
   the latest run per open PR always stay). ``serve`` runs it once at startup and then every
   :data:`GC_INTERVAL_S` (:func:`gc_forever`), and :func:`expire_pr_runs` applies the per-PR rule
@@ -59,8 +61,10 @@ __all__ = [
     "gc_forever",
     "load_test_history",
     "nodeid_hash",
+    "p50_seconds",
     "previous_pr_run",
     "prior_candidates",
+    "prune_upload_files",
     "register_tests",
     "runs_to_keep",
     "seed_history",
@@ -399,6 +403,26 @@ async def update_test_stats(session: AsyncSession, run: Run, test_ids: Sequence[
     return len(stat_rows)
 
 
+async def p50_seconds(session: AsyncSession, repo_id: int, nodeids: Iterable[str]) -> dict[str, float]:
+    """``nodeid -> p50 seconds`` from ``test_stats`` for the nodeids that have one (the durations the
+    test economy weighs tests by: :class:`coverset.facts.economy.EconomyInputs`)."""
+    by_hash = {nodeid_hash(n): n for n in dict.fromkeys(nodeids)}
+    out: dict[str, float] = {}
+    for chunk in _chunks(list(by_hash)):
+        rows = await session.execute(
+            select(TestCase.nodeid_hash, TestStats.p50_ms)
+            .join(TestStats, (TestStats.test_id == TestCase.id) & (TestStats.repo_id == TestCase.repo_id))
+            .where(
+                TestCase.repo_id == repo_id, TestCase.nodeid_hash.in_(chunk), TestStats.p50_ms.is_not(None)
+            )
+        )
+        for digest, p50_ms in rows:
+            nodeid = by_hash.get(bytes(digest))
+            if nodeid is not None:
+                out[nodeid] = float(p50_ms) / 1000.0
+    return out
+
+
 async def upsert_rows(
     session: AsyncSession, model: type[Any], rows: Sequence[Mapping[str, Any]], keys: Sequence[str]
 ) -> None:
@@ -626,6 +650,10 @@ class GcReport:
     events: int = 0
     payloads: int = 0
     deliveries: int = 0
+    uploads: list[str] = field(default_factory=list)
+    """Expired runs whose upload shard archives (``<runs_dir>/<run_id>/upload``) went."""
+    sources: list[str] = field(default_factory=list)
+    """``<repo_id>/<sha>`` of uploaded-source directories that went (no remaining run's head)."""
     kept: set[str] = field(default_factory=set)
     skipped: bool = False
     """Another gc held :data:`GC_LOCK`; nothing was done."""
@@ -639,6 +667,8 @@ class GcReport:
             f"{verb} {len(self.expired_db)} run(s) from the database and "
             f"{len(self.expired_facts)} run(s) of facts",
             f"{verb} {self.events} run event(s) older than {settings.retention_events_days} d",
+            f"{verb} the upload archives of {len(self.uploads)} run(s) and the uploaded sources of "
+            f"{len(self.sources)} commit(s)",
             f"{'would clear' if self.dry_run else 'cleared'} {self.payloads} webhook payload(s) older than "
             f"{settings.retention_deliveries_days} d; {verb} {self.deliveries} delivery row(s)",
             f"kept {len(self.kept)} run(s): the latest baseline per repo and the latest run per open PR",
@@ -673,8 +703,10 @@ async def collect_garbage(
     """Apply the retention settings once (what ``coverset gc`` does); skipped while another gc runs.
 
     Deletes runs older than ``COVERSET_RETENTION_RUNS_DAYS`` that are not queued or running and not
-    kept by :func:`runs_to_keep`, with their facts directories (``facts.gc.expire_runs``); run
-    events older than ``COVERSET_RETENTION_EVENTS_DAYS``; webhook payloads older than
+    kept by :func:`runs_to_keep`, with their facts directories (``facts.gc.expire_runs``), their
+    upload archives and the uploaded sources of head commits no remaining run of the repository
+    has (:func:`prune_upload_files`); run events older than ``COVERSET_RETENTION_EVENTS_DAYS``;
+    webhook payloads older than
     ``COVERSET_RETENTION_DELIVERIES_DAYS`` (nulled) and delivery rows older than
     ``max(30, COVERSET_RETENTION_DELIVERIES_DAYS)`` days.
     """
@@ -697,15 +729,17 @@ async def _collect_garbage(db: Database, settings: Settings, store: FactsStore, 
     report = GcReport(dry_run=dry_run)
     async with db.session() as session:
         keep = report.kept = await runs_to_keep(session)
-        report.expired_db = list(
-            await session.scalars(
-                select(Run.id).where(
+        expired = [
+            (int(repo_id), str(run_id), str(head_sha))
+            for repo_id, run_id, head_sha in await session.execute(
+                select(Run.repo_id, Run.id, Run.head_sha).where(
                     Run.created_at < run_cutoff,
                     Run.id.not_in(keep or {""}),
                     Run.status.not_in(_ACTIVE_STATUSES),
                 )
             )
-        )
+        ]
+        report.expired_db = [run_id for _, run_id, _ in expired]
         report.events = int(
             await session.scalar(select(func.count(RunEvent.id)).where(RunEvent.at < event_cutoff)) or 0
         )
@@ -736,6 +770,7 @@ async def _collect_garbage(db: Database, settings: Settings, store: FactsStore, 
                 delete(WebhookDelivery).where(WebhookDelivery.received_at < delivery_cutoff)
             )
             await session.commit()
+        report.uploads, report.sources = await prune_upload_files(session, settings, expired, dry_run=dry_run)
     report.expired_facts = await asyncio.to_thread(
         expire_runs, store, keep_run_ids=keep, older_than=run_cutoff, dry_run=dry_run
     )
@@ -758,7 +793,7 @@ async def expire_pr_runs(
             )
             rows = (
                 await session.execute(
-                    select(Run.repo_id, Run.id).where(
+                    select(Run.repo_id, Run.id, Run.head_sha).where(
                         Run.pr_id == pr_id,
                         Run.created_at < cutoff,
                         Run.id != (latest or ""),
@@ -766,16 +801,57 @@ async def expire_pr_runs(
                     )
                 )
             ).all()
-            expired = [(int(repo_id), str(run_id)) for repo_id, run_id in rows]
+            expired = [(int(repo_id), str(run_id), str(head_sha)) for repo_id, run_id, head_sha in rows]
             if expired and not dry_run:
-                await session.execute(delete(Run).where(Run.id.in_([run_id for _, run_id in expired])))
+                await session.execute(delete(Run).where(Run.id.in_([run_id for _, run_id, _ in expired])))
                 await session.commit()
+            if expired:
+                await prune_upload_files(session, settings, expired, dry_run=dry_run)
         if not dry_run:
-            for repo_id, run_id in expired:
+            for repo_id, run_id, _ in expired:
                 await asyncio.to_thread(store.delete_run, repo_id, run_id)
-        return sorted(run_id for _, run_id in expired)
+        return sorted(run_id for _, run_id, _ in expired)
     finally:
         GC_LOCK.release()
+
+
+async def prune_upload_files(
+    session: AsyncSession,
+    settings: Settings,
+    expired: Sequence[tuple[int, str, str]],
+    *,
+    dry_run: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Remove what upload mode keeps on disk for ``expired`` runs (``(repo_id, run_id, head_sha)``).
+
+    Each run's shard archives (``<runs_dir>/<run_id>/upload``) go, and each head commit's uploaded
+    sources (``<data_dir>/sources/<repo_id>/<sha>``) once no run of the repository other than the
+    expired ones has that head (call it after the runs' rows are deleted, or with ``dry_run``).
+    Returns ``(run ids, "<repo_id>/<sha>" commits)`` that were (or would be) removed.
+    """
+    from coverset.facts.gc import remove_sources, remove_upload_dirs
+
+    if not expired:
+        return [], []
+    gone = {run_id for _, run_id, _ in expired}
+    uploads = await asyncio.to_thread(remove_upload_dirs, settings.runs_dir, gone, dry_run=dry_run)
+    by_repo: dict[int, set[str]] = defaultdict(set)
+    for repo_id, _, sha in expired:
+        by_repo[repo_id].add(sha)
+    sources: list[str] = []
+    for repo_id, shas in sorted(by_repo.items()):
+        live = set(
+            await session.scalars(
+                select(Run.head_sha).where(
+                    Run.repo_id == repo_id, Run.head_sha.in_(sorted(shas)), Run.id.not_in(sorted(gone))
+                )
+            )
+        )
+        removed = await asyncio.to_thread(
+            remove_sources, settings.data_dir, repo_id, shas - live, dry_run=dry_run
+        )
+        sources += [f"{repo_id}/{sha}" for sha in removed]
+    return uploads, sources
 
 
 async def gc_forever(

@@ -32,6 +32,16 @@ queued ──▶ claim + policy ──▶ plan ───────────
    `COVERSET_REQUEUE_ON_BOOT=true` a fresh queued copy (same trigger, PR, `extra_env`, webhook arrival
    time; `timeline.requeued_from` names the old run) is created first, since the old run's shard and
    result rows already exist.
+   Upload runs (`trigger = "upload"`, [upload.md](upload.md)) never pass through the dispatcher:
+   they are created `running` by `POST /v1/bundles` and processed by the serving process's
+   `UploadWorker` (`orchestrator/upload.py`), never executed, so there is nothing for a worker to
+   run and no executor to lose. The boot takeover therefore skips them entirely: an upload run
+   waiting for the rest of its matrix legs (`--shards N`) is `running` by design and stays so across
+   a restart, neither abandoned nor re-queued, and the next leg's upload joins it. After the
+   takeover, `install_run_queue`'s start-up hook calls `resume_upload_runs`, which schedules one
+   pass on the app's `UploadWorker` for every upload run still `running`: a pass that a restart
+   interrupted concludes its run, and a run still waiting for legs keeps waiting. The check run of an upload run carries no re-run buttons, since a managed
+   re-run would need an executor the repository may not have (`forge/verdict.py`, `verdict_actions`).
 2. **Policy.** Untrusted runs never use the local executor; webhook-triggered runs use it only with
    `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true`. A Modal run is admitted only if today's spend plus what
    it reserves fits `COVERSET_MODAL_DAILY_BUDGET_USD`; otherwise it concludes `neutral` with reason
@@ -95,7 +105,8 @@ queued ──▶ claim + policy ──▶ plan ───────────
 4. **Shards.** Each worker gets `run/shard.args` (its nodeids, in priority order),
    `run/shard.scores.json` (rank-derived scores that make the plugin reproduce that order) and
    `run/full-trace.txt` (the PR's changed source files plus every invariant target's file, traced
-   without a sample cap), and runs the adapter's test command.
+   without a sample cap), and runs the adapter's test command, with `[tool.coverset] pytest_args`
+   appended last (collection appends them after the test paths), as `coverset doctor` shows.
 5. **Events.** Stdout lines that start with `\x1ecoverset <nonce> ` (a fresh 128-bit nonce per exec in
    `COVERSET_EVENT_NONCE`) are events; anything else is log text. Lines are capped at 1 MiB, an
    exec's output at `COVERSET_MAX_STDOUT_BYTES` (then it is killed and the shard errors).
@@ -103,7 +114,12 @@ queued ──▶ claim + policy ──▶ plan ───────────
    its worker is released, then extracted, converted and ingested concurrently (a process pool;
    ingest serialises on the facts run lock). `results.jsonl` in the bundle is authoritative and
    overrides streamed outcomes; retried tests keep their retry verdict. The run is finalized
-   (`file_cov`, `func_input_cov`, `coverage_complete`).
+   (`file_cov`, `func_input_cov`, `coverage_complete`, and the test-economy tables with the
+   repository's scoped `policy.test_tax_threshold` and the tests' `test_stats` p50s as durations:
+   `runner.economy_inputs`, which upload runs use too). In `serve` the web's run-facts and
+   source-text caches are then warmed for the run in a background thread
+   (`runner.schedule_warm_up`, `web/loaders.py` `warm_run`), so the first page after an ingest is
+   not a cold one; a warm-up failure is logged and never touches the run.
 7. **Report and verdict.** Patch coverage and the changed-function table, input-class coverage of
    the changed functions and of every invariant target (classes no test ever passed in, each with a
    Hypothesis snippet), invariant statuses (head definitions plus base definitions the PR removed,

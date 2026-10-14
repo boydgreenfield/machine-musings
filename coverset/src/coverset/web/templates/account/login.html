@@ -10,6 +10,17 @@
 <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
 <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='features.css') }}">
+{% if dev %}
+{# Development sign-in only (COVERSET_DEV_LOGIN); the picker hides itself for the admin role. #}
+<style>
+.dev-login fieldset { border: 1px solid var(--rule-strong); border-radius: 5px; margin: 0 0 12px; padding: 8px 12px; }
+.dev-login legend { font-size: 0.9rem; color: var(--ink-2); padding: 0 4px; }
+.dev-login-roles label { margin-right: 14px; }
+.dev-login-repo { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0; font-size: 0.9rem; }
+.dev-login-repo select { font: inherit; padding: 3px 6px; border: 1px solid var(--rule-strong); border-radius: 5px; background: var(--surface); color: var(--ink); }
+.dev-login:has(input[name="role"][value="admin"]:checked) .dev-login-repos { display: none; }
+</style>
+{% endif %}
 </head>
 <body class="login-body">
 <main class="login" id="main">
@@ -38,6 +49,37 @@
       <label class="login-label">Admin token
         <input type="password" name="token" autocomplete="current-password" required autofocus>
       </label>
+      <button class="btn" type="submit">Sign in</button>
+    </form>
+  </section>
+  {% endif %}
+  {% if dev %}
+  <section class="panel login-option dev-login" aria-labelledby="login-dev">
+    <h2 id="login-dev">Sign in as a local user</h2>
+    <p class="muted">Development only (<code>COVERSET_DEV_LOGIN</code>): no password, no GitHub. Pick a role and, for a member, what each repository allows.</p>
+    <form method="post" action="{{ url_for('account.dev_login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ next_path }}">
+      <label class="login-label">Login
+        <input type="text" name="login" required pattern="[A-Za-z0-9][A-Za-z0-9\-]{0,38}" maxlength="39" autocomplete="username" spellcheck="false"{% if not github and not token %} autofocus{% endif %}>
+      </label>
+      <fieldset class="dev-login-roles">
+        <legend>Role</legend>
+        <label><input type="radio" name="role" value="member" checked> member</label>
+        <label><input type="radio" name="role" value="admin"> admin</label>
+      </fieldset>
+      {% if dev_repos %}
+      <fieldset class="dev-login-repos">
+        <legend>Repository permissions (members)</legend>
+        {% for repo in dev_repos %}
+        <label class="dev-login-repo">{{ repo.full_name }}
+          <select name="repo-{{ repo.id }}">
+            {% for permission in dev_permissions %}<option value="{{ permission }}"{% if permission == 'read' %} selected{% endif %}>{{ permission }}</option>{% endfor %}
+          </select>
+        </label>
+        {% endfor %}
+      </fieldset>
+      {% endif %}
       <button class="btn" type="submit">Sign in</button>
     </form>
   </section>

@@ -6,7 +6,7 @@
 <div class="page-head">
   <h1><code>{{ case.nodeid|test_label|visible }}</code></h1>
   <p class="meta">
-    <span>{% if run %}run <a href="{{ url_for('runs.run_page', run_id=run.id) }}"><code>{{ run.head_sha|sha }}</code></a> · {{ run_name(run, prs) }} · {{ run.created_at|stamp }}{% else %}no completed run yet{% endif %}</span>
+    <span>{% if run %}run <a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r"><code>{{ run.head_sha|sha }}</code></a> · {{ run_name(run, prs) }} · {{ run.created_at|stamp }}{% else %}no completed run yet{% endif %}</span>
     {% if case.quarantined %}<span class="badge">quarantined</span>{% endif %}
   </p>
 </div>

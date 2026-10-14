@@ -114,6 +114,10 @@ class FunctionView:
     branch_pct: float | None
     catalogue: Catalogue = dataclasses.field(default_factory=Catalogue)
     """The catalogue ``cov`` was computed with (enum-aware for the function's file)."""
+    tests_called: int | None = None
+    """Tests (not import time) that ran a line of the body, from line coverage; None when not
+    counted. Tells "never called" apart from "called, but no argument shapes recorded" (a Rust
+    bundle, a Python run without shape capture)."""
 
     @property
     def hollow(self) -> int:
@@ -144,7 +148,7 @@ class FunctionView:
                 observed = any(o.param.lstrip("*") == param for o in self.observations)
                 note = "no input classes expected" if observed else self.cov.missing_reason
                 if not self.observations:
-                    note = "never called by a test"
+                    note = self.no_shapes_note
             rows.append(GridRow(param, self.annotations.get(param), cells, note))
         if self.return_cells or any(o.param == "return" for o in self.observations):
             rows.append(GridRow("return", self.returns, self.return_cells, "no return classes recorded"))
@@ -160,6 +164,15 @@ class FunctionView:
             missing_reason=self.cov.missing_reason,
             note=self.cov.note,
         )
+
+    @property
+    def no_shapes_note(self) -> str:
+        """A row's note when no argument shape of the function was recorded: "never called by a
+        test" only when line coverage agrees (or was not counted), else how many tests ran it."""
+        if not self.tests_called:
+            return "never called by a test"
+        tests = "1 test" if self.tests_called == 1 else f"{self.tests_called} tests"
+        return f"called by {tests}, no argument shapes recorded"
 
     def chips(self) -> list[tuple[str, str | None, list[GridCell], list[GridCell]]]:
         """Inlay chips per parameter: ``(param, annotation, shown cells, hidden cells)``.
@@ -551,14 +564,14 @@ class RunFacts:
         observations = self.observations(region.func_key)
         sampling = self.sampling(region)
         capped = (sampling is not None and sampling.truncated) or any(o.truncated for o in observations)
-        cov = found.input_cov(
-            region,
-            observations,
-            sampling,
-            tests_called=self.tests_in_range(region.path, region.body_start, region.end_line)
-            if capped
-            else None,
+        # The body's covering tests, read only when needed: for the sample-cap wording, and to tell
+        # a function no test ran from one whose runs recorded no argument shape.
+        covering = (
+            self.tests_in_range(region.path, region.body_start, region.end_line)
+            if capped or not observations
+            else None
         )
+        cov = found.input_cov(region, observations, sampling, tests_called=covering if capped else None)
         expected = {c.name for c in cov.expected}
         samples: dict[str, int] = defaultdict(int)
         for obs in observations:
@@ -596,6 +609,7 @@ class RunFacts:
             line_pct=line_pct,
             branch_pct=branch_pct,
             catalogue=catalogue,
+            tests_called=len(covering) if covering is not None else None,
         )
 
 

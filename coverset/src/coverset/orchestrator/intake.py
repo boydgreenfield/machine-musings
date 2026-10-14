@@ -446,6 +446,10 @@ class _Intake:
             return IntakeResult(
                 "duplicate", run_id=prior.id, repo_id=repo.id, reason=f"run is {prior.status}"
             )
+        if prior.trigger == "upload":
+            # The commit's results came from the repository's own CI; there is nothing for a
+            # managed rerun to execute. The CI job is where a rerun happens.
+            return _ignored("the earlier run was an upload: re-run the CI job instead", repo.id)
         needs_approval = (
             not prior.trusted
             and prior.approved_by is None

@@ -17,7 +17,12 @@ from ``before_serving``. At boot, runs a previous process left behind are handle
   than :data:`STALE_HEARTBEAT_S`. A live ``coverset run``/``coverset demo`` keeps its runs. A taken-over
   run is ``abandoned`` (with ``verdict`` and ``done`` events so SSE clients finish); with
   ``COVERSET_REQUEUE_ON_BOOT=true`` a fresh queued copy (same trigger, PR, ``extra_env`` and webhook
-  arrival time) is created first, because the old run's plan rows already exist.
+  arrival time) is created first, because the old run's plan rows already exist;
+* upload runs (``trigger = "upload"``) are skipped entirely: the dispatcher never executes them
+  (``orchestrator/upload.py`` processes them in the request's process), and one that is
+  ``running`` is waiting for more shards by design, so it is neither abandoned nor re-queued. Once the
+  dispatcher has started, :func:`resume_upload_runs` schedules one processing pass for each of them
+  on the app's upload worker, which concludes a run whose pass the restart cut off.
 
 Without a web app, the CLI uses :meth:`RunDispatcher.run_once` and :meth:`RunDispatcher.drain`.
 """
@@ -113,11 +118,18 @@ class RunDispatcher:
         return not pid_text.isdigit() or not _pid_alive(int(pid_text))
 
     async def on_boot(self) -> list[str]:
-        """Abandon (or re-queue) runs a previous process left behind; returns the ids touched."""
+        """Abandon (or re-queue) runs a previous process left behind; returns the ids touched.
+
+        Upload runs are never touched (see the module docstring).
+        """
         requeue = self.ctx.settings.requeue_on_boot
         touched: list[str] = []
         async with self.ctx.db.session() as session:
-            leftovers = list(await session.scalars(select(Run).where(Run.status.in_(("queued", "running")))))
+            leftovers = list(
+                await session.scalars(
+                    select(Run).where(Run.status.in_(("queued", "running")), Run.trigger != "upload")
+                )
+            )
         for run in leftovers:
             if run.status == "running" and not self._executor_gone(run):
                 continue
@@ -360,9 +372,26 @@ def install_run_queue(app: Any, *, ctx: OrchestratorContext | None = None) -> Ru
     @app.before_serving
     async def _start_run_queue() -> None:
         await dispatcher.start()
+        await resume_upload_runs(app)
 
     @app.after_serving
     async def _stop_run_queue() -> None:
         await dispatcher.stop()
 
     return dispatcher
+
+
+async def resume_upload_runs(app: Any) -> list[str]:
+    """Schedule a pass for every upload run a previous process left ``running`` (after the boot
+    takeover, which skips them); returns their ids. Never raises: serving starts regardless.
+
+    Upload runs are processed by the app's :class:`~coverset.orchestrator.upload.UploadWorker`
+    (``web/uploads.py``), not by the dispatcher; see :meth:`~coverset.orchestrator.upload.UploadWorker.resume`.
+    """
+    from coverset.web.uploads import upload_worker
+
+    try:
+        return await upload_worker(app).resume()
+    except Exception:
+        log.exception("resuming upload runs at start-up failed")
+        return []

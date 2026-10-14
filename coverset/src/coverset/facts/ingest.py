@@ -34,11 +34,12 @@ import pyarrow as pa
 
 from coverset.analysis.shapes import cap_hits
 from coverset.facts.aggregates import compute_summaries, write_summaries
+from coverset.facts.cache import compact_layout  # the configured value, else the environment
 from coverset.facts.convert import lines_to_bitsets, tracer_mismatch
 from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.economy import EconomyInputs, write_economy
 from coverset.facts.schema import CALLABLE_KINDS, ECONOMY_TABLES, SCHEMAS, SUMMARY_TABLES
-from coverset.facts.store import FactsStore, compact_layout, conform
+from coverset.facts.store import FactsStore, conform
 from coverset.facts.untrusted import BundleError, safe_rel_path
 from coverset.lang.base import (
     IMPORT_CONTEXT,

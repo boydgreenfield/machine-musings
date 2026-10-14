@@ -43,14 +43,26 @@ async def _gc(settings: Settings, *, dry_run: bool) -> list[str]:
 @click.argument("name")
 @click.option("--yes", is_flag=True, help="Do not ask for confirmation.")
 def repo_purge_command(name: str, yes: bool) -> None:
-    """Delete repository NAME (id or full name) with its runs, facts and mirror."""
+    """Delete repository NAME (id or full name) with its runs, facts, mirror and uploads."""
     settings = load()
     run_async(lambda: _purge(settings, name, yes=yes))
 
 
 async def _purge(settings: Settings, name: str, *, yes: bool) -> None:
-    from coverset.db.models import Repo
+    """Delete the repository's rows and scoped settings in one transaction, then its files.
+
+    ``forget_scope`` runs in the Repo delete's transaction: repo-scope settings have no foreign key,
+    and SQLite hands a deleted id to the next repository (docs/settings.md). The files are the
+    facts, the mirror, the uploaded sources (``<data_dir>/sources/<repo_id>``) and the upload
+    archives of the repository's runs (``<runs_dir>/<run_id>/upload``).
+    """
+    from sqlalchemy import select
+
+    from coverset import settings_scopes
+    from coverset.db.models import Repo, Run
     from coverset.db.session import Database
+    from coverset.facts.gc import remove_upload_dirs
+    from coverset.facts.sources import sources_root
     from coverset.facts.store import FactsStore
     from coverset.orchestrator.repos import mirror_path
 
@@ -64,14 +76,20 @@ async def _purge(settings: Settings, name: str, *, yes: bool) -> None:
                 f"Delete {label} and everything recorded for it?", default=False
             ):
                 raise click.Abort()
+            run_ids = list(await session.scalars(select(Run.id).where(Run.repo_id == repo_id)))
             await session.execute(delete(Repo).where(Repo.id == repo_id))
+            await settings_scopes.forget_scope(session, "repo", repo_id)
             await session.commit()
     finally:
         await db.engine.dispose()
     store = FactsStore(settings.facts_dir)
     await asyncio.to_thread(shutil.rmtree, store.repo_dir(repo_id), True)
     await asyncio.to_thread(shutil.rmtree, mirror_path(settings, repo_id), True)
-    click.echo(f"purged {label} (repo {repo_id}): database rows, facts and mirror")
+    sources = sources_root(settings.data_dir) / str(repo_id)
+    if not sources.is_symlink():
+        await asyncio.to_thread(shutil.rmtree, sources, True)
+    await asyncio.to_thread(remove_upload_dirs, settings.runs_dir, run_ids)
+    click.echo(f"purged {label} (repo {repo_id}): database rows, scoped settings, facts, mirror and uploads")
 
 
 @click.command("check")

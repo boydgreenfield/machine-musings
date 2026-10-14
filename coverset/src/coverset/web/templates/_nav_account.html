@@ -1,9 +1,12 @@
 {# Header account menu: who is signed in, Account, Audit (admins), Sign out; or a Sign in link.
-   The avatar is an initials badge, not GitHub's image: the CSP allows img-src 'self' data: only. #}
+   The avatar is GitHub's image when the signed-in user has one under avatar_origin (the one image
+   origin the CSP's img-src allows, app.py AVATAR_ORIGIN), else an initials badge. #}
 <div class="account-nav">
 {% if principal and not principal.is_public %}
   {% if principal.login %}
-  <span class="account-avatar" aria-hidden="true">{{ principal.login[:1]|upper }}</span>
+  {% set avatar = (account_user.avatar_url or '') if (account_user is defined and account_user and account_user.login == principal.login) else '' %}
+  {% if avatar_origin and avatar.startswith(avatar_origin) %}<img class="account-avatar" src="{{ avatar }}" alt="" width="22" height="22" loading="lazy" decoding="async" referrerpolicy="no-referrer">
+  {% else %}<span class="account-avatar" aria-hidden="true">{{ principal.login[:1]|upper }}</span>{% endif %}
   <a class="account-who" href="{{ url_for('account.account_page') }}"{% if request.endpoint == 'account.account_page' %} aria-current="page"{% endif %} title="Account">@{{ principal.login }}{% if principal.instance_admin %} <span class="badge">admin</span>{% endif %}</a>
   {% else %}
   <a class="account-who" href="{{ url_for('account.account_page') }}"{% if request.endpoint == 'account.account_page' %} aria-current="page"{% endif %} title="Account">{{ principal.label }}</a>

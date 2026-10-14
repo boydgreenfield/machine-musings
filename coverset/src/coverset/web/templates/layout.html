@@ -52,8 +52,11 @@
     {% include "_nav_repo_economy.html" ignore missing %}
     {% include "_nav_repo_settings.html" ignore missing %}
     {% endif %}
+    {#- Outbox and Setup are instance-admin pages (everyone else gets a 403 there), so only admins see the links. #}
+    {% if principal and principal.instance_admin %}
     <a href="{{ url_for('outbox.outbox') }}"{% if endpoint == 'outbox.outbox' %} aria-current="page"{% endif %}>Outbox</a>
     <a href="{{ url_for('setup.index') }}"{% if endpoint.startswith('setup.') %} aria-current="page"{% endif %}>Setup</a>
+    {% endif %}
     {% include "_nav_admin.html" ignore missing %}
   </nav>
   {% include "_nav_account.html" ignore missing %}

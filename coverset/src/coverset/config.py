@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 from datetime import UTC, datetime
@@ -33,6 +34,22 @@ MIN_WEBHOOK_SECRET_CHARS = 16
 MIN_GITHUB_TOKEN_CHARS = 16
 """GitHub tokens are 40+ characters; a short value is a mistake, and too short to redact safely."""
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+CACHE_SETTINGS: dict[str, str] = {
+    "facts_cache_entries": "COVERSET_FACTS_CACHE_ENTRIES",
+    "facts_memory_limit": "COVERSET_FACTS_MEMORY_LIMIT",
+    "facts_threads": "COVERSET_FACTS_THREADS",
+    "facts_result_entries": "COVERSET_FACTS_RESULT_ENTRIES",
+    "run_facts_entries": "COVERSET_RUN_FACTS_ENTRIES",
+    "run_facts_mb": "COVERSET_RUN_FACTS_MB",
+    "source_cache_mb": "COVERSET_SOURCE_CACHE_MB",
+    "facts_compact": "COVERSET_FACTS_COMPACT",
+    "agent_contexts": "COVERSET_AGENT_CONTEXTS",
+}
+"""The cache knobs' fields and the environment names the facts, web and agent modules read
+(:meth:`Settings.cache_overrides`; those modules keep the environment as their fallback)."""
+DUCKDB_SIZE = r"^\d{1,6}(\.\d{1,3})?\s?(KB|MB|GB|TB|KiB|MiB|GiB|TiB)$"
+"""A DuckDB ``memory_limit`` value (``512MB``, ``1.5GiB``): it is interpolated into a ``SET``."""
 
 CommaList = Annotated[list[str], NoDecode]
 """A ``list[str]`` field that also accepts a comma-separated (or JSON array) string from the env."""
@@ -170,8 +187,42 @@ class Settings(BaseSettings):
     retention_deliveries_days: int = Field(default=14, gt=0)
     retention_events_days: int = Field(default=7, gt=0)
 
+    # Caches (docs/data-model.md, "Caches"; docs/benchmarks.md sizes them). None means "not set
+    # here": the module reads the environment, then uses its default (given in each description).
+    facts_cache_entries: int | None = Field(
+        default=None, gt=0, description="Cached DuckDB databases of the facts layer (default 16)."
+    )
+    facts_memory_limit: str | None = Field(
+        default=None, description="DuckDB memory_limit of each cached database (default 512MB)."
+    )
+    facts_threads: int | None = Field(
+        default=None, gt=0, description="DuckDB threads of each cached database (default min(4, CPUs))."
+    )
+    facts_result_entries: int | None = Field(
+        default=None, gt=0, description="Memoised run-scoped query results (default 256)."
+    )
+    run_facts_entries: int | None = Field(
+        default=None, gt=0, description="Runs whose indexed facts the web keeps (default 8)."
+    )
+    run_facts_mb: int | None = Field(
+        default=None, gt=0, description="Estimated MB the web's cached run facts may hold (default 384)."
+    )
+    source_cache_mb: int | None = Field(
+        default=None, gt=0, description="MB of source text the web keeps (default 64)."
+    )
+    facts_compact: bool | None = Field(
+        default=None, description="Also write the compact test_file_bits layout at ingest (default false)."
+    )
+    agent_contexts: int | None = Field(
+        default=None, gt=0, description="Run contexts the agent API and MCP server keep (default 3)."
+    )
+
     fake_now: datetime | None = None
     skip_migrations: bool = False
+    dev_login: bool = False
+    """Offer "Sign in as a local user" on the login page (``COVERSET_DEV_LOGIN``). Only honoured with
+    ``COVERSET_ENV=dev``, open mode (no admin token), a loopback bind, a private public URL and the
+    fake forge with no GitHub credentials (:func:`coverset.web.account.dev_login_problems`)."""
 
     @field_validator(
         "allowed_owners",
@@ -189,6 +240,15 @@ class Settings(BaseSettings):
         if text.startswith("["):
             return json.loads(text)
         return [item.strip() for item in text.split(",") if item.strip()]
+
+    @field_validator("facts_memory_limit")
+    @classmethod
+    def _check_memory_limit(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        if not re.fullmatch(DUCKDB_SIZE, value.strip(), re.IGNORECASE):
+            raise ValueError("COVERSET_FACTS_MEMORY_LIMIT must be a size such as 512MB or 1.5GiB")
+        return value.strip()
 
     @field_validator("bind")
     @classmethod
@@ -309,6 +369,16 @@ class Settings(BaseSettings):
     def runs_dir(self) -> Path:
         """Per-run scratch files (args files, pulled bundles): ``<data_dir>/runs/<run_id>``."""
         return self.data_dir / "runs"
+
+    def cache_overrides(self) -> dict[str, str]:
+        """The cache knobs set here, by environment name (``coverset.facts.cache.configure`` takes
+        them); knobs left unset are omitted, so the modules fall back to the environment."""
+        out: dict[str, str] = {}
+        for name, env_name in CACHE_SETTINGS.items():
+            value = getattr(self, name)
+            if value is not None:
+                out[env_name] = ("1" if value else "0") if isinstance(value, bool) else str(value)
+        return out
 
     def now(self) -> datetime:
         """Current time as an aware UTC datetime, pinned to :attr:`fake_now` when set."""

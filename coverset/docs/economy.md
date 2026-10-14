@@ -447,7 +447,10 @@ The report reads bundles, not the store:
 from coverset.analysis.economy import analyse, base_snapshot
 from coverset.facts.economy import GitHistory, git_stale_lookup
 
-def read(path: str) -> str | None: ...           # the report's SourceAccess (git-tracked files only)
+
+def read(path: str) -> str | None: ...  # the report's SourceAccess (git-tracked files only)
+
+
 notes: list[str] = []
 git_dir = Path(run("git", "-C", repo_root, "rev-parse", "--absolute-git-dir"))  # also a linked worktree
 stale = git_stale_lookup(GitHistory(git_dir), head_sha, notes) if head_sha else None

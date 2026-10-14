@@ -512,16 +512,6 @@ def _describe_tests(
                 f"addopts {word!r} in {ini.file}: {problem}",
                 f"remove it from addopts in {ini.file} (the rest would read: {cleaned or '(empty)'})",
             )
-    if config.pytest_args:
-        report.add(
-            "warning",
-            "pytest-args-pending",
-            "[tool.coverset] pytest_args "
-            + " ".join(config.pytest_args)
-            + " are validated but not yet passed to real collects and shards (the runner and planner "
-            "do not forward them), so the commands below and this collection run without them",
-            "until that lands, put these options in the repository's own pytest addopts",
-        )
     if (repo / "conftest.py").is_file():
         report.add(
             "info",
@@ -572,7 +562,7 @@ def _describe_commands(report: DoctorReport, config: CoversetConfig, env: EnvRep
         "stop_file": "run/STOP",
         "xdist": "pytest-xdist" in requirements,
         "pytest_cov": "pytest-cov" in requirements,
-        # no "pytest_args": the runner's _extra() does not forward them yet (see _describe_tests)
+        "pytest_args": config.pytest_args,  # as the runner's _extra() passes them, appended last
     }
     scores = "run/shard.scores.json" if config.reorder else None
     shard = PythonAdapter().test_command("run/shard.args", scores, "run/out", extra) + ["--rootdir=repo"]
@@ -583,8 +573,7 @@ def _collect_argv(repo: str, out: str, config: CoversetConfig) -> list[str]:
     """The planner's collect command (``orchestrator/planner.py``, ``_collect``) for these paths.
 
     It must stay identical to the planner's, or the doctor's verdict would describe a run that
-    never happens: ``[tool.coverset] pytest_args`` are left out because the planner does not pass
-    them yet (``_describe_tests`` warns when they are set).
+    never happens: the test paths, then ``[tool.coverset] pytest_args``.
     """
     return [
         "python",
@@ -599,6 +588,7 @@ def _collect_argv(repo: str, out: str, config: CoversetConfig) -> list[str]:
         "--coverset-shapes=off",
         "--continue-on-collection-errors",
         *config.testpaths,
+        *config.pytest_args,
     ]
 
 
@@ -839,12 +829,12 @@ def suggested_config(report: DoctorReport, config: CoversetConfig, env: EnvRepor
         cleaned = suggested_addopts(
             tuple(report.tests.get("addopts", ())), [(c["option"], c["problem"]) for c in conflicts]
         )
-        # pytest_args are not forwarded yet, so an --override-ini here would fix the doctor's view only
+        # the repository's own addopts: the fix then also holds for local pytest runs
         where = report.tests.get("pytest_config") or "the pytest configuration"
         comment = f"# edit addopts in {where} (not here) to read: {cleaned or '(empty)'}"
         lines.append(" ".join(comment.split()))  # one line, whatever the repository's addopts hold
     if config.pytest_args:
-        lines.append(f"pytest_args = {arr(config.pytest_args)}  # not forwarded to runs yet")
+        lines.append(f"pytest_args = {arr(config.pytest_args)}")
     if report.invariants.get("exists"):
         lines.append(f"invariants = {q(config.invariants)}")
     return "\n".join(lines) + "\n"

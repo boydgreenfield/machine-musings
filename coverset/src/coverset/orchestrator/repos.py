@@ -394,16 +394,29 @@ def read_blobs(mirror: Path, sha: str, paths: Iterable[str]) -> dict[str, bytes]
     return _parse_batch(proc.stdout, wanted)
 
 
+_UNRESOLVED = (b"missing", b"ambiguous")
+"""The last word of a ``git cat-file --batch`` header for an object name it could not resolve."""
+
+
 def _parse_batch(data: bytes, wanted: list[str]) -> dict[str, bytes]:
+    """The blobs of a ``git cat-file --batch`` reply, one request per ``wanted`` path, in order.
+
+    A resolved object's header is ``<oid> <type> <size>``; an unresolved one echoes the requested
+    name, ``<sha>:<path> missing``, and the path may contain spaces, so the status is the header's
+    last word, checked before the header is split into fields.
+    """
     result: dict[str, bytes] = {}
     offset = 0
     for path in wanted:
-        newline = data.index(b"\n", offset)
-        header = data[offset:newline].split()
+        newline = data.find(b"\n", offset)
+        if newline < 0:
+            raise RepoError(f"truncated git cat-file output for {path!r}")
+        line = data[offset:newline]
         offset = newline + 1
-        if len(header) == 2 and header[1] == b"missing":
+        if line.rpartition(b" ")[2] in _UNRESOLVED:
             continue
-        if len(header) != 3:
+        header = line.split()
+        if len(header) != 3 or not header[2].isdigit():
             raise RepoError(f"unexpected git cat-file output for {path!r}")
         size = int(header[2])
         if header[1] == b"blob":

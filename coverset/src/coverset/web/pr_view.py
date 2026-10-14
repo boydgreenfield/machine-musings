@@ -4,7 +4,10 @@ The orchestrator stores the verdict summary but not the classified changes, so t
 them the same way the planner does (``git diff merge-base...head`` on the mirror, both sides' source
 from ``git cat-file``, :func:`~coverset.analysis.diff.changed_functions`) and runs
 :func:`~coverset.analysis.patch.patch_report` over the run's stored facts. The result is cached per
-``(mirror, base, head, run)``. Synchronous: call through ``asyncio.to_thread``.
+``(mirror, base, head, facts store, repo, run, run stamp)``: the stamp
+(:func:`coverset.facts.cache.run_stamp`) changes whenever the run's facts do, so a re-ingested run
+is analysed again, and the key never depends on the identity of the facts object (an evicted
+object's ``id`` can be reused by a new one). Synchronous: call through ``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from unidiff import PatchSet
 
 from coverset.analysis.diff import FileDiff, GitDiffError, changed_functions, parse_diff, run_git_diff
 from coverset.analysis.patch import PatchReport, patch_report
+from coverset.facts.cache import RunStamp, run_stamp
 from coverset.lang.base import FunctionChange
 from coverset.lang.python import PythonAdapter
 from coverset.orchestrator.repos import RepoError, merge_base, read_blobs
@@ -46,13 +50,27 @@ class DiffAnalysis:
     error: str | None = None
 
 
-_cache: OrderedDict[tuple[str, str, str, str, int], DiffAnalysis] = OrderedDict()
+type _Key = tuple[str, str, str, str, int, str, RunStamp]
+
+_cache: OrderedDict[_Key, DiffAnalysis] = OrderedDict()
 _lock = threading.Lock()
+
+
+def cache_key(mirror: Path, base_sha: str | None, head_sha: str, facts: RunFacts) -> _Key | None:
+    """The cache key of an analysis: the commits, the run, and the run's current stamp (None for
+    facts that live in no store, such as a report's in-memory bundle: those are not cached)."""
+    store = getattr(facts, "store", None)
+    if store is None:
+        return None
+    stamp = run_stamp(store.run_dir(facts.repo_id, facts.run_id))
+    return (str(mirror), base_sha or "", head_sha, str(store.root), facts.repo_id, facts.run_id, stamp)
 
 
 def analyse_diff(mirror: Path, base_sha: str | None, head_sha: str, facts: RunFacts) -> DiffAnalysis:
     """The (cached) diff analysis of ``base_sha...head_sha`` against ``facts``."""
-    key = (str(mirror), base_sha or "", head_sha, facts.run_id, id(facts))
+    key = cache_key(mirror, base_sha, head_sha, facts)
+    if key is None:
+        return _analyse(mirror, base_sha, head_sha, facts)
     with _lock:
         found = _cache.get(key)
         if found is not None:

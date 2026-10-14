@@ -12,6 +12,8 @@ Medians of 5 runs on 2026-10-11 (the cold image build and the snapshot build are
 
 **Blue** lines ran, **vermilion** lines never ran (heavier edge), **dotted yellow** lines took one branch. In the shape grid a **filled square** is an input class some test exercised and a **hollow dashed square** is one no test ever passed in.
 
+What is here, in one list: a control plane that runs a PR's tests on Modal sandboxes before CI boots and posts one sticky comment and a check run; an **upload mode** that takes the same bundle from your existing CI job instead (`coverset-ci upload`); per-test line and branch coverage plus the **data-flow overlay** of argument shapes; a **test economy** that measures what each test buys (leverage, duplicates, a minimal covering set, the PR's test tax); **GitHub sign-in** with per-repository access and an audit log; settings at instance, organization, repository and user scope; an **MCP server** for AI agents; a static **report** for local use; the same model for TypeScript (Vitest) and Rust (nextest); and a production **probe** that reports which input classes production sees that no test does. [docs/getting-started.md](docs/getting-started.md) is the on-ramp; [docs/dev.md](docs/dev.md) the developer loop; [docs/deploy.md](docs/deploy.md) the hosting guide.
+
 ![The PR page for "Allow signups from company subdomains": PASS with gaps, the changed function's diff with coverage, its shape grid with two hollow email classes, and the flow ribbon from test files to parameters](docs/pr.jpg)
 
 **The PR page.** PR #2 passes every test, and the page still says what is missing: two input classes of the changed `check_if_new_user_signup_allowed` that no test passed in, and an invariant with no linked test.
@@ -23,11 +25,13 @@ Medians of 5 runs on 2026-10-11 (the cold image build and the snapshot build are
 | ![The function page of validate_email](docs/shapes.jpg) | ![The source view of parse.py with inlay chips and the tests popover](docs/source.jpg) |
 | **Shape grid and flow ribbon.** `validate_email` at 100% lines and branches, with `multi-label-domain` and `idn` never passed in, and which tests and callers feed its parameter. | **Source view.** Chips under `def parse_duration` count the calls per input class; the dashed ones are classes no test tried. The popover lists the tests that ran line 18, in run order. |
 | ![The coverage map in Gap mode](docs/map.jpg) | ![The sticky PR comment in the fake forge's outbox](docs/comment.jpg) |
-| **Coverage map, Gap mode.** Tile area is statements; the stronger a tile's colour, the more of its lines ran under tests that never tried whole kinds of input. Hatched tiles were never called. | **PR comment.** The one sticky comment coverset posts, as the fake forge recorded it: verdict, patch coverage, changed functions, invariants. |
+| **Coverage map, Gap mode.** Tile area is statements; the stronger a tile's colour, the more of its lines ran under tests that never tried whole kinds of input. Hatched tiles were never called; dashed tiles are module-level code, drawn reduced because imports and `def` lines run on import. The layout is ordered, so it holds still between commits. | **PR comment.** The one sticky comment coverset posts, as the fake forge recorded it: verdict, patch coverage, changed functions, invariants, and the test-tax line. |
 | ![The page of the refunds PR's failing test: identity, result, history and its data flow](docs/test.jpg) | ![The static report's overview: totals, the Gap treemap and the file table](docs/report.jpg) |
 | **Test page.** The refunds PR's failing test: its result and retry, the invariant it violates, its last runs, and its data flow from the test through `refund` into `allocate_cents` and each parameter. Every nodeid on the pages links here, and from here each file opens with the lines this test did not run dimmed. | **Local report.** The same facts as static pages from one `pytest` run, with no server: totals, the Gap treemap, the file table, a page per file, function and test. Built by `coverset report`; see below. |
 | ![The repository overview: tiles, trends over six baselines, changes since the previous baseline, the Gap map thumbnail and the largest gaps](docs/repo.jpg) | ![The static report's Changes page: PR #1 against the main baseline](docs/report-changes.jpg) |
 | **Repository overview.** The default branch over its last six baselines: statements, lines run, branches, functions called and input classes observed as tiles, a sparkline each for line % and input-class %, what changed since the previous baseline, a Gap-map thumbnail that opens the coverage map, and the functions with the most input classes no test passed in. | **Changes since a base.** `coverset report --compare`: PR #1 against the main baseline shows exactly its effect: three refund tests added, one failing, one new function, five input classes gained (one on `allocate_cents`, four on the new `refund`), nothing lost. |
+| ![The Economy page: leverage histogram, minimal covering set, redundant candidates, parametrize families](docs/economy.jpg) | ![The tests page with its filter box, sorted by risk](docs/tests.jpg) |
+| **Test economy.** What each test buys: statements and asserts against the lines, arcs and input classes only it covers, the tests whose data flows another test already exercises (candidates, never verdicts), the greedy minimal set that keeps every fact covered, parametrize families with many cases and few distinct flows, and the exception handlers no test ever entered. The static report has the same page (`docs/report-economy.jpg`), with the `--deselect` file for the tests the minimal set drops. | **Tests page.** Every test with its fail rate, flakiness, durations and quarantine switch, 500 rows a page, and a filter box that `/` focuses. Outbox and Setup in the header appear only for instance admins. |
 
 Screenshots: demo data from <!-- n:demo_runs -->8<!-- /n --> local runs (`coverset demo --executor local`: six `main` commits and two PRs), taken on <!-- n:screenshot_date -->2026-10-11<!-- /n --> with `scripts/screenshots.py`. Dark versions are next to them as `docs/*-dark.jpg`. The AI review in them comes from fixtures.
 
@@ -111,9 +115,26 @@ coverset report bundle.tar.gz --repo-root ~/src/myrepo   # a CI bundle or a neut
 
 With `--compare BASE` (or `--compare-run RUN_ID` from the facts store) the report also says what this run gained or lost against a base: a Changes page with the totals as base → now, lines newly uncovered or covered per file, input classes lost or gained per function, and tests added, removed, failing or slower, honest about runs that ran different test sets. One run (or one pair) only: no history and no PR diff, which the live pages have. Keys, the lens, the comparison rules and the trust model are in [docs/report.md](docs/report.md).
 
+## Test economy
+
+A colleague watched an agent add ninety-five lines of test scripting to check that one environment variable parses `true`, `1` and `TRUE`. coverset puts a number on that. For every test it records its **weight** (statements, asserts, parametrize cases, helper statements it calls) and its **value** (the lines, arcs and input classes it covers, and the part of that no other test covers), so each test has a **leverage** (unique facts per statement) and a cost per unique fact. Tests whose lines, arcs and shape observations are identical, or a subset of a faster test's, are listed as **redundancy candidates** (their assertions may still differ, and every surface says so). A greedy set cover over all facts gives the **minimal covering set** and a `--deselect` file for the rest. Parametrize **families** show cases against distinct data flows (twelve cases, three flows). Per function, coverset also reports **assertion-free** tests, functions that are only reached through other functions (never called by a test directly), **exception handlers no test entered**, and **stale** tests whose covered functions all changed since the test did. On a PR run the **test tax** is the added test statements per newly covered production line and class, flagged above `policy.test_tax_threshold` (8 by default) in the sticky comment, the check run and a card on the PR page: "95 test statements for 3 newly covered lines (threshold 8) · 2 new tests duplicate existing flows".
+
+```sh
+pytest --coverset && coverset tests economy .coverset          # leverage table, sorted
+coverset tests redundant .coverset                               # identical and dominated flows
+coverset tests minimal .coverset --write deselect.txt && pytest @deselect.txt   # the minimal set (pytest 8.2+)
+coverset tests tax .coverset --compare base/.coverset --base-ref origin/main --check   # a CI gate
+```
+
+Every surface reads one view model (`src/coverset/report/economy.py`), so the Economy page (`/repos/<id>/economy`, key `g e`), the PR card, the comment line, the static report and the CLI cannot disagree. Definitions, weights and caveats: [docs/economy.md](docs/economy.md).
+
 ## One model for every language
 
 Everything downstream of a test run (the facts store, the input-class catalogue, the pages, the comment, the report) reads one language-neutral model, `coverset-model`, a package with no dependencies. Its on-disk form is the **neutral bundle** ([docs/neutral-bundle.md](docs/neutral-bundle.md)): `manifest.json`, then `tests`, `files`, `coverage`, `arcs`, `functions`, `shapes` and `links` as JSON lines, with shape keys from one value vocabulary (`int|neg`, `str|kind:email/multi-label-domain`, `list|elem:int|order:unsorted`) and declared types as small **type descriptors** (`{"kind": "union", "arms": [...]}`, `{"kind": "enum", "members": [...]}`) that any language can produce. `pytest-coverset --coverset-neutral` writes it for Python, `coverset bundle validate` checks a bundle against the specification and its JSON Schemas, `coverset bundle convert` turns a plugin bundle into one, and a synthetic TypeScript bundle (`fixtures/bundles/neutral-ts`, the shape a Vitest or Jest reporter would emit) validates, ingests into the facts store with no Python-specific code path, and renders in the report and the live pages, whose function page and PR cards build its input classes from the type descriptors stored at ingest (`tests/web/test_web_neutral.py`). `coverset-vitest` (`packages/coverset-vitest`) writes the same bundle from a real Vitest run: per-test lines from Istanbul's counters, regions and declared types from the TypeScript checker, and argument shapes from a small instrumentation plugin that moves no line and changes no Istanbul statement, branch or function count; it also wraps Vitest's Istanbul instrumenter so that runtime stack traces and failure signatures name the original lines with the plugin as without it, and instrumented code runs unchanged where no recorder is installed (a `globalSetup`, a script). `examples/ts-app`'s `npm test` produces one that validates with no problem, ingests, and shows `email:multi-label-domain` and `totalCents:negative` as never exercised (`tests/e2e/test_vitest_reporter.py`; [docs/typescript.md](docs/typescript.md)).
+
+**Rust.** `coverset rust run --crate PATH` runs a crate's tests one process per test (cargo-nextest when installed, else libtest) with LLVM source-based coverage (`rustup component add llvm-tools-preview`), writes a neutral bundle (`language: rust`) to `PATH/.coverset/neutral` and prints the `coverset report` command. You get per-test lines, outcomes, panic messages, function regions and declared types; there are no branches (stable rustc records none) and no argument shapes yet (the `#[coverset::trace]` design is in [docs/rust.md](docs/rust.md)). `examples/rust-app` is the crate the fixture comes from.
+
+**Running in parallel.** Four ways, one bundle: coverset shards across sandboxes (the runner never passes `-n`); upload mode takes one `coverset-ci upload --label <job>` per CI job and merges them per commit; `pytest --coverset -n 8` runs xdist workers on one machine, each writing its own bundle under `.coverset/workers/<gw>/`, merged by the controller into one that equals a serial run; and Vitest spreads files over workers with no pool setting needed (concurrent tests within a file get a superset of lines and a warning; `--maxConcurrency=1` makes them exact). On a 5,426-test application suite, `-n 8` took 145 s against 486 s serial on this machine. [docs/instrumentation.md](docs/instrumentation.md#running-in-parallel) has the layer-by-layer overhead and the roadmap.
 
 ## Run it
 
@@ -137,7 +158,36 @@ uv run coverset bundle validate fixtures/bundles/neutral-ts/bundle   # the TypeS
 
 On Modal the demo builds the environment image (cached after the first build), runs every shard in a sandbox, and builds one trusted snapshot of `main` at the end of seeding. While it serves, the warm-pool maintainer keeps up to `COVERSET_POOL_SIZE` (4) idle sandboxes for the demo repository until `COVERSET_POOL_TTL_S` (600 s) after its last run, at about $0.03 per sandbox-hour; stopping the server drains the pool. `coverset modal reap --all` cleans up after an interrupted run.
 
+## Develop it
+
+```sh
+uv run coverset dev                       # seed the demo if the data dir is empty, serve with code and template reload, open the browser
+uv run coverset demo --fresh --no-serve   # wipe the data directory and rebuild the demo
+make check                                # ruff, format check and the quick tests; `make test` is the whole suite, `make help` lists the rest
+```
+
+With `COVERSET_DEV_LOGIN=true` in open mode (a loopback bind, no admin token, `COVERSET_ENV=dev`, the fake forge), the login page offers "Sign in as a local user" (a login, a role, and per-repository permissions) so the pages can be clicked through as a member without a GitHub App; such sessions and tokens are refused on any request where one of those conditions no longer holds. `coverset dev` prints whether the sign-in is on. [docs/dev.md](docs/dev.md) is the developer guide.
+
+## Deploy it
+
+coverset runs on a public URL in three ways, all with the same image; [docs/deploy.md](docs/deploy.md) has the decision table, the measurements, secret rotation and troubleshooting.
+
+```sh
+uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py   # one always-on Modal container (about $0.76/day), data on a Volume
+fly launch --no-deploy && fly deploy        # Fly.io: deploy/fly/fly.toml, a volume at /data
+docker compose -f deploy/compose.yml up -d  # any VM: coverset + Caddy for HTTPS; deploy/aws/user-data.sh sets this up on Lightsail or EC2
+uv run coverset deploy check                # PASS / WARN / FAIL rows for the environment it runs in
+```
+
+The Modal path needs a Secret `coverset-web` with `COVERSET_ADMIN_TOKEN`, `COVERSET_SECRET_KEY` and `COVERSET_PUBLIC_URL`; the executor needs no Modal token there. The live SQLite database sits on the container's disk and is backed up to the Volume every 60 s when it changed and on shutdown (recovery point 60 s on a crash); facts and mirrors are written to the Volume directly. Behind Fly, Caddy or a load balancer set `COVERSET_TRUST_PROXY=true`, which trusts only the nearest hop. Streaming responses are not cut at Modal's 150 s request limit (measured: SSE streams of 210 s and 330 s completed), and a redeploy must use `--strategy recreate`, because a rolling deploy deadlocks with one container.
+
+## Who sees what
+
+Sign in with GitHub through the App's own client id (the manifest flow registers the callback) or with the admin token. A signed-in person sees exactly the repositories GitHub lets them see, with GitHub's permission collapsed to read, write or admin, recomputed at sign-in, every ten minutes and on demand; everything else answers 404. Logins listed in `COVERSET_ADMINS` are instance admins, as the admin token always is; `coverset users promote|demote|disable` manages the rest. API tokens (`cst_...`, shown once, sha256 stored) carry scopes: `read` for the pages and the agent API, `write` for approvals and quarantine, `upload` for `POST /v1/bundles`, bound to one repository or acting as their user. Every state-changing request and every credential event lands in the audit log at `/audit`. Settings inherit by scope: view preferences user > repo > org > instance; policy (untrusted-PR handling, drafts, AI review, fail-fast, shard caps, the test-tax threshold) repo > org > instance > `COVERSET_*`, set by repository writers and admins, never by the PR author. [docs/auth.md](docs/auth.md), [docs/settings.md](docs/settings.md), [docs/security.md](docs/security.md).
+
 ## Use it on your repo
+
+0. Run `coverset doctor --repo PATH` (add `--write-config` for a suggested `[tool.coverset]`). It prints the environment source, the packages, test paths, install mode and the exact pytest commands coverset would run, collects in a throwaway worker, and lists findings with fixes. Repositories no longer need a `uv.lock`: environments come from `uv.lock`, `poetry.lock`, `Pipfile.lock`, requirement files, `[project]` metadata or `setup.cfg`/`setup.py` literals, pinned by `uv pip compile` (network once per set of inputs); nothing from the repository is executed on the control plane. [docs/getting-started.md](docs/getting-started.md) has the decision between the two routes below and the full `[tool.coverset]` reference (`source`, `source_root`, `testpaths`, `python`, `requirements`, `install`, `pytest_args`, `invariants`).
 
 1. Add `[tool.coverset]` to the repository's `pyproject.toml`. Every key has a default; these are the ones the demo sets:
 
@@ -152,25 +202,41 @@ On Modal the demo builds the environment image (cached after the first build), r
 
    Locally, `pytest --coverset` then `coverset report .coverset --open` gives you the pages for one run before any of the rest exists. The plugin prints the test run and one closing line that names the bundle and the report command; the JSON event lines exist only for the orchestrator. If the sources measured no file (a misspelt `[tool.coverset] source`), that line ends with a warning.
 
-2. Run `coverset serve` where GitHub can reach it, with an admin token (`COVERSET_ADMIN_TOKEN`) and `COVERSET_PUBLIC_URL`. Then either create and install the GitHub App from `/setup` (check runs, buttons, the sticky comment), or set `COVERSET_GITHUB_TOKEN` (at least 16 characters), `COVERSET_ALLOWED_OWNERS` and `COVERSET_GITHUB_WEBHOOK_SECRET` and add a repository webhook (a commit status and the sticky comment). App mode needs `COVERSET_ALLOWED_OWNERS` too. See [docs/github.md](docs/github.md).
+2. Run `coverset serve` where GitHub can reach it (see **Deploy it**), with an admin token (`COVERSET_ADMIN_TOKEN`), `COVERSET_PUBLIC_URL` and `COVERSET_ADMINS=<your login>`. Then either create and install the GitHub App from `/setup` (check runs, buttons, the sticky comment, sign-in), or set `COVERSET_GITHUB_TOKEN` (at least 16 characters), `COVERSET_ALLOWED_OWNERS` and `COVERSET_GITHUB_WEBHOOK_SECRET` and add a repository webhook (a commit status and the sticky comment). App mode needs `COVERSET_ALLOWED_OWNERS` too. See [docs/github.md](docs/github.md).
+
+   **Route A, upload mode (ten minutes, no runners):** keep your CI, add `permissions: {contents: read, id-token: write}`, check out the PR head (`ref: ${{ github.event.pull_request.head.sha || github.sha }}`), then `pip install <pinned pytest-coverset>`, `python -m pytest --coverset` and `coverset-ci upload --server $URL --with-sources` (with `if: always()`), or the composite action `src/coverset/forge/gha/upload`. The first OIDC upload registers the repository when its owner is in `COVERSET_ALLOWED_OWNERS`; a repository token from `coverset users tokens create --repo OWNER/NAME --scopes upload` works where there is no OIDC. Patch coverage needs coverset to fetch the repository (the App installed, or `COVERSET_GITHUB_TOKEN`); without that the run still gets totals, gaps and invariants, with the reason "no diff available". Upload mode has no anticipatory ordering, no retries and no warm starts, and results arrive after CI finishes. [docs/upload.md](docs/upload.md).
+
+   **Route B, managed runs:** steps 3 and 4.
 3. Pick the executor: `COVERSET_EXECUTOR=modal` after `modal setup`, with `COVERSET_MODAL_DAILY_BUDGET_USD` as the daily cap, `COVERSET_MAX_RUN_COST_USD` (1.00) as the per-run cap, also enforced while the run executes, and `COVERSET_MAX_IMAGE_BUILDS_PER_DAY` (20). An untrusted PR whose lockfile has no image yet waits for approval, and its environment is never built from direct URL or VCS references. The local executor runs webhook-triggered runs only with `COVERSET_LOCAL_ALLOW_WEBHOOK_RUNS=true` and never runs untrusted PRs. `coverset warm --repo <name>` builds the environment (and on Modal a trusted snapshot) ahead of the first PR.
 4. In CI, replace the `pytest` step with the composite action in `src/coverset/forge/gha/`, which runs `coverset-ci wait`: it proves the repository with the job's OIDC token, waits for coverset's verdict, prints the results in pytest's format and exits with pytest's codes.
 5. Declare invariants in `invariants.yaml` and link tests to them with `@pytest.mark.invariant("<id>")` ([docs/invariants.md](docs/invariants.md)). `coverset invariants scan` reviews the review-kind invariants at the latest trusted baseline of the default branch through the configured review client (the offline fake unless `COVERSET_AI=anthropic` and the repo opted in) and records their statuses. It also runs automatically after every trusted, completed baseline of the default branch's tip (`COVERSET_SCAN_AFTER_BASELINE=false` turns that off).
 
 ## Keys
 
-In the source view:
+Keys work on every page and in the static report; `?` lists the ones for the current page.
 
 | Key | Action |
 |---|---|
 | `j` / `k` | Next / previous line that never ran or took only one branch |
 | `n` / `N` | Next / previous function with an input class no test passed in |
 | `t` | Tests that ran the current line |
-| `i` | Show or hide the current function's shape grid |
+| `i` | Show or hide the current function's shape grid; `.` hides the inlay chips |
+| `h` | Highlight every measured line, or only what never ran or took one branch (`?highlight=missing`; `view.highlight` in the settings) |
 | `[` / `]` | Previous / next file |
-| `?` | Keys help |
+| `m` / `M` | Cycle the map's mode (gap, lines, input classes) / its module weight (thin, full, hidden) |
+| `g` then `o` `t` `m` `e` `i` | Go to the overview, tests, map, economy, invariants; `r` goes to the latest run |
+| `/` | Focus the filter box (tests, files) |
+| `?` | Keys help; Escape closes |
 
-Keys are ignored while typing in a form field and with Ctrl, Alt or Cmd held. The header's theme button cycles auto, light and dark.
+Keys are ignored while typing in a form field and with Ctrl, Alt or Cmd held. The header's theme button cycles auto, light and dark. A view choice comes from, in order, the query string, a scoped setting someone chose, the browser's own memory, then the default; the server renders the chosen mode, so nothing flashes.
+
+## For AI agents
+
+`coverset mcp serve` exposes the facts to an agent over MCP, and `/v1/agent/<tool>` serves the same fifteen tools over HTTP with a read-scope token: run summaries, patch coverage against a base, a function's input classes with the Hypothesis (or fast-check) strategies for the missing ones, covering tests, redacted example inputs per class, the minimal test set and the redundancy candidates, the PR's test tax, search, and a plain-words explanation of any shape key. Three prompts are playbooks: `review-tests-for-pr` (shrink a PR that tests everything to death at the expense of reviewability), `bootstrap-tests-for-function` (write tests from the classes nothing exercises, with de-identified examples), `shrink-test-suite` (the set-cover problem, with candidates labelled as such). `pytest --coverset`, then `coverset mcp install-claude-code` prints the `.mcp.json` entry; nothing is written. On a real 5,081-test Flask suite the set cover keeps 1,703 tests (175 s) and drops 3,377 (279 s) without losing a covered line, inferred arc or observed input class, which is a candidate result, not a verdict. [docs/mcp.md](docs/mcp.md).
+
+## Production flows
+
+`coverset-probe` (`packages/coverset-probe`, depends only on `coverset-model`) runs the shape tracer inside a live Python service: `coverset_probe.start(modules=[...], sample_rate=0.01, k_anonymity=5, export=JsonlExporter(path))` plus a WSGI or ASGI middleware that reads the W3C `traceparent` header so a request's calls form one flow. It exports categorical shape keys only, never values, reprs or raw trace ids; rows are k-anonymous and windowed; hot functions are shed under a hard budget and the probe switches itself off above 2% of a core (about 0.1 µs per call of an allow-listed function, 3 to 5 µs per recorded call). `coverset flows import FILE.jsonl --repo NAME` lands a window, `coverset flows gaps` lists the input classes production passes in that no test does, ranked by call volume with Hypothesis strategies, and `coverset flows archetypes` clusters production calls into archetypal patterns and marks each as covered exactly, by a superset, partially, or not at all. On the demo, `validate_email`'s `email:multi-label-domain` (14% of production calls in the fixture) is the first gap. `POST /v1/flows`, the OpenTelemetry span attributes, the Sentry and Datadog integrations, the UI and the MCP tools are designed, not built: [docs/production-flows.md](docs/production-flows.md).
 
 ## How a run works
 
@@ -195,7 +261,13 @@ Keys are ignored while typing in a form field and with Ctrl, Alt or Cmd held. Th
 - **Model** (`packages/coverset-model`, no dependencies, Python 3.12+): the neutral bundle (reader, writer, validator, JSON Schemas), the shape-key grammar and the input-class catalogue over language-neutral type descriptors; the control plane and the plugin's conformance tests build on it.
 - **Worker plugin** (`packages/pytest-coverset`, Python 3.12+): coverage.py 7.16.2 with the ctrace core and one dynamic context per test, a `sys.monitoring` shape tracer on its own tool id, framed stdout events, `--coverset-neutral` for the neutral bundle, and `coverset-ci`, which needs only the standard library.
 - **Executors**: Modal 1.6.1 Sandboxes (env images, trusted filesystem snapshots, a warm pool, a reaper, cost guards) and a local subprocess executor.
-- **Forge**: githubkit 0.16.1 and PyJWT 2.15.1 for the GitHub App, token mode, webhooks and Actions OIDC; a fake forge records every call for the demo and the tests.
+- **Forge**: githubkit 0.16.1 and PyJWT 2.15.1 for the GitHub App, token mode, webhooks, Actions OIDC and GitHub sign-in (`forge/oauth.py`); a fake forge records every call for the demo and the tests.
+- **Access and settings**: one `Principal` per request (`web/principal.py`: `require_repo`, `visible_repo_ids`, `require_instance_admin`), server-side sessions, `cst_` API tokens (`web/tokens.py`), the audit log (`web/audit.py`), and scoped settings with a catalogue, validation, resolution and a per-process cache (`settings_scopes.py`).
+- **Environments**: `lang/python_env.py` turns `uv.lock`, `poetry.lock`, `Pipfile.lock`, requirement files, `[project]` metadata or `setup.cfg`/`setup.py` into pinned requirements (`uv pip compile`, cached by input digest) and decides whether the project must be installed at snapshot time.
+- **Test economy**: `analysis/economy.py` (pure functions over a bundle and sources), `facts/economy.py` (the tables written at finalize) and `report/economy.py` (the one view model).
+- **Agents**: `agent/` (the MCP server on the `mcp` package, the agent tools over a local bundle or the facts store, set cover) and `web/agent_api.py`.
+- **Probe**: `packages/coverset-probe` (Python 3.12+, no dependencies beyond `coverset-model`; not a workspace member).
+- **Performance**: `facts/cache.py` (run stamps, leased DuckDB connections, memoised queries), `facts/aggregates.py` (per-run summaries at finalize), `web/loaders.py` (indexed run facts, source-text and Pygments caches), content-hashed static assets with gzip, and an optional compact bitset layout (`COVERSET_FACTS_COMPACT=1`).
 - **Analysis**: unidiff 1.0.1 and the `ast` module for changed functions, greedy set cover for wave 1, priority-snake sharding, and the Python side of the catalogue (annotations and Enums to type descriptors).
 - **AI review**: a `ReviewClient` interface with a fixture-backed fake and an Anthropic client (`anthropic>=1.13,<2`, structured outputs, prompt caching).
 - **UI**: server-rendered Jinja pages with htmx 2.0.11, its SSE extension and idiomorph (vendored, SRI-checked), Pygments 2.21.0 for the source view, SVG built in Python for the shape grid, flow ribbon, test flow, Gantt chart and treemap. No build step and no inline scripts. `coverset report` builds its static pages from the same renderers.
@@ -204,39 +276,47 @@ Keys are ignored while typing in a form field and with Ctrl, Alt or Cmd held. Th
 ```
 coverset/
   src/coverset/
-    forge/          GitHub App and token adapters, webhooks, OIDC, the fake forge, the Actions step
+    forge/          GitHub App and token adapters, webhooks, OIDC, GitHub sign-in, the fake forge, the Actions steps (wait, upload)
+    agent/          the MCP server and the agent tools
     orchestrator/   intake, queue, planner, runner, verdict, bundles, pool, reaper, budget
     analysis/       diff to functions, prior run, scoring, wave 1, sharding, input classes, invariants
     facts/          untrusted-bundle reading, Parquet ingest, DuckDB queries, retention
     executors/      the executor contract, LocalExecutor, ModalExecutor
-    lang/           the language-adapter contract, the Python adapter and NeutralAdapter (any language that ships a neutral bundle)
+    lang/           the language-adapter contract, the Python adapter and its environment sources, the Rust driver, NeutralAdapter
     ai/             review bundles, fake and Anthropic clients
-    web/            pages, SSE, the /v1 API, templates, static files, SVG renderers
+    web/            pages, SSE, the /v1 API, sign-in, settings, uploads, the economy pages, templates, static files, SVG renderers
     report/         the static report (coverset report)
     db/             SQLAlchemy models and the Alembic migration
     demo/           the seeded demo repository and the demo flow
-    commands/       the coverset CLI
+    commands/       the coverset CLI (run, demo, dev, serve, report, doctor, deploy check, users, settings, tests, mcp, rust, flows, ...)
+    settings_scopes.py   scoped settings: the catalogue, resolution, the policy the orchestrator reads
   packages/coverset-model/    the neutral bundle, shape keys and the input-class catalogue (no dependencies)
   packages/pytest-coverset/   the worker plugin and coverset-ci
   packages/coverset-vitest/   the Vitest reporter (TypeScript) that writes the neutral bundle
+  packages/coverset-probe/    the production probe (the shape tracer for long-running processes)
+  deploy/                     Dockerfile targets: compose + Caddy, Fly, AWS, the Modal web deployment
   examples/demo-app/          the ledger package the demo runs
   examples/bench-suite/       the synthetic 1,200-test benchmark suite
   examples/ts-app/            a TypeScript library and its Vitest suite, measured by coverset-vitest
-  fixtures/                   signed webhook payloads, review fixtures, bundles (a synthetic TypeScript one included)
+  examples/rust-app/          a Rust crate and its tests, measured by coverset rust run
+  fixtures/                   signed webhook payloads, review fixtures, bundles (TypeScript and Rust), repository layouts, production flows
   scripts/                    screenshots, README check, benchmarks, fixtures, demo seeding
   docs/                       the pages below, numbers.json and the screenshots
 ```
 
-[ARCHITECTURE.md](ARCHITECTURE.md) is the map: components, trust boundaries, extension seams, and what is designed but not built. Then [instrumentation](docs/instrumentation.md), [data model](docs/data-model.md), [input classes](docs/input-classes.md), [invariants](docs/invariants.md), [orchestrator](docs/orchestrator.md), [Modal](docs/modal.md), [GitHub](docs/github.md), [AI review](docs/ai-review.md), [web UI](docs/ui.md), [security](docs/security.md), [extending](docs/extending.md), [benchmarks](docs/benchmarks.md), [the neutral bundle](docs/neutral-bundle.md) and [the static report](docs/report.md).
+[ARCHITECTURE.md](ARCHITECTURE.md) is the map: components, trust boundaries, extension seams, and what is designed but not built. Then [getting started](docs/getting-started.md), [the developer loop](docs/dev.md), [deploying](docs/deploy.md), [sign-in and access](docs/auth.md), [settings](docs/settings.md), [upload mode](docs/upload.md), [test economy](docs/economy.md), [AI agents and MCP](docs/mcp.md), [production flows](docs/production-flows.md), [Rust](docs/rust.md), [instrumentation](docs/instrumentation.md), [data model](docs/data-model.md), [input classes](docs/input-classes.md), [invariants](docs/invariants.md), [orchestrator](docs/orchestrator.md), [Modal](docs/modal.md), [GitHub](docs/github.md), [AI review](docs/ai-review.md), [web UI](docs/ui.md), [security](docs/security.md), [extending](docs/extending.md), [benchmarks](docs/benchmarks.md), [the neutral bundle](docs/neutral-bundle.md), [TypeScript](docs/typescript.md) and [the static report](docs/report.md).
 
 ## Caveats
 
-- The GitHub integration is verified only against recorded, signed webhook fixtures and a fake forge. No real GitHub App, repository or Actions job was used.
+- The GitHub integration is verified only against recorded, signed webhook fixtures and a fake forge, and GitHub sign-in against a stubbed GitHub. No real GitHub App, repository or Actions job was used. The Modal web deployment was tested live (health, sign-in, a replayed webhook, a 97-test run in Modal sandboxes, SSE past 150 s), the Fly and AWS paths were not.
 - The AI review in the screenshots comes from `FakeReviewClient` fixtures. `AnthropicReviewClient` is unit-tested against a stubbed SDK and has never been called live. The review is advisory and never changes pass or fail.
 - Instrumented repositories need Python 3.12 or later, because the shape tracer uses `sys.monitoring`. Per-test contexts need coverage.py's ctrace core, the slowest configuration it supports. On the demo suite the plugin costs <!-- n:overhead_x -->1.14<!-- /n -->× plain pytest; that suite's wall time is mostly interpreter start-up and imports, so suites with tight loops pay more.
 - A hollow square means "never observed", not "buggy". Shapes are sampled: the tracer caps the calls it records per function, except in the PR's changed files and invariant targets.
 - The LocalExecutor is not a sandbox. It runs tests as your user, with your network, and refuses untrusted PRs.
-- One control plane is one trust domain. Every repository it watches shares its database, facts, credentials and admin token.
+- One control plane is one trust domain. Repositories are hidden per person by GitHub's own permissions, but every repository shares the database, facts, credentials and admin token, and instance admins see everything.
+- Upload-mode results are self-reported by the repository's CI job, which runs the PR's code; coverset authenticates the repository, reads the bundle under the untrusted-bundle limits and stores sources only for the paths the bundle lists, but it cannot vouch for what the job measured.
+- Test-economy figures are candidates, not verdicts: identical lines, arcs and shape observations do not mean identical assertions, and signatures compare within one run. Test weights are Python-only (a Vitest or Rust test has value and redundancy but no weight).
+- The Rust path records lines, outcomes, regions and declared types; no branches (stable rustc records none) and no argument shapes. The probe is not on PyPI and is installed from this repository.
 - coverset keeps the data directory at mode 0700 and the database at 0600; keep `.env` private too (`chmod 600 .env`).
 - An untrusted PR's verdict is self-reported by the PR's own code, which shares a process with the plugin. Approval, a blocked network and validation of every event limit what it can do, not what it can claim about its own tests.
 - Storage is SQLite plus Parquet. Postgres, DuckLake and roaring-bitmap facts are documented as the scale-out path, not built.
@@ -245,4 +325,6 @@ coverset/
 - The bench suite is synthetic. Its `busy()` bodies calibrate under the tracer, so each test spends its drawn time whether or not coverage is on, and the fan-out numbers measure parallelism, not instrumentation overhead.
 - Inherited means labelled, not copied. Trivial, renamed and moved functions are labelled inherited in the report, but their facts are not reused from the prior run and every collected test still runs.
 - `verify.kind: runtime` invariants are accepted and validated but not executed; they are always reported `untested`.
-- The TypeScript reporter supports Vitest with the Istanbul provider only, not V8 coverage or Jest ([docs/extending.md](docs/extending.md) lists what a Jest port would change). Async functions and generators are never recorded as callers, concurrent tests share one current test, unannotated parameters have no type, and it costs about 0.4 s per run on the example (loading TypeScript and type-checking).
+- The TypeScript reporter supports Vitest with the Istanbul provider only, not V8 coverage or Jest ([docs/extending.md](docs/extending.md) lists what a Jest port would change). Async functions and generators are never recorded as callers, concurrent tests within one file get a superset of lines (and a warning), unannotated parameters have no type, and it costs about 0.4 s per run on the example (loading TypeScript and type-checking).
+- Under xdist each worker samples shapes on its own, so a hot function can be sampled up to N times the per-session cap, and module-scoped fixture lines go to the test that set the fixture up on each worker (`--dist loadfile` avoids it).
+- The sign-in session cookie for the admin token has no server-side row; rotating `COVERSET_ADMIN_TOKEN` or `COVERSET_SECRET_KEY` signs every admin cookie out. The settings and login limiters are per process.
