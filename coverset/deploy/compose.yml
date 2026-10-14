@@ -1,20 +1,19 @@
-# coverset + Caddy (automatic HTTPS) on one VM. docs/deploy.md, deploy/aws/README.md.
+# coverset + Postgres 17 + Caddy (automatic HTTPS) on one VM. docs/deploy.md, deploy/aws/README.md.
 #
-#   cd deploy && cp coverset.env.example coverset.env   # fill in the admin token, URL, Modal token
+#   cd deploy && cp coverset.env.example coverset.env   # admin token, URL, Modal token, database URL
+#   cp services.env.example services.env                # POSTGRES_PASSWORD (the one in the database URL)
 #   COVERSET_DOMAIN=coverset.example.com docker compose up -d --build
 #
 # Caddy terminates TLS (Let's Encrypt for a real domain; `COVERSET_CADDY_TLS="tls internal"` for a
 # self-signed certificate on an IP or a test name) and proxies to coverset, which trusts the
 # X-Forwarded-For/-Proto that Caddy sets (COVERSET_TRUST_PROXY=true). Only Caddy publishes ports.
 #
-# The "hosted" profile adds Postgres 17 and MinIO (S3-compatible) on the same VM, so coverset keeps
-# its state the way a hosted deployment does and its own container is disposable:
+# Blobs (facts, uploads, uploaded sources) are files under /data by default. The "hosted" profile
+# adds MinIO (S3-compatible) on the same VM, so they live in a bucket the way a hosted deployment
+# keeps them and coverset's own container is disposable:
 #
-#   cp services.env.example services.env                # POSTGRES_PASSWORD, MINIO_ROOT_USER/PASSWORD
-#   # in coverset.env: COVERSET_DATABASE_URL, COVERSET_BLOB_URL, AWS_ACCESS_KEY_ID/SECRET (see the example)
+#   # services.env: MINIO_ROOT_USER/PASSWORD; coverset.env: COVERSET_BLOB_URL, AWS_ACCESS_KEY_ID/SECRET
 #   COMPOSE_PROFILES=hosted COVERSET_DOMAIN=coverset.example.com docker compose up -d --build
-#
-# Without the profile the two services do not exist and coverset uses SQLite + files under /data.
 name: coverset
 
 services:
@@ -29,15 +28,14 @@ services:
       COVERSET_DATA_DIR: /data
       COVERSET_TRUST_PROXY: "true"
     volumes:
-      # The data dir (SQLite, Parquet facts, git mirrors, .env and the App key written by /setup).
-      # On a VM point COVERSET_DATA_PATH at the attached disk (deploy/aws/user-data.sh: /srv/coverset/data,
-      # owned by uid 10001).
+      # The data dir (blobs unless the "hosted" profile's bucket holds them, the cache with the git
+      # mirrors, .env and the App key written by /setup). On a VM point COVERSET_DATA_PATH at the
+      # attached disk (deploy/aws/user-data.sh: /srv/coverset/data/app, owned by uid 10001).
       - ${COVERSET_DATA_PATH:-coverset-data}:/data
     depends_on:
-      # Only with the "hosted" profile (required: false: absent services are fine without it).
       postgres:
         condition: service_healthy
-        required: false
+      # Only with the "hosted" profile (required: false: absent without it).
       minio-init:
         condition: service_completed_successfully
         required: false
@@ -68,14 +66,11 @@ services:
       - caddy-config:/config
     restart: unless-stopped
 
-  # --- profile "hosted": the state services --------------------------------------------------------
   postgres:
-    profiles: ["hosted"]
     image: postgres:17
     env_file:
       # POSTGRES_PASSWORD (and nothing else of coverset's settings).
       - path: ${COVERSET_SERVICES_ENV_FILE:-services.env}
-        required: false
     environment:
       POSTGRES_USER: coverset
       POSTGRES_DB: coverset
@@ -95,6 +90,7 @@ services:
       driver: json-file
       options: {max-size: "20m", max-file: "5"}
 
+  # --- profile "hosted": the bucket ------------------------------------------------------------------
   # MinIO built by Chainguard: MinIO no longer publishes minio/minio or minio/mc images that pull
   # anonymously (deploy/dev-compose.yml uses the same image).
   minio:

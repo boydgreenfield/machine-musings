@@ -17,6 +17,8 @@ from types import ModuleType
 
 import pytest
 
+from coverset.db.testing import PostgresTestDatabases
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -66,8 +68,10 @@ def test_fix_rewrites_a_stale_region(tmp_path: Path) -> None:
 
 
 @pytest.fixture(scope="module")
-def demo_data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A local demo seeded the way the web tests' session fixture does it (database in the data dir)."""
+def demo_data_dir(
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases
+) -> tuple[Path, str]:
+    """A local demo seeded the way the web tests' session fixture does it: its data dir and database."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
     from coverset.config import Settings
@@ -82,7 +86,7 @@ def demo_data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     data_dir = tmp_path_factory.mktemp("readme-demo") / "data"
     settings = Settings.for_tests(
         data_dir=data_dir,
-        database_url=f"sqlite+aiosqlite:///{data_dir / 'coverset.db'}",
+        database_url=postgres_databases.create(),
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
     )
@@ -101,13 +105,17 @@ def demo_data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     asyncio.run(scenario())
     clear_registered_secrets()
-    return data_dir
+    return data_dir, settings.database_url
 
 
 @pytest.mark.slow
-def test_shapes_tables_match_coverset_shapes(demo_data_dir: Path) -> None:
+def test_shapes_tables_match_coverset_shapes(
+    demo_data_dir: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir, database_url = demo_data_dir
+    monkeypatch.setenv("COVERSET_DATABASE_URL", database_url)  # what `coverset shapes` reads
     # Strict: the demo app's Hypothesis profile is derandomized, so even the example values are stable.
-    findings = check_readme.check(data_dir=demo_data_dir)
+    findings = check_readme.check(data_dir=data_dir)
     assert not findings, _report(findings)
 
 

@@ -17,7 +17,7 @@ Order of checks (nothing is parsed or written before the signature is verified):
    approval" check, the approver's permission check) and the run-queue hand-off happen after the
    response is ready.
 
-Steps 3-5 run under one per-app :class:`asyncio.Lock` (SQLite has one writer anyway), so bursts
+Steps 3-5 run under one per-app :class:`asyncio.Lock`, so bursts
 such as ``opened`` + ``ready_for_review`` for a new repo never race on the ``repos`` or
 ``pull_requests`` unique keys. If an :class:`~sqlalchemy.exc.IntegrityError` still escapes (another
 process), the whole intake is retried once; a second failure is a 503 and nothing is half-stored.

@@ -1,17 +1,15 @@
 """Throwaway Postgres databases for the test suite: one migrated template per process, one clone
 per test.
 
-``COVERSET_TEST_DATABASE_URL`` (an asyncpg URL whose user may ``CREATE DATABASE``; ``make test-pg``
-sets it to the compose stack's Postgres) switches ``tests/conftest.py``'s ``settings`` fixture from a
-SQLite file under ``tmp_path`` to a fresh Postgres database. Migrating costs about a second, so it
-happens once per process (each pytest-xdist worker is one) into a template database, and every
-test gets ``CREATE DATABASE test_<hex> TEMPLATE <template>``: a file-level copy that is already at
+The suite runs on a local Postgres server by default: :data:`DEFAULT_TEST_DATABASE_URL` (Homebrew's
+accepts the current user without a password), or ``COVERSET_TEST_DATABASE_URL`` (an asyncpg URL
+whose user may ``CREATE DATABASE``; the database it names is only the one connected to for creating
+and dropping the others, ``postgres`` by default). Migrating costs about a second, so it happens once
+per process (each pytest-xdist worker is one) into a template database, and every test that takes the
+``settings`` fixture gets ``CREATE DATABASE <name> TEMPLATE <template>``: a copy that is already at
 the Alembic head, so the app fixture's start-up migration is the one-read no-op of
 :func:`coverset.db.session.migrate`. Each test's database is dropped ``WITH (FORCE)`` afterwards,
-which also ends connections a test forgot to close.
-
-The connection parameters come from the URL (any database on the server works as the
-maintenance database: ``CREATE DATABASE`` runs outside it).
+which also ends connections a test forgot to close. Nothing here needs more than Postgres 14.
 """
 
 from __future__ import annotations
@@ -24,19 +22,20 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import make_url
 
-from coverset.db.session import make_engine, migrate, postgres_connect_args
+from coverset.db.session import admin_execute, make_engine, migrate, quote_database
 
 TEST_DATABASE_URL_ENV = "COVERSET_TEST_DATABASE_URL"
-"""An asyncpg URL whose user may ``CREATE DATABASE``; unset, the suite uses SQLite files."""
+"""The server the suite creates its databases on (see the module docstring)."""
+DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://localhost/postgres"
+"""The local server, through its maintenance database."""
 
 
-def test_database_url() -> str | None:
-    """``COVERSET_TEST_DATABASE_URL`` normalised to the asyncpg driver, or None when unset."""
-    url = os.environ.get(TEST_DATABASE_URL_ENV, "").strip()
-    if not url:
-        return None
+def test_database_url() -> str:
+    """``COVERSET_TEST_DATABASE_URL`` normalised to the asyncpg driver, or
+    :data:`DEFAULT_TEST_DATABASE_URL` when it is unset."""
+    url = os.environ.get(TEST_DATABASE_URL_ENV, "").strip() or DEFAULT_TEST_DATABASE_URL
     if url.startswith(("postgresql://", "postgres://")):
         url = "postgresql+asyncpg://" + url.split("://", 1)[1]
     if not url.startswith("postgresql+asyncpg://"):
@@ -47,33 +46,24 @@ def test_database_url() -> str | None:
 test_database_url.__test__ = False  # type: ignore[attr-defined]  # not a test, despite its name
 
 
-def _quote(name: str) -> str:
-    """A database name as a quoted identifier (names here are generated, never user input)."""
-    if not name.replace("_", "").isalnum():
-        raise ValueError(f"unexpected database name {name!r}")
-    return f'"{name}"'
+def server_problem(url: str, *, timeout_s: float = 5.0) -> str | None:
+    """None when the server behind ``url`` accepts a connection, else one line saying how to fix it
+    (the suite fails at collection with it rather than skipping anything)."""
+    from coverset.db.session import shown_url
 
+    async def probe() -> None:
+        await asyncio.wait_for(admin_execute(url, ["SELECT 1"]), timeout_s)
 
-async def _admin(url: URL, statements: list[str]) -> None:
-    """Run ``statements`` one by one on a plain asyncpg connection (``CREATE DATABASE`` and
-    ``DROP DATABASE`` cannot run inside a transaction, which SQLAlchemy would open)."""
-    import asyncpg
-
-    url, connect_args = postgres_connect_args(url)
-    kwargs: dict[str, Any] = {
-        "host": url.host,
-        "port": url.port or 5432,
-        "user": url.username,
-        "password": url.password,
-        "database": url.database,
-    }
-    kwargs.update({key: value for key, value in connect_args.items() if key != "server_settings"})
-    connection = await asyncpg.connect(**kwargs)
     try:
-        for statement in statements:
-            await connection.execute(statement)
-    finally:
-        await connection.close()
+        asyncio.run(probe())
+    except Exception as exc:  # noqa: BLE001 - any failure is the one-line message
+        reason = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        return (
+            f"the test suite needs Postgres at {shown_url(url)} ({reason}): start it (brew services start "
+            f"postgresql@14), or run `make services` and set {TEST_DATABASE_URL_ENV}="
+            "postgresql://coverset:coverset@127.0.0.1:55432/postgres"
+        )
+    return None
 
 
 class PostgresTestDatabases:
@@ -96,7 +86,7 @@ class PostgresTestDatabases:
         asyncio.run(self._start())
 
     async def _start(self) -> None:
-        await _admin(self.admin_url, [f"CREATE DATABASE {_quote(self.template)}"])
+        await admin_execute(self.admin_url, [f"CREATE DATABASE {quote_database(self.template)}"])
         engine = make_engine(self.url_for(self.template))
         try:
             await migrate(engine)
@@ -107,12 +97,12 @@ class PostgresTestDatabases:
         """A fresh database cloned from the migrated template (``empty``: with no schema at all, for
         migration tests); returns its URL. Databases :meth:`retire` queued are dropped first."""
         name = f"{self.prefix}_{uuid.uuid4().hex[:12]}"
-        # FILE_COPY: for a database this small, copying the files plus a cheap DROP beats WAL_LOG
-        # (Postgres 15+'s default), whose clone is faster but whose DROP is not: 70 ms vs 140 ms.
-        template = "" if empty else f" TEMPLATE {_quote(self.template)} STRATEGY FILE_COPY"
+        template = "" if empty else f" TEMPLATE {quote_database(self.template)}"
         statements = [_drop(retired) for retired in self._retired]
         self._retired.clear()
-        asyncio.run(_admin(self.admin_url, [*statements, f"CREATE DATABASE {_quote(name)}{template}"]))
+        asyncio.run(
+            admin_execute(self.admin_url, [*statements, f"CREATE DATABASE {quote_database(name)}{template}"])
+        )
         self._created.add(name)
         return self.url_for(name)
 
@@ -133,29 +123,28 @@ class PostgresTestDatabases:
         """Drop the database behind ``url`` now (ending its connections)."""
         name = make_url(url).database or ""
         self._created.discard(name)
-        asyncio.run(_admin(self.admin_url, [_drop(name)]))
+        asyncio.run(admin_execute(self.admin_url, [_drop(name)]))
 
     def close(self) -> None:
         """Drop every database left over and the template."""
         names = [*self._retired, *sorted(self._created), self.template]
         self._created.clear()
         self._retired.clear()
-        asyncio.run(_admin(self.admin_url, [_drop(name) for name in names]))
+        asyncio.run(admin_execute(self.admin_url, [_drop(name) for name in names]))
 
 
 def _drop(name: str) -> str:
-    return f"DROP DATABASE IF EXISTS {_quote(name)} WITH (FORCE)"
+    return f"DROP DATABASE IF EXISTS {quote_database(name)} WITH (FORCE)"
 
 
 def run_sql(url: str, statement: str, params: Mapping[str, Any] | None = None) -> list[tuple[Any, ...]]:
-    """Run one SQL statement (``:name`` parameters) on the database behind ``url``, SQLite or
-    Postgres, commit it and return its rows (empty for a statement without any).
+    """Run one SQL statement (``:name`` parameters) on the database behind ``url``, commit it and
+    return its rows (empty for a statement without any).
 
     For tests that read or doctor a fixture's database directly (the page tests' shared demo): it
     works from synchronous code and from inside a running event loop alike, because the query runs on
-    its own loop in a worker thread with a throwaway engine. JSON columns come back as text on both
-    backends; write portable SQL (``false`` rather than ``0`` for a boolean, ``RETURNING id`` rather
-    than a driver's last row id, ``CAST(col AS TEXT)`` before ``LIKE`` on a JSON column).
+    its own loop in a worker thread with a throwaway engine. JSON columns come back as their text
+    (``CAST(col AS TEXT)`` before ``LIKE`` on one).
     """
 
     async def run() -> list[tuple[Any, ...]]:
@@ -167,7 +156,7 @@ def run_sql(url: str, statement: str, params: Mapping[str, Any] | None = None) -
                 result = await connection.execute(text(statement), dict(params or {}))
                 if not result.returns_rows:
                     return []
-                # asyncpg decodes json columns; SQLite returns their text: text on both
+                # asyncpg decodes json columns: hand them back as text
                 return [
                     tuple(json.dumps(v) if isinstance(v, dict | list) else v for v in row) for row in result
                 ]

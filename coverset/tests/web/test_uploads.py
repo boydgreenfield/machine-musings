@@ -34,13 +34,13 @@ from sqlalchemy import func, select
 from coverset.config import Settings
 from coverset.db.models import AuditEvent, PullRequest, Repo, Run, RunEvent, Shard, TestResult
 from coverset.facts import sources as source_store
-from coverset.facts.store import FactsStore
+from coverset.facts.store import facts_store
 from coverset.forge.fake import FakeForge
 from coverset.forge.oidc import ISSUER
 from coverset.orchestrator.bundles import IngestPool
 from coverset.orchestrator.runner import OrchestratorContext
 from coverset.orchestrator.upload import NO_DIFF_REASON
-from coverset.storage import remote_store
+from coverset.storage import from_settings
 from coverset.storage.uploads import upload_key
 from coverset.web import tokens
 from coverset.web.api import JWK_CLIENT_EXTENSION
@@ -382,7 +382,7 @@ async def test_an_upload_becomes_a_run_with_facts_a_verdict_and_a_sticky_comment
         assert kinds[-2:] == ["verdict", "done"]
         audited = await session.scalar(select(func.count()).where(AuditEvent.action == "bundle_uploaded"))
         assert audited == 1
-    store = FactsStore(app.extensions["settings"].facts_dir)
+    store = facts_store(app.extensions["settings"])
     assert store.run_dir(repo.id, body["run_id"]).is_dir()
     comments = forge.calls_named("upsert_pr_comment")
     assert len(comments) == 1
@@ -641,25 +641,23 @@ async def test_a_pass_that_missed_a_new_shard_writes_nothing_final(
     await _register(app, repo, make_archive(bundle_dir, python=False), "b", tmp_path)
     async with db.session() as session:
         assert not await stale.current(session, run_id)
-    # A shard registered but not on disk yet holds the verdict back without failing the run. With an
-    # object store the pass would restore it from its archive, so that is parked too: the moment
+    # A shard registered but not on disk yet holds the verdict back without failing the run. The
+    # pass would restore it from its archive in the blob store, so that is parked too: the moment
     # between registering a shard and archiving it.
     moved = shard_dir(app.extensions["settings"], run_id, 1)
     parked = tmp_path / "parked"
     moved.rename(parked)
-    blobs = remote_store(app.extensions["settings"])
+    blobs = from_settings(app.extensions["settings"])
     archive = upload_key(repo.id, SHA, "b")
-    parked_archive = blobs.get_bytes(archive)[0] if blobs is not None else b""
-    if blobs is not None:
-        blobs.delete([archive])
+    parked_archive = blobs.get_bytes(archive)[0]
+    blobs.delete([archive])
     await process_run(ctx, run_id)
     async with db.session() as session:
         run = await session.get(Run, run_id)
         assert run is not None and (run.status, run.verdict) == ("running", None)
     assert forge.calls_named("upsert_pr_comment") == [] and forge.calls_named("set_commit_status") == []
     parked.rename(moved)
-    if blobs is not None:
-        blobs.put_bytes(archive, parked_archive)
+    blobs.put_bytes(archive, parked_archive)
     await process_run(ctx, run_id)
     async with db.session() as session:
         run = await session.get(Run, run_id)

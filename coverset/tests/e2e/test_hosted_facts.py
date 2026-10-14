@@ -2,8 +2,7 @@
 
 The demo (seeded repository, six baselines, both PRs) runs with ``COVERSET_BLOB_URL`` pointing at
 moto (or ``COVERSET_TEST_BLOB_URL``) and a *process* ingest pool, so the shards are ingested by
-worker processes that get only the cache directory and the knobs, find the bucket from them and
-publish there. Then the cache's facts are wiped, as on a new replica or after a restart on an
+worker processes that get only the cache directory and the blob URL, and publish there. Then the cache's facts are wiped, as on a new replica or after a restart on an
 ephemeral disk, and the dashboard, the PR pages, the source view and the economy page are rendered
 through the Quart test client, the static report is loaded with ``load_run`` and the agent's
 ``StoreBackend`` answers: everything comes back from the bucket, and answers what it answered
@@ -26,6 +25,7 @@ from sqlalchemy import select
 
 from coverset.config import Settings
 from coverset.db.models import Repo, Run
+from coverset.db.testing import PostgresTestDatabases
 
 pytestmark = pytest.mark.slow
 
@@ -88,7 +88,9 @@ def _report_totals(inp: Any) -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def hosted(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Hosted]:
+def hosted(
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases
+) -> Iterator[Hosted]:
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
     from coverset.db.session import init_db
@@ -107,7 +109,7 @@ def hosted(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Hosted]:
     root = tmp_path_factory.mktemp("hosted-demo")
     settings = Settings.for_tests(
         data_dir=root / "data",
-        database_url=f"sqlite+aiosqlite:///{root / 'coverset.db'}",
+        database_url=postgres_databases.create(),
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
         blob_url=fresh_blob_url("hosted-demo"),

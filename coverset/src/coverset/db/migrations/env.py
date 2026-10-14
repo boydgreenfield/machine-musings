@@ -1,10 +1,10 @@
-"""Alembic environment: online migrations only, async-engine aware, batch mode for SQLite.
+"""Alembic environment: online migrations only, async-engine aware.
 
 When :func:`coverset.db.session.migrate` drives Alembic it passes a live connection in
 ``config.attributes["connection"]``; the Alembic CLI instead gets one from
 ``sqlalchemy.url`` or, when that is unset, from the coverset settings (``COVERSET_DATABASE_URL``).
-Both paths run inside :func:`coverset.db.session.run_schema_change` (one transaction, foreign keys
-off on SQLite).
+Both paths run inside :func:`coverset.db.session.run_schema_change` (one transaction holding the
+migration advisory lock).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from sqlalchemy import Connection
 
 from coverset.config import Settings
 from coverset.db.models import Base
-from coverset.db.session import make_engine, run_schema_change, sqlite_file_path
+from coverset.db.session import make_engine, run_schema_change
 from coverset.db.types import UTCDateTime
 
 config = context.config
@@ -39,7 +39,6 @@ def run_with_connection(connection: Connection) -> None:
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        render_as_batch=True,
         compare_type=True,
         render_item=render_item,
     )
@@ -49,9 +48,6 @@ def run_with_connection(connection: Connection) -> None:
 
 async def run_with_new_engine(url: str) -> None:
     """Open a short-lived async engine for ``url`` and migrate through it."""
-    db_file = sqlite_file_path(url)
-    if db_file is not None:
-        db_file.parent.mkdir(parents=True, exist_ok=True)
     engine = make_engine(url)
     try:
         await run_schema_change(engine, run_with_connection)

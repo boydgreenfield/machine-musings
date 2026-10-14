@@ -4,18 +4,18 @@ coverset keeps two stores with different shapes.
 
 | Store | Holds | Size per run | Technology | Code |
 |---|---|---|---|---|
-| Control-plane database | repositories, PRs, runs, tests, results, events, deliveries, invariants, findings | O(files) + O(tests) rows | SQLAlchemy 2.1 async, SQLite in WAL mode | `src/coverset/db/` |
+| Control-plane database | repositories, PRs, runs, tests, results, events, deliveries, invariants, findings | O(files) + O(tests) rows | Postgres 14+ through SQLAlchemy 2.1 async (asyncpg) | `src/coverset/db/` |
 | Facts store | per-test executed lines, branch arcs, function regions, argument shapes, run aggregates | O(tests × lines) rows | immutable Parquet files (zstd, dictionary encoding), queried by in-memory DuckDB | `src/coverset/facts/` |
 
-Per-line coverage and argument shapes never go into SQL. The SQL store stays small enough for SQLite; the Parquet store is written once per shard and never updated in place, so any number of processes can read it while one writes.
+Per-line coverage and argument shapes never go into SQL, so the SQL store stays small; the Parquet store is written once per shard and never updated in place, so any number of processes can read it while one writes.
 
 ## Control-plane database
 
 ### Connection and migrations
 
-Every SQLite connection gets `PRAGMA journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000` and `foreign_keys=ON` (`db/session.py`, `SQLITE_PRAGMAS`; test `test_sqlite_pragmas`). The default URL is `sqlite+aiosqlite:///<data_dir>/coverset.db`. `COVERSET_DATABASE_URL` accepts any SQLAlchemy async URL, but only SQLite is exercised.
+`COVERSET_DATABASE_URL` is a Postgres URL (default `postgresql+asyncpg://localhost/coverset`; anything else is refused at start-up). Every connection gets a bounded pool, `application_name=coverset`, `timezone=UTC` and TCP keepalives, and the web app's a 30 s `statement_timeout` (`db/session.py`; [postgres.md](postgres.md) has the details).
 
-Migrations are Alembic revisions under `src/coverset/db/migrations/versions/`, run with `render_as_batch=True` so SQLite can alter tables. `coverset init-db` migrates explicitly, and the app migrates when it starts serving unless `COVERSET_SKIP_MIGRATIONS=true`. Test `test_migrations_match_models` checks that the revisions produce exactly the models.
+Migrations are Alembic revisions under `src/coverset/db/migrations/versions/`. `coverset init-db` creates the database when the server has none of its name and migrates it, and `coverset serve` does the same before it opens the port unless `COVERSET_MIGRATE_ON_START=false`; the app's own startup migration runs unless `COVERSET_SKIP_MIGRATIONS=true`. Test `test_migrations_match_models` checks that the revisions produce exactly the models.
 
 | Revision | Adds |
 |---|---|
@@ -29,10 +29,10 @@ Migrations are Alembic revisions under `src/coverset/db/migrations/versions/`, r
 ### Conventions
 
 - String enums are `Literal` aliases stored as `VARCHAR(32)` without a CHECK constraint; values are validated in Python on bind (`db/types.py`, `str_enum`; test `test_enum_values_validated`).
-- Every datetime is aware UTC (`UTCDateTime`); SQLite stores it naive and gets `tzinfo=UTC` back on load; a naive datetime is refused on bind (`test_datetimes_normalised_to_utc_and_naive_rejected`).
+- Every datetime is aware UTC (`UTCDateTime`, `timestamptz`); a naive datetime is refused on bind (`test_datetimes_normalised_to_utc_and_naive_rejected`).
 - JSON columns use `MutableDict`/`MutableList`, so in-place edits of top-level keys are saved (`test_json_columns_track_in_place_changes`).
 - Run ids are `run_<ULID>`: 48-bit milliseconds plus 80 random bits in Crockford base32, so they sort by creation time (`new_id`).
-- Every foreign-key column leads some index, because SQLite looks children up by it on every parent delete (`test_every_foreign_key_column_leads_an_index`).
+- Every foreign-key column leads some index, because every parent delete looks the children up by it and Postgres does not index a foreign key by itself (`test_every_foreign_key_column_leads_an_index`).
 
 ### Tables
 
@@ -68,13 +68,18 @@ The `runs.timeline` keys are listed in [ARCHITECTURE.md](../ARCHITECTURE.md#how-
 
 ### Layout
 
+What DuckDB reads is the facts cache, `<cache_dir>/facts/` (by default `<data_dir>/cache/facts/`); the
+blob store holds the same runs as versioned objects and a `MANIFEST.json` per run
+([object-store.md](object-store.md)):
+
 ```
-<data_dir>/facts/
+<cache_dir>/facts/
   repo=<repo_id>/
     dictionary.json              ids for paths, node ids and shape keys (append-only)
     dictionary.lock
     run=<run_id>/
       .lock                      writers of this run serialise on it
+      .sync.json, MANIFEST.json  what this cache last pulled or published
       functions.parquet          run tables: one file per run
       runs_dim.parquet
       file_cov.parquet
@@ -89,7 +94,7 @@ Files never store `repo_id` or `run_id`: the DuckDB views add both from the Hive
 
 ### Ids: `dictionary.json`
 
-Paths, node ids and shape keys are stored as dense integer ids. The ids are list positions in `repo=<id>/dictionary.json`, so an id never changes once assigned and new values are only appended (`facts/dictionary.py`). Test id 0 is reserved for `<import>`, the pseudo test that holds lines executed outside any test (coverage.py's `''` context). Extensions happen under an exclusive `flock` and an atomic write, so concurrent ingests never hand out the same id twice. Garbage collection never touches the dictionary. Ids are therefore stable across runs of a repo (`test_ids_are_stable_across_runs`).
+Paths, node ids and shape keys are stored as dense integer ids. The ids are list positions in `repo=<id>/dictionary.json`, so an id never changes once assigned and new values are only appended (`facts/dictionary.py`). Test id 0 is reserved for `<import>`, the pseudo test that holds lines executed outside any test (coverage.py's `''` context). Extensions are a compare-and-swap of the dictionary's object in the blob store, under an exclusive `flock` in the cache, so concurrent ingests (on one machine or several) never hand out the same id twice. Garbage collection never touches the dictionary. Ids are therefore stable across runs of a repo (`test_ids_are_stable_across_runs`).
 
 ### Attempts and the commit record
 
@@ -131,7 +136,7 @@ Run tables (one file per run):
 | Table | Columns | Notes |
 |---|---|---|
 | `functions` | `commit_sha`, `func_key`, `file_id`, `path`, `qualname`, `ordinal`, `def_line`, `body_start`, `end_line`, `body_hash`, `sig_hash`, `params_json`, `kind` (`function`, `method`, `class`, `module`), `language`, `types_json` | the head commit's regions, indexed once per run. `language` is the ingest job's (never a bundle manifest's). `types_json` is the declared types a neutral bundle shipped for a region it supplied (`{"param": descriptor or null, ..., "return": ...}`, the `types` of `functions.jsonl`), else null; the pages build a function's input classes from it, so they count what `finalize_run` stored in `func_input_cov` |
-| `runs_dim` | `head_sha`, `base_sha`, `branch`, `pr_number`, `created_at`, `scoring_basis_run_id`, `expected_shards`, `ingested_shards`, `coverage_complete`, `finalized_at` | mirrored from the control database so facts SQL never attaches SQLite |
+| `runs_dim` | `head_sha`, `base_sha`, `branch`, `pr_number`, `created_at`, `scoring_basis_run_id`, `expected_shards`, `ingested_shards`, `coverage_complete`, `finalized_at` | mirrored from the control database so facts SQL never needs the database |
 | `file_cov` | `file_id`, `path`, `statements`, `covered`, `branches`, `branches_covered`, `partial_branches`, `percent` | `percent = 100 × (covered + branches_covered) / (statements + branches)` |
 | `func_input_cov` | `func_key`, `tests_called`, `tests_sampled`, `tests_truncated`, `blocks_expected`, `blocks_observed`, `missing_json` | input-class coverage per function; the class columns stay null without a catalogue. `tests_truncated` is counted over the whole run with `analysis/shapes.cap_hits`, the definition the verdict and the UI use: 0 when no shard capped the function, else the tests that called it (lines in its body) but were never sampled, at least 1 |
 
@@ -393,7 +398,5 @@ When one machine's Parquet directory stops being enough, three steps apply in or
 1. **Content-addressed per-(test, blob) bitsets.** Most tests execute the same lines of an unchanged file run after run. Key each `test_file_bits` row by `(test, file blob sha)` instead of by run and reference it from each run, so an unchanged file costs one reference per run instead of one bitset (and the long table's one row per line). On the real bundle a run's bitsets are 0.33 MB; with most files unchanged between baselines, a run would add tens of kilobytes.
 2. **DuckLake.** Keep the Parquet files, move the catalogue (which files belong to which run and attempt, today `ingest_log`) into a DuckLake catalogue, so several control planes can read and write the same facts.
 3. **Postgres with `pg_roaringbitmap`.** Store the per-(test, blob) bitsets as roaring bitmaps in Postgres, which makes "tests covering line L" and patch coverage set operations inside the database.
-
-The control database moves to Postgres through `COVERSET_DATABASE_URL`; that path is untested.
 
 Before any of these, one process serves more than this page's ceiling suggests: the pages read per-run summaries and memoised results (see [Caches](#caches)), so a request costs O(functions of the page), not O(cells of the run); what grows with the number of runs is disk (above) and, at ingest, memory. Converting and ingesting a shard runs in the ingest pool's worker processes (the default `process` mode), so its peak stays out of the server; `finalize_run` runs in the runner, inside the server process, and on a 20-million-cell run it peaks at 1 GB without the test-economy pass and 3 GB with it (measured in `docs/benchmarks.md`). Running `finalize_run` in the ingest pool as well is the next step for a server with little memory.

@@ -53,7 +53,7 @@ MAX_NODEID_CHARS = 4096
 MAX_SOURCE_CHARS = 2_000_000
 FLOW_W = 1100.0
 MAX_DB_ID = 2**63 - 1
-"""Larger path ids cannot be a database id: a 404 before any query (SQLite would overflow)."""
+"""Larger path ids cannot be a database id (``BIGINT``): a 404 before any query, never an overflow."""
 
 
 # -- source: markers and @given ----------------------------------------------------------------------

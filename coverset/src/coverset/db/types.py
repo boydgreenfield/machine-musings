@@ -11,7 +11,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any, get_args
 
-from sqlalchemy import BigInteger, DateTime, Dialect, Enum, Integer
+from sqlalchemy import BigInteger, DateTime, Dialect, Enum
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -19,14 +19,13 @@ ENUM_LENGTH = 32
 """Every string enum is stored as ``VARCHAR(32)``, so adding a value never changes the column."""
 
 
-BigIntId: TypeEngine[int] = BigInteger().with_variant(Integer(), "sqlite")
-"""The type of every integer primary key (and so of the foreign keys that point at one).
+BigIntId: TypeEngine[int] = BigInteger()
+"""The type of every integer primary key (and so of the foreign keys that point at one): ``BIGINT``.
 
-``BIGINT`` on Postgres: a ``SERIAL`` there is 32-bit, and high-volume tables (``run_events``,
-``audit_log``, ``webhook_deliveries``) burn ids that are never reused, while the web layer accepts
-any id up to 2**63 - 1 (a larger one in a URL must be a 404, not an int4 overflow). ``INTEGER`` on
-SQLite, where it is already 64-bit and where only ``INTEGER PRIMARY KEY`` (not ``BIGINT``) is the
-auto-incrementing rowid alias. Migration 0009 widens the Postgres columns; SQLite's DDL is unchanged.
+A ``SERIAL`` is 32-bit, and high-volume tables (``run_events``, ``audit_log``,
+``webhook_deliveries``) burn ids that are never reused, while the web layer accepts any id up to
+2**63 - 1 (a larger one in a URL must be a 404, not an int4 overflow). Migration 0009 widened the
+columns.
 """
 
 
@@ -67,11 +66,8 @@ def str_enum(literal: Any) -> Enum:
 
 
 class UTCDateTime(TypeDecorator[datetime]):
-    """A timezone-aware UTC datetime on every backend.
-
-    SQLite has no timezone support, so values are normalised to UTC and stored naive, and
-    ``tzinfo=UTC`` is re-attached on load. Naive datetimes are rejected on bind.
-    """
+    """A timezone-aware UTC datetime (``timestamptz``): naive datetimes are rejected on bind, and
+    every value is converted to UTC on the way in and out."""
 
     impl = DateTime(timezone=True)
     cache_ok = True
@@ -81,8 +77,7 @@ class UTCDateTime(TypeDecorator[datetime]):
             return None
         if value.tzinfo is None:
             raise ValueError(f"naive datetime {value!r}: coverset stores aware UTC datetimes only")
-        value = value.astimezone(UTC)
-        return value.replace(tzinfo=None) if dialect.name == "sqlite" else value
+        return value.astimezone(UTC)
 
     def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
         if value is None:

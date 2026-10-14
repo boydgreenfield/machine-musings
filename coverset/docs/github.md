@@ -168,7 +168,7 @@ fake forge, `POST /webhooks/fake` is accepted as well as `/webhooks/github`.
    the approver's permission check) and the run-queue hand-off happen after the database commit,
    so GitHub's 10 s budget is never at risk.
 
-Steps 4-6 run one delivery at a time per process (SQLite has a single writer anyway), so a burst
+Steps 4-6 run one delivery at a time per process, so a burst
 such as `opened` + `ready_for_review` for a repository coverset has not seen yet cannot race on its
 unique keys. Should a unique-key conflict still happen, the whole intake is retried once; a second
 failure answers **503** with nothing stored, so the delivery can be redelivered.

@@ -11,13 +11,15 @@ from orch_fakes import PROJECT_ROOT
 from coverset.cli import cli
 from coverset.commands.common import StreamPrinter
 from coverset.commands.facts import format_rows, match_function
+from coverset.config import Settings
 from coverset.lang.base import FunctionRegion
 
 
 @pytest.fixture
-def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CliRunner:
-    monkeypatch.setenv("COVERSET_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.delenv("COVERSET_DATABASE_URL", raising=False)
+def runner(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> CliRunner:
+    """The CLI on the ``settings`` fixture's data dir and database."""
+    monkeypatch.setenv("COVERSET_DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("COVERSET_DATABASE_URL", settings.database_url)
     from coverset.config import get_settings
 
     get_settings.cache_clear()

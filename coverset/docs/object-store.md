@@ -2,26 +2,27 @@
 
 Everything coverset keeps that is not a database row is a blob: the Parquet facts of every run,
 each run's manifest, each repository's id dictionary, production-flow batches, sources uploaded with
-`coverset-ci upload --with-sources`, and upload archives waiting to be processed. By default they are
-files under the data directory and a laptop needs no service at all. Set `COVERSET_BLOB_URL` and
-they live in any S3-compatible bucket instead (AWS S3, MinIO, Cloudflare R2, Tigris), with a
-disposable local cache in front of it. Together with Postgres (`COVERSET_DATABASE_URL`,
-[postgres.md](postgres.md)) that makes the control plane stateless: nothing under the data
+`coverset-ci upload --with-sources`, and upload archives waiting to be processed. They live in one
+blob store: files under the data directory by default (`LocalBlobStore`, so a laptop needs no
+service besides Postgres), or any S3-compatible bucket when `COVERSET_BLOB_URL` is set (AWS S3,
+MinIO, Cloudflare R2, Tigris). Either way a disposable local cache sits in front of it and the same
+code runs above it: manifests, conditional writes, pulls and publishes, eviction. With a bucket and
+Postgres ([postgres.md](postgres.md)) the control plane is stateless: nothing under the data
 directory has to survive a restart (`Settings.hosted`), and several replicas can serve the same
 state ([deploy.md](deploy.md)).
 
 Code: `src/coverset/storage/` (the `BlobStore` protocol, `LocalBlobStore`, `S3BlobStore`, the cache,
-upload archives, `seed`), `facts/store.py` (manifests, pull and publish), `facts/dictionary.py`
+upload archives), `facts/store.py` (manifests, pull and publish), `facts/dictionary.py`
 (compare-and-swap), `facts/sources.py` (`SourceStore`), `facts/flows.py`, `facts/gc.py`.
-Tests: `tests/storage/`, `tests/facts/` (every test that takes the `store` fixture runs on both
-backends), `tests/web/test_blob_uploads.py`, `tests/e2e/test_hosted_facts.py`.
+Tests: `tests/storage/`, `tests/facts/` (every test that takes the `store` or `replicas` fixture runs
+over local files and over S3), `tests/web/test_blob_uploads.py`, `tests/e2e/test_hosted_facts.py`.
 
 ## Configuration
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `COVERSET_BLOB_URL` | empty: files under `COVERSET_DATA_DIR` | `s3://bucket[/prefix][?endpoint_url=...&region=...]` |
-| `COVERSET_CACHE_DIR` | `<data_dir>/cache` | the local cache: facts, git mirrors, fetched sources; always safe to delete |
+| `COVERSET_CACHE_DIR` | `<data_dir>/cache` | the local cache: facts, git mirrors, fetched sources; always safe to delete (mode 0700, like the data dir: both hold private source) |
 | `COVERSET_CACHE_MAX_GB` | `10` | the cache's bound (decimal GB); gc and each process's first downloads evict beyond it |
 | `COVERSET_BLOB_SYNC_S` | `5` | how long a reader trusts its last check of a run's manifest |
 
@@ -43,14 +44,14 @@ S3-compatible stores). Requests retry in botocore's `standard` mode (5 attempts,
 throttling, 5xx and connection errors), with a 5 s connect and a 60 s read timeout. Objects above
 8 MiB go up in 8 MiB parts.
 
-With `COVERSET_BLOB_URL` set, `Settings.facts_dir` is `<cache_dir>/facts` and
-`Settings.mirrors_dir` is `<cache_dir>/mirrors`: both are caches. (The mirrors follow the blob URL,
-not `Settings.hosted`, because the test-economy pass finds a repository's mirror beside the facts
-directory, `facts/economy.mirror_history`.)
+`Settings.facts_dir` is `<cache_dir>/facts` and `Settings.mirrors_dir` is `<cache_dir>/mirrors`:
+both are caches, whatever holds the blobs (the test-economy pass finds a repository's mirror beside
+the facts directory, `facts/economy.mirror_history`).
 
 `coverset deploy check` has an `object store` row (`coverset.storage.check_store`): it creates a
 throwaway object under `_coverset/probe/` with `If-None-Match: *`, tries to overwrite it with a
-wrong `If-Match` (which must be refused), reads it back, lists and deletes it.
+wrong `If-Match` (which must be refused), reads it back, lists and deletes it, on the local store
+and on a bucket alike.
 
 ## Keys
 
@@ -64,21 +65,21 @@ sources/<repo_id>/<sha>/<path>                               uploaded sources of
 uploads/<repo_id>/<sha>/<label>.tar.gz                       an upload's shard, for the processing pass
 ```
 
-The layout below `facts/` is the local one except for the run files: in the cache (and in the local
-default) a file keeps its plain name (`runs_dim.parquet`, `test_lines.shard=0.attempt=2.parquet`), in
-the bucket each *version* of it is its own object, named with the manifest version that introduced it
-and a random tag (`runs_dim.v8.3f9a1c2e.parquet`), and the manifest maps the name to the object. An
+In the cache a run file keeps its plain name (`runs_dim.parquet`,
+`test_lines.shard=0.attempt=2.parquet`); in the store each *version* of it is its own object, named
+with the manifest version that introduced it and a random tag (`runs_dim.v8.3f9a1c2e.parquet`), and
+the manifest maps the name to the object. With the local store the keys are paths below the data
+directory (`<data_dir>/facts/repo=1/run=.../MANIFEST.json`). An
 object is never rewritten in place (why: *Consistency rules* below). Every key is checked (`storage.base.check_key`): the facts store's
 path rules (relative, normalised, no `..`, no backslash, no NUL), no control characters, no segment
 shaped like a local temporary file, at most 1,024 UTF-8 bytes. Unicode and spaces are kept as they
 are (a source file may be called `naïve file.py`); keys built from untrusted input (an uploaded
 source path, an upload label) pass the caller's own check first.
 
-## Facts over a bucket
+## Facts over the blob store
 
-The facts store keeps running on local files: DuckDB, pyarrow, the stamps, the hidden-temp atomic
-writes and every query are unchanged. Over a bucket the facts directory is a cache, and the bucket
-holds the truth through one object per run:
+The facts store runs on local files: DuckDB, pyarrow, the stamps, the hidden-temp atomic writes and
+every query read the cache. The store holds the truth through one object per run:
 
 ```json
 {
@@ -95,8 +96,7 @@ holds the truth through one object per run:
 ```
 
 `created_at` is `runs_dim.created_at`, copied in whenever `runs_dim` is published, so retention can
-age a run from the manifest alone. An entry without a `key` (a format-1 manifest, and every local
-`MANIFEST.json`) names an object called exactly like the file.
+age a run from the manifest alone.
 
 **Publish.** Writers of a run already serialise on the run lock (`FactsStore.run_lock`: ingest of a
 shard, a failure record, finalize). Taking the lock *pulls* the run (below), so a writer always starts
@@ -139,8 +139,7 @@ inode, the next lookup after a pull misses.
   uploaded stays in the run's prefix, unreferenced, until the run is deleted (`delete_run` removes
   the whole prefix); it costs space, never correctness.
 - A pull sees the manifest replaced under it only when a publish lands between its `GET` of the
-  manifest and its downloads: an object it was about to fetch is now deleted (superseded) or, in an
-  older format-1 run, rewritten. The reader discards the whole pull and reads the new manifest after
+  manifest and its downloads: an object it was about to fetch is now deleted (superseded). The reader discards the whole pull and reads the new manifest after
   0.25, 0.5 and 1 s. If three fresh manifests in a row still name an object that is missing or does
   not match, that is not a race (objects are never rewritten) but an object deleted or replaced
   behind coverset's back, and the reader raises `RunWriteConflict` (remembered for the sync interval
@@ -169,30 +168,36 @@ etag, appends the new paths, node ids and shape keys, and PUTs it with `If-Match
 (`If-None-Match: *` for the first one). A lost race (412, or 409 when two land together) starts the
 loop again from the newer version after a random back-off (at most 50 rounds). An id is used only
 after the PUT that assigned it succeeded, so two replicas never hand out the same id
-(`test_two_writers_never_hand_out_the_same_id`). The local `flock` is still held around the loop so
+(`test_two_writers_never_hand_out_the_same_id`). A `flock` in the cache is held around the loop so
 processes on one machine queue instead of racing. The cached copy is replaced only by a version
 with at least as many entries.
 
-**A bare path finds its bucket.** The ingest pool's worker processes get a picklable job with the
-facts directory and the cache knobs, not a settings object. `Settings.cache_overrides()` includes
-`COVERSET_BLOB_URL` and `COVERSET_CACHE_DIR` when a blob URL is set, the worker configures them
-(`facts.cache.configure`), and `FactsStore(path)` treats `path` as the bucket's cache exactly when it
-is `<COVERSET_CACHE_DIR>/facts` (`storage.facts_remote`). Every caller that has settings builds its
-store with `facts.store.facts_store(settings)`.
+**The local store emulates S3's conditions.** `LocalBlobStore` evaluates `If-Match` and
+`If-None-Match: *` under an exclusive `flock` on `<data_dir>/.blobstore.lock`, so the manifest and
+dictionary compare-and-swap is the same code on files as on a bucket. A published file is a hard
+link to its object when the cache and the data directory share a filesystem, so the two hold one
+copy of the bytes (a download is always a copy); its etag is the inode, size and mtime.
+
+**An ingest worker finds the store from its job.** The ingest pool's worker processes get a
+picklable job with the facts directory and the blob URL (`IngestJob.blob_url`,
+`storage.blob_url_of(settings)`: `COVERSET_BLOB_URL`, or `file://<data_dir>`), and build the same
+`FactsStore` the app has; `storage.store_from_url` keeps one store object per URL and process.
+Every caller that has settings builds its store with `facts.store.facts_store(settings)`.
 
 ## The other blobs
 
-| What | Local default | With a bucket |
-|---|---|---|
-| Production batches (`coverset flows import`) | `facts/repo=<id>/prod/...` | the same keys; a batch is immutable, its `prod_windows.parquet` is uploaded last and readers mirror only complete batches (downloaded whole into a hidden directory, then renamed) |
-| Uploaded sources | `<data_dir>/sources/<repo>/<sha>/<path>` | the objects; every upload is checked into a private staging directory first (the same allow-list and path rules), then each file is PUT with `If-None-Match: *` so the first upload of a path still wins across replicas; reads go through `<cache_dir>/sources/...` (0700 directories, 0600 files, no symlink followed): a miss is one `GET` bounded by the 4 MiB source limit from the response's size (no `HEAD`), and a path the bucket does not have is remembered as missing for `COVERSET_BLOB_SYNC_S`; a whole commit (the upload pass's function index) is one listing, whose sizes skip oversized files, then the `GET`s 16 at a time |
-| Upload archives | `<runs_dir>/<run_id>/upload/shard-<id>/` | that directory too (scratch), plus `uploads/<repo>/<sha>/<label>.tar.gz`; a pass that finds a shard's directory missing (a restart, another replica) restores it from the archive, under the same untrusted-bundle limits, and only when the archive's recorded sha256 is the one the shard row was registered with |
-| Git mirrors | `<data_dir>/mirrors/<repo>.git` | `<cache_dir>/mirrors/<repo>.git`; a run re-clones a missing one as always, and pages re-clone on demand (`orchestrator/repos.restore_mirror`: the source view waits for the clone, a PR page's diff waits up to 10 s (`web/loaders.diff_mirror`) and renders without it after that, other run pages start it in the background; one clone per repository and event loop at a time, a failure retried after 5 min). A diff analysed without the mirror, or one git failed on, is never cached (`web/pr_view`), so the next request shows the changed functions once the clone is done |
-| Run scratch (args files, pulled bundles) | `<runs_dir>/<run_id>/` | the same: ephemeral is fine |
+| What | Where |
+|---|---|
+| Production batches (`coverset flows import`) | `facts/repo=<id>/prod/...`; a batch is immutable, its `prod_windows.parquet` is uploaded last and readers mirror only complete batches (downloaded whole into a hidden directory, then renamed) |
+| Uploaded sources | `sources/<repo>/<sha>/<path>`; every upload is checked into a private staging directory first (the allow-list and path rules), then each file is PUT with `If-None-Match: *` so the first upload of a path wins across replicas too; reads go through `<cache_dir>/sources/...` (0700 directories, 0600 files, no symlink followed): a miss is one `GET` bounded by the 4 MiB source limit from the response's size (no `HEAD`), and a path the store does not have is remembered as missing for `COVERSET_BLOB_SYNC_S`; a whole commit (the upload pass's function index) is one listing, whose sizes skip oversized files, then the `GET`s 16 at a time |
+| Upload archives | unpacked into `<runs_dir>/<run_id>/upload/shard-<id>/` (scratch) and kept as `uploads/<repo>/<sha>/<label>.tar.gz`; a pass that finds a shard's directory missing (a restart, another replica) restores it from the archive, under the same untrusted-bundle limits, and only when the archive's recorded sha256 is the one the shard row was registered with |
+| Git mirrors | `<cache_dir>/mirrors/<repo>.git`; a run re-clones a missing one as always, and pages re-clone on demand (`orchestrator/repos.restore_mirror`: the source view waits for the clone, a PR page's diff waits up to 10 s (`web/loaders.diff_mirror`) and renders without it after that, other run pages start it in the background; one clone per repository and event loop at a time, a failure retried after 5 min). A diff analysed without the mirror, or one git failed on, is never cached (`web/pr_view`), so the next request shows the changed functions once the clone is done |
+| Run scratch (args files, pulled bundles) | `<runs_dir>/<run_id>/`: ephemeral |
 
-**What is ephemeral** with a bucket: the whole cache directory (facts copies, mirrors, fetched
-sources) and the runs directory. Losing them costs downloads (a run's files, a few hundred KB) and
-one clone per repository. What must survive is the bucket and the database.
+**What is ephemeral**: the whole cache directory (facts copies, mirrors, fetched sources) and the
+runs directory. Losing them costs downloads (a run's files, a few hundred KB) and one clone per
+repository. What must survive is the blob store (the bucket, or the data directory's `facts/`,
+`sources/` and `uploads/`) and the database.
 
 ## The cache
 
@@ -203,12 +208,13 @@ is held (an ingest, a pull), a run with changes not yet published (no `.sync.jso
 differ from it), a mirror whose fetch lock is held. It runs in `coverset gc` (which `serve` runs at
 start and every 24 h, on the replica holding the leader lease) and, because every replica has its
 own cache, in each process after its first download and then at most every 10 minutes. An evicted
-run is pulled again by its next reader.
+run is pulled again by its next reader. With the local store a published run's cached files are
+hard links to its objects: they count toward the bound, though evicting them frees no disk until
+the objects go too.
 
 ```sh
 uv run coverset cache status            # size by kind against the bound, entries in use
 uv run coverset cache clear --yes       # remove everything not in use (always safe)
-uv run coverset cache seed --from DIR   # publish a local data directory to the bucket
 ```
 
 ## Retention and purge
@@ -220,25 +226,8 @@ then the cached copy. The uploaded
 sources and the upload archives of a commit go once no remaining run of the repository has that head
 (`orchestrator/history.prune_upload_files`). `coverset flows prune` deletes a batch's objects, then its
 cached copy. `coverset repo purge` (`facts/gc.purge_repo_files`) deletes `facts/repo=<id>/`,
-`sources/<id>/` and `uploads/<id>/` from the bucket, and the cached copies, the mirror and the runs'
-scratch directories. With the local default every one of these does exactly what it did before.
-
-## Moving a laptop's data into a bucket
-
-`coverset db copy --to postgresql://...` moves the rows ([postgres.md](postgres.md)); then, with the
-hosted settings in the environment:
-
-```sh
-uv run coverset cache seed --from /path/to/old/data
-```
-
-A plain `aws s3 sync` of the facts directory is not enough: a run is visible only through a manifest
-listing *S3* etags, and the local `MANIFEST.json` files carry local ones. `seed` copies each run into
-this host's cache (keeping mtimes) and publishes it through the store's own path, creates each
-dictionary with `If-None-Match: *` (a bucket that already has a different dictionary for a repository
-id is reported and that repository's runs are skipped: ids cannot be merged), and uploads production
-batches, uploaded sources and pending upload archives. Running it twice skips what is there.
-Mirrors are not copied; they are cloned on first use.
+`sources/<id>/` and `uploads/<id>/` from the store, and the cached copies, the mirror and the runs'
+scratch directories.
 
 ## Bucket policy and permissions
 
@@ -281,48 +270,51 @@ whatever the store does), or put the instance on a store that supports them.
 ## Measured
 
 On the local demo (seeded repository, six baselines, both PRs; 20 to 30 small Parquet files per
-run), on an Apple M4 Max laptop, with a harness that seeds the demo once per backend through a
-process ingest pool and then drives the app's test client (2026-10-14), three backends:
-the local default, moto running in the same process (it shares the GIL with the app, so it is the
-slow end), and the compose MinIO on loopback (a real server over HTTP). "Cold" is a page's first
-request with every in-process cache emptied and, for the object stores, an empty facts cache (a new
-replica: the page pulls what it reads); "warm" is the p50 and p95 of 30 requests after 3 more.
+run), on an Apple M4 Max laptop, with a harness that seeds the demo once per bucket through a
+process ingest pool and then drives the app's test client (2026-10-14), two buckets: moto running in
+the same process (it shares the GIL with the app, so it is the slow end), and the compose MinIO on
+loopback (a real server over HTTP). "Cold" is a page's first request with every in-process cache
+emptied and an empty facts cache (a new replica: the page pulls what it reads); "warm" is the p50
+and p95 of 30 requests after 3 more.
 
-| Page | local cold / p50 / p95 (ms) | moto cold / p50 / p95 | MinIO cold / p50 / p95 |
-|---|---|---|---|
-| dashboard `/` | 71 / 7.2 / 7.8 | 418 / 8.1 / 9.0 | 197 / 6.9 / 8.6 |
-| repository | 93 / 8.9 / 10.0 | 419 / 8.3 / 9.4 | 217 / 7.7 / 8.5 |
-| PR #2 | 145 / 12.1 / 13.2 | 254 / 13.5 / 15.1 | 174 / 11.3 / 12.0 |
-| source view | 56 / 4.2 / 4.9 | 248 / 3.4 / 4.1 | 155 / 2.9 / 3.2 |
-| economy | 32 / 5.1 / 5.9 | 217 / 6.0 / 6.6 | 103 / 4.4 / 4.8 |
-| map | 24 / 4.3 / 4.8 | 121 / 4.8 / 5.2 | 62 / 3.6 / 3.8 |
-| tests | 13 / 6.5 / 7.0 | 15 / 7.0 / 7.8 | 12 / 5.8 / 6.1 |
+| Page | moto cold / p50 / p95 (ms) | MinIO cold / p50 / p95 |
+|---|---|---|
+| dashboard `/` | 418 / 8.1 / 9.0 | 197 / 6.9 / 8.6 |
+| repository | 419 / 8.3 / 9.4 | 217 / 7.7 / 8.5 |
+| PR #2 | 254 / 13.5 / 15.1 | 174 / 11.3 / 12.0 |
+| source view | 248 / 3.4 / 4.1 | 155 / 2.9 / 3.2 |
+| economy | 217 / 6.0 / 6.6 | 103 / 4.4 / 4.8 |
+| map | 121 / 4.8 / 5.2 | 62 / 3.6 / 3.8 |
+| tests | 15 / 7.0 / 7.8 | 12 / 5.8 / 6.1 |
 
-Warm pages cost the same on every backend: within the sync interval a run's check is one `stat`
-(a `stamp` of one run: 67 µs local, 66 µs over a bucket; with `COVERSET_BLOB_SYNC_S=0` it adds a
-`HEAD`, 1.7 ms on loopback). The cold hit pays the downloads: the dashboard and the repository page
-read every baseline of the trend (all runs, pulled 16 files at a time), a PR or source page one or two
-runs. Against AWS S3 in-region add a few tens of milliseconds per round trip to the cold numbers;
-the warm ones do not change.
+Within the sync interval a run's check is one `stat` of its `.sync.json`; with
+`COVERSET_BLOB_SYNC_S=0` it adds a `HEAD`, 1.7 ms on loopback. The cold hit pays the downloads: the
+dashboard and the repository page read every baseline of the trend (all runs, pulled 16 files at a
+time), a PR or source page one or two runs. Against AWS S3 in-region add a few tens of milliseconds
+per round trip to the cold numbers; the warm ones do not change.
 
-| Ingest of the demo's real bundle (one shard; median of 5) | local | moto | MinIO |
-|---|---|---|---|
-| `ingest_shard` (publish included) | 11 ms | 48 ms | 27 ms |
-| `finalize_run` (publish included) | 52 ms | 94 ms | 70 ms |
-| first pull of the run on another replica | — | 45 ms | 19 ms |
-| the whole demo (`run_demo`, tests executed) | 18.4 s | 19.3 s | 19.3 s |
+| Ingest of the demo's real bundle (one shard; median of 5) | moto | MinIO |
+|---|---|---|
+| `ingest_shard` (publish included) | 48 ms | 27 ms |
+| `finalize_run` (publish included) | 94 ms | 70 ms |
+| first pull of the run on another replica | 45 ms | 19 ms |
+| the whole demo (`run_demo`, tests executed) | 19.3 s | 19.3 s |
 
 The whole demo is dominated by running the tests; the object store adds well under a second to it.
 
-What the local default pays for all this: one refresh of the run's local `MANIFEST.json` when a
-run lock is released (0.22 ms for a 21-file run when the files changed, 0.09 ms to find they did
-not, against 11 ms for the smallest ingest), and an attribute test on the paths that branch.
+**The local store** (files under the data directory, the default), measured on the same laptop
+(2026-10-14, the minimal fixture bundle of `tests/facts`, 9 runs, medians): `ingest_shard` 14 ms
+and `finalize_run` 57 ms, publish included (a publish hard-links each changed file into the store,
+then writes the manifest under the store's lock); a run's `stamp` within the sync interval 85 µs,
+160 µs when every lookup checks the manifest (`COVERSET_BLOB_SYNC_S=0`, one `lstat` of the object);
+the first summary query of a run 29 ms. Nine runs take 1.2 MB of disk, cache and store together
+(the cache's files share their inodes with the objects).
 
 ## Testing against a real store
 
 Unset, the suite's object-store tests use moto in-process (`coverset.storage.testing`: one
 `ThreadedMotoServer` per xdist worker on a free port, with `PutObject` serialised so moto's
-conditional writes are atomic like a real store's) and everything else uses local files.
+conditional writes are atomic like a real store's) and everything else uses the local store.
 `COVERSET_TEST_BLOB_URL` moves the whole suite onto a real store:
 
 * the object-store tests (`tests/storage`, the `s3` half of `tests/facts`, the hosted e2e) use it
@@ -330,19 +322,14 @@ conditional writes are atomic like a real store's) and everything else uses loca
 * the `settings` fixture (`tests/conftest.py`) gives every app, CLI and orchestrator test a fresh
   key prefix of it as `blob_url`, unless the module brings its own `data_dir` or `blob_url`;
 * the page and report tests' shared demo (`tests/web/conftest.py`, `tests/report/conftest.py`) is
-  seeded into a prefix of it, so every page test reads its facts through the cache and the bucket;
-* tests marked `local_files_only` (they plant or age facts directly in the local layout, such as
-  an empty run directory aged by its mtime) are skipped; their bucket counterparts are in
-  `tests/facts`.
+  seeded into a prefix of it, so every page test reads its facts through the cache and the bucket.
 
 ```sh
 docker compose -f deploy/dev-compose.yml up -d --wait
-COVERSET_TEST_DATABASE_URL=postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/coverset \
 COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1' \
 AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin \
   uv run pytest -q -n 6 -p no:cacheprovider
 ```
 
 Every test works under its own key prefix and deletes it afterwards (the bucket held nothing from
-the suite after a full run). Tests that read or doctor a fixture's database directly go through
-`coverset.db.testing.run_sql`, which works on either backend.
+the suite after a full run).

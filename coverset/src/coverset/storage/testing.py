@@ -25,11 +25,22 @@ import functools
 import os
 import threading
 import uuid
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from coverset.storage.s3 import S3BlobStore, parse_blob_url
 
-__all__ = ["TEST_BLOB_URL_ENV", "fresh_blob_url", "moto_blob_url", "test_blob_url"]
+if TYPE_CHECKING:
+    from coverset.facts.store import FactsStore
+
+__all__ = [
+    "TEST_BLOB_URL_ENV",
+    "fresh_blob_url",
+    "local_blob_url",
+    "local_facts_store",
+    "moto_blob_url",
+    "test_blob_url",
+]
 
 TEST_BLOB_URL_ENV = "COVERSET_TEST_BLOB_URL"
 _BUCKET = "coverset-test"
@@ -104,3 +115,20 @@ def fresh_blob_url(label: str = "t") -> str:
         f"{name}={value}" for name in ("endpoint_url", "region") if (value := parsed[name]) is not None
     )
     return f"s3://{parsed['bucket']}/{prefix}" + (f"?{query}" if query else "")
+
+
+def local_blob_url(facts_dir: Path) -> str:
+    """The ``file://`` URL of the blob store :func:`local_facts_store` puts beside ``facts_dir`` (an
+    ``IngestJob`` for that store carries it)."""
+    facts_dir = Path(facts_dir)
+    return facts_dir.with_name(f"{facts_dir.name}.blobs").resolve().as_uri()
+
+
+def local_facts_store(facts_dir: Path) -> FactsStore:
+    """A facts store whose cache is ``facts_dir`` and whose blob store is files in the sibling
+    directory ``<facts_dir>.blobs``: what ``Settings`` gives a data directory, for tests that work on
+    a bare directory."""
+    from coverset.facts.store import FactsStore
+    from coverset.storage import store_from_url
+
+    return FactsStore(Path(facts_dir), store_from_url(local_blob_url(facts_dir)))

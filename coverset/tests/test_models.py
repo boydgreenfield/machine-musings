@@ -1,9 +1,4 @@
-"""Migrations build the full schema; rows round-trip; constraints and pragmas are enforced.
-
-Runs on the suite's backend: SQLite files by default, Postgres under ``make test-pg``
-(``COVERSET_TEST_DATABASE_URL``); ``sqlite_only`` tests check SQLite mechanics (pragmas, batch
-table rebuilds, ``PRAGMA foreign_key_check``) that Postgres does not have.
-"""
+"""Migrations build the full schema; rows round-trip; constraints are enforced."""
 
 from __future__ import annotations
 
@@ -16,7 +11,6 @@ import pytest
 import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from alembic.operations import Operations
 from sqlalchemy import Connection, inspect, select, text
 from sqlalchemy.exc import IntegrityError, StatementError
 
@@ -31,7 +25,7 @@ from coverset.db.models import (
     TestResult,
     WebhookDelivery,
 )
-from coverset.db.session import Database, MigrationError, init_db, migrate, run_schema_change
+from coverset.db.session import Database, init_db, migrate, run_schema_change
 from coverset.db.types import new_id
 
 
@@ -66,7 +60,7 @@ async def test_migrations_match_models(db: Database) -> None:
     """The Alembic revisions and the models must not drift (regenerate the revision if this fails)."""
 
     def diff(sync: Connection) -> list[object]:
-        context = MigrationContext.configure(sync, opts={"compare_type": True, "render_as_batch": True})
+        context = MigrationContext.configure(sync, opts={"compare_type": True})
         return compare_metadata(context, Base.metadata)
 
     async with db.engine.connect() as conn:
@@ -78,16 +72,6 @@ async def test_migrate_is_idempotent(db: Database) -> None:
     async with db.engine.connect() as conn:
         versions = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
     assert len(versions) == 1
-
-
-@pytest.mark.sqlite_only
-async def test_sqlite_pragmas(db: Database) -> None:
-    async with db.engine.connect() as conn:
-        pragmas = {
-            name: (await conn.execute(text(f"PRAGMA {name}"))).scalar()
-            for name in ("journal_mode", "synchronous", "busy_timeout", "foreign_keys")
-        }
-    assert pragmas == {"journal_mode": "wal", "synchronous": 1, "busy_timeout": 5000, "foreign_keys": 1}
 
 
 async def test_repo_run_test_result_event_round_trip(db: Database) -> None:
@@ -233,8 +217,8 @@ async def test_foreign_keys_enforced(db: Database) -> None:
 
 
 async def test_datetimes_keep_microseconds_and_compare_in_sql(db: Database) -> None:
-    """``UTCDateTime`` on both backends: SQLite text with microseconds, Postgres ``timestamptz``
-    through asyncpg (aware in, aware out); comparisons in SQL see the same instants."""
+    """``UTCDateTime`` is ``timestamptz`` through asyncpg (aware in, aware out, microseconds kept);
+    comparisons in SQL see the same instants."""
     repo = await make_repo(db)
     instants = [
         datetime(2026, 10, 10, 12, 0, 0, 123456, tzinfo=UTC) + timedelta(microseconds=n) for n in range(3)
@@ -252,15 +236,12 @@ async def test_datetimes_keep_microseconds_and_compare_in_sql(db: Database) -> N
     assert later == [1, 2]
     async with db.engine.connect() as conn:
         stored = (await conn.execute(text("SELECT at FROM run_events WHERE seq = 0"))).scalar()
-    if db.engine.dialect.name == "postgresql":
-        assert isinstance(stored, datetime) and stored.utcoffset() == timedelta(0)
-    else:
-        assert stored == "2026-10-10 12:00:00.123456"
+    assert stored == instants[0] and stored.utcoffset() == timedelta(0)
 
 
 async def test_integer_ids_accept_any_int64(db: Database) -> None:
-    """Ids are ``BIGINT`` on Postgres (``BigIntId``): the largest id a URL may carry is a miss,
-    not an int4 overflow; SQLite's ``INTEGER`` is 64-bit anyway."""
+    """Ids are ``BIGINT`` (``BigIntId``): the largest id a URL may carry is a miss, not an int4
+    overflow."""
     async with db.session() as session:
         assert await session.get(Repo, 2**63 - 1) is None
         assert await session.get(TestCase, 2**31) is None
@@ -301,21 +282,6 @@ async def test_json_columns_track_in_place_changes(db: Database) -> None:
         assert reloaded_commit.parent_shas == ["0" * 40]
 
 
-@pytest.mark.sqlite_only
-async def test_batch_migration_on_parent_keeps_child_rows(db: Database) -> None:
-    """A batch migration recreates the parent table; with foreign keys on, that would cascade."""
-    run = await _run(db, await make_repo(db))
-
-    def recreate_repos(sync: Connection) -> None:
-        operations = Operations(MigrationContext.configure(sync))
-        with operations.batch_alter_table("repos", recreate="always") as batch:
-            batch.add_column(sa.Column("probe", sa.Integer))
-
-    await run_schema_change(db.engine, recreate_repos)
-    async with db.session() as session:
-        assert await session.get(Run, run.id) is not None
-
-
 async def test_failed_schema_change_rolls_back_ddl(db: Database) -> None:
     def half_done(sync: Connection) -> None:
         sync.exec_driver_sql("CREATE TABLE probe_t (id INTEGER PRIMARY KEY)")
@@ -328,39 +294,9 @@ async def test_failed_schema_change_rolls_back_ddl(db: Database) -> None:
     assert "probe_t" not in tables
 
 
-@pytest.mark.sqlite_only
-async def test_schema_change_leaving_orphans_is_rolled_back(db: Database) -> None:
-    def orphan(sync: Connection) -> None:
-        sync.exec_driver_sql(
-            'INSERT INTO runs (id, repo_id, head_sha, "trigger", status, trusted, executor, shard_count,'
-            " coverage_complete, cancelled_tests, cost_estimate, timeline, created_at)"
-            " VALUES ('run_orphan', 999, 'a', 'manual', 'queued', 1, 'local', 0, 0, 0, 0, '{}',"
-            " '2026-10-10 12:00:00.000000')"
-        )
-
-    with pytest.raises(MigrationError, match="runs"):
-        await run_schema_change(db.engine, orphan)
-    async with db.session() as session:
-        assert await session.get(Run, "run_orphan") is None
-
-
-async def test_migrate_restores_connection_state() -> None:
-    """In-memory SQLite shares one connection, so the migration must hand it back as it found it."""
-    database = Database.from_url("sqlite+aiosqlite:///:memory:")
-    try:
-        await migrate(database.engine)
-        async with database.engine.connect() as conn:
-            assert (await conn.execute(text("PRAGMA foreign_keys"))).scalar() == 1
-            raw = await conn.get_raw_connection()
-            assert raw.dbapi_connection is not None
-            assert raw.dbapi_connection.isolation_level == ""
-        await _expect_integrity_error(database, Run(repo_id=999, head_sha="e" * 40, trigger="manual"))
-    finally:
-        await database.engine.dispose()
-
-
 def test_every_foreign_key_column_leads_an_index() -> None:
-    """SQLite looks child rows up by FK column on every parent delete (run retention, repo purge)."""
+    """Every parent delete (run retention, repo purge) looks child rows up by FK column, and Postgres
+    does not index a foreign key by itself."""
     missing = []
     for table in Base.metadata.sorted_tables:
         leading = {index.columns[0].name for index in table.indexes}

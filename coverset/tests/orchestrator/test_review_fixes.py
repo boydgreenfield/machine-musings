@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -148,10 +147,7 @@ def test_collection_errors_are_validated_and_redacted() -> None:
 # -- C2: events queued during a transaction never get skipped ----------------------------------------
 
 
-async def _sink_with_run(tmp_path: Path) -> tuple[Database, EventSink, str]:
-    settings = Settings.for_tests(
-        data_dir=tmp_path / "data", database_url=f"sqlite+aiosqlite:///{tmp_path / 'sink.db'}"
-    )
+async def _sink_with_run(settings: Settings) -> tuple[Database, EventSink, str]:
     await init_db(settings)
     db = Database.from_url(settings.database_url)
     now = settings.now()
@@ -187,8 +183,8 @@ async def _sink_with_run(tmp_path: Path) -> tuple[Database, EventSink, str]:
     return db, EventSink(db, run_id, lock=asyncio.Lock(), now=settings.now, interval_s=10.0), run_id
 
 
-async def test_events_queued_during_a_transaction_commit_with_it(tmp_path: Path) -> None:
-    db, sink, run_id = await _sink_with_run(tmp_path)
+async def test_events_queued_during_a_transaction_commit_with_it(settings: Settings) -> None:
+    db, sink, run_id = await _sink_with_run(settings)
     try:
         sink.event("status", {"status": "running"})
         await sink.flush()
@@ -218,8 +214,8 @@ async def test_events_queued_during_a_transaction_commit_with_it(tmp_path: Path)
         await db.engine.dispose()
 
 
-async def test_a_failed_transaction_requeues_both_batches_in_order(tmp_path: Path) -> None:
-    db, sink, run_id = await _sink_with_run(tmp_path)
+async def test_a_failed_transaction_requeues_both_batches_in_order(settings: Settings) -> None:
+    db, sink, run_id = await _sink_with_run(settings)
     try:
         sink.event("log", {"text": "one"})
         attempts = 0

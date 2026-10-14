@@ -20,6 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from coverset.cli import cli
+from coverset.config import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PROJECT = ROOT / "packages" / "pytest-coverset" / "tests" / "fixture_project"
@@ -253,7 +254,9 @@ def test_tax_without_the_base_sources_does_not_count_statements(projects: Projec
     assert tax["duplicate_count"] == 3  # the flows are still compared
 
 
-def test_usage_errors(projects: Projects, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_usage_errors(
+    projects: Projects, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
     out = str(projects.head / "out")
     assert CliRunner().invoke(cli, ["tests", "economy"]).exit_code == 2
     assert CliRunner().invoke(cli, ["tests", "economy", out, "--run", "r"]).exit_code == 2
@@ -276,6 +279,6 @@ def test_usage_errors(projects: Projects, tmp_path: Path, monkeypatch: pytest.Mo
     )
     assert bad_ref.exit_code == 1 and "is not a commit" in bad_ref.output
     monkeypatch.setenv("COVERSET_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("COVERSET_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'c.db'}")
+    monkeypatch.setenv("COVERSET_DATABASE_URL", settings.database_url)
     missing = CliRunner().invoke(cli, ["tests", "economy", "--run", "run_nope"])
     assert missing.exit_code == 1 and "no run" in missing.output

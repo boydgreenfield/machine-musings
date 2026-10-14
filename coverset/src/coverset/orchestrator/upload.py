@@ -13,8 +13,9 @@ archive's sha256 are kept in ``shards.worker_ref`` (``upload:<sha256 prefix>:<la
 uploads idempotent on ``(repository, commit, label, sha256)``: a replay of the same archive is
 answered with the existing run and changes nothing; a different archive under the same label
 replaces that shard (a re-run of the CI job), and a new label adds a shard. The archive's content
-is kept under ``<runs_dir>/<run_id>/upload/shard-<id>/`` for the processing pass (and removed with
-the run by retention). An upload run is never executed, so the dispatcher's boot takeover leaves it
+is unpacked under ``<runs_dir>/<run_id>/upload/shard-<id>/`` for the processing pass and packed into
+the blob store (:mod:`coverset.storage.uploads`), from which any replica's pass restores a shard
+directory it lacks (both are removed with the run by retention). An upload run is never executed, so the dispatcher's boot takeover leaves it
 alone (``orchestrator/queue.py``): a run waiting for its matrix legs when the server restarts stays
 ``running``, and the late legs join it (:func:`_reusable_run`). At start-up ``serve`` schedules one
 pass for every upload run still ``running`` (:meth:`UploadWorker.resume`), so a pass that the restart
@@ -133,7 +134,7 @@ from coverset.orchestrator.verdict import (
     persist_verdict,
     post_summary,
 )
-from coverset.storage import remote_store
+from coverset.storage import blob_url_of, from_settings
 from coverset.storage.uploads import archive_upload, restore_upload
 from coverset_model.catalogue import Catalogue as TypeCatalogue
 
@@ -387,7 +388,7 @@ async def register_upload(
     digest = meta.archive_sha256[:SHA256_PREFIX_CHARS]
 
     async def work(session: AsyncSession) -> tuple[Registration, Path | None]:
-        # The caller's lock is per process; on Postgres, replicas serialise here too (no-op on SQLite).
+        # The caller's lock is per process; replicas serialise here too.
         await transaction_lock(session, f"upload:{meta.repo_id}:{meta.head_sha}")
         run = await _reusable_run(session, meta)
         created = run is None
@@ -462,8 +463,10 @@ async def register_upload(
     registration, target = await run_transaction(db, work)
     if target is not None:
         await asyncio.to_thread(_move_into_place, unpacked.root, target, meta)
-        if (blobs := remote_store(settings)) is not None:  # any replica's pass can restore it from there
-            await asyncio.to_thread(archive_upload, blobs, meta.repo_id, meta.head_sha, meta.label, target)
+        # Any replica's pass (or this one's after a restart) restores the shard from there.
+        await asyncio.to_thread(
+            archive_upload, from_settings(settings), meta.repo_id, meta.head_sha, meta.label, target
+        )
     return registration
 
 
@@ -598,7 +601,7 @@ async def _head(ctx: OrchestratorContext, run: Run, repo: Repo, shard_dirs: Sequ
             return _Head(checkout, paths, mirror, True, "mirror", owns_checkout=True)
         except (RepoError, GitDiffError, OSError) as exc:
             log.info("upload run %s: head %s not in the mirror (%s)", run.id, run.head_sha[:12], exc)
-    uploaded = source_store.source_store(settings)  # local files, or the object store via its cache
+    uploaded = source_store.source_store(settings)  # the blob store, through its cache
     if await asyncio.to_thread(uploaded.has, repo.id, run.head_sha):
         stored = await asyncio.to_thread(uploaded.checkout, repo.id, run.head_sha)
         return _Head(stored, None, mirror, False, "sources")
@@ -608,11 +611,9 @@ async def _head(ctx: OrchestratorContext, run: Run, repo: Repo, shard_dirs: Sequ
 
 
 def _restore_shards(settings: Settings, run: Run, shards: Sequence[Shard], dirs: Mapping[int, Path]) -> None:
-    """Restore each shard whose directory this replica lacks from its archive in the object store
-    (:mod:`coverset.storage.uploads`; the runs directory is scratch there). A no-op locally."""
-    blobs = remote_store(settings)
-    if blobs is None:
-        return
+    """Restore each shard whose directory this replica lacks from its archive in the blob store
+    (:mod:`coverset.storage.uploads`; the runs directory is scratch)."""
+    blobs = from_settings(settings)
     for shard in shards:
         parsed = parse_worker_ref(shard.worker_ref)
         if parsed is None or dirs[shard.shard_id].is_dir():
@@ -918,7 +919,9 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
     if repo is None or not shards:
         return
     dirs = {s.shard_id: shard_dir(settings, run_id, s.shard_id) for s in shards}
-    await asyncio.to_thread(_restore_shards, settings, run, shards, dirs)  # object store: after a restart
+    await asyncio.to_thread(
+        _restore_shards, settings, run, shards, dirs
+    )  # after a restart, or another replica's
     adapter = PythonAdapter()
     head = await _head(ctx, run, repo, [d for d in dirs.values() if d.is_dir()])
     try:
@@ -1006,6 +1009,7 @@ async def _process(ctx: OrchestratorContext, run_id: str) -> None:
             jobs.append(
                 IngestJob(
                     facts_dir=str(ctx.store.root),
+                    blob_url=blob_url_of(settings),
                     ctx=rctx,
                     shard_id=shard.shard_id,
                     tarball=str(tarball),

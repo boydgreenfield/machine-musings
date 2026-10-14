@@ -20,11 +20,11 @@ import pytest
 
 from coverset.facts import queries
 from coverset.facts.ingest import RunContext, finalize_run
-from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang import read_any_bundle
 from coverset.lang.neutral import NeutralAdapter
 from coverset.orchestrator.bundles import IngestJob, ingest_one, job_regions
+from coverset.storage.testing import local_blob_url, local_facts_store
 from coverset_model.catalogue import NEVER_EXERCISED, function_catalogue_from_types
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "bundles" / "neutral-ts"
@@ -53,6 +53,7 @@ def ingest_ts_fixture(facts: Path) -> dict:  # type: ignore[type-arg]
     )
     job = IngestJob(
         facts_dir=str(facts),
+        blob_url=local_blob_url(facts),
         ctx=ctx,
         shard_id=0,
         tarball=str(FIXTURE / "bundle.tar.gz"),
@@ -67,7 +68,7 @@ def ingest_ts_fixture(facts: Path) -> dict:  # type: ignore[type-arg]
         outcome = ingest_one(job)
         assert outcome.ok, outcome.error
         bundle = read_any_bundle(FIXTURE / "bundle.tar.gz", head_paths=HEAD)
-        store = FactsStore(facts)
+        store = local_facts_store(facts)
         result = finalize_run(
             store, ctx, expected_shards=1, catalogue=NeutralAdapter.from_bundle(bundle).shape_catalogue()
         )
@@ -190,6 +191,7 @@ def _job(facts: Path, **overrides: object) -> IngestJob:
     )
     fields: dict = {  # type: ignore[type-arg]
         "facts_dir": str(facts),
+        "blob_url": local_blob_url(facts),
         "ctx": ctx,
         "shard_id": 0,
         "tarball": str(FIXTURE / "bundle.tar.gz"),
@@ -207,7 +209,7 @@ def test_a_python_job_takes_nothing_language_specific_from_the_bundle(tmp_path: 
     # The manifest says typescript and functions.jsonl ships regions and types; the job is Python.
     outcome = ingest_one(_job(tmp_path, language="python"))
     assert outcome.ok, outcome.error
-    store = FactsStore(tmp_path)
+    store = local_facts_store(tmp_path)
     assert store.read_table(REPO, "ts-run-2", "functions").num_rows == 0
     bundle = read_any_bundle(FIXTURE / "bundle.tar.gz", head_paths=HEAD)
     rate = _region({"bundle": bundle}, "rateFor")

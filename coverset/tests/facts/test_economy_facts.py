@@ -53,6 +53,7 @@ from coverset.facts.economy import (
 from coverset.facts.ingest import finalize_run, ingest_shard
 from coverset.facts.store import FactsStore
 from coverset.lang.base import FunctionRegion, NeutralBundle
+from coverset.storage.testing import local_facts_store
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -369,7 +370,7 @@ def test_the_mirror_beside_the_store_is_used(
     mirror: tuple[Path, str, str], bundle: NeutralBundle, functions: list[FunctionRegion]
 ) -> None:
     data, _, head = mirror
-    store = FactsStore(data / "facts")
+    store = local_facts_store(data / "facts")
     assert mirror_history(store, 1) is not None and mirror_history(store, 2) is None
     regions = index_functions(MODULE_PATH, CALC_SOURCE)
     ctx = make_ctx(head_sha=head)

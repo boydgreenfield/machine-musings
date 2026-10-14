@@ -2,9 +2,9 @@
 
 The ``demo`` fixture seeds the demo repository and runs its history and both PRs with the
 LocalExecutor (about 20 s once the cached virtualenv exists), recording forge calls with the fake
-forge. It uses the suite's backends: a SQLite file and local facts by default, or a Postgres
-database and an object-store prefix when ``COVERSET_TEST_DATABASE_URL`` / ``COVERSET_TEST_BLOB_URL``
-are set, so every page test also runs on the hosted shape. Module tests then point the shared
+forge. It uses the suite's backends: a Postgres database of its own on the test server, and local
+blobs by default or an object-store prefix when ``COVERSET_TEST_BLOB_URL`` is set, so every page
+test also runs on the hosted shape. Module tests then point the shared
 ``settings`` fixture at that state through ``settings_overrides`` (``Demo.overrides``); tests that
 change state (quarantine) restore it.
 """
@@ -25,11 +25,10 @@ from coverset.db.testing import PostgresTestDatabases, run_sql
 
 @pytest.fixture(scope="session")
 def demo(
-    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases | None
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases
 ) -> Iterator[Demo]:
-    """Run the local demo once and describe the result (on the suite's backends: a SQLite file and
-    local facts by default, a Postgres database and an object-store prefix when
-    ``COVERSET_TEST_DATABASE_URL`` / ``COVERSET_TEST_BLOB_URL`` are set)."""
+    """Run the local demo once and describe the result (on the suite's backends, see the module
+    docstring)."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
     from coverset.db.session import init_db
@@ -43,9 +42,7 @@ def demo(
 
     root = tmp_path_factory.mktemp("web-demo")
     data_dir = root / "data"
-    db_url = f"sqlite+aiosqlite:///{root / 'coverset.db'}"
-    if postgres_databases is not None:
-        db_url = postgres_databases.create()  # dropped with the worker's other databases
+    db_url = postgres_databases.create()  # dropped with the worker's other databases
     blob_url = fresh_blob_url("web-demo") if test_blob_url() is not None else ""
     settings = Settings.for_tests(
         data_dir=data_dir,

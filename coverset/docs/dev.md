@@ -21,14 +21,31 @@ that machine.
 
 ## Setup
 
+Start with Postgres: coverset keeps its control plane there, and the test suite needs it too. On a
+Mac, Homebrew's server is all it takes; it lets the current user in without a password, which is
+what coverset's default `COVERSET_DATABASE_URL` (`postgresql+asyncpg://localhost/coverset`)
+expects, and coverset creates the `coverset` database itself on first use:
+
+```sh
+brew install postgresql@14 && brew services start postgresql@14
+```
+
+Any Postgres 14 or newer on `localhost:5432` that accepts you works the same way; without one,
+`make services` starts Postgres 17 in Docker on 55432 (then set
+`COVERSET_DATABASE_URL=postgresql://coverset:coverset@127.0.0.1:55432/coverset`, and
+`COVERSET_TEST_DATABASE_URL=postgresql://coverset:coverset@127.0.0.1:55432/postgres` for the tests).
+A command that cannot reach the server stops with exit status 2 and says which of the two to start
+([postgres.md](postgres.md#the-database-coverset-uses)).
+
 | Tool | For | Check |
 |---|---|---|
+| Postgres 14+ | the control-plane database and the test suite | `psql -d postgres -c 'select version()'` |
 | [uv](https://docs.astral.sh/uv/) | everything Python | `uv sync --all-groups` installs the project, the workspace packages (`pytest-coverset`, `coverset-model`, `coverset-probe`) and the dev group (pytest, pytest-xdist, hypothesis, ruff, playwright) into `.venv` |
 | Python 3.13 | the control plane (`requires-python = ">=3.13"`) | uv picks or downloads it |
 | Python 3.12 | the pytest plugin's floor (`requires-python = ">=3.12"`) | `make test-plugin-312` runs its tests on 3.12 |
 | git | mirrors, the demo repository | |
 | node 20+ and npm | the Vitest reporter (`packages/coverset-vitest`) and its end-to-end test | `make test-vitest` |
-| docker | optional: `make dev-hosted` (Postgres + MinIO from `deploy/dev-compose.yml`), `deploy/compose.yml`, the Dockerfile | `docker compose version` (2.20+) |
+| docker | optional: `make dev-hosted` and `make test-pg` (Postgres 17 + MinIO from `deploy/dev-compose.yml`), `deploy/compose.yml`, the Dockerfile | `docker compose version` (2.20+) |
 | Modal CLI and a token | optional: `COVERSET_EXECUTOR=modal` and the `modal` tests | |
 | cargo (plus `llvm-tools-preview`) | optional: the Rust adapter and its end-to-end test | |
 
@@ -42,13 +59,14 @@ make dev            # or: uv run coverset dev
 
 `coverset dev` (`make dev`) is the development server:
 
-1. When the data directory holds no repository, it seeds the demo first: the ledger repository,
+1. It creates the database when the server has none of its name, migrates it, and says so.
+2. When the database holds no repository, it seeds the demo first: the ledger repository,
    six `main` commits and two PRs, run with the local executor, and the `pr_opened` webhook
    replayed. It runs in a separate process, so nothing of it (the local executor's worker pool)
-   stays behind in the dev server. That took 17.2 to 17.5 s on an empty directory, once.
+   stays behind in the dev server. That took 19.1 s on an empty directory, once.
    `--no-seed` skips it.
-2. It serves on `127.0.0.1:8000` (`--bind` to change it; `--open` opens the browser).
-3. It watches `src/coverset` and `packages/*/src`, re-reading the modification times of every
+3. It serves on `127.0.0.1:8000` (`--bind` to change it; `--open` opens the browser).
+4. It watches `src/coverset` and `packages/*/src`, re-reading the modification times of every
    `.py`, `.html`, `.css` and `.js` file every 0.5 s. Caches, virtualenvs, `node_modules` and
    hidden entries are skipped. A change counts once nothing else has changed for 300 ms, so a
    save-all or a branch switch restarts once.
@@ -56,9 +74,10 @@ make dev            # or: uv run coverset dev
 ```
 $ COVERSET_DATA_DIR=/tmp/cs uv run coverset dev
 coverset dev: data directory /tmp/cs
+coverset dev: database postgresql+asyncpg://localhost/coverset (10 migration(s) applied)
 coverset dev: no repository yet, seeding the demo (about 25 s, once)
 ...
-coverset dev: demo seeded in 17.5 s
+coverset dev: demo seeded in 19.1 s
 coverset dev: watching src/coverset, packages/coverset-model/src, packages/coverset-probe/src, packages/coverset-vitest/src, packages/pytest-coverset/src (every 0.5 s; templates and static files reload without a restart)
 coverset dev: serving on http://127.0.0.1:8000 (ready in 0.6 s; Ctrl-C to stop)
 coverset dev: src/coverset/web/pages.py changed; restarting the server
@@ -89,68 +108,71 @@ notices within a second and stops too.
 run.
 
 The server's own output is the log: one line per request (`hypercorn.access`), the gc pass at
-startup, warnings. Alembic's "Context impl SQLiteImpl" lines are gone from every command. Set
-`COVERSET_LOG_LEVEL=DEBUG` to get them back. `coverset init-db` prints one line per migration it
-applies:
+startup, warnings. Alembic's "Context impl PostgresqlImpl" lines are gone from every command. Set
+`COVERSET_LOG_LEVEL=DEBUG` to get them back. `coverset init-db` creates the database when it is
+missing and prints one line per migration it applies:
 
 ```
 $ uv run coverset init-db
 applied migration 0001 initial
 ...
-applied migration 0008 accounts, api tokens, repo access, audit log, scoped settings
-database ready (8 migration(s) applied): sqlite+aiosqlite:////tmp/cs/coverset.db
+applied migration 0010 an index on run_events.at for the retention gc
+database ready (10 migration(s) applied): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 $ uv run coverset init-db
-database ready (already at the latest revision): sqlite+aiosqlite:////tmp/cs/coverset.db
+database ready (already at the latest revision): postgresql+asyncpg://localhost/coverset (Postgres 14.17)
 ```
 
 ## Data
 
-Everything lives in `COVERSET_DATA_DIR` (default `./data`; directories are 0700, the database
-0600), unless the state is hosted ([below](#hosted-like-development)). After the demo and one upload:
+The rows are in the database (`COVERSET_DATABASE_URL`); everything else lives in
+`COVERSET_DATA_DIR` (default `./data`, mode 0700, as is the cache directory inside it), unless the
+blobs are in a bucket ([below](#hosted-like-development)). After the demo and one upload:
 
 | Path | What |
 |---|---|
-| `coverset.db` (`-wal`, `-shm`) | the control-plane database (SQLite, WAL) |
-| `facts/repo=<id>/run=<run_id>/*.parquet` | the immutable per-run facts (Parquet), plus `repo=<id>/dictionary.json` |
-| `mirrors/<repo_id>.git` | bare mirrors of each repository |
+| `facts/repo=<id>/run=<run_id>/` | the blob store's run objects: `MANIFEST.json` and one versioned object per Parquet file (`runs_dim.v3.1a2b3c4d.parquet`), plus `repo=<id>/dictionary.json` |
+| `sources/`, `uploads/` | source files sent with `coverset-ci upload --with-sources`, and the upload archives |
+| `cache/facts/repo=<id>/run=<run_id>/*.parquet` | the facts as DuckDB reads them (hard links to the objects, or downloaded copies) |
+| `cache/mirrors/<repo_id>.git` | bare mirrors of each repository (cloned again when missing) |
+| `cache/sources/` | uploaded sources fetched for the source view |
 | `runs/<run_id>/` | per-run scratch: args files, pulled and uploaded bundles |
-| `sources/` | source files sent with `coverset-ci upload --with-sources` |
 | `demo.git`, `demo.git.shas.json` | the seeded demo repository and its commit SHAs |
 | `report/` | the static report of the demo's PR #2 (`coverset demo` builds it; `coverset dev`'s seeding skips it) |
 | `secret_key` | the cookie-signing key when `COVERSET_SECRET_KEY` and the admin token are unset |
 
-Start over with `uv run coverset demo --fresh --no-serve` (`make demo-reset`, 19.7 s). It empties the
-data directory and rebuilds the demo. It refuses a directory that is neither empty nor holds
-`coverset.db`, a symlinked data directory, and a database configured outside the data directory
-(`COVERSET_DATABASE_URL`):
+Start over with `uv run coverset demo --fresh --no-serve` (`make demo-reset`, 21 s). It drops the
+database and creates it again (only on a server on this machine), empties the data directory (and
+a cache directory outside it, and the bucket prefix when `COVERSET_BLOB_URL` is set), and rebuilds
+the demo. It refuses a directory that is neither empty nor holds `runs/`, a symlinked data
+directory, a database on another machine and the server's maintenance database:
 
 ```
 $ COVERSET_DATA_DIR=~/notes uv run coverset demo --fresh --no-serve
-Error: --fresh refuses /Users/you/notes: it is not empty and holds no coverset.db, so it does not look like a coverset data directory (check COVERSET_DATA_DIR)
+Error: --fresh refuses /Users/you/notes: it is not empty and holds no runs/, so it does not look like a coverset data directory (check COVERSET_DATA_DIR)
 ```
 
 Without `--fresh`, `coverset demo` stays idempotent: running it again adds runs to the same database.
 
-Keep several data directories side by side by pointing `COVERSET_DATA_DIR` at each one. For
-example, `COVERSET_DATA_DIR=/tmp/cs-a uv run coverset dev --bind 127.0.0.1:8001` and a second
-server on another directory and port.
+Keep several data directories side by side by pointing `COVERSET_DATA_DIR` at each one, each with
+a database of its own (the rows name the files of one data directory). For example,
+`COVERSET_DATA_DIR=/tmp/cs-a COVERSET_DATABASE_URL=postgresql+asyncpg://localhost/coverset_a uv run
+coverset dev --bind 127.0.0.1:8001` and a second server on another directory, database and port.
 
 The facts are plain Parquet: query them through coverset's views, or with DuckDB directly:
 
 ```sh
 uv run coverset facts query --repo-id 1 --run <run_id> "select count(*) as tests from tests_dim"
-uv run python -c "import duckdb; print(duckdb.sql(\"select count(*) from 'data/facts/repo=1/run=<run_id>/tests_dim*.parquet'\").fetchall())"
+uv run python -c "import duckdb; print(duckdb.sql(\"select count(*) from 'data/cache/facts/repo=1/run=<run_id>/tests_dim*.parquet'\").fetchall())"
 ```
 
 `--run` needs `--repo-id` (`Error: query failed: run_id and run_ids require repo_id` otherwise).
 
 ## Hosted-like development
 
-`make dev` keeps everything in SQLite and files, which is what the demo and most work need. A
-deployment keeps its state in Postgres and an S3-compatible bucket instead ([deploy.md](deploy.md)),
-and some bugs only show up there: a query SQLite forgives, a transaction that holds a lock, a write
-that must be conditional, a cache that was never filled. `make dev-hosted` runs the same development
-loop against that shape, on your machine.
+`make dev` keeps the rows in the local Postgres and the blobs as files, which is what the demo and
+most work need. A deployment keeps its blobs in an S3-compatible bucket instead
+([deploy.md](deploy.md)), and runs Postgres 17 where the laptop may run 14. `make dev-hosted` runs
+the same development loop against that shape, on your machine.
 
 ### The stack
 
@@ -185,7 +207,7 @@ the variable was set only in the shell that started the stack.
 2. Sets `COVERSET_DATABASE_URL`, `COVERSET_BLOB_URL`, `AWS_ACCESS_KEY_ID` and
    `AWS_SECRET_ACCESS_KEY` to the stack's values in its own environment, which the seeding and
    server children inherit (they replace values from `.env`), and `COVERSET_DATA_DIR` to
-   `data/hosted-dev` unless the environment sets one, kept apart from the SQLite demo in `data/`:
+   `data/hosted-dev` unless the environment sets one, kept apart from the local demo in `data/`:
    it holds the cache (mirrors, downloaded facts) and the demo's git repository, which the database
    points at (see "Resetting it"). It also removes `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`,
    `AWS_PROFILE` and `AWS_DEFAULT_PROFILE` from its environment: a session token from an SSO login
@@ -211,7 +233,7 @@ server answering `/healthz` and `/` with 200 within a second.)
 Postgres and bucket work the same way: set the four variables and run plain `coverset dev`.
 
 `coverset deploy check --offline` in that environment prints the `database` (Postgres 17, the
-migrated revision, the pool), `object store` (the MinIO bucket probed with a conditional write),
+migrated revision, the pool, the lease holder), `object store` (the MinIO bucket probed with a conditional write),
 `cache dir` and `state` (`hosted`) rows a deployment would.
 
 **What a restart costs** (measured 2026-10-14 on an M4 Max laptop against the dev stack, with
@@ -246,7 +268,7 @@ still names it.
 | To | Run |
 |---|---|
 | start over with an empty database and bucket | `make services-reset && make dev-hosted` (`services-reset` also deletes `data/hosted-dev`; the demo seeds again) |
-| empty only the database | `make services-psql`, then `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`, then `rm -rf data/hosted-dev` (a new database numbers repositories from 1 again, so the old cache's `facts/repo=1/` would pass for the new repository's; the bucket's facts are orphans that gc removes) |
+| empty only the database | `make services-psql`, then `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`, then `rm -rf data/hosted-dev` (a new database numbers repositories from 1 again, so the old cache's `facts/repo=1/` would pass for the new repository's; the bucket's facts are orphans that gc removes); or `coverset demo --fresh` in the hosted environment, which also empties the bucket |
 | drop the local cache | `rm -rf data/hosted-dev/cache` (the next page view downloads what it needs; leave `demo.git` beside it) |
 | remove just the demo repository | `uv run coverset repo purge coverset-demo/ledger --yes` in the hosted environment |
 
@@ -254,8 +276,8 @@ still names it.
 
 * **Postgres:** `make services-psql` opens `psql -U coverset coverset` in the container
   (`\dt` lists the tables, `select id, status, verdict from runs order by created_at desc limit 5;`).
-  `uv run coverset db status` prints the backend, the revision, the pool and who holds the leader
-  lease.
+  `uv run coverset deploy check --offline` prints the server version, the revision, the pool and
+  who holds the leader lease in its `database` row.
 * **MinIO:** the console at `http://127.0.0.1:9001` (minioadmin / minioadmin) browses the `coverset`
   bucket: `facts/repo=<id>/run=<run id>/` holds each run's Parquet files and `MANIFEST.json`,
   `facts/repo=<id>/dictionary.json` the repository's id spaces, `sources/` and `uploads/` what
@@ -271,13 +293,14 @@ still names it.
 
 ### The test suite against both
 
-The suite needs no service: SQLite, local files and an in-process moto S3 server. Two variables
-point it at the real ones:
+The suite runs on the local Postgres (`postgresql+asyncpg://localhost/postgres`, through which it
+creates and drops its databases), local files and an in-process moto S3 server. Two variables point
+it at the dev stack instead:
 
 | Variable | Effect |
 |---|---|
-| `COVERSET_TEST_DATABASE_URL=postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/coverset` | the `settings` fixture gets a fresh Postgres database per test, cloned from a template migrated once per worker, and the page and report tests' shared demo is seeded into a Postgres database too; SQLite-specific tests (`sqlite_only`) skip ([postgres.md](postgres.md)) |
-| `COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1'` (with `AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin`) | the object-store tests run against MinIO instead of moto, and the `settings` fixture and the shared demos keep their facts, sources and upload archives under a fresh key prefix there; tests that plant facts in the local layout (`local_files_only`) skip ([object-store.md](object-store.md#testing-against-a-real-store)) |
+| `COVERSET_TEST_DATABASE_URL=postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/postgres` | the template, each test's clone and the shared demos' databases are made on that server (Postgres 17) instead ([postgres.md](postgres.md#tests)) |
+| `COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1'` (with `AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin`) | the object-store tests run against MinIO instead of moto, and the `settings` fixture and the shared demos keep their facts, sources and upload archives under a fresh key prefix there ([object-store.md](object-store.md#testing-against-a-real-store)) |
 
 `make test-pg` runs the whole suite with the first one set against the dev stack; add the second
 for MinIO:
@@ -286,7 +309,7 @@ for MinIO:
 make services
 make test-pg
 COVERSET_TEST_BLOB_URL='s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1' \
-  AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin make test-pg
+  AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin make test
 ```
 
 ## A public demo through a tunnel
@@ -438,23 +461,24 @@ COVERSET_TOKEN=cst_... /path/to/coverset/.venv/bin/coverset-ci upload \
 | Layout | |
 |---|---|
 | `tests/` | the control plane, by package: `web/`, `orchestrator/`, `facts/`, `forge/`, `report/`, `analysis/`, `executors/`, `lang/`, `agent/`, `ai/`, `model/`, `plugin_conformance/`, `bench/`, and `e2e/` |
+| `tests/conftest.py` | the `settings` fixture: a fresh Postgres database per test, cloned from a template migrated once per worker; the run stops at once, with the fix, when no server answers |
 | `tests/web/conftest.py` | runs the real local demo once per session (about 20 s) for the page tests |
 | `packages/pytest-coverset/tests/` | the plugin, driven through `pytester` (a pytest inside the test) |
 | `packages/coverset-vitest/test/` | the Vitest reporter (`npm test`) |
 
 Markers (`pyproject.toml`): `security`, `slow` (end to end), `modal` (live Modal, skipped without
-a token), `network` (needs the package index). On 2026-10-14 the suite collected 2,703 tests;
-`-m "not slow and not modal and not network"` kept 2,635 and `-m security` 829. The quick selection
+a token), `network` (needs the package index). On 2026-10-14 the suite collected 3,055 tests;
+`-m "not slow and not modal and not network"` kept 2,980 and `-m security` 836. The quick selection
 is barely faster than the whole suite with six workers, because the page tests' shared demo
 fixture dominates both; while you work, run the module you are changing.
 
 | Command | What | Time |
 |---|---|---|
 | `make check` | `ruff check`, `ruff format --check`, then the quick tests with `-n 6` | tests: 126 s (measured when the selection held 2,623) |
-| `make test` | the whole suite, `pytest -q -n 6 -p no:cacheprovider` | 2,703 in 131 s |
+| `make test` | the whole suite, `pytest -q -n 6 -p no:cacheprovider`, on the local Postgres | 3,048 in 161 s (Homebrew's 14) |
 | `make test-plugin-312` | the plugin's tests on Python 3.12 in an isolated environment | 237 passed, 23.7 s |
 | `make test-vitest` | the reporter's Vitest suite | 156 passed, 0.9 s |
-| `make test-pg` | the whole suite against the dev stack's Postgres ([Hosted-like development](#the-test-suite-against-both)) | |
+| `make test-pg` | the whole suite against the dev stack's Postgres 17 ([Hosted-like development](#the-test-suite-against-both)) | 3,048 in 156 s |
 | `uv run pytest tests/test_dev_command.py` | one module while you work on it | 0.4 s |
 
 `make test-plugin-312` installs the two local packages with `--with-editable`. uv caches the wheel

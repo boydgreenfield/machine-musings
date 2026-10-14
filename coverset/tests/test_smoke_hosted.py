@@ -1,4 +1,5 @@
-"""``scripts/smoke_hosted.py`` against the local backends (SQLite and files).
+"""``scripts/smoke_hosted.py`` against the local backends (a database of each test's own on the test
+server, and blobs as files).
 
 The pieces are tested one by one (the children's environment, the settings they share, the
 report, the step bookkeeping, the database and store helpers), and one slow test runs the whole
@@ -23,6 +24,7 @@ import pytest
 
 from coverset.config import Settings
 from coverset.db.session import Database, init_db
+from coverset.db.testing import PostgresTestDatabases
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ADMIN = "smoke-test-admin-token-0123456789abcdef"
@@ -41,10 +43,17 @@ def smoke() -> Iterator[ModuleType]:
     sys.modules.pop(spec.name, None)
 
 
-def _environ(**extra: str) -> dict[str, str]:
-    """The process environment without coverset's settings (the data dir comes from --data-dir)."""
+@pytest.fixture
+def database_url(postgres_databases: PostgresTestDatabases) -> str:
+    """A database of this test's own, with no schema yet (the smoke's migrate step builds it)."""
+    return postgres_databases.create(empty=True)
+
+
+def _environ(database_url: str, **extra: str) -> dict[str, str]:
+    """The process environment without coverset's settings (the data dir comes from --data-dir), on
+    the test's database."""
     base = {key: value for key, value in os.environ.items() if not key.startswith("COVERSET_")}
-    return {**base, **extra}
+    return {**base, "COVERSET_DATABASE_URL": database_url, **extra}
 
 
 def _rows(out: str) -> dict[str, str]:
@@ -99,19 +108,19 @@ def test_settings_match_what_the_children_see(smoke: ModuleType, tmp_path: Path)
 
 
 def test_local_backends_are_a_warning_not_a_failure(smoke: ModuleType, tmp_path: Path) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path)
+    settings = Settings.for_tests(data_dir=tmp_path)  # describes the settings, connects to nothing
     row = smoke.describe_state(settings)
     assert (row.mark, row.ok) == ("WARN", True)
     assert row.detail.startswith("not hosted (local backends)")
 
 
-def _smoke(smoke: ModuleType, tmp_path: Path) -> Any:
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
+def _smoke(smoke: ModuleType, tmp_path: Path, database_url: str) -> Any:
+    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url=database_url)
     return smoke.Smoke(settings, {}, tmp_path, ADMIN, echo=lambda _line: None)
 
 
 def test_steps_record_rows_and_stop_dependants(smoke: ModuleType, tmp_path: Path) -> None:
-    run = _smoke(smoke, tmp_path)
+    run = _smoke(smoke, tmp_path, "postgresql+asyncpg://localhost:1/unused")  # no step connects
     with run.step("fine") as row:
         row["detail"] = "all good"
     with pytest.raises(smoke.StepFailed), run.step("refused") as row:
@@ -128,11 +137,11 @@ def test_steps_record_rows_and_stop_dependants(smoke: ModuleType, tmp_path: Path
     assert table.endswith("1 of 3 passed, 2 FAILED")
 
 
-def test_database_helpers(smoke: ModuleType, tmp_path: Path) -> None:
+def test_database_helpers(smoke: ModuleType, tmp_path: Path, database_url: str) -> None:
     from coverset.db.models import Repo
     from coverset.web import tokens
 
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
+    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url=database_url)
     asyncio.run(init_db(settings))
     assert smoke.find_repo_id(settings) is None
 
@@ -183,26 +192,30 @@ def test_run_keys_lists_one_run_from_the_store(smoke: ModuleType, tmp_path: Path
 
 
 def test_clean_only_on_an_empty_database(
-    smoke: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    smoke: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     argv = ["--clean-only", "--workdir", str(tmp_path / "work"), "--data-dir", str(tmp_path / "data")]
-    code = smoke.main(argv, environ=_environ())
+    code = smoke.main(argv, environ=_environ(database_url))
     out = capsys.readouterr().out
     assert code == 0, out
     assert "WARN  state" in out and "PASS  clean" in out and "nothing to clean" in out
     assert not (tmp_path / "work").exists(), "the scratch directory goes with --clean-only"
-    assert not (tmp_path / "data").exists(), "--clean-only creates no database"
+    assert not (tmp_path / "data").exists(), "--clean-only creates no data dir"
 
 
 def _laptop(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
-    """A laptop's ``data/`` from ``make dev``: the demo's git repository and a SQLite database."""
+    """A laptop's ``data/`` from ``make dev``: the demo's git repository and a key file."""
     data = tmp_path / "data"
     (data / "demo.git" / "refs").mkdir(parents=True)
     files = {
         "demo.git/HEAD": b"ref: refs/heads/main\n",
         "demo.git.shas.json": b"{}",
-        "coverset.db": b"sqlite",
+        "secret_key": b"k" * 64,
     }
     for name, content in files.items():
         (data / name).write_bytes(content)
@@ -210,52 +223,59 @@ def _laptop(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
 
 
 def test_the_default_data_dir_is_the_smokes_own(
-    smoke: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    smoke: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
 ) -> None:
     """Run from a checkout with a laptop demo in data/: --clean-only leaves every byte of it alone."""
     monkeypatch.chdir(tmp_path)
     data, files = _laptop(tmp_path)
-    code = smoke.main(["--clean-only", "--workdir", str(tmp_path / "work")], environ=_environ())
+    code = smoke.main(["--clean-only", "--workdir", str(tmp_path / "work")], environ=_environ(database_url))
     out = capsys.readouterr().out
     assert code == 0, out
     assert "nothing to clean" in out and str(tmp_path / "data" / "smoke-hosted") in out
     for name, content in files.items():
         assert (data / name).read_bytes() == content, name
-    assert sorted(path.name for path in data.iterdir()) == ["coverset.db", "demo.git", "demo.git.shas.json"]
+    assert sorted(path.name for path in data.iterdir()) == ["demo.git", "demo.git.shas.json", "secret_key"]
 
 
 def test_default_data_dirs_are_fixed_per_target(smoke: ModuleType) -> None:
-    sqlite = {"database": "sqlite in the data dir", "store": "files in the data dir"}
+    local = {"database": "postgresql+asyncpg://localhost/coverset", "store": "files in the data dir"}
     hosted = {"database": "postgresql+asyncpg://u:***@db/x", "store": "s3://b"}
-    assert smoke.default_data_dir(sqlite) == smoke.default_data_dir(dict(sqlite))
-    assert smoke.default_data_dir(sqlite) != smoke.default_data_dir(hosted)
+    assert smoke.default_data_dir(local) == smoke.default_data_dir(dict(local))
+    assert smoke.default_data_dir(local) != smoke.default_data_dir(hosted)
     assert smoke.default_data_dir(hosted).parent == Path("data") / "smoke-hosted"
 
 
 def test_a_data_dir_with_foreign_files_is_refused(
-    smoke: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    smoke: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     data, files = _laptop(tmp_path)
     argv = ["--workdir", str(tmp_path / "work"), "--data-dir", str(data)]
-    code = smoke.main(argv, environ=_environ())
+    code = smoke.main(argv, environ=_environ(database_url))
     out = capsys.readouterr().out
     assert code == 1
     assert _rows(out) == {"state": "WARN", "data": "FAIL"}, "nothing runs after the refusal"
     assert "holds files the smoke did not make" in out
     for name, content in files.items():
         assert (data / name).read_bytes() == content, name
-    code = smoke.main([*argv, "--clean-only"], environ=_environ())
+    code = smoke.main([*argv, "--clean-only"], environ=_environ(database_url))
     out = capsys.readouterr().out
     assert code == 0 and "nothing to clean" in out
     assert (data / "demo.git" / "HEAD").exists()
 
 
-def _database_with_demo_repo(smoke: ModuleType, path: Path) -> str:
-    """A SQLite database outside any data dir that already holds the demo repository."""
+def _database_with_demo_repo(smoke: ModuleType, path: Path, url: str) -> str:
+    """``url``'s database, migrated and already holding the demo repository (as another data dir's)."""
     from coverset.db.models import Repo
 
-    url = f"sqlite+aiosqlite:///{path}"
     settings = Settings.for_tests(data_dir=path.parent / "elsewhere", database_url=url)
     asyncio.run(init_db(settings))
 
@@ -280,12 +300,16 @@ def _database_with_demo_repo(smoke: ModuleType, path: Path) -> str:
 
 
 def test_a_demo_repository_the_smoke_did_not_make_is_never_touched(
-    smoke: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    smoke: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
 ) -> None:
     """``make dev-hosted``'s demo in the same database: the smoke refuses, and --clean keeps it."""
     monkeypatch.chdir(tmp_path)
-    url = _database_with_demo_repo(smoke, tmp_path / "shared.db")
-    environ = _environ(COVERSET_DATABASE_URL=url)
+    url = _database_with_demo_repo(smoke, tmp_path / "shared", database_url)
+    environ = _environ(url)
     argv = ["--workdir", str(tmp_path / "work"), "--data-dir", str(tmp_path / "smoke")]
     code = smoke.main(argv, environ=environ)
     out = capsys.readouterr().out
@@ -299,8 +323,8 @@ def test_a_demo_repository_the_smoke_did_not_make_is_never_touched(
     assert smoke.find_repo_id(settings) is not None, "the other demo repository is still there"
 
 
-def test_a_marker_for_another_target_is_refused(smoke: ModuleType, tmp_path: Path) -> None:
-    run = _smoke(smoke, tmp_path)
+def test_a_marker_for_another_target_is_refused(smoke: ModuleType, tmp_path: Path, database_url: str) -> None:
+    run = _smoke(smoke, tmp_path, database_url)
     run.target = smoke.target_of(run.settings)
     data = run.settings.data_dir
     data.mkdir(parents=True)
@@ -314,10 +338,13 @@ def test_a_marker_for_another_target_is_refused(smoke: ModuleType, tmp_path: Pat
     assert (data / smoke.MARKER).exists()
 
 
-def test_the_data_dir_step_claims_and_reuses(smoke: ModuleType, tmp_path: Path) -> None:
-    run = _smoke(smoke, tmp_path)
+def test_the_data_dir_step_claims_and_reuses(smoke: ModuleType, tmp_path: Path, database_url: str) -> None:
+    run = _smoke(smoke, tmp_path, database_url)
     run.target = smoke.target_of(run.settings)
-    assert run.target == {"database": "sqlite in the data dir", "store": "files in the data dir"}
+    assert run.target["store"] == "files in the data dir"
+    assert run.target["database"].startswith("postgresql+asyncpg://") and run.target["database"].endswith(
+        database_url.rsplit("/", 1)[1]
+    )
     smoke.step_data_dir(run)
     marker = smoke.read_marker(run.settings.data_dir)
     assert marker is not None and marker["target"] == run.target
@@ -338,11 +365,15 @@ def test_free_port_is_bindable(smoke: ModuleType) -> None:
 @pytest.mark.slow
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 def test_the_whole_smoke_on_local_backends(
-    smoke: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    smoke: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    database_url: str,
 ) -> None:
     """Migrate, the demo, serve, four pages, an upload, its keys and rows; then --clean-only."""
     monkeypatch.chdir(tmp_path)  # no stray .env for the children
-    environ = _environ()
+    environ = _environ(database_url)
     argv = ["--workdir", str(tmp_path / "work"), "--data-dir", str(tmp_path / "data")]
     code = smoke.main(argv, environ=environ)
     out = capsys.readouterr().out
@@ -362,9 +393,11 @@ def test_the_whole_smoke_on_local_backends(
     assert not (tmp_path / "data").exists(), "the smoke's whole data dir goes"
 
 
-def test_a_reset_database_clears_the_stale_cache(smoke: ModuleType, tmp_path: Path) -> None:
+def test_a_reset_database_clears_the_stale_cache(
+    smoke: ModuleType, tmp_path: Path, database_url: str
+) -> None:
     """After ``make services-reset`` the old cache's repo=1 would shadow the new database's repo 1."""
-    run = _smoke(smoke, tmp_path)
+    run = _smoke(smoke, tmp_path, database_url)
     run.target = smoke.target_of(run.settings)
     smoke.step_data_dir(run)
     data = run.settings.data_dir
@@ -373,14 +406,16 @@ def test_a_reset_database_clears_the_stale_cache(smoke: ModuleType, tmp_path: Pa
     stale.parent.mkdir(parents=True)
     stale.write_text("{}")
     (data / "demo.git").mkdir()
-    smoke.step_data_dir(run)  # the database (SQLite in the data dir, never created) holds no repository
+    smoke.step_data_dir(run)  # the database (empty: no schema yet) holds no repository
     assert sorted(path.name for path in data.iterdir()) == [smoke.MARKER]
     assert "repo_id" not in smoke.read_marker(data)
     assert "old cache and git repository went" in run.steps[-1].detail
 
 
-def test_a_demo_repository_with_another_id_is_not_the_smokes(smoke: ModuleType, tmp_path: Path) -> None:
-    url = _database_with_demo_repo(smoke, tmp_path / "shared.db")
+def test_a_demo_repository_with_another_id_is_not_the_smokes(
+    smoke: ModuleType, tmp_path: Path, database_url: str
+) -> None:
+    url = _database_with_demo_repo(smoke, tmp_path / "shared", database_url)
     settings = Settings.for_tests(data_dir=tmp_path / "data", database_url=url)
     run = smoke.Smoke(settings, {}, tmp_path, ADMIN, echo=lambda _line: None)
     run.target = smoke.target_of(settings)

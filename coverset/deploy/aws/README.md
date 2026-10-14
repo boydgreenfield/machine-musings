@@ -11,10 +11,10 @@ Two shapes, both with shards on Modal:
 
 ## One VM
 
-One Ubuntu 24.04 machine runs [`deploy/compose.yml`](../compose.yml): coverset plus Caddy, which
-gets a Let's Encrypt certificate on its own. With `COVERSET_STATE=hosted` the script also runs the
-compose file's `hosted` profile: Postgres 17 and MinIO on the same VM, their data on the data disk,
-so coverset's own container is disposable; the default (`files`) keeps SQLite + files on the data
+One Ubuntu 24.04 machine runs [`deploy/compose.yml`](../compose.yml): coverset, Postgres 17 and
+Caddy, which gets a Let's Encrypt certificate on its own. With `COVERSET_STATE=hosted` the script
+also runs the compose file's `hosted` profile: MinIO on the same VM, its data on the data disk, so
+coverset's own container is disposable; the default (`files`) keeps the blobs as files on the data
 disk. Shards still run on Modal; the VM only runs the control plane. Not deployed from this repository: [`user-data.sh`](user-data.sh) passes `bash -n` and
 shellcheck and was dry-run in an `ubuntu:24.04` container with Docker stubbed out; the compose stack
 itself was run locally with Caddy's internal TLS (docs/deploy.md has what was verified).
@@ -52,8 +52,8 @@ domain, point an `A` record at the static IP first, then set `COVERSET_DOMAIN`.
 * An Elastic IP so the name (and the GitHub webhook URL) survives a stop/start.
 * IMDSv2 is fine (the script asks for a token).
 * Backups: a Data Lifecycle Manager policy for daily snapshots of the data volume; the script's
-  `/etc/cron.daily/coverset-backup` also writes a consistent SQLite copy next to the live database
-  every night (kept 7 days), so a snapshot always holds a clean copy.
+  `/etc/cron.daily/coverset-backup` also writes a `pg_dump` of the database to
+  `/srv/coverset/data/backups` every night (kept 7 days), so a snapshot always holds a clean copy.
 
 #### Security group (inbound)
 
@@ -84,12 +84,10 @@ Settings live in `/opt/coverset/coverset.env` (root only); edit, then
 its key and `.env` into the data dir (the container's working directory is `/data`), so they survive
 rebuilds.
 
-With `COVERSET_STATE=hosted`: the Postgres and MinIO passwords are in `/opt/coverset/services.env`
-(root only) and the matching URLs in `/opt/coverset/coverset.env`; `/srv/coverset/data` holds
-`app/` (coverset's cache and the `/setup` files), `postgres/`, `minio/` and `backups/` (a nightly
-`pg_dump`, 7 days). psql: `sudo docker compose --env-file /etc/coverset.compose.env exec postgres
+The Postgres (and MinIO) passwords are in `/opt/coverset/services.env` (root only) and the matching
+URLs in `/opt/coverset/coverset.env`; `/srv/coverset/data` holds `app/` (coverset's data dir: the
+blobs without `COVERSET_STATE=hosted`, the cache and the `/setup` files), `postgres/`, `minio/` and
+`backups/` (a nightly `pg_dump`, 7 days). psql: `sudo docker compose --env-file /etc/coverset.compose.env exec postgres
 psql -U coverset coverset`. MinIO publishes no port; list the bucket from inside its container
 with `mc alias set vm http://localhost:9000 <MINIO_ROOT_USER> <MINIO_ROOT_PASSWORD>` and then
-`mc ls --recursive vm/coverset` (`docker compose ... exec minio sh`). Switching an
-existing `files` VM to `hosted` does not move its data: `coverset db copy --to <postgres url>` first
-([docs/postgres.md](../../docs/postgres.md)).
+`mc ls --recursive vm/coverset` (`docker compose ... exec minio sh`).

@@ -3,12 +3,18 @@
 Override ``settings_overrides`` in a test module to change any :class:`Settings` field for the
 ``settings``/``app``/``client`` fixtures of that module.
 
-Backend switch: with ``COVERSET_TEST_DATABASE_URL`` set (``make test-pg``), the ``settings``
-fixture's database is a fresh Postgres database cloned from a template migrated once per worker
-(:mod:`coverset.db.testing`) instead of a SQLite file under ``tmp_path``; with
-``COVERSET_TEST_BLOB_URL`` set, its ``blob_url`` is a fresh key prefix of that store (deleted after
-the test) unless the module overrides ``blob_url`` or ``data_dir`` (a module that brings its own data
-directory brings its own facts too). Unset, nothing changes: SQLite and local files.
+Databases: the ``settings`` fixture's database is a fresh Postgres database cloned from a template
+migrated once per worker (:mod:`coverset.db.testing`), on the local server
+(``postgresql+asyncpg://localhost/postgres``) or the one ``COVERSET_TEST_DATABASE_URL`` names, and
+dropped after the test. When that server does not answer, the run stops before collecting anything,
+with one line saying how to start it. ``COVERSET_DATABASE_URL`` points at a scratch database of this
+process on the same server (created on first use like any database, dropped at the end): code that
+reads the process environment (CLI commands under ``CliRunner``, subprocesses) and
+``Settings.for_tests`` without a ``database_url`` (the one environment key it reads) both land there,
+never in the developer's own ``coverset`` database. Blobs: files under the test's data directory by default; with
+``COVERSET_TEST_BLOB_URL`` set, ``blob_url`` is a fresh key prefix of that store (deleted after the
+test) unless the module overrides ``blob_url`` or ``data_dir`` (a module that brings its own data
+directory brings its own facts too).
 
 :func:`pytest_configure` groups the command line's test paths by directory first: pytest 9 binds a
 ``conftest.py``'s fixtures to the one ``Dir`` node it was loaded for, and paths that leave a
@@ -18,6 +24,10 @@ second ``Dir`` node whose tests cannot see its conftest fixtures ("fixture 'demo
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
+import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -28,7 +38,8 @@ from quart.typing import TestClientProtocol as Client
 
 from coverset.app import create_app
 from coverset.config import Settings
-from coverset.db.testing import PostgresTestDatabases, test_database_url
+from coverset.db.session import admin_execute, quote_database
+from coverset.db.testing import PostgresTestDatabases, server_problem, test_database_url
 from coverset.facts.cache import configure as configure_caches
 from coverset.logging import clear_registered_secrets
 from coverset.storage import S3BlobStore
@@ -57,36 +68,45 @@ def grouped_by_directory(args: Sequence[str], invocation_dir: Path) -> list[str]
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
-    """Group the command line's test paths by directory (see the module docstring)."""
+    """Group the command line's test paths by directory (see the module docstring), and stop at
+    once, with the one-line fix, when the Postgres server the suite needs does not answer (checked
+    by the controlling process only, before any worker starts)."""
     config.args = grouped_by_directory(config.args, config.invocation_params.dir)
-    config.addinivalue_line(
-        "markers",
-        "sqlite_only: needs the SQLite backend of the settings fixture (file modes, pragmas, rowid "
-        "reuse, an empty unmigrated database); skipped when COVERSET_TEST_DATABASE_URL is set",
-    )
-    config.addinivalue_line(
-        "markers",
-        "local_files_only: plants or ages facts directly in the local facts layout (an empty run "
-        "directory, a file's mtime); skipped when COVERSET_TEST_BLOB_URL selects an object store",
-    )
+    if config.option.help or config.option.version:
+        return
+    _point_the_environment_at_a_scratch_database(config)
+    if hasattr(config, "workerinput"):
+        return
+    problem = server_problem(test_database_url())
+    if problem is not None:
+        raise pytest.UsageError(problem)
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip ``sqlite_only`` tests while the suite runs against Postgres, and ``local_files_only``
-    tests while it runs against an object store."""
-    skips: dict[str, pytest.MarkDecorator] = {}
-    if test_database_url() is not None:
-        skips["sqlite_only"] = pytest.mark.skip(
-            reason="SQLite-specific; COVERSET_TEST_DATABASE_URL selects Postgres"
-        )
-    if test_blob_url() is not None:
-        skips["local_files_only"] = pytest.mark.skip(
-            reason="local facts layout; COVERSET_TEST_BLOB_URL selects an object store"
-        )
-    for item in items:
-        for marker, skip in skips.items():
-            if item.get_closest_marker(marker) is not None:
-                item.add_marker(skip)
+_ENV_DATABASE = "_coverset_env_database"
+
+
+def _point_the_environment_at_a_scratch_database(config: pytest.Config) -> None:
+    """Set ``COVERSET_DATABASE_URL`` for this process to a database of its own on the test server
+    (see the module docstring); :func:`pytest_unconfigure` drops it."""
+    from sqlalchemy.engine import make_url
+
+    name = f"cs_env_{os.getpid()}_{uuid.uuid4().hex[:6]}"
+    url = make_url(test_database_url()).set(database=name).render_as_string(hide_password=False)
+    os.environ["COVERSET_DATABASE_URL"] = url
+    setattr(config, _ENV_DATABASE, url)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Drop this process's scratch database, if anything created it."""
+    url = getattr(config, _ENV_DATABASE, None)
+    if url is None:
+        return
+    from sqlalchemy.engine import make_url
+
+    parsed = make_url(url)
+    drop = f"DROP DATABASE IF EXISTS {quote_database(parsed.database or '')} WITH (FORCE)"
+    with contextlib.suppress(Exception):  # the server may be gone; nothing else to clean up
+        asyncio.run(admin_execute(parsed.set(database=make_url(test_database_url()).database), [drop]))
 
 
 @pytest.fixture(autouse=True)
@@ -116,13 +136,10 @@ def settings_overrides() -> dict[str, Any]:
 
 
 @pytest.fixture(scope="session")
-def postgres_databases() -> Iterator[PostgresTestDatabases | None]:
-    """The per-worker Postgres template when ``COVERSET_TEST_DATABASE_URL`` is set, else None."""
-    url = test_database_url()
-    if url is None:
-        yield None
-        return
-    databases = PostgresTestDatabases(url)
+def postgres_databases() -> Iterator[PostgresTestDatabases]:
+    """This worker's migrated template database on the test server, and the clones made from it
+    (all dropped at the end of the session)."""
+    databases = PostgresTestDatabases(test_database_url())
     databases.start()
     try:
         yield databases
@@ -132,17 +149,13 @@ def postgres_databases() -> Iterator[PostgresTestDatabases | None]:
 
 @pytest.fixture
 def settings(
-    tmp_path: Path, settings_overrides: dict[str, Any], postgres_databases: PostgresTestDatabases | None
+    tmp_path: Path, settings_overrides: dict[str, Any], postgres_databases: PostgresTestDatabases
 ) -> Iterator[Settings]:
-    """Test settings with ``data_dir`` under ``tmp_path`` and a file-backed SQLite database there,
-    or a fresh Postgres database already at head, and local facts or a fresh object-store prefix
-    (see the module docstring)."""
-    values: dict[str, Any] = {
-        "data_dir": tmp_path / "data",
-        "database_url": f"sqlite+aiosqlite:///{tmp_path / 'coverset.db'}",
-    }
+    """Test settings with ``data_dir`` under ``tmp_path``, a fresh Postgres database already at head,
+    and blobs as local files or under a fresh object-store prefix (see the module docstring)."""
+    values: dict[str, Any] = {"data_dir": tmp_path / "data"}
     created = None
-    if postgres_databases is not None and "database_url" not in settings_overrides:
+    if "database_url" not in settings_overrides:
         created = values["database_url"] = postgres_databases.create()
     blob_url = None
     if test_blob_url() is not None and not {"blob_url", "data_dir"} & settings_overrides.keys():
@@ -150,7 +163,7 @@ def settings(
     values.update(settings_overrides)
     yield Settings.for_tests(**values)
     if created is not None:
-        postgres_databases.retire(created)  # type: ignore[union-attr]  # dropped before the next test's
+        postgres_databases.retire(created)  # dropped before the next test's
     if blob_url is not None:
         blobs = S3BlobStore.from_url(blob_url)
         blobs.delete([info.key for info in blobs.list()])  # this test's prefix only

@@ -1,7 +1,6 @@
 """Several web replicas on one database: the leader lease decides which one dispatches runs and
 runs the background loops; a follower takes over when the leader stops. Boot handling and the
-stale-run sweep of the lease holder. Replica tests need Postgres (``make test-pg``); the SQLite
-path is checked to be unchanged."""
+stale-run sweep of the lease holder."""
 
 from __future__ import annotations
 
@@ -19,9 +18,9 @@ from sqlalchemy import select
 
 from coverset.app import add_leader_task, create_app, install_leader_lease
 from coverset.config import Settings
-from coverset.db.leader import LEADER_EXTENSION, LeaderLease
+from coverset.db.leader import LeaderLease
 from coverset.db.models import Repo, Run
-from coverset.db.session import init_db, is_postgres
+from coverset.db.session import init_db
 from coverset.orchestrator import queue as queue_module
 from coverset.orchestrator.queue import RunDispatcher, install_run_queue
 from coverset.orchestrator.runner import OrchestratorContext, RunOutcome
@@ -84,7 +83,7 @@ async def _until(predicate: Callable[[], Any], timeout: float = 5.0) -> None:
 
 
 async def test_one_replica_dispatches_and_a_follower_takes_over(
-    settings: Settings, postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await init_db(settings)
     repo_id = await _repo(settings)
@@ -125,7 +124,7 @@ async def _true(value: bool) -> bool:
     return value
 
 
-async def test_background_tasks_run_only_on_the_leader(settings: Settings, postgres_url: str) -> None:
+async def test_background_tasks_run_only_on_the_leader(settings: Settings) -> None:
     await init_db(settings)
     ran: list[str] = []
 
@@ -153,21 +152,7 @@ async def test_background_tasks_run_only_on_the_leader(settings: Settings, postg
     assert holder in ("a", "b")
 
 
-async def test_sqlite_starts_the_dispatcher_before_serving(settings: Settings) -> None:
-    """On SQLite the lease is implicit and the run queue starts exactly as before: synchronously,
-    with boot handling done before the first request."""
-    if is_postgres(settings.database_url):
-        pytest.skip("the SQLite behaviour")
-    app = create_app(settings)
-    lease = install_leader_lease(app)
-    dispatcher = install_run_queue(app)
-    assert app.extensions[LEADER_EXTENSION] is lease and not lease.exclusive
-    async with app.test_app():
-        assert dispatcher.started and lease.held
-    assert not dispatcher.started
-
-
-# -- boot handling and the sweep (both backends) --------------------------------------------------
+# -- boot handling and the sweep ------------------------------------------------------------------
 
 
 async def _run(ctx: OrchestratorContext, repo_id: int, **fields: Any) -> str:
@@ -197,8 +182,7 @@ async def test_the_lease_holders_boot_keeps_runs_queued_after_it_started(setting
 async def test_the_lease_holders_boot_keeps_runs_of_a_live_serve_on_this_host(settings: Settings) -> None:
     """Two replicas on one host: the new leader must not abandon runs the other replica (or the
     previous leader, finishing its runs after a transient loss of the lease) is still executing.
-    With a lease the same-host rule is the pid, not the role; without one (SQLite, one process per
-    database) an earlier ``serve`` of this host is gone by definition, as before."""
+    The same-host rule is the pid, not the role."""
     await init_db(settings)
     repo_id = await _repo(settings)
     app = create_app(settings)

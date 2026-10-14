@@ -1,6 +1,6 @@
-"""The leader lease: implicit on SQLite, one holder per Postgres database, handed over when the
-holder releases it or its session dies; :func:`run_while_leader` follows it; transaction locks
-serialise across "replicas" (engines)."""
+"""The leader lease: one holder per database, handed over when the holder releases it or its
+session dies; :func:`run_while_leader` follows it; transaction locks serialise across "replicas"
+(engines)."""
 
 from __future__ import annotations
 
@@ -10,20 +10,9 @@ import time
 import pytest
 from sqlalchemy import text
 
+from coverset.config import Settings
 from coverset.db.leader import LeaderLease, leader_status, run_while_leader, transaction_lock
 from coverset.db.session import Database, make_engine
-
-
-async def test_the_lease_is_implicit_on_sqlite(db: Database) -> None:
-    if db.backend != "sqlite":
-        pytest.skip("the SQLite behaviour")
-    lease = LeaderLease(db.engine)
-    assert (lease.exclusive, lease.held, lease.role) == (False, True, "leader")
-    assert await lease.acquire() and await lease.check()
-    await lease.release()
-    assert lease.held  # nothing to release: one process per SQLite database
-    status = await leader_status(db.engine)
-    assert not status.exclusive and "implicit" in status.detail
 
 
 class _Switch:
@@ -140,16 +129,13 @@ async def test_a_lost_lease_cancels_the_retry() -> None:
     await asyncio.wait_for(runner, 1)
 
 
-# -- Postgres ---------------------------------------------------------------------------------------
-
-
 async def test_one_holder_and_a_handover_on_release(
-    postgres_url: str, caplog: pytest.LogCaptureFixture
+    settings: Settings, caplog: pytest.LogCaptureFixture
 ) -> None:
-    first, second = make_engine(postgres_url), make_engine(postgres_url)
+    first, second = make_engine(settings.database_url), make_engine(settings.database_url)
     a, b = LeaderLease(first, "test:lease"), LeaderLease(second, "test:lease")
     try:
-        assert (a.exclusive, a.held) == (True, False)
+        assert a.held is False
         assert await a.acquire() is True and a.role == "leader"
         assert await b.acquire() is False and b.role == "follower"
         assert await a.check() and not await b.check()
@@ -170,8 +156,8 @@ async def test_one_holder_and_a_handover_on_release(
         await second.dispose()
 
 
-async def test_a_dead_session_loses_the_lease(postgres_url: str) -> None:
-    holder_engine, other_engine = make_engine(postgres_url), make_engine(postgres_url)
+async def test_a_dead_session_loses_the_lease(settings: Settings) -> None:
+    holder_engine, other_engine = make_engine(settings.database_url), make_engine(settings.database_url)
     holder, other = LeaderLease(holder_engine, "test:dead"), LeaderLease(other_engine, "test:dead")
     try:
         assert await holder.acquire()
@@ -189,8 +175,8 @@ async def test_a_dead_session_loses_the_lease(postgres_url: str) -> None:
         await other_engine.dispose()
 
 
-async def test_keep_takes_a_freed_lease_within_one_check(postgres_url: str) -> None:
-    first, second = make_engine(postgres_url), make_engine(postgres_url)
+async def test_keep_takes_a_freed_lease_within_one_check(settings: Settings) -> None:
+    first, second = make_engine(settings.database_url), make_engine(settings.database_url)
     a, b = LeaderLease(first, "test:keep"), LeaderLease(second, "test:keep", check_s=0.05)
     stop = asyncio.Event()
     keeper = asyncio.create_task(b.keep(stop))
@@ -209,9 +195,9 @@ async def test_keep_takes_a_freed_lease_within_one_check(postgres_url: str) -> N
         await second.dispose()
 
 
-async def test_transaction_locks_serialise_two_engines(postgres_url: str) -> None:
+async def test_transaction_locks_serialise_two_engines(settings: Settings) -> None:
     """Two replicas (engines) registering an upload of the same commit take turns."""
-    replicas = [Database.from_url(postgres_url), Database.from_url(postgres_url)]
+    replicas = [Database.from_url(settings.database_url), Database.from_url(settings.database_url)]
     spans: list[tuple[float, float]] = []
 
     async def critical(database: Database) -> None:

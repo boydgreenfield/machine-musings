@@ -20,7 +20,7 @@ from pydantic import SecretStr
 
 from coverset.cli import cli
 from coverset.commands import dev
-from coverset.commands.demo import DATA_DIR_MARKER, wipe_data_dir
+from coverset.commands.demo import DATA_DIR_MARKER, start_fresh, wipe_data_dir
 from coverset.commands.dev import (
     Reloader,
     Watcher,
@@ -31,8 +31,9 @@ from coverset.commands.dev import (
     scan_mtimes,
     watch_roots,
 )
-from coverset.config import Settings
+from coverset.config import Settings, get_settings
 from coverset.db.session import LOG_LEVEL_ENV, init_db, quiet_alembic
+from coverset.db.testing import PostgresTestDatabases
 from coverset.web.account import dev_login_problems
 
 # -- the watcher -----------------------------------------------------------------------------------
@@ -311,7 +312,6 @@ def test_serve_reload_runs_the_reloader_without_seeding(
     )
     assert result.exit_code == 0, result.output
     assert calls == [("127.0.0.1:8124", False)]
-    assert not (tmp_path / "coverset.db").exists()
 
 
 def test_dev_seeds_an_empty_data_dir_and_skips_a_seeded_one(
@@ -380,12 +380,13 @@ def test_dev_says_whether_the_development_sign_in_is_on(
     assert "development sign-in" not in quiet.output
 
 
-def test_data_dir_has_repository(tmp_path: Path) -> None:
+def test_data_dir_has_repository(tmp_path: Path, postgres_databases: PostgresTestDatabases) -> None:
     from coverset.db.models import Repo
     from coverset.db.session import Database
 
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
-    assert not dev.data_dir_has_repository(settings)  # no database file
+    url = postgres_databases.create(empty=True)
+    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url=url)
+    assert not dev.data_dir_has_repository(settings)  # no schema yet
     asyncio.run(init_db(settings))
     assert not dev.data_dir_has_repository(settings)  # schema, no repository
 
@@ -443,9 +444,9 @@ def fresh_settings(data_dir: Path, **overrides: Any) -> Settings:
 
 def test_fresh_empties_a_coverset_data_dir(tmp_path: Path) -> None:
     data = tmp_path / "data"
-    (data / "mirrors" / "1.git").mkdir(parents=True)
+    (data / "cache" / "mirrors" / "1.git").mkdir(parents=True)
     (data / "facts" / "repo=1").mkdir(parents=True)
-    (data / DATA_DIR_MARKER).write_text("db")
+    (data / DATA_DIR_MARKER).mkdir()
     (data / "secret_key").write_text("k")
     outside = tmp_path / "keep.txt"
     outside.write_text("keep")
@@ -473,16 +474,48 @@ def test_fresh_refuses_a_directory_that_is_not_a_coverset_data_dir(tmp_path: Pat
 def test_fresh_refuses_a_symlinked_data_dir_and_a_database_elsewhere(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
-    (real / DATA_DIR_MARKER).write_text("db")
+    (real / DATA_DIR_MARKER).mkdir()
     (tmp_path / "alias").symlink_to(real, target_is_directory=True)
     settings = fresh_settings(real)
     settings.data_dir = tmp_path / "alias"  # what the validator would have resolved away
     with pytest.raises(click.ClickException, match="symlink"):
         wipe_data_dir(settings)
-    elsewhere = fresh_settings(real, database_url=f"sqlite+aiosqlite:///{tmp_path / 'other.db'}")
-    with pytest.raises(click.ClickException, match="not a SQLite file inside"):
-        wipe_data_dir(elsewhere)
+    for url, words in (
+        ("postgresql://u:p@db.example.com/coverset", "not on this machine"),
+        ("postgresql://localhost/postgres", "maintenance database"),
+        ("postgresql://localhost/has-dash", "plain identifier"),
+    ):
+        with pytest.raises(click.ClickException, match=words):
+            start_fresh(fresh_settings(real, database_url=url))
     assert (real / DATA_DIR_MARKER).exists()
+
+
+def test_fresh_drops_the_database_and_empties_the_blob_prefix_and_the_cache(
+    tmp_path: Path, postgres_databases: PostgresTestDatabases
+) -> None:
+    """The demo's --fresh on a local server: the database goes (prepare_db creates it again), the
+    bucket prefix is emptied, and a cache outside the data dir and the data dir itself are emptied."""
+    from coverset.commands.common import prepare_db
+    from coverset.db.session import check_database
+    from coverset.storage import from_settings
+    from coverset.storage.testing import fresh_blob_url
+
+    url = postgres_databases.create()
+    settings = fresh_settings(
+        tmp_path / "data", database_url=url, blob_url=fresh_blob_url("fresh"), cache_dir=tmp_path / "cache"
+    )
+    asyncio.run(prepare_db(settings))
+    blobs = from_settings(settings)
+    blobs.put_bytes("facts/repo=1/dictionary.json", b"{}")
+    (settings.data_dir / DATA_DIR_MARKER).mkdir(exist_ok=True)
+    (tmp_path / "cache" / "mirrors").mkdir(parents=True)
+    lines = start_fresh(settings)
+    assert lines[0].startswith("dropped database ") and "deleted 1 objects" in lines[1]
+    assert check_database(url).status == "fail", "the database is gone"
+    assert list(blobs.list()) == []
+    assert list((tmp_path / "cache").iterdir()) == [] and list(settings.data_dir.iterdir()) == []
+    asyncio.run(prepare_db(settings))
+    assert check_database(url).status == "pass", "and the demo's prepare_db makes it again"
 
 
 def test_demo_fresh_command_refuses_before_doing_anything(tmp_path: Path) -> None:
@@ -555,8 +588,11 @@ def test_alembic_is_quiet_unless_debug(monkeypatch: pytest.MonkeyPatch) -> None:
         logger.setLevel(previous)
 
 
-def test_init_db_returns_the_applied_revisions_once(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
+def test_init_db_returns_the_applied_revisions_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, postgres_databases: PostgresTestDatabases
+) -> None:
+    url = postgres_databases.create(empty=True)
+    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url=url)
     with caplog.at_level(logging.INFO):
         applied = asyncio.run(init_db(settings))
     assert applied[0].startswith("0001 ") and len(applied) >= 8
@@ -571,17 +607,39 @@ def test_init_db_returns_the_applied_revisions_once(tmp_path: Path, caplog: pyte
     assert not [r for r in caplog.records if r.name == "coverset.db.session"]
 
 
-def test_init_db_command_prints_one_line_per_revision(tmp_path: Path) -> None:
-    env = {"COVERSET_DATA_DIR": str(tmp_path / "data")}
-    first = CliRunner().invoke(cli, ["init-db"], env=env)
-    assert first.exit_code == 0, first.output
-    lines = first.output.splitlines()
-    applied = [line for line in lines if line.startswith("applied migration ")]
-    assert applied[0].startswith("applied migration 0001 ") and len(applied) >= 8
-    assert "Context impl" not in first.output and "non-transactional" not in first.output
-    assert lines[-1].startswith(f"database ready ({len(applied)} migration(s) applied): sqlite")
-    again = CliRunner().invoke(cli, ["init-db"], env=env)
-    assert again.output.startswith("database ready (already at the latest revision)")
+def test_init_db_command_creates_the_database_and_prints_one_line_per_revision(
+    tmp_path: Path, postgres_databases: PostgresTestDatabases
+) -> None:
+    url = postgres_databases.url_for(f"{postgres_databases.prefix}_initdb")  # not created yet
+    env = {"COVERSET_DATA_DIR": str(tmp_path / "data"), "COVERSET_DATABASE_URL": url}
+    get_settings.cache_clear()  # the CLI reads its settings once per process
+    try:
+        first = CliRunner().invoke(cli, ["init-db"], env=env)
+        assert first.exit_code == 0, first.output
+        lines = first.output.splitlines()
+        applied = [line for line in lines if line.startswith("applied migration ")]
+        assert applied[0].startswith("applied migration 0001 ") and len(applied) >= 8
+        assert "Context impl" not in first.output and "transactional DDL" not in first.output
+        assert lines[-1].startswith(
+            f"database ready ({len(applied)} migration(s) applied): postgresql+asyncpg://"
+        )
+        assert lines[-1].endswith(")") and "(Postgres " in lines[-1]
+        again = CliRunner().invoke(cli, ["init-db"], env=env)
+        assert again.output.startswith("database ready (already at the latest revision)")
+    finally:
+        get_settings.cache_clear()
+        postgres_databases.drop(url)
+
+
+def test_init_db_against_a_stopped_server_exits_2_with_the_fix(tmp_path: Path) -> None:
+    env = {"COVERSET_DATA_DIR": str(tmp_path / "data"), "COVERSET_DATABASE_URL": "postgresql://localhost:1/x"}
+    get_settings.cache_clear()
+    try:
+        result = CliRunner().invoke(cli, ["init-db"], env=env)
+    finally:
+        get_settings.cache_clear()
+    assert result.exit_code == 2
+    assert result.output.count("\n") == 1 and "brew services start postgresql@14" in result.output
 
 
 async def test_an_edited_stylesheet_gets_a_new_version_url(tmp_path: Path) -> None:

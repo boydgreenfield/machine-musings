@@ -26,7 +26,6 @@ from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource
 
 MIB = 1024 * 1024
 PRIVATE_DIR_MODE = 0o700
-PRIVATE_FILE_MODE = 0o600
 
 log = logging.getLogger(__name__)
 MIN_ADMIN_TOKEN_CHARS = 32
@@ -34,6 +33,10 @@ MIN_WEBHOOK_SECRET_CHARS = 16
 MIN_GITHUB_TOKEN_CHARS = 16
 """GitHub tokens are 40+ characters; a short value is a mistake, and too short to redact safely."""
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+DEFAULT_DATABASE_URL = "postgresql+asyncpg://localhost/coverset"
+"""A local Postgres (Homebrew's accepts the current user without a password), database ``coverset``."""
+DATABASE_URL_ENV = "COVERSET_DATABASE_URL"
+"""The environment key of :attr:`Settings.database_url`, the one key :meth:`Settings.for_tests` reads."""
 
 CACHE_SETTINGS: dict[str, str] = {
     "facts_cache_entries": "COVERSET_FACTS_CACHE_ENTRIES",
@@ -130,8 +133,11 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=200 * MIB, gt=0, description="Largest accepted uploaded bundle.")
     data_dir: Path = Path("data")
     database_url: str = Field(
-        default="",
-        description="SQLAlchemy URL: empty means SQLite at <data_dir>/coverset.db; postgresql+asyncpg://... for Postgres.",
+        default=DEFAULT_DATABASE_URL,
+        description=(
+            "The Postgres database: postgresql+asyncpg://[user[:password]@]host[:port]/name (a plain "
+            "postgresql:// URL is accepted); created on first use when the server allows it."
+        ),
     )
     blob_url: str = Field(
         default="",
@@ -143,7 +149,7 @@ class Settings(BaseSettings):
     )
     cache_dir: Path | None = Field(
         default=None,
-        description="Local cache of object-store files and git mirrors; empty means <data_dir>/cache.",
+        description="Local cache of the blob store's files and the git mirrors; empty means <data_dir>/cache.",
     )
 
     github_webhook_secret: SecretStr | None = None
@@ -292,15 +298,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _derive_and_check(self) -> Self:
-        if not self.database_url:
-            self.database_url = f"sqlite+aiosqlite:///{self.data_dir / 'coverset.db'}"
         if self.database_url.startswith(("postgresql://", "postgres://")):
             # Normalise the common form to the async driver so hosted-Postgres URLs paste straight in.
             self.database_url = "postgresql+asyncpg://" + self.database_url.split("://", 1)[1]
-        if self.database_url.startswith("postgresql+") and not self.database_url.startswith(
-            "postgresql+asyncpg://"
-        ):
-            raise ValueError("COVERSET_DATABASE_URL must use the asyncpg driver (postgresql+asyncpg://...)")
+        if not self.database_url.startswith("postgresql+asyncpg://"):
+            scheme = self.database_url.split("://", 1)[0] if "://" in self.database_url else "no scheme"
+            raise ValueError(
+                f"COVERSET_DATABASE_URL must be a Postgres URL for the asyncpg driver, got {scheme}: set "
+                "it to postgresql://user:password@host:5432/name (or postgresql+asyncpg://...), or unset "
+                f"it for {DEFAULT_DATABASE_URL} (docs/postgres.md)"
+            )
         if self.blob_url and not self.blob_url.startswith("s3://"):
             raise ValueError("COVERSET_BLOB_URL must be empty (local files) or an s3://bucket[/prefix] URL")
         if self.cache_dir is None:
@@ -365,13 +372,19 @@ class Settings(BaseSettings):
 
     @classmethod
     def for_tests(cls, **overrides: Any) -> Settings:
-        """Build hermetic test settings: ``env=test``, no ``.env`` file and no process environment.
+        """Build hermetic test settings: ``env=test``, no ``.env`` file and, with one exception, no
+        process environment.
 
         ``data_dir`` defaults to a fresh temporary directory; any field may be overridden by name.
+        The exception is ``database_url``: it defaults to ``COVERSET_DATABASE_URL`` when the process
+        sets it, which the test suite points at a scratch database of its own (``tests/conftest.py``),
+        so a test that forgets ``database_url`` can never reach a developer's ``coverset`` database.
         """
         values: dict[str, Any] = {"env": "test"}
         if "data_dir" not in overrides:
             values["data_dir"] = Path(tempfile.mkdtemp(prefix="coverset-test-"))
+        if "database_url" not in overrides and os.environ.get(DATABASE_URL_ENV, "").strip():
+            values["database_url"] = os.environ[DATABASE_URL_ENV].strip()
         values.update(overrides)
         return _HermeticSettings(**values)
 
@@ -392,21 +405,23 @@ class Settings(BaseSettings):
 
     @property
     def mirrors_dir(self) -> Path:
-        """Bare git mirrors, one per repo: ``<data_dir>/mirrors/<repo_id>.git``; with an object store
-        ``<cache_dir>/mirrors`` (disposable: a missing mirror costs one clone, docs/object-store.md)."""
-        return (self.cache_dir or self.data_dir if self.blob_url else self.data_dir) / "mirrors"
+        """Bare git mirrors, one per repo: ``<cache_dir>/mirrors/<repo_id>.git`` (disposable: a
+        missing mirror costs one clone, docs/object-store.md)."""
+        assert self.cache_dir is not None  # set by the validator
+        return self.cache_dir / "mirrors"
 
     @property
     def hosted(self) -> bool:
-        """True when the control plane keeps its state in Postgres and an object store (no local
-        state that must survive a restart; the data dir is then only a cache)."""
-        return self.database_url.startswith("postgresql+") and bool(self.blob_url)
+        """True when the blobs live in an object store (``COVERSET_BLOB_URL``): with the database in
+        Postgres, nothing under the data dir then has to survive a restart."""
+        return bool(self.blob_url)
 
     @property
     def facts_dir(self) -> Path:
-        """Immutable Parquet facts: ``<data_dir>/facts/repo=<id>/run=<id>/...``; with an object store
-        the local cache of the bucket's ``facts/`` (``<cache_dir>/facts``, docs/object-store.md)."""
-        return (self.cache_dir or self.data_dir if self.blob_url else self.data_dir) / "facts"
+        """The working copy of the Parquet facts that DuckDB reads: ``<cache_dir>/facts/repo=<id>/
+        run=<id>/...``, a cache of the blob store's ``facts/`` (docs/object-store.md)."""
+        assert self.cache_dir is not None  # set by the validator
+        return self.cache_dir / "facts"
 
     @property
     def runs_dir(self) -> Path:
@@ -421,8 +436,6 @@ class Settings(BaseSettings):
             value = getattr(self, name)
             if value is not None:
                 out[env_name] = ("1" if value else "0") if isinstance(value, bool) else str(value)
-        if self.blob_url:  # an ingest worker process finds the bucket its facts dir caches from these
-            out.update(COVERSET_BLOB_URL=self.blob_url, COVERSET_CACHE_DIR=str(self.cache_dir))
         return out
 
     def now(self) -> datetime:
@@ -461,36 +474,21 @@ def get_settings() -> Settings:
 
 
 def secure_data_dirs(settings: Settings) -> None:
-    """Create ``data_dir`` and its ``mirrors``, ``facts`` and ``runs`` directories with mode 0700,
-    tighten existing ones to 0700, and a SQLite database file (and its WAL files) to 0600.
+    """Create ``data_dir`` and ``cache_dir`` with mode 0700 and tighten existing ones to 0700, and
+    create ``runs_dir`` inside the data directory (what marks a coverset data directory for
+    ``coverset demo --fresh``).
 
-    The mirrors hold private source, the database and facts describe it: other local users must not
-    read them. A directory or file coverset cannot chmod (another owner) is left alone with a warning.
+    Both roots hold private source: the data directory is the local blob store (uploaded sources and
+    upload archives) and holds the runs' unpacked uploads; the cache directory holds the git
+    mirrors and the fetched uploaded sources. Mode 0700 on the two roots keeps other local users
+    out of everything below them. A directory coverset cannot chmod (another owner) is left alone
+    with a warning.
     """
-    for path in (settings.data_dir, settings.mirrors_dir, settings.facts_dir, settings.runs_dir):
+    assert settings.cache_dir is not None  # set by the validator
+    for path in (settings.data_dir, settings.cache_dir):
         path.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
         _restrict(path, PRIVATE_DIR_MODE)
-    database = _sqlite_file(settings.database_url)
-    if database is not None:
-        for path in (
-            database,
-            *(database.with_name(database.name + s) for s in ("-wal", "-shm", "-journal")),
-        ):
-            if path.is_file() and not path.is_symlink():
-                _restrict(path, PRIVATE_FILE_MODE)
-
-
-def _sqlite_file(url: str) -> Path | None:
-    """The file behind a file-backed SQLite URL, else None."""
-    from sqlalchemy.engine import make_url
-
-    try:
-        parsed = make_url(url)
-    except Exception:  # noqa: BLE001 - an unparsable URL fails later, where it is used
-        return None
-    if not parsed.drivername.startswith("sqlite") or not parsed.database or parsed.database == ":memory:":
-        return None
-    return Path(parsed.database)
+    settings.runs_dir.mkdir(exist_ok=True)
 
 
 def _restrict(path: Path, mode: int) -> None:

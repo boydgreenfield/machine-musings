@@ -2,16 +2,17 @@
 # coverset control plane: web UI, webhooks, API, run dispatcher (docs/deploy.md).
 #
 #   docker build -t coverset .
-#   docker run -p 8000:8000 -v coverset-data:/data \
+#   docker run -p 8000:8000 -v coverset-data:/data -e COVERSET_DATABASE_URL=postgresql://... \
 #     -e COVERSET_ADMIN_TOKEN=$(openssl rand -hex 32) -e COVERSET_PUBLIC_URL=http://localhost:8000 coverset
 #
-# Two state shapes, one image. Laptop/VM: SQLite and files under /data (a volume). Hosted: set
-# COVERSET_DATABASE_URL (Postgres) and COVERSET_BLOB_URL (an S3-compatible bucket) plus the bucket's
-# AWS_* credentials (or an instance/task role), and the container is stateless: /data and the cache
+# The rows are in Postgres (COVERSET_DATABASE_URL). The blobs are files under /data (a volume), or,
+# with COVERSET_BLOB_URL (an S3-compatible bucket) plus the bucket's AWS_* credentials (or an
+# instance/task role), in the bucket, and the container is stateless: /data and the cache
 # (/var/cache/coverset, on the container's own disk) are disposable, so no volume is needed.
 #
-# At start `serve` runs `coverset init-db` first (COVERSET_MIGRATE_ON_START=true, the default). Every
-# replica may do so: on Postgres an advisory lock (coverset:migrate) runs them one after the other.
+# At start `serve` runs `coverset init-db` first (COVERSET_MIGRATE_ON_START=true, the default): it
+# creates the database when the server has none of its name, then migrates. Every replica may do
+# so: an advisory lock (coverset:migrate) runs them one after the other.
 # To migrate once per deploy instead, set it false and run `init-db` in a release step
 # (docs/deploy.md, "Migrations on deploy"). The entrypoint writes COVERSET_GITHUB_APP_PRIVATE_KEY (PEM text) to the key path when set.
 #

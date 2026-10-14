@@ -2,10 +2,10 @@
 
 ``coverset deploy check``'s database, object store, cache and state rows (with the two probes
 stubbed: the probes themselves are tested with the database and storage layers); ``serve``'s
-migration at start; ``coverset dev --hosted`` and ``--tunnel``; the Modal web module's choice
-between the stateless hosted mode and the Volume mode, with ``modal`` stubbed out so nothing
-reaches Modal; and the deployment files (compose, Fly, AWS, Dockerfile) parse and say what the
-docs say they do.
+migration at start; ``coverset dev --hosted`` and ``--tunnel``; the Modal web module (stateless:
+it refuses a Secret without Postgres, a bucket and the admin token), with ``modal`` stubbed out so
+nothing reaches Modal; and the deployment files (compose, Fly, AWS, Dockerfile) parse and say what
+the docs say they do.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from coverset.cli import cli, migrate_before_serving
 from coverset.commands import deploy_cmd, dev
 from coverset.commands.deploy_cmd import Check, deployment_checks
 from coverset.config import Settings, get_settings
+from coverset.db.testing import PostgresTestDatabases
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = PROJECT_ROOT / "deploy"
@@ -124,30 +125,26 @@ def test_async_probes_are_awaited(tmp_path: Path, admin_token: str) -> None:
     assert rows["database"].status == "warn"
 
 
-def test_the_real_probes_answer_for_a_laptop(tmp_path: Path) -> None:
-    """Without stubs: SQLite that does not exist yet warns (never created), local files pass."""
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
+def test_the_real_probes_answer_for_a_laptop(settings: Settings) -> None:
+    """Without stubs: the test's database (migrated) passes, and the local blob store passes the same
+    probe a bucket gets (conditional writes included), leaving nothing behind."""
+    settings = Settings.for_tests(data_dir=settings.data_dir, database_url=settings.database_url)  # files
     rows = _rows(deployment_checks(settings, environ={}, prober=None, in_modal=False))
-    assert rows["database"].status == "warn" and "does not exist yet" in rows["database"].detail
-    assert not (tmp_path / "data" / "coverset.db").exists()
-    assert rows["object store"].status == "pass" and "local files" in rows["object store"].detail
-    assert rows["state"].status == "pass" and rows["state"].detail.startswith("laptop")
+    assert rows["database"].status == "pass", rows["database"].detail
+    assert rows["object store"].status == "pass", rows["object store"].detail
+    assert "conditional writes ok" in rows["object store"].detail
+    assert not (settings.data_dir / "_coverset" / "probe").exists() or not any(
+        (settings.data_dir / "_coverset" / "probe").iterdir()
+    )
+    assert rows["state"].status == "pass" and rows["state"].detail.startswith("local: Postgres + blobs")
 
 
-@pytest.mark.parametrize(
-    ("overrides", "status", "words"),
-    [
-        ({"blob_url": ""}, "warn", "Postgres, but facts and uploads are files"),
-        ({"database_url": ""}, "warn", "object store, but the database is SQLite"),
-        ({"database_url": "", "blob_url": ""}, "warn", "behind the public https://coverset.example.com"),
-    ],
-)
-def test_state_row_names_what_still_needs_a_disk(
-    tmp_path: Path, admin_token: str, overrides: dict[str, Any], status: str, words: str
-) -> None:
-    rows = _checks(_hosted(tmp_path, admin_token, **overrides))
-    assert rows["state"].status == status
-    assert words in rows["state"].detail
+def test_state_row_names_what_still_needs_a_disk(tmp_path: Path, admin_token: str) -> None:
+    rows = _checks(_hosted(tmp_path, admin_token, blob_url=""))
+    assert rows["state"].status == "warn"
+    assert "behind the public https://coverset.example.com" in rows["state"].detail
+    assert "set COVERSET_BLOB_URL" in rows["state"].detail
+    assert _checks(_hosted(tmp_path, admin_token))["state"].status == "pass"
 
 
 def test_check_flags_skip_the_connecting_rows(tmp_path: Path, admin_token: str) -> None:
@@ -243,17 +240,19 @@ def test_serve_migrates_first_and_the_app_does_not_again(
 def test_serve_without_migrate_on_start_migrates_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data", migrate_on_start=False)
+    unreachable = "postgresql+asyncpg://localhost:1/coverset"  # connecting at all would fail
+    settings = Settings.for_tests(
+        data_dir=tmp_path / "data", migrate_on_start=False, database_url=unreachable
+    )
     served = migrate_before_serving(settings)
     assert served.skip_migrations is True
     assert capsys.readouterr().out == ""
-    assert not (tmp_path / "data" / "coverset.db").exists()
 
 
 def test_skip_migrations_keeps_its_meaning(tmp_path: Path) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data", skip_migrations=True)
+    unreachable = "postgresql+asyncpg://localhost:1/coverset"
+    settings = Settings.for_tests(data_dir=tmp_path / "data", skip_migrations=True, database_url=unreachable)
     assert migrate_before_serving(settings) is settings
-    assert not (tmp_path / "data" / "coverset.db").exists()
 
 
 def test_migrate_on_start_reads_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -263,22 +262,52 @@ def test_migrate_on_start_reads_the_environment(monkeypatch: pytest.MonkeyPatch,
     assert Settings.for_tests().migrate_on_start is True
 
 
-def test_serve_command_uses_the_migrated_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_serve_command_creates_and_migrates_the_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, postgres_databases: PostgresTestDatabases
+) -> None:
+    """``serve`` with COVERSET_MIGRATE_ON_START (the default) creates a database the server does not
+    have, migrates it, and builds the app with its own startup migration off."""
     import coverset.app
     import coverset.cli
 
+    url = postgres_databases.url_for(f"{postgres_databases.prefix}_serve")
     built: list[Settings] = []
     monkeypatch.setattr(coverset.app, "create_app", lambda s: built.append(s) or object())
     monkeypatch.setattr(coverset.cli, "_serve", _no_serve)
-    result = CliRunner().invoke(
-        cli,
-        ["serve", "--bind", "127.0.0.1:8131"],
-        env={"COVERSET_DATA_DIR": str(tmp_path / "data"), "COVERSET_DATABASE_URL": ""},
-    )
-    assert result.exit_code == 0, result.output
-    assert "database ready" in result.output
-    assert len(built) == 1 and built[0].skip_migrations is True
-    assert (tmp_path / "data" / "coverset.db").is_file()
+    get_settings.cache_clear()
+    try:
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--bind", "127.0.0.1:8131"],
+            env={"COVERSET_DATA_DIR": str(tmp_path / "data"), "COVERSET_DATABASE_URL": url},
+        )
+        assert result.exit_code == 0, result.output
+        assert "applied migration 0001" in result.output and "migration(s) applied" in result.output
+        assert len(built) == 1 and built[0].skip_migrations is True
+    finally:
+        get_settings.cache_clear()
+        postgres_databases.drop(url)
+
+
+def test_serve_against_a_stopped_server_says_how_to_start_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    get_settings.cache_clear()
+    try:
+        result = CliRunner().invoke(
+            cli,
+            ["serve", "--bind", "127.0.0.1:8132"],
+            env={
+                "COVERSET_DATA_DIR": str(tmp_path / "data"),
+                "COVERSET_DATABASE_URL": "postgresql://localhost:1/coverset",
+            },
+        )
+    finally:
+        get_settings.cache_clear()
+    assert result.exit_code == 2, result.output
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 1 and lines[0].startswith("Error: cannot reach Postgres at localhost:1")
+    assert "brew services start postgresql@14" in lines[0] and "make services" in lines[0]
 
 
 async def _no_serve(_app: Any, _bind: str) -> None:
@@ -372,7 +401,7 @@ def test_ports_follow_the_compose_variables() -> None:
 
 
 def test_hosted_environment_points_at_the_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    env: dict[str, str] = {"COVERSET_DATABASE_URL": "sqlite+aiosqlite:///elsewhere.db"}
+    env: dict[str, str] = {"COVERSET_DATABASE_URL": "postgresql://someone@elsewhere/other"}
     lines = dev.apply_hosted_environment(dev.DevStack(pg_port=55432), env)
     assert env["COVERSET_DATABASE_URL"] == "postgresql+asyncpg://coverset:coverset@127.0.0.1:55432/coverset"
     assert env["COVERSET_BLOB_URL"] == "s3://coverset?endpoint_url=http://127.0.0.1:9000&region=us-east-1"
@@ -413,6 +442,7 @@ def test_hosted_environment_drops_the_shells_aws_identity() -> None:
 def test_dev_hosted_wires_the_stack_into_the_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started: list[str] = []
     monkeypatch.setattr(dev, "ensure_dev_stack", lambda stack: dev.DevStack(pg_port=55432))
+    monkeypatch.setattr(dev, "prepare_database", lambda _settings: None)  # never the real dev stack
     monkeypatch.setattr(dev, "data_dir_has_repository", lambda _settings: True)
     monkeypatch.setattr(
         dev,
@@ -530,11 +560,6 @@ def _fake_modal(recorded: dict[str, Any]) -> ModuleType:
 
     module = ModuleType("modal")
     module.App = App  # type: ignore[attr-defined]
-    module.Volume = SimpleNamespace(  # type: ignore[attr-defined]
-        from_name=lambda name, **_kw: SimpleNamespace(
-            name=name, commit=lambda: recorded.setdefault("commits", 0)
-        )
-    )
     module.Secret = SimpleNamespace(from_name=lambda name: ("secret", name))  # type: ignore[attr-defined]
     module.Image = SimpleNamespace(debian_slim=lambda **_kw: "image")  # type: ignore[attr-defined]
     module.FilePatternMatcher = SimpleNamespace(from_file=lambda _path: None)  # type: ignore[attr-defined]
@@ -544,17 +569,11 @@ def _fake_modal(recorded: dict[str, Any]) -> ModuleType:
     return module
 
 
-def _load_modal_web(
-    monkeypatch: pytest.MonkeyPatch, web_state: str | None = None
-) -> tuple[ModuleType, dict[str, Any]]:
+def _load_modal_web(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, dict[str, Any]]:
     recorded: dict[str, Any] = {}
     monkeypatch.setitem(sys.modules, "modal", _fake_modal(recorded))
     if "MODAL_IMAGE_BUILDER_VERSION" not in os.environ:  # the module sets a default at import
         _forget_after(monkeypatch, "MODAL_IMAGE_BUILDER_VERSION")
-    if web_state is None:
-        monkeypatch.delenv("COVERSET_WEB_STATE", raising=False)
-    else:
-        monkeypatch.setenv("COVERSET_WEB_STATE", web_state)
     spec = importlib.util.spec_from_file_location(
         "coverset_web_stubbed", DEPLOY / "modal" / "coverset_web.py"
     )
@@ -604,93 +623,97 @@ def modal_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]
     get_settings.cache_clear()
 
 
-def test_modal_hosted_mode_skips_the_volume_machinery(
+def _secret(admin_token: str) -> dict[str, str]:
+    return {
+        "COVERSET_DATABASE_URL": "postgresql://coverset:pw@db.internal/coverset",
+        "COVERSET_BLOB_URL": BLOB_URL,
+        "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE",
+        "AWS_SECRET_ACCESS_KEY": "secret-example",
+        "COVERSET_ADMIN_TOKEN": admin_token,
+        "COVERSET_PUBLIC_URL": PUBLIC_URL,
+    }
+
+
+def test_modal_container_is_stateless(
     monkeypatch: pytest.MonkeyPatch, modal_env: Path, admin_token: str
 ) -> None:
     web, recorded = _load_modal_web(monkeypatch)
-    assert recorded["function"]["volumes"], "the default deploy mounts the Volume"
-    local, volume = modal_env / "local", modal_env / "volume"
-    monkeypatch.setenv("COVERSET_DATABASE_URL", "postgresql://coverset:pw@db.internal/coverset")
-    monkeypatch.setenv("COVERSET_BLOB_URL", BLOB_URL)
-    monkeypatch.setenv("COVERSET_ADMIN_TOKEN", admin_token)
-    monkeypatch.setenv("COVERSET_PUBLIC_URL", PUBLIC_URL)
+    assert "volumes" not in recorded["function"], "no Volume: nothing in the container must survive it"
+    local = modal_env / "local"
+    for key, value in _secret(admin_token).items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setenv(
         web.PRIVATE_KEY_ENV, "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----"
     )
-    restored: list[Any] = []
-    monkeypatch.setattr(web.SQLiteVolumeBackup, "restore", lambda self: restored.append(self))
 
-    app = web.build_web_app(
-        os.environ, volume_mounted=True, local_dir=local, volume_mount=volume, create_app=FakeApp
-    )
+    app = web.build_web_app(os.environ, local_dir=local, create_app=FakeApp)
 
-    assert restored == [] and app.hooks == [], "no restore, no backup timer"
+    assert app.hooks == [], "no backup timer or anything else of its own"
     assert app.settings.hosted is True
+    assert app.settings.database_url == "postgresql+asyncpg://coverset:pw@db.internal/coverset"
     assert app.settings.data_dir == local and app.settings.cache_dir == local / "cache"
-    assert Path.cwd() == local, "the working directory is the container's disk, not the Volume"
-    assert not volume.exists(), "nothing touches the Volume"
+    assert app.settings.executor == "modal" and app.settings.trust_proxy is False
+    assert Path.cwd() == local, "the working directory is the container's disk"
     key = local / "secrets" / "github-app.pem"
     assert app.settings.github_app_private_key_path == key
     assert key.read_text(encoding="utf-8").startswith("-----BEGIN RSA PRIVATE KEY-----")
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
 
 
-def test_modal_volume_mode_is_the_fallback(monkeypatch: pytest.MonkeyPatch, modal_env: Path) -> None:
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        ({"COVERSET_DATABASE_URL": ""}, "COVERSET_DATABASE_URL"),
+        ({"COVERSET_BLOB_URL": ""}, "COVERSET_BLOB_URL"),
+        ({"AWS_SECRET_ACCESS_KEY": ""}, "AWS_SECRET_ACCESS_KEY"),
+        ({"COVERSET_ADMIN_TOKEN": ""}, "COVERSET_ADMIN_TOKEN"),
+        ({"COVERSET_DATABASE_URL": "mysql://u:p@h/db"}, "COVERSET_DATABASE_URL (a Postgres URL)"),
+        ({"COVERSET_BLOB_URL": "gs://bucket"}, "COVERSET_BLOB_URL (an s3:// URL)"),
+    ],
+)
+def test_modal_refuses_a_secret_without_its_state(
+    monkeypatch: pytest.MonkeyPatch, modal_env: Path, admin_token: str, change: dict[str, str], named: str
+) -> None:
     web, _ = _load_modal_web(monkeypatch)
-    local, volume = modal_env / "local", modal_env / "volume"
-    restored: list[Any] = []
-    monkeypatch.setattr(web.SQLiteVolumeBackup, "restore", lambda self: restored.append(self) or "restored")
+    environ = {**_secret(admin_token), **change}
+    built: list[Any] = []
+    with pytest.raises(RuntimeError, match="needs in the Modal Secret") as raised:
+        web.build_web_app(environ, local_dir=modal_env / "local", create_app=built.append)
+    assert named in str(raised.value) and built == []
+    assert not (modal_env / "local").exists(), "nothing laid out before the check"
 
-    app = web.build_web_app(
-        os.environ, volume_mounted=True, local_dir=local, volume_mount=volume, create_app=FakeApp
+
+def test_modal_max_containers_is_a_deploy_time_knob(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COVERSET_WEB_MAX_CONTAINERS", raising=False)
+    _, default = _load_modal_web(monkeypatch)
+    assert default["function"]["max_containers"] == 1
+    monkeypatch.setenv("COVERSET_WEB_MAX_CONTAINERS", "3")
+    _, raised = _load_modal_web(monkeypatch)
+    assert raised["function"]["max_containers"] == 3
+
+
+def test_modal_exec_shells_see_the_servers_layout(
+    monkeypatch: pytest.MonkeyPatch, modal_env: Path, admin_token: str
+) -> None:
+    """The image carries the layout web() uses, so `modal container exec ... coverset deploy check`
+    checks the server's data dir, cache and key path."""
+    web, _ = _load_modal_web(monkeypatch)
+    local = modal_env / "local"
+    image_env = web.container_environment(local)
+    assert image_env["COVERSET_DATA_DIR"] == str(local)
+    assert image_env["COVERSET_CACHE_DIR"] == str(local / "cache")
+    assert image_env["COVERSET_EXECUTOR"] == "modal" and image_env["COVERSET_TRUST_PROXY"] == "false"
+    assert "COVERSET_DATABASE_URL" not in image_env, "the state comes from the Secret only"
+    for key, value in {**image_env, **_secret(admin_token)}.items():  # an exec shell's environment
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    shell = Settings()
+    served = web.build_web_app(os.environ, local_dir=local, create_app=FakeApp).settings
+    assert (
+        (shell.data_dir, shell.cache_dir) == (served.data_dir, served.cache_dir) == (local, local / "cache")
     )
-
-    assert len(restored) == 1 and restored[0].live == local / "coverset.db"
-    assert restored[0].backup_dir == volume / "backup"
-    assert app.hooks == ["before_serving", "after_serving"], "the backup timer and the final backup"
-    assert app.settings.hosted is False
-    assert app.settings.data_dir == volume and Path.cwd() == volume
-    assert app.settings.database_url == f"sqlite+aiosqlite:///{local / 'coverset.db'}"
-
-
-def test_modal_postgres_without_a_bucket_keeps_the_volume_for_files(
-    monkeypatch: pytest.MonkeyPatch, modal_env: Path
-) -> None:
-    web, _ = _load_modal_web(monkeypatch)
-    monkeypatch.setenv("COVERSET_DATABASE_URL", PG_URL)
-    plan = web.plan_container(os.environ, local_dir=modal_env / "l", volume_mount=modal_env / "v")
-    assert (plan.hosted, plan.backups, plan.workdir) == (False, False, modal_env / "v")
-
-
-def test_modal_without_a_volume_refuses_a_stateful_secret(
-    monkeypatch: pytest.MonkeyPatch, modal_env: Path
-) -> None:
-    web, recorded = _load_modal_web(monkeypatch, web_state="hosted")
-    assert recorded["function"]["volumes"] == {}, "COVERSET_WEB_STATE=hosted deploys no Volume"
-    assert recorded["function"]["max_containers"] == 1
-    with pytest.raises(RuntimeError, match="no Volume"):
-        web.build_web_app(
-            os.environ,
-            volume_mounted=False,
-            local_dir=modal_env / "local",
-            volume_mount=modal_env / "volume",
-            create_app=FakeApp,
-        )
-
-
-def test_secret_is_hosted_matches_settings_hosted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    web, _ = _load_modal_web(monkeypatch)
-    cases = [
-        ({"COVERSET_DATABASE_URL": "postgres://u:p@h/db", "COVERSET_BLOB_URL": BLOB_URL}, True),
-        ({"COVERSET_DATABASE_URL": PG_URL, "COVERSET_BLOB_URL": BLOB_URL}, True),
-        ({"COVERSET_DATABASE_URL": PG_URL}, False),
-        ({"COVERSET_BLOB_URL": BLOB_URL}, False),
-        ({}, False),
-    ]
-    for environ, expected in cases:
-        assert web.secret_is_hosted(environ) is expected
-        fields = {k.removeprefix("COVERSET_").lower(): v for k, v in environ.items()}
-        assert Settings.for_tests(data_dir=tmp_path, **fields).hosted is expected
+    assert shell.github_app_private_key_path == served.github_app_private_key_path
+    assert shell.hosted and served.hosted
 
 
 # -- the deployment files ----------------------------------------------------------------------------
@@ -700,16 +723,17 @@ def _compose(name: str) -> dict[str, Any]:
     return yaml.safe_load((DEPLOY / name).read_text(encoding="utf-8"))
 
 
-def test_compose_has_an_optional_hosted_profile() -> None:
+def test_compose_runs_postgres_and_has_an_optional_bucket() -> None:
     compose = _compose("compose.yml")
     services = compose["services"]
     assert set(services) == {"coverset", "caddy", "postgres", "minio", "minio-init"}
-    for name in ("postgres", "minio", "minio-init"):
+    for name in ("minio", "minio-init"):
         assert services[name]["profiles"] == ["hosted"], name
-    for name in ("coverset", "caddy"):
+    for name in ("coverset", "caddy", "postgres"):
         assert "profiles" not in services[name], f"{name} runs without the profile"
     depends = services["coverset"]["depends_on"]
-    assert depends["postgres"]["required"] is False and depends["minio-init"]["required"] is False
+    assert depends["postgres"] == {"condition": "service_healthy"}, "coverset needs its database"
+    assert depends["minio-init"]["required"] is False
     assert services["postgres"]["image"] == "postgres:17"
     assert "ports" not in services["postgres"] and "ports" not in services["minio"], "never published"
     assert {"coverset-postgres", "coverset-minio"} <= set(compose["volumes"])
@@ -829,50 +853,8 @@ def test_hosted_dev_example_is_the_stack(tmp_path: Path, monkeypatch: pytest.Mon
     assert settings.data_dir == (tmp_path / dev.DEV_HOSTED_DATA_DIR).resolve()
 
 
-def test_modal_max_containers_is_a_hosted_only_knob(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COVERSET_WEB_MAX_CONTAINERS", "3")
-    _, volume_mode = _load_modal_web(monkeypatch)
-    assert volume_mode["function"]["max_containers"] == 1, "SQLite on a Volume: one writer"
-    _, hosted = _load_modal_web(monkeypatch, web_state="hosted")
-    assert hosted["function"]["max_containers"] == 3
-
-
 def test_a_key_file_is_called_out_when_the_data_dir_is_disposable(tmp_path: Path) -> None:
     laptop = Settings.for_tests(data_dir=tmp_path / "a")
     hosted = Settings.for_tests(data_dir=tmp_path / "b", database_url=PG_URL, blob_url=BLOB_URL)
     assert "lost with the container" not in _checks(laptop)["secret key"].detail
     assert "set COVERSET_SECRET_KEY" in _checks(hosted)["secret key"].detail
-
-
-def test_modal_exec_shells_see_the_hosted_layout(
-    monkeypatch: pytest.MonkeyPatch, modal_env: Path, admin_token: str
-) -> None:
-    """A hosted deploy's image carries the layout web() uses, so `modal container exec ... coverset
-    deploy check` checks the server's data dir, cache and key path, not a /data with no Volume."""
-    web, _ = _load_modal_web(monkeypatch, web_state="hosted")
-    local = modal_env / "local"
-    volume_env = web.image_environment("volume", local_dir=local)
-    assert volume_env == web.container_environment(local_dir=local), "the Volume mode's image is unchanged"
-    image_env = web.image_environment("hosted", local_dir=local)
-    assert image_env["COVERSET_DATA_DIR"] == str(local)
-    assert image_env["COVERSET_CACHE_DIR"] == str(local / "cache")
-    secret = {
-        "COVERSET_DATABASE_URL": PG_URL,
-        "COVERSET_BLOB_URL": BLOB_URL,
-        "COVERSET_ADMIN_TOKEN": admin_token,
-        "COVERSET_PUBLIC_URL": PUBLIC_URL,
-        web.PRIVATE_KEY_ENV: "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----",
-    }
-    for key, value in {**image_env, **secret}.items():  # what an exec shell's environment holds
-        monkeypatch.setenv(key, value)
-    get_settings.cache_clear()
-    shell = Settings()
-    app = web.build_web_app(
-        os.environ, volume_mounted=False, local_dir=local, volume_mount=modal_env / "v", create_app=FakeApp
-    )
-    served = app.settings
-    assert (
-        (shell.data_dir, shell.cache_dir) == (served.data_dir, served.cache_dir) == (local, local / "cache")
-    )
-    assert shell.github_app_private_key_path == served.github_app_private_key_path
-    assert shell.hosted and served.hosted

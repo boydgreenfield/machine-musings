@@ -1052,6 +1052,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--shards", type=lambda s: [int(x) for x in s.split(",") if x], default=[1, 16, 32])
     parser.add_argument("--scenarios", type=lambda s: [x for x in s.split(",") if x], default=list(SCENARIOS))
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data" / "bench-modal")
+    parser.add_argument(
+        "--database-url",
+        default="postgresql+asyncpg://localhost/coverset_bench_modal",
+        help="the benchmark's own database (created if missing; default: %(default)s)",
+    )
     parser.add_argument("--plan-tier", default="Starter")
     parser.add_argument("--resume", action="store_true", help="Skip scenarios already in bench-raw.json.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan and the estimate, then exit.")
@@ -1082,7 +1087,7 @@ def make_settings(args: argparse.Namespace) -> Settings:
     data_dir.mkdir(parents=True, exist_ok=True)
     common: dict[str, Any] = {
         "data_dir": data_dir,
-        "database_url": f"sqlite+aiosqlite:///{data_dir / 'coverset.db'}",
+        "database_url": args.database_url,
         "executor": "modal",
         "github_webhook_secret": secrets.token_hex(24),
         "forge": "fake",

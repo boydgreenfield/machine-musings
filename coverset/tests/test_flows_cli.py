@@ -14,7 +14,6 @@ import importlib.util
 import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -27,6 +26,7 @@ from click.testing import CliRunner, Result
 
 from coverset.cli import cli
 from coverset.config import Settings
+from coverset.db.testing import PostgresTestDatabases, run_sql
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "flows" / "ledger-prod.jsonl"
@@ -36,12 +36,12 @@ REPO = "coverset-demo/ledger"
 @dataclass(frozen=True)
 class Seeded:
     data_dir: Path
-    db_path: Path
+    db_url: str
     baseline_run: str
 
 
 @pytest.fixture(scope="module")
-def seeded(tmp_path_factory: pytest.TempPathFactory) -> Seeded:
+def seeded(tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases) -> Seeded:
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
     from coverset.db.session import init_db
@@ -55,7 +55,7 @@ def seeded(tmp_path_factory: pytest.TempPathFactory) -> Seeded:
     root = tmp_path_factory.mktemp("flows-cli-demo")
     settings = Settings.for_tests(
         data_dir=root / "data",
-        database_url=f"sqlite+aiosqlite:///{root / 'coverset.db'}",
+        database_url=postgres_databases.create(),
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
     )
@@ -73,21 +73,18 @@ def seeded(tmp_path_factory: pytest.TempPathFactory) -> Seeded:
 
     asyncio.run(scenario())
     clear_registered_secrets()
-    con = sqlite3.connect(root / "coverset.db")
-    try:
-        baseline = con.execute(
-            "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()[0]
-    finally:
-        con.close()
-    return Seeded(root / "data", root / "coverset.db", baseline)
+    baseline = run_sql(
+        settings.database_url,
+        "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+    )[0][0]
+    return Seeded(root / "data", settings.database_url, baseline)
 
 
 @pytest.fixture(scope="module")
 def env(seeded: Seeded) -> Iterator[dict[str, str]]:
     values = {
         "COVERSET_DATA_DIR": str(seeded.data_dir),
-        "COVERSET_DATABASE_URL": f"sqlite+aiosqlite:///{seeded.db_path}",
+        "COVERSET_DATABASE_URL": seeded.db_url,
     }
     saved = {k: os.environ.get(k) for k in values}
     os.environ.update(values)

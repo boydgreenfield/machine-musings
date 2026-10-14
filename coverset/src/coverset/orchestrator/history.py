@@ -430,8 +430,7 @@ async def upsert_rows(
 ) -> None:
     """Insert ``rows`` into ``model``'s table, replacing the other columns where ``keys`` exist.
 
-    One ``INSERT ... ON CONFLICT`` per distinct column set on SQLite and Postgres alike
-    (:func:`coverset.db.upsert.upsert`).
+    One ``INSERT ... ON CONFLICT`` per distinct column set (:func:`coverset.db.upsert.upsert`).
     """
     await upsert(session, model, rows, keys)
 
@@ -756,7 +755,7 @@ async def _collect_garbage(db: Database, settings: Settings, store: FactsStore, 
     report.expired_facts = await asyncio.to_thread(
         expire_runs, store, keep_run_ids=keep, older_than=run_cutoff, dry_run=dry_run
     )
-    from coverset.storage.cachedir import evict  # object store: keep this host's cache in its bound
+    from coverset.storage.cachedir import evict  # keep this host's cache in its bound
 
     if (evicted := await asyncio.to_thread(evict, settings, dry_run=dry_run)).removed:
         log.info("gc: %s", evicted.line())
@@ -811,14 +810,14 @@ async def prune_upload_files(
 ) -> tuple[list[str], list[str]]:
     """Remove what upload mode keeps on disk for ``expired`` runs (``(repo_id, run_id, head_sha)``).
 
-    Each run's shard archives (``<runs_dir>/<run_id>/upload``) go, and each head commit's uploaded
-    sources (``<data_dir>/sources/<repo_id>/<sha>``) once no run of the repository other than the
+    Each run's unpacked shards (``<runs_dir>/<run_id>/upload``) go, and each head commit's uploaded
+    sources and upload archives in the blob store once no run of the repository other than the
     expired ones has that head (call it after the runs' rows are deleted, or with ``dry_run``).
     Returns ``(run ids, "<repo_id>/<sha>" commits)`` that were (or would be) removed.
     """
     from coverset.facts.gc import remove_upload_dirs
     from coverset.facts.sources import source_store
-    from coverset.storage import remote_store
+    from coverset.storage import from_settings
     from coverset.storage.uploads import remove_uploads
 
     if not expired:
@@ -841,13 +840,12 @@ async def prune_upload_files(
             source_store(settings).remove, repo_id, shas - live, dry_run=dry_run
         )
         sources += [f"{repo_id}/{sha}" for sha in removed]
-        if (blobs := remote_store(settings)) is not None:  # the commits' archives in the object store
-            archived = set(
-                await asyncio.to_thread(remove_uploads, blobs, repo_id, shas - live, dry_run=dry_run)
+        archived = set(
+            await asyncio.to_thread(
+                remove_uploads, from_settings(settings), repo_id, shas - live, dry_run=dry_run
             )
-            uploads += [
-                r for rid, r, sha in expired if rid == repo_id and sha in archived and r not in uploads
-            ]
+        )
+        uploads += [r for rid, r, sha in expired if rid == repo_id and sha in archived and r not in uploads]
     return sorted(uploads), sources
 
 

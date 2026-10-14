@@ -241,10 +241,13 @@ def test_tunnel_public_url_without_admin_token_refuses_to_start(tmp_path: Path) 
 
 
 @pytest.mark.security
-async def test_admin_session_replaces_credentials_with_a_csrf_post(tmp_path: Path, admin_token: str) -> None:
+async def test_admin_session_replaces_credentials_with_a_csrf_post(
+    tmp_path: Path, admin_token: str, settings: Settings
+) -> None:
     """With a token, the callback works through a tunnel for a signed-in admin, and replacing
     stored credentials is a POST carrying the CSRF token."""
     settings = Settings.for_tests(
+        database_url=settings.database_url,
         data_dir=tmp_path / "data",
         admin_token=admin_token,
         public_url="https://coverset-demo.ngrok.app",

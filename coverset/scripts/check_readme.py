@@ -155,10 +155,12 @@ def coverset_bin() -> list[str]:
 
 
 def shapes_markdown(func: str, data_dir: Path) -> str:
-    """``coverset shapes FUNC --markdown`` on the default branch of the demo in ``data_dir``."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("COVERSET_")}
+    """``coverset shapes FUNC --markdown`` on the default branch of the demo in ``data_dir``, whose
+    database is ``COVERSET_DATABASE_URL`` (the one setting kept from this process's environment)."""
+    env = {
+        k: v for k, v in os.environ.items() if not k.startswith("COVERSET_") or k == "COVERSET_DATABASE_URL"
+    }
     env["COVERSET_DATA_DIR"] = str(data_dir)
-    env["COVERSET_DATABASE_URL"] = f"sqlite+aiosqlite:///{data_dir / 'coverset.db'}"
     result = subprocess.run(
         [*coverset_bin(), "shapes", func, "--markdown"],
         cwd=ROOT,
@@ -334,7 +336,9 @@ def check(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
-        "--data-dir", type=Path, help="a seeded demo's data dir: also check the shapes tables"
+        "--data-dir",
+        type=Path,
+        help="a seeded demo's data dir (its database: COVERSET_DATABASE_URL): also check the shapes tables",
     )
     parser.add_argument("--fix", action="store_true", help="rewrite the generated regions in place")
     parser.add_argument(

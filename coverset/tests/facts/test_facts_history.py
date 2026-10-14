@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from coverset.config import Settings
+from coverset.db.testing import PostgresTestDatabases, run_sql
 from coverset.facts.queries import (
     baseline_trend,
     class_changes,
@@ -28,7 +28,8 @@ from coverset.facts.queries import (
     top_gaps,
 )
 from coverset.facts.schema import CALLABLE_KINDS
-from coverset.facts.store import FactsStore
+from coverset.facts.store import FactsStore, facts_store
+from coverset.storage.testing import local_facts_store
 
 VALIDATE_EMAIL = "validate_email"
 
@@ -45,7 +46,9 @@ class DemoFacts:
 
 
 @pytest.fixture(scope="module")
-def demo_facts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[DemoFacts]:
+def demo_facts(
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases
+) -> Iterator[DemoFacts]:
     """Seed the local demo once (about 20 s) and describe its facts."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
@@ -61,7 +64,7 @@ def demo_facts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[DemoFacts]:
     data_dir = root / "data"
     settings = Settings.for_tests(
         data_dir=data_dir,
-        database_url=f"sqlite+aiosqlite:///{root / 'coverset.db'}",
+        database_url=postgres_databases.create(),
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
     )
@@ -79,26 +82,24 @@ def demo_facts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[DemoFacts]:
 
     asyncio.run(scenario())
     clear_registered_secrets()
-    con = sqlite3.connect(root / "coverset.db")
-    try:
-        baselines = tuple(
-            row[0]
-            for row in con.execute(
-                "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at"
-            )
+    url = settings.database_url
+    baselines = tuple(
+        row[0]
+        for row in run_sql(
+            url, "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at"
         )
+    )
 
-        def pr_run(number: int) -> str:
-            return con.execute(
-                "SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = ? "
-                "ORDER BY r.created_at DESC LIMIT 1",
-                (number,),
-            ).fetchone()[0]
+    def pr_run(number: int) -> str:
+        return run_sql(
+            url,
+            "SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = :number "
+            "ORDER BY r.created_at DESC LIMIT 1",
+            {"number": number},
+        )[0][0]
 
-        repo_id = con.execute("SELECT id FROM repos ORDER BY id LIMIT 1").fetchone()[0]
-        yield DemoFacts(FactsStore(settings.facts_dir), repo_id, baselines, pr_run(1), pr_run(2))
-    finally:
-        con.close()
+    repo_id = int(run_sql(url, "SELECT id FROM repos ORDER BY id LIMIT 1")[0][0])
+    yield DemoFacts(facts_store(settings), repo_id, baselines, pr_run(1), pr_run(2))
 
 
 def _func_key(facts: DemoFacts, run_id: str, qualname: str) -> str:
@@ -193,11 +194,22 @@ def test_class_changes_of_a_pr_against_its_base(demo_facts: DemoFacts) -> None:
     assert all(c.sampled for c in class_changes(store, rid, demo_facts.pr2_run, base))
 
 
+def _private_copy(source: FactsStore, facts_dir: Path) -> FactsStore:
+    """A copy of ``source``'s cached facts that the test may rewrite in place: the files only, not
+    the records of what was pulled, so the copy is an unpublished store of its own (its empty blob
+    store has nothing to pull over the edits)."""
+    shutil.copytree(
+        source.root,
+        facts_dir,
+        ignore=shutil.ignore_patterns(".sync.json", ".dictionary.sync", "MANIFEST.json", ".lock"),
+    )
+    return local_facts_store(facts_dir)
+
+
 def test_class_changes_report_body_lines_newly_uncovered(demo_facts: DemoFacts, tmp_path: Path) -> None:
     """Drop every hit on validate_email's last body line from the newest baseline's test_lines
     (a copy of the store): the line shows up as newly uncovered and its history's line % drops."""
-    shutil.copytree(demo_facts.store.root, tmp_path / "facts")
-    store = FactsStore(tmp_path / "facts")
+    store = _private_copy(demo_facts.store, tmp_path / "facts")
     rid, (main5, main6) = demo_facts.repo_id, demo_facts.baselines[-2:]
     fn = next(
         r for r in store.read_table(rid, main6, "functions").to_pylist() if r["qualname"] == VALIDATE_EMAIL
@@ -296,8 +308,7 @@ def test_class_changes_name_classes_only_for_the_same_signature(
     """A changed ``sig_hash`` (or expected count) means the stored gaps cannot be compared by name:
     the change is listed as uncompared, with no class called lost or gained. The sample-cap flag
     is this run's, not the prior run's."""
-    shutil.copytree(demo_facts.store.root, tmp_path / "facts")
-    store = FactsStore(tmp_path / "facts")
+    store = _private_copy(demo_facts.store, tmp_path / "facts")
     rid, (main5, main6) = demo_facts.repo_id, demo_facts.baselines[-2:]
 
     def resign(rows: list[dict]) -> list[dict]:  # type: ignore[type-arg]

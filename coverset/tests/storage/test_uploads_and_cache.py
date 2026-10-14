@@ -17,9 +17,9 @@ from click.testing import CliRunner
 
 from coverset.config import Settings
 from coverset.facts import cache
-from coverset.facts.store import FactsStore
+from coverset.facts.store import FactsStore, facts_store
 from coverset.facts.untrusted import BundleLimits
-from coverset.storage import BlobStore, cachedir, store_from_url
+from coverset.storage import BlobStore, blob_url_of, cachedir, from_settings
 from coverset.storage.testing import fresh_blob_url
 from coverset.storage.uploads import archive_upload, remove_uploads, restore_upload, upload_key
 
@@ -60,13 +60,17 @@ def test_archive_restore_and_remove(blobs: BlobStore, tmp_path: Path) -> None:
 # -- the cache ------------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def hosted(tmp_path: Path) -> Iterator[Settings]:
-    settings = Settings.for_tests(data_dir=tmp_path / "data", blob_url=fresh_blob_url("cache"))
+@pytest.fixture(params=["local", "s3"])
+def hosted(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Settings]:
+    """Settings whose blobs are files under the data dir (``local``) or in S3: the cache in front of
+    either is the same."""
+    blob_url = fresh_blob_url("cache") if request.param == "s3" else ""
+    settings = Settings.for_tests(data_dir=tmp_path / "data", blob_url=blob_url)
     cache.configure(settings.cache_overrides())
     yield settings
-    blobs = store_from_url(settings.blob_url)
-    blobs.delete([info.key for info in blobs.list()])
+    if blob_url:  # this test's prefix (the local store lives in tmp_path)
+        blobs = from_settings(settings)
+        blobs.delete([info.key for info in blobs.list()])
 
 
 def _run(store: FactsStore, run_id: str, kb: int, used: float) -> Path:
@@ -77,20 +81,16 @@ def _run(store: FactsStore, run_id: str, kb: int, used: float) -> Path:
     return store.run_dir(1, run_id)
 
 
-def test_settings_put_facts_and_mirrors_in_the_cache_with_an_object_store(tmp_path: Path) -> None:
+def test_facts_and_mirrors_are_always_in_the_cache(tmp_path: Path) -> None:
     local = Settings.for_tests(data_dir=tmp_path / "data")
-    assert local.facts_dir == local.data_dir / "facts" and local.mirrors_dir == local.data_dir / "mirrors"
-    assert "COVERSET_BLOB_URL" not in local.cache_overrides()
+    cache_dir = local.data_dir / "cache"
+    assert local.facts_dir == cache_dir / "facts" and local.mirrors_dir == cache_dir / "mirrors"
     hosted = Settings.for_tests(data_dir=tmp_path / "data", blob_url="s3://b", cache_dir=tmp_path / "c")
     assert hosted.facts_dir == tmp_path / "c" / "facts" and hosted.mirrors_dir == tmp_path / "c" / "mirrors"
-    assert hosted.cache_overrides() == {
-        "COVERSET_BLOB_URL": "s3://b",
-        "COVERSET_CACHE_DIR": str(tmp_path / "c"),
-    }
+    assert hosted.cache_overrides() == {} == local.cache_overrides(), "the ingest job carries the blob URL"
 
 
 def test_eviction_is_least_recently_used_and_spares_what_is_in_use(hosted: Settings) -> None:
-    from coverset.facts.store import facts_store
 
     store = facts_store(hosted)
     now = time.time()
@@ -109,7 +109,7 @@ def test_eviction_is_least_recently_used_and_spares_what_is_in_use(hosted: Setti
     os.utime(mirror / "HEAD", (now - 400, now - 400))
     os.utime(mirror, (now - 400, now - 400))
     status = cachedir.status(hosted)
-    assert status.remote and status.by_kind["run"][0] == 5 and status.by_kind["mirror"][0] == 1
+    assert status.by_kind["run"][0] == 5 and status.by_kind["mirror"][0] == 1
     sizes = {entry.path: entry.bytes for entry in cachedir.entries(hosted)}
     bound = status.total_bytes - sizes[mirror] - sizes[oldest] - 1  # those two, then one more
     with open(locked / ".lock", "a") as handle:
@@ -118,18 +118,8 @@ def test_eviction_is_least_recently_used_and_spares_what_is_in_use(hosted: Setti
     removed = {entry.path for entry in report.removed}
     assert removed == {mirror, oldest, middle}, "oldest first; locked and unpublished runs stay"
     assert locked.is_dir() and unpublished.is_dir() and newest.is_dir() and not oldest.exists()
-    assert store.has_run(1, "oldest"), "an evicted run comes back from the bucket on its next read"
+    assert store.has_run(1, "oldest"), "an evicted run comes back from the store on its next read"
     assert store.read_table(1, "oldest", "file_cov").num_rows == 1
-
-
-def test_the_local_default_has_no_cache_to_evict(tmp_path: Path) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
-    FactsStore(settings.facts_dir).write_table(
-        1, "r", "files", pa.table({"file_id": [0], "path": ["a"]}), shard_id=0, attempt=1
-    )
-    assert cachedir.evict(settings, max_bytes=0).removed == []
-    assert cachedir.clear(settings).removed == [] and FactsStore(settings.facts_dir).list_runs(1) == ["r"]
-    assert not cachedir.status(settings).remote
 
 
 def test_the_cache_bound_knob(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,7 +137,6 @@ def test_the_cache_bound_knob(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_cache_command(hosted: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from coverset.cli import cli
     from coverset.config import get_settings
-    from coverset.facts.store import facts_store
 
     _run(facts_store(hosted), "r1", 10, time.time())
     env = {
@@ -161,10 +150,8 @@ def test_cache_command(hosted: Settings, monkeypatch: pytest.MonkeyPatch, tmp_pa
     status = runner.invoke(cli, ["cache", "status", "--json"], env=env)
     assert status.exit_code == 0, status.output
     parsed = json.loads(status.output)
-    assert parsed["remote"] and parsed["by_kind"]["run"]["entries"] == 1
+    assert parsed["blob_url"] == blob_url_of(hosted) and parsed["by_kind"]["run"]["entries"] == 1
     cleared = runner.invoke(cli, ["cache", "clear", "--yes"], env=env)
     assert cleared.exit_code == 0 and "removed 1 entries" in cleared.output
-    get_settings.cache_clear()
-    local = runner.invoke(cli, ["cache", "clear", "--yes"], env={"COVERSET_DATA_DIR": str(tmp_path / "d")})
-    assert local.exit_code == 0 and "nothing to clear" in local.output
+    assert facts_store(hosted).list_runs(1) == ["r1"], "the store still has it"
     get_settings.cache_clear()

@@ -57,7 +57,7 @@ queued ──▶ claim + policy ──▶ plan ───────────
    the run ends `error`, `neutral`, "run cost cap $X reached", with its real cost recorded. The cancel
    watcher starts right after the claim, so cancelling or superseding a run also interrupts its
    planning.
-3. **Plan.** The repo's bare mirror (`data/mirrors/<repo_id>.git`) is refreshed; the head commit is
+3. **Plan.** The repo's bare mirror (`<cache_dir>/mirrors/<repo_id>.git`) is refreshed; the head commit is
    exported with `git archive` into a temporary control-plane checkout. The environment spec is the
    repo's pinned requirements plus the pytest-coverset wheel (`executors/env_export.py`), and the
    executor builds or finds it (`ensure_env`); see [The environment](#the-environment) for where the
@@ -127,7 +127,7 @@ queued ──▶ claim + policy ──▶ plan ───────────
    (advisory; its absence or failure is recorded as `ai_source = unavailable`), `test_stats`
    (recomputed over each test's last 50 executed results), and the cost estimate. The terminal status,
    the verdict (`runs.verdict/reason/summary_json`) and the `verdict` and `done` events are written in
-   one transaction, retried with backoff while SQLite is busy; then the verdict is posted to the forge
+   one transaction, retried with backoff after a deadlock or a serialization failure; then the verdict is posted to the forge
    for PR runs (check run + sticky comment). A report that cannot be built degrades to a verdict
    without its extras rather than failing the run.
 8. **Afterwards.** A PR run applies the per-PR retention rule (outside `COVERSET_ENV=test`). A trusted

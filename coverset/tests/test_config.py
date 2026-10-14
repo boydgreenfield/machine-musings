@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from coverset.config import Settings, get_settings
+from coverset.config import DEFAULT_DATABASE_URL, Settings, get_settings
 
 LONG_TOKEN = "x" * 32
 
@@ -25,14 +25,17 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyP
 
 
 @pytest.mark.security
-def test_defaults(tmp_path: Path) -> None:
+def test_defaults(clean_env: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Under a clean environment: the suite's own ``COVERSET_DATABASE_URL`` would show instead of
+    the default (``test_for_tests_takes_the_database_url_from_the_environment``)."""
     settings = Settings.for_tests(data_dir=tmp_path)
     assert settings.env == "test"
     assert settings.bind == "127.0.0.1:8000"
     assert settings.is_loopback
     assert settings.public_url == "http://127.0.0.1:8000"
     assert settings.oidc_audience == settings.public_url
-    assert settings.database_url == f"sqlite+aiosqlite:///{tmp_path.resolve() / 'coverset.db'}"
+    assert settings.database_url == "postgresql+asyncpg://localhost/coverset"
+    assert settings.cache_dir == tmp_path.resolve() / "cache" and settings.blob_url == ""
     assert settings.admin_token is None
     assert settings.ai == "fake"
     assert settings.executor == "local"
@@ -57,8 +60,8 @@ def test_defaults(tmp_path: Path) -> None:
     ) == (30, 14, 7)
     assert settings.allowed_owners == [] and settings.allowed_repos == []
     assert not (settings.paused or settings.run_drafts or settings.requeue_on_boot)
-    assert settings.mirrors_dir == tmp_path.resolve() / "mirrors"
-    assert settings.facts_dir == tmp_path.resolve() / "facts"
+    assert settings.mirrors_dir == tmp_path.resolve() / "cache" / "mirrors"
+    assert settings.facts_dir == tmp_path.resolve() / "cache" / "facts"
     assert settings.runs_dir == tmp_path.resolve() / "runs"
 
 
@@ -227,6 +230,19 @@ def test_for_tests_is_hermetic(clean_env: pytest.MonkeyPatch) -> None:
     settings = Settings.for_tests()
     assert settings.max_shards == 32
     assert settings.data_dir.is_dir()
+    assert settings.database_url == DEFAULT_DATABASE_URL
+
+
+def test_for_tests_takes_the_database_url_from_the_environment(clean_env: pytest.MonkeyPatch) -> None:
+    """The one environment key hermetic settings read: the suite points ``COVERSET_DATABASE_URL`` at
+    a scratch database of the process, so a test that forgets ``database_url`` never reaches a
+    developer's ``coverset`` database. An explicit ``database_url`` wins; the URL is normalised."""
+    clean_env.setenv("COVERSET_DATABASE_URL", "postgresql://localhost/cs_scratch_1")
+    assert Settings.for_tests().database_url == "postgresql+asyncpg://localhost/cs_scratch_1"
+    explicit = "postgresql+asyncpg://localhost/cs_explicit"
+    assert Settings.for_tests(database_url=explicit).database_url == explicit
+    clean_env.setenv("COVERSET_DATABASE_URL", "  ")
+    assert Settings.for_tests().database_url == DEFAULT_DATABASE_URL
 
 
 @pytest.mark.security
@@ -267,28 +283,45 @@ def test_hosted_libpq_query_parameters_are_kept_for_the_engine() -> None:
     assert settings.database_url == "postgresql+asyncpg://u:p@ep-x.neon.tech/neondb?sslmode=require"
 
 
-@pytest.mark.parametrize("url", ["postgresql+psycopg://u:p@h/db", "postgresql+psycopg2://u:p@h/db"])
-def test_other_postgres_drivers_are_refused(url: str) -> None:
-    with pytest.raises(ValidationError, match="asyncpg"):
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+psycopg://u:p@h/db",
+        "postgresql+psycopg2://u:p@h/db",
+        "sqlite+aiosqlite:///data/coverset.db",
+        "mysql://u:p@h/db",
+        "localhost/coverset",
+    ],
+)
+def test_anything_but_postgres_on_asyncpg_is_refused_with_the_fix(url: str) -> None:
+    with pytest.raises(ValidationError) as raised:
         Settings.for_tests(database_url=url)
+    message = str(raised.value)
+    assert "must be a Postgres URL for the asyncpg driver" in message
+    assert (
+        "postgresql://user:password@host:5432/name" in message
+        and "postgresql+asyncpg://localhost/coverset" in message
+    )
 
 
-def test_hosted_needs_postgres_and_a_bucket(tmp_path: Path) -> None:
+def test_hosted_means_a_bucket(tmp_path: Path) -> None:
     pg = "postgresql+asyncpg://u:p@h/db"
     assert not Settings.for_tests(data_dir=tmp_path).hosted
     assert not Settings.for_tests(database_url=pg).hosted
-    assert not Settings.for_tests(blob_url="s3://bucket/prefix").hosted
+    assert Settings.for_tests(blob_url="s3://bucket/prefix").hosted
     assert Settings.for_tests(database_url=pg, blob_url="s3://bucket/prefix").hosted
 
 
-def test_secure_data_dirs_with_postgres_touches_no_database_file(tmp_path: Path) -> None:
+def test_secure_data_dirs_restricts_the_data_and_cache_dirs_only(tmp_path: Path) -> None:
     from coverset.config import secure_data_dirs
 
-    decoy = tmp_path / "data" / "db"  # the URL's database name, as a file: never chmodded
-    decoy.parent.mkdir()
-    decoy.write_text("not a database")
-    decoy.chmod(0o644)
-    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url="postgresql+asyncpg://u:p@h/db")
+    settings = Settings.for_tests(data_dir=tmp_path / "data", cache_dir=tmp_path / "cache")
+    plain = settings.data_dir / "facts"  # what the blob store creates below is its own business
+    plain.mkdir(parents=True)
+    plain.chmod(0o755)
+    settings.data_dir.chmod(0o755)
     secure_data_dirs(settings)
+    assert settings.cache_dir is not None
     assert (settings.data_dir.stat().st_mode & 0o777) == 0o700
-    assert (decoy.stat().st_mode & 0o777) == 0o644
+    assert (settings.cache_dir.stat().st_mode & 0o777) == 0o700
+    assert (plain.stat().st_mode & 0o777) == 0o755

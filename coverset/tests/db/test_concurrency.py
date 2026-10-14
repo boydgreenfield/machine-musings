@@ -1,6 +1,6 @@
-"""Writes that must stay correct with several writers: the dispatcher's atomic claim on the suite's
-backend (Postgres READ COMMITTED under ``make test-pg``, SQLite's single writer otherwise), and an
-upload's registration from two replicas (two engines, no shared in-process lock) on Postgres."""
+"""Writes that must stay correct with several writers: the dispatcher's atomic claim under READ
+COMMITTED, and an upload's registration from two replicas (two engines, no shared in-process
+lock)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from sqlalchemy import select
 from coverset.config import Settings
 from coverset.db.models import Repo, Run, Shard
 from coverset.db.session import Database
-from coverset.facts.store import FactsStore
+from coverset.facts.store import facts_store
 from coverset.orchestrator.runner import OrchestratorContext, _Execution
 from coverset.orchestrator.upload import UnpackedUpload, UploadMeta, register_upload
 
@@ -45,7 +45,7 @@ async def test_exactly_one_claimant_wins_a_queued_run(db: Database, settings: Se
         OrchestratorContext(
             settings=settings,
             db=Database.from_url(url),
-            store=FactsStore(settings.facts_dir),
+            store=facts_store(settings),
             claimant=f"serve@replica-{n}:1:{n:08d}",
         )
         for n in range(4)
@@ -74,7 +74,7 @@ async def test_a_claimed_run_without_a_heartbeat_is_claimed_again_by_its_claiman
     repo_id = await _repo(db)
     ours, theirs = (
         OrchestratorContext(
-            settings=settings, db=db, store=FactsStore(settings.facts_dir), claimant=f"serve@{name}:1:x"
+            settings=settings, db=db, store=facts_store(settings), claimant=f"serve@{name}:1:x"
         )
         for name in ("ours", "theirs")
     )
@@ -94,11 +94,11 @@ async def test_a_claimed_run_without_a_heartbeat_is_claimed_again_by_its_claiman
 
 
 async def test_two_replicas_registering_one_commit_share_one_run(
-    db: Database, settings: Settings, tmp_path: Path, postgres_url: str
+    db: Database, settings: Settings, tmp_path: Path
 ) -> None:
-    """Postgres only: replicas share no in-process lock, so ``register_upload`` takes a
-    transaction-scoped advisory lock per commit. (One process serves a SQLite database, and the
-    upload view's per-commit ``asyncio.Lock`` serialises its registrations.)"""
+    """Replicas share no in-process lock, so ``register_upload`` takes a transaction-scoped advisory
+    lock per commit (within one process the upload view's per-commit ``asyncio.Lock`` serialises
+    registrations too)."""
     repo_id = await _repo(db)
     url = db.engine.url.render_as_string(hide_password=False)
     replicas = [Database.from_url(url), Database.from_url(url)]

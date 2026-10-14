@@ -7,13 +7,14 @@ UV ?= uv
 BIND ?= 127.0.0.1:8000
 WORKERS ?= 6
 QUICK_MARKERS ?= not slow and not modal and not network
-# The dev services' Postgres (deploy/dev-compose.yml publishes it on 55432, clear of a local Postgres on
-# 5432; COVERSET_DEV_PG_PORT moves both). test-pg runs the suite against it.
+# The dev services' Postgres 17 (deploy/dev-compose.yml publishes it on 55432, clear of a local Postgres
+# on 5432; COVERSET_DEV_PG_PORT moves both). `make test` uses the local server (Homebrew's, on 5432);
+# test-pg runs the suite against this one instead.
 DEV_PG_PORT ?= $(or $(COVERSET_DEV_PG_PORT),55432)
-TEST_DATABASE_URL ?= postgresql+asyncpg://coverset:coverset@127.0.0.1:$(DEV_PG_PORT)/coverset
+TEST_DATABASE_URL ?= postgresql+asyncpg://coverset:coverset@127.0.0.1:$(DEV_PG_PORT)/postgres
 # coverset dev --hosted's data dir (commands/dev.py DEV_HOSTED_DATA_DIR). Its cache and the demo's git
-# repository belong to the dev database, so services-reset deletes it with the volumes. Deliberately
-# not COVERSET_DATA_DIR, which may name the laptop's SQLite data.
+# repository belong to the dev stack's database, so services-reset deletes it with the volumes.
+# Deliberately not COVERSET_DATA_DIR, which may name the laptop's own data dir.
 HOSTED_DEV_DATA_DIR ?= data/hosted-dev
 
 .DEFAULT_GOAL := help
@@ -27,8 +28,8 @@ dev: ## Seed the demo once, then serve with reload on BIND (coverset dev)
 	@echo "==> coverset dev --bind $(BIND): seeds an empty data dir, restarts on .py changes"
 	$(UV) run coverset dev --bind $(BIND)
 
-# Postgres + MinIO from deploy/dev-compose.yml instead of SQLite + files (docs/dev.md, "Hosted-like
-# development"); coverset dev --hosted starts the stack itself when it is down.
+# Postgres 17 + MinIO from deploy/dev-compose.yml instead of the local Postgres and files (docs/dev.md,
+# "Hosted-like development"); coverset dev --hosted starts the stack itself when it is down.
 dev-hosted: ## coverset dev against Postgres + MinIO (starts deploy/dev-compose.yml if needed)
 	@echo "==> coverset dev --hosted --bind $(BIND): COVERSET_DATABASE_URL/BLOB_URL and the MinIO keys point at the dev services"
 	$(UV) run coverset dev --hosted --bind $(BIND)
@@ -54,8 +55,8 @@ serve: ## Serve with reload, no seeding (coverset serve --reload)
 	@echo "==> coverset serve --reload --bind $(BIND)"
 	$(UV) run coverset serve --reload --bind $(BIND)
 
-demo-reset: ## Empty the data dir and rebuild the demo (coverset demo --fresh --no-serve)
-	@echo "==> coverset demo --fresh --no-serve: wipes COVERSET_DATA_DIR (only a coverset data dir) and reseeds"
+demo-reset: ## Drop the local database, empty the data dir and rebuild the demo (coverset demo --fresh --no-serve)
+	@echo "==> coverset demo --fresh --no-serve: drops the database (a local server only), empties COVERSET_DATA_DIR (only a coverset data dir) and reseeds"
 	$(UV) run coverset demo --fresh --no-serve
 
 lint: ## ruff check
@@ -75,11 +76,11 @@ check: ## ruff check + format --check + the quick tests (no slow, modal or netwo
 	@echo "==> pytest -m '$(QUICK_MARKERS)' -n $(WORKERS)"
 	$(UV) run pytest -q -n $(WORKERS) -p no:cacheprovider -m "$(QUICK_MARKERS)"
 
-test: ## The whole suite in parallel (pytest -n WORKERS)
-	@echo "==> pytest -n $(WORKERS): the whole suite"
+test: ## The whole suite in parallel (pytest -n WORKERS) on the local Postgres
+	@echo "==> pytest -n $(WORKERS): the whole suite (databases on postgresql://localhost, or COVERSET_TEST_DATABASE_URL)"
 	$(UV) run pytest -q -n $(WORKERS) -p no:cacheprovider
 
-test-pg: services ## The whole suite against the dev Postgres (a fresh database per test); leaves the services running
+test-pg: services ## The whole suite against the dev stack's Postgres 17; leaves the services running
 	@echo "==> pytest -n $(WORKERS) with COVERSET_TEST_DATABASE_URL=$(TEST_DATABASE_URL)"
 	COVERSET_TEST_DATABASE_URL=$(TEST_DATABASE_URL) $(UV) run pytest -q -n $(WORKERS) -p no:cacheprovider
 

@@ -32,8 +32,8 @@ def assert_csp_clean(html: str) -> None:
 class Demo:
     """Where the demo data lives and the ids the tests need.
 
-    The demo follows the suite's backends (``tests/web/conftest.py``): ``db_url`` is a SQLite file or,
-    with ``COVERSET_TEST_DATABASE_URL``, a Postgres database; ``blob_url`` is empty (facts under
+    The demo follows the suite's backends (``tests/web/conftest.py``): ``db_url`` is a database cloned
+    from the worker's template on the test server; ``blob_url`` is empty (facts under
     ``data_dir``) or, with ``COVERSET_TEST_BLOB_URL``, a key prefix of that store, with ``data_dir``
     holding only the cache. Tests reach the data through :meth:`overrides`, :meth:`settings`,
     :meth:`facts` and :meth:`rows`, never through a backend's own files.

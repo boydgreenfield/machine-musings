@@ -569,7 +569,7 @@ settled by `htmx:afterRequest` only, which htmx fires after errors, aborts and t
 `page.wait_for_function("...")` with a string: the CSP forbids eval and the call fails. `/setup`
 has no scripts and is rendered with `data-ready="1"`.
 
-**Run ids**: take them from the database (`<dir>/coverset.db`), e.g.
+**Run ids**: take them from the database (`psql` on `COVERSET_DATABASE_URL`), e.g.
 `SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = 1 ORDER BY r.created_at DESC LIMIT 1`,
 or follow the "run page" link on `/repos/1/prs/1`. The demo repo is id 1.
 

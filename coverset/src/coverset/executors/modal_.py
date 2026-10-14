@@ -1546,15 +1546,14 @@ class ModalExecutor:
         return await self._db_read(query)
 
     async def _db_write(self, label: str, write: Callable[[Any], Awaitable[Any]]) -> Any:
-        """Run ``write`` in its own transaction now; on a locked database retry in the background.
-
-        The planner may hold a write transaction while it plans (SQLite allows one writer), so a
-        write that cannot get the lock within the busy timeout is retried after the planner commits.
+        """Run ``write`` in its own transaction now; when that fails (a connection blip, a lock the
+        planner's transaction holds), retry it in the background so sandbox work never waits on
+        bookkeeping. A database without the table (not migrated) skips the write.
         """
         try:
             return await self._write_once(write)
         except Exception as exc:
-            if "no such table" in str(exc):
+            if getattr(getattr(exc, "orig", None), "sqlstate", None) == "42P01":  # undefined_table
                 log.debug("skipping %s: database not migrated", label)
                 return None
             log.info("deferring %s: %s", label, exc)
@@ -1584,7 +1583,7 @@ class ModalExecutor:
         from coverset.db.upsert import upsert
 
         async def write(session: Any) -> None:
-            # One atomic statement on SQLite and Postgres: a concurrent build of the same env by
+            # One atomic statement: a concurrent build of the same env by
             # another run (or replica) updates the row instead of failing on the primary key.
             row = {
                 "env_hash": spec.env_hash,

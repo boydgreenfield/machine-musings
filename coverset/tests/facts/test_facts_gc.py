@@ -60,12 +60,9 @@ def test_expire_everything_old_keeps_the_dictionary(runs: FactsStore) -> None:
 def test_gc_ages_runs_from_their_manifests_without_pulling_them(
     runs: FactsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A gc leader with an empty cache must not download the bucket to read one timestamp."""
-    if not runs.remote:
-        pytest.skip("the local store reads the file it has")
-    assert runs.blobs is not None
+    """A gc leader with an empty cache must not download the store to read one timestamp."""
     cache.configure({cache.SYNC_INTERVAL_ENV: "0"})  # the writer's listing is not cached
-    janitor = FactsStore(tmp_path / "janitor" / "facts", blobs=runs.blobs)
+    janitor = FactsStore(tmp_path / "janitor" / "facts", runs.blobs)
     downloads: list[str] = []
     original = runs.blobs.get_file
 
@@ -83,18 +80,13 @@ def test_gc_ages_runs_from_their_manifests_without_pulling_them(
     assert runs.list_runs(1) == ["run-1", "run-3"]
 
 
-def test_runs_without_runs_dim_use_directory_age(store: FactsStore) -> None:
+def test_runs_without_runs_dim_use_the_manifests_age(store: FactsStore) -> None:
     store.write_table(
         1, "crashed", "files", pa.table({"file_id": [0], "path": ["a.py"]}), shard_id=0, attempt=1
     )
     old = datetime(2026, 9, 1, tzinfo=UTC).timestamp()
     os.utime(store.run_dir(1, "crashed"), (old, old))
-    if store.remote:
-        # Over an object store the age is the manifest's (the cache directory's mtime is only when
-        # this replica downloaded it): written just now, so only a later cutoff expires it.
-        assert expire_runs(store, keep_run_ids=set(), older_than=CUTOFF) == []
-        assert expire_runs(store, keep_run_ids=set(), older_than=datetime(2100, 1, 1, tzinfo=UTC)) == [
-            "crashed"
-        ]
-        return
-    assert expire_runs(store, keep_run_ids=set(), older_than=CUTOFF) == ["crashed"]
+    # The age is the manifest's (the cache directory's mtime is only when this replica wrote or
+    # downloaded it): written just now, so only a later cutoff expires it.
+    assert expire_runs(store, keep_run_ids=set(), older_than=CUTOFF) == []
+    assert expire_runs(store, keep_run_ids=set(), older_than=datetime(2100, 1, 1, tzinfo=UTC)) == ["crashed"]

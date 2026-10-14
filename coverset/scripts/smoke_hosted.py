@@ -24,8 +24,9 @@ reads or writes the shared state, then prints one PASS/FAIL row per step:
 The data stays in place for a look in the UI (or psql and the bucket console). ``--clean`` (after a
 run) or ``--clean-only`` deletes it: ``coverset repo purge coverset-demo/ledger --yes`` for the
 rows and the store's files, then any key left under the repository's prefixes, the smoke's data
-directory and the scratch checkout. Without the two URLs it runs against SQLite and files (how its
-tests drive it) and says so in a ``state`` row; nothing in it is specific to one provider.
+directory and the scratch checkout. Without ``COVERSET_BLOB_URL`` it runs against files under its
+data directory (how its tests drive it) and says so in a ``state`` row; nothing in it is specific to
+one provider.
 
 **Its own data directory.** The demo's git repository is a local directory whose absolute path the
 database stores as the repository's source, and the object-store cache is keyed by repository id,
@@ -218,13 +219,10 @@ def settings_for(env: Mapping[str, str]) -> Settings:
 def target_of(settings: Settings) -> dict[str, str]:
     """The database and store a run talks to, as recorded in :data:`MARKER` (no password).
 
-    From the settings, not the environment, so a URL from ``.env`` counts too; the SQLite default
-    and local files are named relative to the data directory, which they live in.
+    From the settings, not the environment, so a URL from ``.env`` counts too; local files are named
+    relative to the data directory, which they live in.
     """
-    if settings.database_url == f"sqlite+aiosqlite:///{settings.data_dir / 'coverset.db'}":
-        database = "sqlite in the data dir"
-    else:
-        database = make_url(settings.database_url).render_as_string(hide_password=True)
+    database = make_url(settings.database_url).render_as_string(hide_password=True)
     return {"database": database, "store": settings.blob_url or "files in the data dir"}
 
 
@@ -389,18 +387,9 @@ def demo_pr(settings: Settings, number: int = PR_NUMBER) -> dict[str, Any]:
     return next(pr for pr in shas["prs"] if pr["number"] == number)
 
 
-def _sqlite_missing(settings: Settings) -> bool:
-    """True when the database is a SQLite file that does not exist yet (nothing can be in it, and
-    opening it would create it)."""
-    url = make_url(settings.database_url)
-    return url.get_backend_name() == "sqlite" and not (url.database and Path(url.database).exists())
-
-
 def existing_repo_id(settings: Settings) -> int | None:
     """The demo repository's id when the database already holds it (None for an empty database, one
-    without coverset's tables, or a SQLite file not created yet, which this does not create)."""
-    if _sqlite_missing(settings):
-        return None
+    without coverset's tables, or one the server does not have yet, which this does not create)."""
     try:
         return find_repo_id(settings)
     except Exception:  # noqa: BLE001 - no schema yet: nothing of anyone's is in there
@@ -616,7 +605,7 @@ def step_rows(smoke: Smoke) -> None:
 
 def clean(smoke: Smoke) -> None:
     """Delete what the smoke made: the demo repository's rows and files, keys left under its
-    prefixes, and the smoke's data directory (its git repository, cache and, on SQLite, database).
+    prefixes, and the smoke's data directory (its git repository, cache and local blobs).
 
     Only with the data directory's :data:`MARKER` for this target: without it the smoke made
     nothing here, and a ``coverset-demo/ledger`` in the database is someone else's (``make
@@ -634,7 +623,7 @@ def clean(smoke: Smoke) -> None:
         repo_id = smoke.repo_id
         if repo_id is None:
             try:
-                repo_id = None if _sqlite_missing(smoke.settings) else find_repo_id(smoke.settings)
+                repo_id = find_repo_id(smoke.settings)
             except Exception as exc:  # noqa: BLE001 - no schema: nothing of the smoke's is in there
                 parts.append(f"no coverset tables to clean ({type(exc).__name__})")
         recorded = marker.get("repo_id")
@@ -715,7 +704,7 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     source = dict(os.environ if environ is None else environ)
     admin_token = source.get("COVERSET_ADMIN_TOKEN") or secrets.token_hex(32)
     port = args.port or free_port()
-    if args.data_dir is None:  # the target decides the default; only the SQLite default needs a dir
+    if args.data_dir is None:  # the target decides the default (the database and the store)
         probe = settings_for(
             child_environment(source, port=port, admin_token=admin_token, data_dir=SMOKE_DATA_ROOT)
         )

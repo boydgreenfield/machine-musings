@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import timedelta
 
+import pyarrow as pa
 import pytest
 from orch_fakes import Script, TestRepo, pr_change
 from orch_helpers import events, load_run, run_baseline, run_pr
@@ -192,7 +192,8 @@ async def test_local_executor_runs_webhook_runs_with_the_flag(
 async def _old_pr_runs(
     ctx: OrchestratorContext, repo_id: int, sha: str, *, days: list[int]
 ) -> tuple[int, list[str]]:
-    """A PR with one completed run created ``days`` ago each (oldest first); facts dirs for each."""
+    """A PR with one completed run created ``days`` ago each (oldest first); published facts for each
+    (a ``runs_dim`` row, whose ``created_at`` the run's manifest carries for retention)."""
     now = ctx.settings.now()
     async with ctx.db.session() as session:
         pr = PullRequest(repo_id=repo_id, number=42, head_sha=sha, base_sha=sha, title="old", state="open")
@@ -212,7 +213,9 @@ async def _old_pr_runs(
             session.add(run)
             await session.flush()
             ids.append(run.id)
-            ctx.store.run_dir(repo_id, run.id).mkdir(parents=True)
+            ctx.store.write_table(
+                repo_id, run.id, "runs_dim", pa.table({"head_sha": [sha], "created_at": [run.created_at]})
+            )
         await session.commit()
         return pr.id, ids
 
@@ -259,13 +262,11 @@ async def test_gc_lock_makes_a_concurrent_gc_skip(
     assert len(await _run_ids(ctx)) == 2
 
 
-@pytest.mark.local_files_only  # ages an empty local run dir by mtime; tests/facts/test_facts_gc.py covers a bucket
 async def test_collect_garbage_applies_retention(
     ctx: OrchestratorContext, repo: TestRepo, repo_id: int
 ) -> None:
     _, (old, latest) = await _old_pr_runs(ctx, repo_id, repo.main_sha, days=[60, 50])
     stale = ctx.settings.now() - timedelta(days=60)
-    os.utime(ctx.store.run_dir(repo_id, old), (stale.timestamp(), stale.timestamp()))
     async with ctx.db.session() as session:
         session.add(RunEvent(run_id=latest, seq=1, kind="log", payload={"text": "x"}, at=stale))
         session.add(

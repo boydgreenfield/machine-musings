@@ -76,7 +76,7 @@ def create_app(settings: Settings | None = None) -> Quart:
     # Templates show a stored avatar URL only under the origin the CSP's img-src allows.
     app.jinja_env.globals["avatar_origin"] = AVATAR_ORIGIN + "/"
     app.extensions["settings"] = settings
-    # On Postgres no statement of the web process runs longer than 30 s (SQLite has no timeout).
+    # No statement of the web process runs longer than 30 s.
     database = Database.from_url(settings.database_url, statement_timeout_s=WEB_STATEMENT_TIMEOUT_S)
     app.extensions["db"] = database
     app.config.update(
@@ -100,7 +100,6 @@ def create_app(settings: Settings | None = None) -> Quart:
     async def _startup() -> None:
         if not settings.skip_migrations:
             await init_db(settings, database.engine)
-            secure_data_dirs(settings)  # the database file the migration may just have created
 
     @app.after_serving
     async def _shutdown() -> None:
@@ -144,7 +143,7 @@ def install_leader_lease(app: Quart) -> LeaderLease:
     When serving starts, the process tries to take the lease once and logs its role; then it
     re-checks every 30 s. While a lease is installed, :func:`add_leader_task` (gc, reaper, pool
     maintainer) and the run queue run their loops only while it is held, so several replicas on
-    one Postgres run one dispatcher. On SQLite the lease is always held and nothing changes.
+    one database run one dispatcher.
     """
     from coverset.db.leader import LEADER_EXTENSION, LeaderLease, process_label
 
@@ -154,8 +153,6 @@ def install_leader_lease(app: Quart) -> LeaderLease:
 
     @app.before_serving
     async def _take_leader_lease() -> None:
-        if not lease.exclusive:
-            return
         try:
             await lease.acquire()
         except Exception as exc:  # noqa: BLE001 - serving starts regardless; keep() retries
@@ -180,12 +177,12 @@ def install_leader_lease(app: Quart) -> LeaderLease:
 
 def add_leader_task(app: Quart, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
     """``app.add_background_task(func, *args, **kwargs)``, run only while this process holds the
-    app's Postgres leader lease when one is installed (:func:`install_leader_lease`; tests install
-    none, and on SQLite the task starts directly, as it always did)."""
+    app's leader lease when one is installed (:func:`install_leader_lease`; tests install none, and
+    the task then starts directly)."""
     from coverset.db.leader import LEADER_EXTENSION, run_while_leader
 
     lease = app.extensions.get(LEADER_EXTENSION)
-    if lease is None or not lease.exclusive:  # no lease, or SQLite's implicit one: run it as always
+    if lease is None:  # tests: run it directly
         app.add_background_task(func, *args, **kwargs)
         return
     label = getattr(func, "__qualname__", repr(func))
@@ -201,7 +198,7 @@ def schedule_gc(app: Quart, *, interval_s: float | None = None) -> None:
     shuts down (``app.shutdown_event``). ``create_app`` calls this outside tests only; tests call it
     explicitly.
     """
-    from coverset.facts.store import FactsStore
+    from coverset.facts.store import facts_store
     from coverset.orchestrator.history import GC_INTERVAL_S, gc_forever
 
     settings: Settings = app.extensions["settings"]
@@ -214,7 +211,7 @@ def schedule_gc(app: Quart, *, interval_s: float | None = None) -> None:
             gc_forever,
             database,
             settings,
-            FactsStore(settings.facts_dir),
+            facts_store(settings),
             app.shutdown_event,
             interval_s=GC_INTERVAL_S if interval_s is None else interval_s,
         )

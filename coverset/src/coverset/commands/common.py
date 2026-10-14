@@ -15,9 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.config import Settings, secure_data_dirs
 from coverset.db.models import Repo
-from coverset.db.session import init_db
+from coverset.db.session import DatabaseUnavailable, init_db
 
 __all__ = [
+    "DatabaseError",
     "StreamPrinter",
     "find_repo",
     "load",
@@ -88,12 +89,23 @@ async def _call[T](factory: Callable[[], Awaitable[T]], received: list[int]) -> 
                 loop.remove_signal_handler(signum)
 
 
-async def prepare_db(settings: Settings) -> None:
-    """Create the data directory (private: :func:`coverset.config.secure_data_dirs`) and migrate the
-    database (idempotent)."""
+class DatabaseError(click.ClickException):
+    """The database cannot be reached or created: one line saying what to do, exit status 2."""
+
+    exit_code = 2
+
+
+async def prepare_db(settings: Settings) -> list[str]:
+    """Create the data directory (private: :func:`coverset.config.secure_data_dirs`), create the
+    database when it does not exist and migrate it (idempotent); returns the applied revisions.
+
+    Raises :class:`DatabaseError` (exit 2) when the server cannot be reached or refuses.
+    """
     secure_data_dirs(settings)
-    await init_db(settings)
-    secure_data_dirs(settings)
+    try:
+        return await init_db(settings)
+    except DatabaseUnavailable as exc:
+        raise DatabaseError(str(exc)) from None
 
 
 async def find_repo(session: AsyncSession, spec: str | None) -> Repo:

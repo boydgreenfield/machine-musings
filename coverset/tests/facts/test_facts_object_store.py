@@ -1,10 +1,10 @@
-"""The facts store over an object store, as several replicas see it.
+"""The facts store over a blob store, as several replicas see it.
 
-``replicas`` hands out :class:`FactsStore` objects that share one store: for ``local`` they are the
-same directory (the default: one machine, one store), for ``s3`` each has its own cache directory in
-front of one S3 prefix (moto, or ``COVERSET_TEST_BLOB_URL``), which is what two control-plane
-replicas are. Every test runs on both, so the local default keeps answering exactly as before while
-the object store answers the same questions from another machine's writes.
+``replicas`` hands out :class:`FactsStore` objects that share one blob store, each with its own cache
+directory in front of it, which is what two control-plane replicas (or a process with an evicted
+cache) are: for ``local`` the store is files in one directory (the default, ``LocalBlobStore``), for
+``s3`` one S3 prefix (moto, or ``COVERSET_TEST_BLOB_URL``). Every test runs on both: one code path,
+the same answers.
 """
 
 from __future__ import annotations
@@ -20,13 +20,12 @@ from facts_helpers import TESTS, calc_functions, int_catalogue, make_ctx, split_
 
 from coverset.facts import cache, flows, queries
 from coverset.facts.convert import read_python_bundle
-from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.gc import expire_runs
 from coverset.facts.ingest import finalize_run, ingest_shard
 from coverset.facts.store import MANIFEST_FILE, FactsStore, RunWriteConflict
 from coverset.lang.base import NeutralBundle
-from coverset.storage import BlobStore, S3BlobStore
-from coverset.storage.testing import fresh_blob_url
+from coverset.storage import BlobStore, LocalBlobStore, S3BlobStore, blob_url_of, store_from_url
+from coverset.storage.testing import fresh_blob_url, local_facts_store
 
 Replicas = Callable[[str], FactsStore]
 
@@ -40,11 +39,12 @@ def bundle(minimal_bundle: Path) -> NeutralBundle:
 def replicas(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Replicas]:
     """``replicas(name)``: a store per replica name (see the module docstring)."""
     cache.configure({cache.SYNC_INTERVAL_ENV: "0"})  # every read checks the manifest (tests below set it)
+    blobs: BlobStore
     if request.param == "local":
-        yield lambda name: FactsStore(tmp_path / "facts")
-        return
-    blobs = S3BlobStore.from_url(fresh_blob_url("replicas"))
-    yield lambda name: FactsStore(tmp_path / name / "facts", blobs=blobs)
+        blobs = LocalBlobStore(tmp_path / "blobs")
+    else:
+        blobs = S3BlobStore.from_url(fresh_blob_url("replicas"))
+    yield lambda name: FactsStore(tmp_path / name / "facts", blobs)
     blobs.delete([info.key for info in blobs.list()])
 
 
@@ -54,18 +54,13 @@ def _ingest(store: FactsStore, bundle: NeutralBundle, run_id: str = "run-1", **c
     finalize_run(store, context, expected_shards=1, catalogue=int_catalogue)
 
 
-def _remote(store: FactsStore) -> BlobStore:
-    assert store.blobs is not None
-    return store.blobs
-
-
 def test_a_second_replica_answers_every_page_query_like_the_writer(
     replicas: Replicas, bundle: NeutralBundle, tmp_path: Path
 ) -> None:
     writer, reader = replicas("writer"), replicas("reader")
     _ingest(writer, bundle, "base", day=1)
     _ingest(writer, bundle, "head", day=2, pr_number=7)
-    reference = FactsStore(tmp_path / "reference")
+    reference = local_facts_store(tmp_path / "reference")
     _ingest(reference, bundle, "base", day=1)
     _ingest(reference, bundle, "head", day=2, pr_number=7)
     path = "src/factspkg/calc.py"
@@ -117,18 +112,15 @@ def test_the_manifest_lists_the_run_and_its_version_only_grows(
     on_disk = sorted(p.name for p in store.run_dir(1, "run-1").glob("*.parquet"))
     assert sorted(second["files"]) == on_disk
     assert (store.run_dir(1, "run-1") / MANIFEST_FILE).is_file()
-    if store.remote:
-        stored = json.loads(_remote(store).get_bytes(f"facts/repo=1/run=run-1/{MANIFEST_FILE}")[0])
-        assert stored == second
-        keys = {i.key.rsplit("/", 1)[1] for i in _remote(store).list("facts/repo=1/run=run-1/")}
-        assert keys == {*(e["key"] for e in second["files"].values()), MANIFEST_FILE}, (
-            "superseded objects are deleted after the manifest"
-        )
-        assert keys.isdisjoint(on_disk), "an object is one version of a file, never the file's own name"
-        assert first["files"]["runs_dim.parquet"]["key"] != second["files"]["runs_dim.parquet"]["key"]
-        assert second["created_at"] == "2026-10-01T12:00:00+00:00", "retention reads the age from here"
-    else:
-        assert "created_at" not in second and "key" not in second["files"]["runs_dim.parquet"]
+    stored = json.loads(store.blobs.get_bytes(f"facts/repo=1/run=run-1/{MANIFEST_FILE}")[0])
+    assert stored == second
+    keys = {i.key.rsplit("/", 1)[1] for i in store.blobs.list("facts/repo=1/run=run-1/")}
+    assert keys == {*(e["key"] for e in second["files"].values()), MANIFEST_FILE}, (
+        "superseded objects are deleted after the manifest"
+    )
+    assert keys.isdisjoint(on_disk), "an object is one version of a file, never the file's own name"
+    assert first["files"]["runs_dim.parquet"]["key"] != second["files"]["runs_dim.parquet"]["key"]
+    assert second["created_at"] == "2026-10-01T12:00:00+00:00", "retention reads the age from here"
 
 
 def test_a_reader_trusts_its_last_check_for_the_sync_interval(
@@ -140,8 +132,7 @@ def test_a_reader_trusts_its_last_check_for_the_sync_interval(
     assert reader.committed(1, "run-1") == {0: 1}
     cache.configure({cache.SYNC_INTERVAL_ENV: "3600"})
     ingest_shard(writer, context, split_bundle(bundle, {TESTS[1]}, with_import=False), 1, calc_functions())
-    expected_stale = {0: 1} if reader.remote else {0: 1, 1: 1}  # the local store has nothing to sync
-    assert reader.committed(1, "run-1") == expected_stale
+    assert reader.committed(1, "run-1") == {0: 1}, "within the interval: the last check's answer"
     cache.configure({cache.SYNC_INTERVAL_ENV: "0"})
     assert reader.committed(1, "run-1") == {0: 1, 1: 1}
     assert reader.dictionary(1).find_test_id(TESTS[1]) is not None, "the dictionary follows the run"
@@ -154,9 +145,7 @@ def test_a_failed_publish_leaves_readers_on_the_previous_version(
     context = make_ctx("run-1")
     ingest_shard(writer, context, split_bundle(bundle, {TESTS[0]}, with_import=True), 0, calc_functions())
     before = queries.run_summary(reader, 1, "run-1")
-    if not writer.remote:
-        pytest.skip("the local default has no publish step")
-    blobs = _remote(writer)
+    blobs = writer.blobs
     original = blobs.put_bytes
 
     def refuse_manifests(key: str, data: bytes, **kwargs: object) -> str:
@@ -178,8 +167,6 @@ def test_a_failed_publish_leaves_readers_on_the_previous_version(
 
 def test_a_lost_race_raises_instead_of_overwriting(replicas: Replicas, bundle: NeutralBundle) -> None:
     first, second = replicas("first"), replicas("second")
-    if not first.remote:
-        pytest.skip("one directory: the fcntl run lock serialises writers")
     context = make_ctx("run-1")
     ingest_shard(first, context, split_bundle(bundle, {TESTS[0]}, with_import=True), 0, calc_functions())
     with pytest.raises(RunWriteConflict), second.run_lock(1, "run-1"):
@@ -189,7 +176,7 @@ def test_a_lost_race_raises_instead_of_overwriting(replicas: Replicas, bundle: N
     assert second.committed(1, "run-1") == {0: 1, 1: 1}, "the winner's version is what everyone reads"
     manifest = first.manifest(1, "run-1")
     assert manifest is not None
-    keys = {i.key.rsplit("/", 1)[1] for i in _remote(first).list("facts/repo=1/run=run-1/")}
+    keys = {i.key.rsplit("/", 1)[1] for i in first.blobs.list("facts/repo=1/run=run-1/")}
     assert keys == {*(e["key"] for e in manifest["files"].values()), MANIFEST_FILE}, (
         "the loser's uploads are deleted: nothing references them"
     )
@@ -214,12 +201,10 @@ def test_a_writer_that_dies_after_its_uploads_leaves_a_readable_run(
     objects: the manifest's version is complete whatever happened to the writer, so a fresh replica
     reads it, another host can take the run over, and gc still ages it."""
     writer = replicas("writer")
-    if not writer.remote:
-        pytest.skip("the local default has no publish step")
     context = make_ctx("run-1")
     ingest_shard(writer, context, split_bundle(bundle, {TESTS[0]}, with_import=True), 0, calc_functions())
     before = queries.run_summary(replicas("check"), 1, "run-1")
-    _die_on_manifest_put(_remote(writer), monkeypatch)
+    _die_on_manifest_put(writer.blobs, monkeypatch)
     with pytest.raises(SystemExit):
         ingest_shard(
             writer, context, split_bundle(bundle, {TESTS[1]}, with_import=False), 1, calc_functions()
@@ -247,10 +232,8 @@ def test_a_failed_pull_is_not_retried_before_the_sync_interval(
     replicas: Replicas, bundle: NeutralBundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     writer, reader = replicas("writer"), replicas("reader")
-    if not writer.remote:
-        pytest.skip("the local default pulls nothing")
     _ingest(writer, bundle)
-    blobs = _remote(reader)
+    blobs = reader.blobs
     calls = {"head": 0, "get": 0}
     original_head, original_get = blobs.head, blobs.get_bytes
 
@@ -296,13 +279,11 @@ def test_a_manifest_naming_a_missing_object_is_an_error_not_a_loop(
     replicas: Replicas, bundle: NeutralBundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     writer = replicas("writer")
-    if not writer.remote:
-        pytest.skip("the local default has no manifest to pull")
     _ingest(writer, bundle)
     manifest = writer.manifest(1, "run-1")
     assert manifest is not None
     gone = manifest["files"]["runs_dim.parquet"]["key"]
-    _remote(writer).delete([f"facts/repo=1/run=run-1/{gone}"])  # behind coverset's back
+    writer.blobs.delete([f"facts/repo=1/run=run-1/{gone}"])  # behind coverset's back
     monkeypatch.setattr("coverset.facts.store.time.sleep", lambda _s: None)
     with pytest.raises(RunWriteConflict, match="missing"):
         replicas("fresh").committed(1, "run-1")
@@ -318,7 +299,7 @@ def test_two_writers_never_hand_out_the_same_id(replicas: Replicas) -> None:
         try:
             for round_ in range(12):
                 values = [f"tests/w{index}.py::t{round_}_{n}" for n in range(3)]
-                ids = RepoDictionary.extend(stores[index].repo_dir(1), nodeids=values)
+                ids = stores[index].extend_dictionary(1, nodeids=values)
                 for value in values:
                     given[index][value] = ids.test_id(value)
         except BaseException as exc:  # surfaced below
@@ -347,8 +328,7 @@ def test_delete_and_gc_reach_every_replica(replicas: Replicas, bundle: NeutralBu
     assert not reader.run_dir(1, "old").exists() or not list(reader.run_dir(1, "old").glob("*.parquet"))
     assert writer.delete_run(1, "new")
     assert reader.list_runs(1) == [] and queries.run_summary(reader, 1, "new") is None
-    if writer.remote:
-        assert [i.key for i in _remote(writer).list("facts/repo=1/")] == ["facts/repo=1/dictionary.json"]
+    assert [i.key for i in writer.blobs.list("facts/repo=1/")] == ["facts/repo=1/dictionary.json"]
     assert reader.dictionary(1).nodeid(1), "gc never touches the dictionary"
 
 
@@ -367,22 +347,22 @@ def test_production_batches_travel_between_replicas(replicas: Replicas, bundle: 
     assert flows.list_windows(writer, 1) == []
 
 
-def test_a_bare_path_finds_its_bucket_through_the_configured_knobs(
+def test_a_worker_builds_the_apps_store_from_the_facts_dir_and_the_blob_url(
     tmp_path: Path, bundle: NeutralBundle
 ) -> None:
-    """What an ingest worker process does: it gets the facts directory and the cache knobs only."""
-    url = fresh_blob_url("worker")
-    cache_dir = tmp_path / "cache"
-    cache.configure(
-        {cache.BLOB_URL_ENV: url, cache.CACHE_DIR_ENV: str(cache_dir), cache.SYNC_INTERVAL_ENV: "0"}
-    )
-    worker = FactsStore(cache_dir / "facts")
-    assert worker.remote
+    """What an ingest worker process does: its job carries the facts directory and the blob URL
+    (``IngestJob``), and the store it builds publishes where the app's own store reads."""
+    from coverset.config import Settings
+    from coverset.facts.store import facts_store
+
+    cache.configure({cache.SYNC_INTERVAL_ENV: "0"})
+    settings = Settings.for_tests(data_dir=tmp_path / "data")
+    worker = FactsStore(settings.facts_dir, store_from_url(blob_url_of(settings)))
     _ingest(worker, bundle)
-    other = FactsStore(tmp_path / "other" / "facts", blobs=worker.blobs)
-    assert other.committed(1, "run-1") == {0: 1}
-    assert FactsStore(tmp_path / "unrelated").blobs is None
-    _remote(worker).delete([info.key for info in _remote(worker).list()])
+    app_store = facts_store(settings)
+    assert app_store.blobs is worker.blobs, "one store object per URL and process"
+    assert app_store.committed(1, "run-1") == {0: 1}
+    assert (settings.data_dir / "facts" / "repo=1" / "run=run-1" / MANIFEST_FILE).is_file()
 
 
 def test_going_to_the_run_directory_pulls_it(replicas: Replicas, bundle: NeutralBundle) -> None:
@@ -390,10 +370,6 @@ def test_going_to_the_run_directory_pulls_it(replicas: Replicas, bundle: Neutral
     diff cache, ``is_dir`` checks) finds the published run on a replica that never saw it."""
     writer, reader = replicas("writer"), replicas("reader")
     _ingest(writer, bundle)
-    assert (
-        cache.run_stamp(reader.run_dir(1, "run-1")) == cache.run_stamp(writer.run_dir(1, "run-1"))
-        or reader.remote
-    )
     assert len(cache.run_stamp(reader.run_dir(1, "run-1"))) == len(
         cache.run_stamp(writer.run_dir(1, "run-1"))
     )

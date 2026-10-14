@@ -1,10 +1,9 @@
 """A leader lease: one process per database runs the background loops.
 
 The web process runs four loops besides serving requests: the run dispatcher, the retention gc,
-the sandbox reaper and the warm-pool maintainer. On SQLite there is one process per database by
-construction, so the lease is always held. On Postgres several replicas can serve one database;
-each loop must still run in exactly one of them, or two dispatchers would race for the same
-queued runs and two reapers would terminate each other's sandboxes.
+the sandbox reaper and the warm-pool maintainer. Several replicas can serve one database; each loop
+must still run in exactly one of them, or two dispatchers would race for the same queued runs and
+two reapers would terminate each other's sandboxes.
 
 The lease is a Postgres session-level advisory lock, ``pg_try_advisory_lock(key)`` with ``key``
 a 64-bit hash of the lease's name (:func:`coverset.db.session.advisory_key`), taken on one
@@ -55,6 +54,7 @@ __all__ = [
     "LeaderLease",
     "LeaderStatus",
     "leader_status",
+    "leader_status_on",
     "run_while_leader",
     "transaction_lock",
 ]
@@ -92,7 +92,7 @@ class LeaderLease:
 
     ``held`` is the current state; :meth:`acquire` makes one attempt, :meth:`check` verifies (or
     retries) and :meth:`keep` does that every ``check_s`` until stopped; :meth:`release` gives it
-    up. On a backend other than Postgres the lease is always held and no connection is used.
+    up.
     """
 
     def __init__(
@@ -102,16 +102,11 @@ class LeaderLease:
         self.name = name
         self.key = advisory_key(name)
         self.check_s = check_s
-        self.exclusive = engine.dialect.name == "postgresql"
-        """False where the lease is implicit (SQLite: one process per database file)."""
         self._connection: AsyncConnection | None = None
         self._held = asyncio.Event()
         self._lost = asyncio.Event()
         self._lock = asyncio.Lock()
-        if self.exclusive:
-            self._lost.set()
-        else:
-            self._held.set()
+        self._lost.set()
 
     @property
     def held(self) -> bool:
@@ -152,8 +147,6 @@ class LeaderLease:
 
     async def acquire(self) -> bool:
         """One attempt to take the lease (True if this process holds it afterwards)."""
-        if not self.exclusive:
-            return True
         async with self._lock:
             if self._connection is not None:
                 return await self._verify()
@@ -197,8 +190,6 @@ class LeaderLease:
         Database errors count as "not held" and are logged, never raised: a follower simply tries
         again at the next check.
         """
-        if not self.exclusive:
-            return True
         if self._connection is not None:
             async with self._lock:
                 if self._connection is not None and await self._verify():
@@ -212,8 +203,6 @@ class LeaderLease:
 
     async def keep(self, stop: asyncio.Event) -> None:
         """:meth:`check` every :attr:`check_s` until ``stop`` is set (the renewal loop)."""
-        if not self.exclusive:
-            return
         while not stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.check_s)
@@ -222,8 +211,6 @@ class LeaderLease:
 
     async def release(self) -> None:
         """Give the lease up (unlock and close its connection); safe to call when not held."""
-        if not self.exclusive:
-            return
         async with self._lock:
             connection, self._connection = self._connection, None
             if connection is not None:
@@ -305,8 +292,6 @@ class LeaderStatus:
     """Who holds a lease, as seen from any connection (``coverset deploy check``)."""
 
     name: str
-    exclusive: bool
-    """False on SQLite, where the lease is implicit."""
     holder_pid: int | None = None
     application_name: str | None = None
     client_addr: str | None = None
@@ -315,8 +300,6 @@ class LeaderStatus:
     @property
     def detail(self) -> str:
         """One line for a report."""
-        if not self.exclusive:
-            return f"{self.name}: implicit (one process per SQLite database)"
         if self.holder_pid is None:
             return f"{self.name}: free (no process runs the background tasks right now)"
         where = f" from {self.client_addr}" if self.client_addr else ""
@@ -325,16 +308,18 @@ class LeaderStatus:
 
 async def leader_status(engine: AsyncEngine, name: str = BACKGROUND_LEASE) -> LeaderStatus:
     """Who holds lease ``name`` on ``engine``'s database, without taking it."""
-    if engine.dialect.name != "postgresql":
-        return LeaderStatus(name, exclusive=False)
     async with engine.connect() as connection:
-        row = (await connection.execute(_HOLDER_QUERY, _key_parts(advisory_key(name)))).first()
+        return await leader_status_on(connection, name)
+
+
+async def leader_status_on(connection: AsyncConnection, name: str = BACKGROUND_LEASE) -> LeaderStatus:
+    """:func:`leader_status` on an open connection (``coverset deploy check`` reuses its probe's)."""
+    row = (await connection.execute(_HOLDER_QUERY, _key_parts(advisory_key(name)))).first()
     if row is None:
-        return LeaderStatus(name, exclusive=True)
+        return LeaderStatus(name)
     pid, application, client, since = row
     return LeaderStatus(
         name,
-        exclusive=True,
         holder_pid=int(pid),
         application_name=application,
         client_addr=client,
@@ -343,15 +328,13 @@ async def leader_status(engine: AsyncEngine, name: str = BACKGROUND_LEASE) -> Le
 
 
 async def transaction_lock(session: AsyncSession, name: str) -> None:
-    """Hold the advisory lock ``name`` until ``session``'s transaction ends (Postgres).
+    """Hold the advisory lock ``name`` until ``session``'s transaction ends.
 
     For work that an in-process ``asyncio.Lock`` serialises within one replica and that must not
     interleave across replicas either (two uploads of one commit arriving at two replicas). Waits
-    while another transaction holds it. A no-op on SQLite, whose single writer already serialises
-    the transactions that write.
+    while another transaction holds it.
     """
-    if session.get_bind().dialect.name == "postgresql":
-        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": advisory_key(name)})
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": advisory_key(name)})
 
 
 def process_label() -> str:

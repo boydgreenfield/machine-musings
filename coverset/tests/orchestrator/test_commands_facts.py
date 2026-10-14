@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +16,7 @@ from click.testing import CliRunner, Result
 
 from coverset.cli import cli
 from coverset.config import Settings
+from coverset.db.testing import PostgresTestDatabases, run_sql
 from coverset.facts.schema import TABLES
 
 REPO = "coverset-demo/ledger"
@@ -25,14 +25,14 @@ REPO = "coverset-demo/ledger"
 @dataclass(frozen=True)
 class SeededDemo:
     data_dir: Path
-    db_path: Path
+    db_url: str
     pr1_run: str
     baseline_run: str
     failing: str
 
 
 @pytest.fixture(scope="module")
-def seeded(tmp_path_factory: pytest.TempPathFactory) -> SeededDemo:
+def seeded(tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases) -> SeededDemo:
     """The local demo (history and both PRs, LocalExecutor, fake forge) in a temp directory."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
@@ -46,10 +46,10 @@ def seeded(tmp_path_factory: pytest.TempPathFactory) -> SeededDemo:
 
     root = tmp_path_factory.mktemp("facts-cli-demo")
     data_dir = root / "data"
-    db_path = root / "coverset.db"
+    db_url = postgres_databases.create()
     settings = Settings.for_tests(
         data_dir=data_dir,
-        database_url=f"sqlite+aiosqlite:///{db_path}",
+        database_url=db_url,
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
     )
@@ -67,29 +67,28 @@ def seeded(tmp_path_factory: pytest.TempPathFactory) -> SeededDemo:
 
     asyncio.run(scenario())
     clear_registered_secrets()
-    con = sqlite3.connect(db_path)
-    try:
-        pr1 = con.execute(
-            "SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = 1 "
-            "ORDER BY r.created_at DESC LIMIT 1"
-        ).fetchone()[0]
-        baseline = con.execute(
-            "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()[0]
-        failing = con.execute(
-            "SELECT t.nodeid FROM test_results r JOIN tests t ON t.id = r.test_id "
-            "WHERE r.run_id = ? AND r.outcome = 'failed' ORDER BY r.rank LIMIT 1",
-            (pr1,),
-        ).fetchone()[0]
-    finally:
-        con.close()
-    return SeededDemo(data_dir, db_path, pr1, baseline, failing)
+    pr1 = run_sql(
+        db_url,
+        "SELECT r.id FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = 1 "
+        "ORDER BY r.created_at DESC LIMIT 1",
+    )[0][0]
+    baseline = run_sql(
+        db_url,
+        "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+    )[0][0]
+    failing = run_sql(
+        db_url,
+        "SELECT t.nodeid FROM test_results r JOIN tests t ON t.id = r.test_id "
+        "WHERE r.run_id = :run AND r.outcome = 'failed' ORDER BY r.rank LIMIT 1",
+        {"run": pr1},
+    )[0][0]
+    return SeededDemo(data_dir, db_url, pr1, baseline, failing)
 
 
 @pytest.fixture
 def runner(monkeypatch: pytest.MonkeyPatch, seeded: SeededDemo) -> Iterator[CliRunner]:
     monkeypatch.setenv("COVERSET_DATA_DIR", str(seeded.data_dir))
-    monkeypatch.setenv("COVERSET_DATABASE_URL", f"sqlite+aiosqlite:///{seeded.db_path}")
+    monkeypatch.setenv("COVERSET_DATABASE_URL", seeded.db_url)
     from coverset.config import get_settings
 
     get_settings.cache_clear()

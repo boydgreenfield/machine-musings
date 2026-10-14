@@ -1,11 +1,12 @@
-"""Engine and session factories for SQLite and Postgres, and programmatic Alembic migrations.
+"""Engine and session factories for Postgres, creating the database, and programmatic Alembic
+migrations.
 
-Two backends, one schema. SQLite (``sqlite+aiosqlite``) is the zero-service default for laptops and
-the demo: WAL, a 5 s busy timeout, enforced foreign keys. Postgres (``postgresql+asyncpg``) is the
-hosted backend: a bounded connection pool per process, ``application_name=coverset`` and
-``timezone=UTC`` on every connection, and (for the web app) a per-statement timeout. Everything above
-this module is backend-neutral; the differences live here, in :mod:`coverset.db.upsert` and in
-:mod:`coverset.db.leader`. docs/postgres.md is the operator's view.
+coverset's control plane runs on Postgres (``postgresql+asyncpg``), 14 or newer: a bounded
+connection pool per process, ``application_name=coverset``, ``timezone=UTC`` and TCP keepalives on
+every connection, and (for the web app) a per-statement timeout. :func:`init_db` creates the
+database named in the URL when the server has none of that name (connecting to its maintenance
+database ``postgres``) and migrates it; :class:`DatabaseUnavailable` says how to start a server that
+does not answer. docs/postgres.md is the operator's view.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import functools
 import hashlib
 import logging
 import os
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,10 +26,9 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, event, text
+from sqlalchemy import Connection, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 if TYPE_CHECKING:
     from coverset.config import Settings
@@ -35,13 +36,18 @@ if TYPE_CHECKING:
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 """Alembic script directory, resolved from the installed package (no ``alembic.ini`` needed)."""
 
-SQLITE_PRAGMAS = (
-    "PRAGMA journal_mode=WAL",
-    "PRAGMA synchronous=NORMAL",
-    "PRAGMA busy_timeout=5000",
-    "PRAGMA foreign_keys=ON",
+MAINTENANCE_DATABASE = "postgres"
+"""The database :func:`create_database` connects to for ``CREATE DATABASE`` (every server has it)."""
+
+PLAIN_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+"""Database names coverset creates itself: letters, digits and underscores, at most 63 bytes (a
+longer name would be truncated by the server and then never match the URL)."""
+
+START_HINT = (
+    "start it (brew services start postgresql@14), or run `make services` and set "
+    "COVERSET_DATABASE_URL=postgresql://coverset:coverset@127.0.0.1:55432/coverset"
 )
-"""Applied to every new SQLite connection, in order."""
+"""How to get a development server, for the one line :class:`DatabaseUnavailable` prints."""
 
 POSTGRES_POOL: dict[str, Any] = {
     "pool_size": 10,
@@ -70,14 +76,13 @@ Postgres; where the transport has no keepalives (a Unix socket, Windows) the ser
 them. A session-mode PgBouncer must list them in ``ignore_startup_parameters`` (docs/postgres.md)."""
 
 WEB_STATEMENT_TIMEOUT_S = 30.0
-"""``statement_timeout`` of the web app's Postgres connections: no request (and no background task
-of the web process) waits more than 30 s on one statement. CLI commands, migrations
-(:func:`run_schema_change` lifts it for the migration's transaction) and ``coverset db copy`` run
-without one."""
+"""``statement_timeout`` of the web app's connections: no request (and no background task of the
+web process) waits more than 30 s on one statement. CLI commands and migrations
+(:func:`run_schema_change` lifts it for the migration's transaction) run without one."""
 
 ADVISORY_MIGRATION_LOCK = "coverset:migrate"
-"""Name of the transaction-scoped advisory lock a Postgres migration takes, so two replicas that
-start together migrate one after the other (the second finds the schema at head)."""
+"""Name of the transaction-scoped advisory lock a migration takes, so two replicas that start
+together migrate one after the other (the second finds the schema at head)."""
 
 _DROPPED_POSTGRES_QUERY = ("channel_binding",)
 """libpq URL parameters asyncpg does not take; hosted providers (Neon) put them in pasted URLs."""
@@ -86,46 +91,6 @@ log = logging.getLogger(__name__)
 
 LOG_LEVEL_ENV = "COVERSET_LOG_LEVEL"
 """``COVERSET_LOG_LEVEL=DEBUG`` keeps Alembic's own INFO lines (see :func:`quiet_alembic`)."""
-
-Backend = Literal["sqlite", "postgresql"]
-
-
-def _is_sqlite(url: URL) -> bool:
-    return url.get_backend_name() == "sqlite"
-
-
-def _is_sqlite_memory(url: URL) -> bool:
-    return _is_sqlite(url) and (url.database in (None, "", ":memory:") or url.query.get("mode") == "memory")
-
-
-def backend_of(url: str | URL) -> str:
-    """The backend name of ``url``: ``"sqlite"``, ``"postgresql"`` (or another dialect's name)."""
-    return make_url(url).get_backend_name()
-
-
-def is_postgres(url: str | URL) -> bool:
-    """True for a Postgres URL (any driver; the settings normalise it to asyncpg)."""
-    return backend_of(url) == "postgresql"
-
-
-def sqlite_file_path(url: str | URL) -> Path | None:
-    """The database file behind a file-backed SQLite URL, or None for other URLs and in-memory DBs.
-
-    None for a Postgres URL too: callers that chmod, back up, wipe or probe the file skip it then.
-    """
-    parsed = make_url(url)
-    if not _is_sqlite(parsed) or _is_sqlite_memory(parsed) or not parsed.database:
-        return None
-    return Path(parsed.database)
-
-
-def _apply_sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
-    cursor = dbapi_connection.cursor()
-    try:
-        for pragma in SQLITE_PRAGMAS:
-            cursor.execute(pragma)
-    finally:
-        cursor.close()
 
 
 def postgres_connect_args(
@@ -160,27 +125,12 @@ def postgres_connect_args(
 def make_engine(
     url: str | URL, *, echo: bool = False, statement_timeout_s: float | None = None
 ) -> AsyncEngine:
-    """Create an async engine for SQLite or Postgres.
-
-    SQLite connections get WAL, ``synchronous=NORMAL``, a 5 s busy timeout and enforced foreign
-    keys; in-memory SQLite shares one connection (``StaticPool``) so every session sees the same
-    database; ``statement_timeout_s`` does not apply (SQLite has none). Postgres gets
-    :data:`POSTGRES_POOL`, :data:`POSTGRES_SERVER_SETTINGS` and, when ``statement_timeout_s`` is
-    given, a server-side ``statement_timeout`` on every connection (the web app passes
-    :data:`WEB_STATEMENT_TIMEOUT_S`); see :func:`postgres_connect_args` for the URL handling.
-    """
-    parsed = make_url(url)
-    kwargs: dict[str, Any] = {"echo": echo}
-    if _is_sqlite_memory(parsed):
-        kwargs["poolclass"] = StaticPool
-    if parsed.get_backend_name() == "postgresql":
-        parsed, connect_args = postgres_connect_args(parsed, statement_timeout_s=statement_timeout_s)
-        kwargs.update(POSTGRES_POOL)
-        kwargs["connect_args"] = connect_args
-    engine = create_async_engine(parsed, **kwargs)
-    if _is_sqlite(parsed):
-        event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
-    return engine
+    """Create an async engine with :data:`POSTGRES_POOL`, :data:`POSTGRES_SERVER_SETTINGS` and, when
+    ``statement_timeout_s`` is given, a server-side ``statement_timeout`` on every connection (the
+    web app passes :data:`WEB_STATEMENT_TIMEOUT_S`); see :func:`postgres_connect_args` for the URL
+    handling."""
+    parsed, connect_args = postgres_connect_args(make_url(url), statement_timeout_s=statement_timeout_s)
+    return create_async_engine(parsed, echo=echo, connect_args=connect_args, **POSTGRES_POOL)
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
@@ -202,11 +152,6 @@ class Database:
         """Create the engine (see :func:`make_engine`) and a matching session factory."""
         engine = make_engine(url, echo=echo, statement_timeout_s=statement_timeout_s)
         return cls(engine=engine, sessionmaker=make_sessionmaker(engine))
-
-    @property
-    def backend(self) -> str:
-        """``"sqlite"`` or ``"postgresql"``."""
-        return self.engine.dialect.name
 
     def session(self) -> AsyncSession:
         """A new session; use as ``async with db.session() as session``."""
@@ -234,76 +179,28 @@ def advisory_key(name: str) -> int:
     return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8).digest(), "big", signed=True)
 
 
-class MigrationError(RuntimeError):
-    """A schema change left rows that violate a foreign key; it was rolled back."""
-
-
-def _driver_execute(connection: Connection, statement: str) -> None:
-    """Run ``statement`` on the DBAPI connection, bypassing SQLAlchemy's transaction tracking."""
-    cursor = connection.connection.cursor()
-    try:
-        cursor.execute(statement)
-    finally:
-        cursor.close()
-
-
-def _run_sqlite_schema_change(connection: Connection, change: Callable[[Connection], None]) -> None:
-    """Run ``change`` atomically with foreign keys off (see :func:`run_schema_change`)."""
-    dbapi_connection = connection.connection.dbapi_connection
-    if dbapi_connection is None:
-        raise RuntimeError("the connection has no live DBAPI connection")
-    previous_isolation = dbapi_connection.isolation_level
-    # The driver's legacy mode never BEGINs before DDL; manage the transaction explicitly instead.
-    dbapi_connection.isolation_level = None
-    # foreign_keys can only change outside a transaction.
-    _driver_execute(connection, "PRAGMA foreign_keys=OFF")
-    try:
-        with connection.begin():
-            _driver_execute(connection, "BEGIN")
-            change(connection)
-            violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
-            if violations:
-                tables = sorted({str(row[0]) for row in violations})
-                raise MigrationError(f"foreign key violations after the schema change in: {tables}")
-    finally:
-        _driver_execute(connection, "PRAGMA foreign_keys=ON")
-        dbapi_connection.isolation_level = previous_isolation
-
-
 def _run_schema_change_sync(connection: Connection, change: Callable[[Connection], None]) -> None:
-    if connection.dialect.name == "sqlite":
-        _run_sqlite_schema_change(connection, change)
-        return
     with connection.begin():
-        if connection.dialect.name == "postgresql":
-            # No web statement timeout for DDL, and one migrating process at a time (the lock is
-            # released when this transaction ends).
-            connection.exec_driver_sql("SET LOCAL statement_timeout = 0")
-            connection.exec_driver_sql(
-                f"SELECT pg_advisory_xact_lock({advisory_key(ADVISORY_MIGRATION_LOCK)})"
-            )
+        # No web statement timeout for DDL, and one migrating process at a time (the lock is
+        # released when this transaction ends).
+        connection.exec_driver_sql("SET LOCAL statement_timeout = 0")
+        connection.exec_driver_sql(f"SELECT pg_advisory_xact_lock({advisory_key(ADVISORY_MIGRATION_LOCK)})")
         change(connection)
 
 
 async def run_schema_change(engine: AsyncEngine, change: Callable[[Connection], None]) -> None:
     """Run the synchronous schema change ``change`` in one transaction on its own connection.
 
-    On SQLite the transaction is real for DDL too (a failed change leaves no half-built tables)
-    and foreign keys are off while it runs: batch migrations copy, drop and rename tables, and with
-    foreign keys on, dropping a parent table would cascade-delete or null its children's rows.
-    ``PRAGMA foreign_key_check`` runs before commit and raises :class:`MigrationError` (rolling
-    back) if any row is left dangling.
-
-    On Postgres DDL is transactional anyway and batch operations are plain ``ALTER TABLE``s
-    (Alembic's batch mode passes them through); the transaction takes the advisory lock
-    :data:`ADVISORY_MIGRATION_LOCK` first and lifts any ``statement_timeout``.
+    DDL is transactional on Postgres, so a failed change leaves nothing half-built. The transaction
+    takes the advisory lock :data:`ADVISORY_MIGRATION_LOCK` first and lifts any
+    ``statement_timeout``.
     """
     async with engine.connect() as connection:
         await connection.run_sync(_run_schema_change_sync, change)
 
 
 async def lift_statement_timeout(session: AsyncSession) -> None:
-    """``SET LOCAL statement_timeout = 0`` for ``session``'s current transaction (Postgres only).
+    """``SET LOCAL statement_timeout = 0`` for ``session``'s current transaction.
 
     For the bulk work the web process does on its own engine, whose connections carry
     :data:`WEB_STATEMENT_TIMEOUT_S`: the retention gc deletes a day's backlog of runs and run
@@ -311,14 +208,13 @@ async def lift_statement_timeout(session: AsyncSession) -> None:
     (after a gc outage or a retention change) every pass would be cancelled and the backlog would
     never shrink. ``SET LOCAL`` ends with the transaction, so the session's later statements, and
     the pooled connection's next user, keep the timeout. Call it inside the transaction (after its
-    first statement, or it begins one); a no-op on SQLite, which has no statement timeout.
+    first statement, or it begins one).
     """
-    if session.get_bind().dialect.name == "postgresql":
-        await session.execute(text("SET LOCAL statement_timeout = 0"))
+    await session.execute(text("SET LOCAL statement_timeout = 0"))
 
 
 def quiet_alembic() -> None:
-    """Keep Alembic's INFO lines ("Context impl SQLiteImpl.", "Will assume non-transactional DDL.",
+    """Keep Alembic's INFO lines ("Context impl PostgresqlImpl.", "Will assume transactional DDL.",
     "Running upgrade ...") out of every command's output.
 
     Its logger is set to WARNING unless ``COVERSET_LOG_LEVEL=DEBUG``; real migration steps are not
@@ -375,23 +271,157 @@ async def migrate(engine: AsyncEngine) -> list[str]:
     return applied
 
 
-async def init_db(settings: Settings, engine: AsyncEngine | None = None) -> list[str]:
-    """Create ``data_dir`` (and the SQLite file's directory) and migrate the database to head.
+class DatabaseUnavailable(RuntimeError):
+    """The database cannot be reached, or created; the message is one line that says what to do."""
 
-    Uses ``engine`` when given; otherwise a temporary engine for ``settings.database_url`` is
-    created and disposed. Returns the applied revisions (see :func:`migrate`).
+
+def _sqlstate(exc: BaseException) -> str | None:
+    """The SQLSTATE of a driver error (asyncpg's, or SQLAlchemy's wrapper around it), else None."""
+    for candidate in (exc, getattr(exc, "orig", None), exc.__cause__):
+        state = getattr(candidate, "sqlstate", None)
+        if isinstance(state, str):
+            return state
+    return None
+
+
+def shown_url(url: str | URL) -> str:
+    """``url`` with its password masked, for messages."""
+    return make_url(url).render_as_string(hide_password=True)
+
+
+def _unavailable(url: str | URL, exc: BaseException) -> DatabaseUnavailable:
+    """The one-line :class:`DatabaseUnavailable` for a failed connection to ``url``."""
+    parsed = make_url(url)
+    where = f"{parsed.host or 'the local socket'}:{parsed.port or 5432}"
+    reason = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+    if isinstance(exc, OSError | TimeoutError):
+        return DatabaseUnavailable(f"cannot reach Postgres at {where} ({reason}): {START_HINT}")
+    return DatabaseUnavailable(f"cannot connect to {shown_url(parsed)}: {reason}")
+
+
+def connection_errors(url: str | URL) -> Callable[[BaseException], DatabaseUnavailable | None]:
+    """A classifier for exceptions raised while connecting to ``url``: the :class:`DatabaseUnavailable`
+    to raise instead (server unreachable, authentication refused, no such database), or None for
+    anything else (a failing migration, a bug), which should propagate as it is."""
+
+    def classify(exc: BaseException) -> DatabaseUnavailable | None:
+        if isinstance(exc, OSError | TimeoutError):
+            return _unavailable(url, exc)
+        state = _sqlstate(exc)
+        if state is not None and (state.startswith("28") or state in ("3D000", "08001", "08006", "57P03")):
+            return _unavailable(url, exc)
+        return None
+
+    return classify
+
+
+def _asyncpg_kwargs(url: URL) -> dict[str, Any]:
+    """``asyncpg.connect`` arguments for ``url`` (the libpq parameters translated as for the engine)."""
+    url, connect_args = postgres_connect_args(url)
+    kwargs: dict[str, Any] = {
+        "host": url.host,
+        "port": url.port,
+        "user": url.username,
+        "password": url.password,
+        "database": url.database,
+    }
+    kwargs.update({key: value for key, value in connect_args.items() if key != "server_settings"})
+    return {key: value for key, value in kwargs.items() if value is not None}
+
+
+async def admin_execute(url: str | URL, statements: list[str]) -> None:
+    """Run ``statements`` one by one on a plain asyncpg connection to ``url`` (``CREATE DATABASE``
+    and ``DROP DATABASE`` cannot run inside a transaction, which SQLAlchemy would open)."""
+    import asyncpg
+
+    connection = await asyncpg.connect(**_asyncpg_kwargs(make_url(url)))
+    try:
+        for statement in statements:
+            await connection.execute(statement)
+    finally:
+        await connection.close()
+
+
+def quote_database(name: str) -> str:
+    """``name`` as a quoted identifier; :class:`ValueError` unless it is a plain identifier
+    (:data:`PLAIN_IDENTIFIER`): coverset creates and drops only names it can quote unambiguously."""
+    if not PLAIN_IDENTIFIER.fullmatch(name):
+        raise ValueError(
+            f"database name {name!r} is not a plain identifier (letters, digits and underscores, at "
+            "most 63 characters)"
+        )
+    return f'"{name}"'
+
+
+async def create_database(url: str | URL) -> None:
+    """``CREATE DATABASE`` the database named in ``url``, from the server's maintenance database
+    (:data:`MAINTENANCE_DATABASE`), as the URL's user. Raises :class:`DatabaseUnavailable` for a name
+    that is not a plain identifier, a server that does not answer, or a user that may not create
+    databases; a database that appeared meanwhile (another process created it) is fine.
+
+    Replicas starting together all find the database missing and all try to create it. The loser
+    sees ``duplicate_database`` (42P04) when the winner's ``CREATE DATABASE`` had already committed,
+    and ``unique_violation`` (23505) on ``pg_database``'s name index when it was still running: the
+    loser waits on the index until the winner commits (the name check in Postgres's dbcommands.c is
+    only a friendlier message than the index gives). Both mean the database exists now.
+    """
+    parsed = make_url(url)
+    name = parsed.database or ""
+    try:
+        quoted = quote_database(name)
+    except ValueError as exc:
+        raise DatabaseUnavailable(
+            f"{shown_url(parsed)} names no database coverset can create: {exc}; create it yourself"
+        ) from None
+    try:
+        await admin_execute(parsed.set(database=MAINTENANCE_DATABASE), [f"CREATE DATABASE {quoted}"])
+    except Exception as exc:
+        if _sqlstate(exc) in ("42P04", "23505"):  # someone else created it meanwhile (see above)
+            return
+        problem = connection_errors(parsed)(exc)
+        if problem is not None:
+            raise problem from None
+        reason = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        raise DatabaseUnavailable(
+            f"cannot create database {name} on {parsed.host or 'the local socket'}: {reason}; create it "
+            f"yourself (createdb {name}) or use a user that may"
+        ) from None
+    log.info("created database %s", name)
+
+
+async def migrate_url(url: str | URL, *, create: bool = True) -> list[str]:
+    """:func:`migrate` the database behind ``url`` with a short-lived engine, creating it first when
+    the server has no database of that name (``create``). Raises :class:`DatabaseUnavailable` when
+    the server cannot be reached or refuses the connection."""
+    classify = connection_errors(url)
+    for attempt in (1, 2):
+        engine = make_engine(url)
+        try:
+            return await migrate(engine)
+        except Exception as exc:
+            if attempt == 1 and create and _sqlstate(exc) == "3D000":  # invalid_catalog_name
+                await create_database(url)
+                continue
+            problem = classify(exc)
+            if problem is not None:
+                raise problem from None
+            raise
+        finally:
+            await engine.dispose()
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def init_db(settings: Settings, engine: AsyncEngine | None = None) -> list[str]:
+    """Create ``data_dir``, then create the database when it does not exist yet and migrate it to
+    head (:func:`migrate_url`).
+
+    With ``engine`` (the app's own, at startup) the database must exist already: it is only
+    migrated. Returns the applied revisions (see :func:`migrate`).
     """
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    db_file = sqlite_file_path(settings.database_url)
-    if db_file is not None:
-        db_file.parent.mkdir(parents=True, exist_ok=True)
     if engine is not None:
         return await migrate(engine)
-    owned = make_engine(settings.database_url)
-    try:
-        return await migrate(owned)
-    finally:
-        await owned.dispose()
+    return await migrate_url(settings.database_url)
 
 
 # -- probing a database (coverset init-db, coverset deploy check) ----------------------------------
@@ -411,33 +441,27 @@ class DatabaseReport:
 
     status: ReportStatus
     detail: str
-    backend: str
-    """``"SQLite"`` or ``"Postgres"``."""
     server_version: str | None = None
     current: tuple[str, ...] = ()
     heads: tuple[str, ...] = ()
     pool: str = ""
     """The connection pool a coverset process opens against this database."""
+    leader: str | None = None
+    """Who holds the background-task lease (:func:`coverset.db.leader.leader_status`)."""
     error: str | None = None
 
     def __iter__(self) -> Iterator[str]:
         return iter((self.status, self.detail))
 
 
-def describe_pool(url: str | URL) -> str:
-    """The connection pool a coverset process uses for ``url``, for reports."""
-    if is_postgres(url):
-        return (
-            f"{POSTGRES_POOL['pool_size']} + {POSTGRES_POOL['max_overflow']} overflow connections per process"
-        )
-    return "SQLite: one file, WAL, one writer at a time"
+def describe_pool() -> str:
+    """The connection pool a coverset process opens, for reports."""
+    return f"{POSTGRES_POOL['pool_size']} + {POSTGRES_POOL['max_overflow']} overflow connections per process"
 
 
 def pooler_warning(url: str | URL) -> str | None:
     """A warning when ``url`` looks like a transaction-mode pooler endpoint, else None."""
     parsed = make_url(url)
-    if not is_postgres(parsed):
-        return None
     location = f"{parsed.host or ''}:{parsed.port or 5432}"
     if any(hint in location for hint in POOLED_HOST_HINTS):
         return (
@@ -448,37 +472,30 @@ def pooler_warning(url: str | URL) -> str | None:
 
 
 async def probe_database(url: str | URL) -> DatabaseReport:
-    """Connect to ``url`` and report the backend, server version, Alembic revision against the
-    packaged head and the pool coverset uses. Never raises for an unreachable database (the
-    report's ``status`` is ``fail``) and never creates a SQLite file (a missing one is ``warn``)."""
+    """Connect to ``url`` and report the server version, the Alembic revision against the packaged
+    head, the pool coverset uses and who holds the background-task lease. Never raises for an
+    unreachable server or a missing database (the report's ``status`` is ``fail``) and never
+    creates anything."""
+    from coverset.db.leader import leader_status_on
+
     parsed = make_url(url)
-    backend = (
-        "Postgres" if is_postgres(parsed) else "SQLite" if _is_sqlite(parsed) else parsed.get_backend_name()
-    )
-    pool = describe_pool(parsed)
+    pool = describe_pool()
     heads = tuple(sorted(head_revisions()))
-    db_file = sqlite_file_path(parsed)
-    if db_file is not None and not db_file.exists():
-        return DatabaseReport(
-            "warn",
-            f"{db_file} does not exist yet (serve creates and migrates it)",
-            backend,
-            heads=heads,
-            pool=pool,
-        )
     engine = make_engine(parsed)
     try:
         async with engine.connect() as connection:
             version = await connection.run_sync(_server_version)
             current = await connection.run_sync(_current_heads)
+            leader = (await leader_status_on(connection)).detail
     except Exception as exc:  # noqa: BLE001 - any driver error is a report, not a crash
         error = f"{type(exc).__name__}: {exc}"
+        hint = " (`coverset init-db` creates it)" if _sqlstate(exc) == "3D000" else ""
         return DatabaseReport(
-            "fail", f"{backend}: cannot connect: {error}", backend, heads=heads, pool=pool, error=error
+            "fail", f"Postgres: cannot connect: {error}{hint}", heads=heads, pool=pool, error=error
         )
     finally:
         await engine.dispose()
-    where = f"{backend} {version}"
+    where = f"Postgres {version}"
     warning = pooler_warning(parsed)
     if not current:
         status: ReportStatus = "warn"
@@ -488,10 +505,10 @@ async def probe_database(url: str | URL) -> DatabaseReport:
     else:
         status = "warn"
         detail = f"{where} at {', '.join(current)}, head is {', '.join(heads)} (`coverset init-db`)"
-    detail = f"{detail}; {pool}"
+    detail = f"{detail}; {pool}; lease {leader}"
     if warning:
         status, detail = "warn", f"{detail}; {warning}"
-    return DatabaseReport(status, detail, backend, version, tuple(sorted(current)), heads, pool)
+    return DatabaseReport(status, detail, version, tuple(sorted(current)), heads, pool, leader)
 
 
 def check_database(url: str | URL) -> DatabaseReport:
@@ -500,9 +517,4 @@ def check_database(url: str | URL) -> DatabaseReport:
 
 
 def _server_version(connection: Connection) -> str:
-    if connection.dialect.name == "postgresql":
-        return str(connection.exec_driver_sql("SHOW server_version").scalar_one()).split(" ")[0]
-    if connection.dialect.name == "sqlite":
-        return str(connection.exec_driver_sql("SELECT sqlite_version()").scalar_one())
-    info = connection.dialect.server_version_info or ()
-    return ".".join(str(part) for part in info)
+    return str(connection.exec_driver_sql("SHOW server_version").scalar_one()).split(" ")[0]

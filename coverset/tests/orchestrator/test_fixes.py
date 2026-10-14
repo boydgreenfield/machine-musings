@@ -36,6 +36,7 @@ from coverset.orchestrator.runner import (
     execute_run,
     process_claimant,
 )
+from coverset.storage.testing import local_blob_url
 
 ZERO = "tests/test_calc.py::test_zero_fails"
 
@@ -159,6 +160,7 @@ def test_broken_process_pool_is_recreated(tmp_path: Path) -> None:
 
     job = IngestJob(
         facts_dir=str(tmp_path / "facts"),
+        blob_url=local_blob_url(tmp_path / "facts"),
         ctx=RunContext(1, "r" * 16, "a" * 40, None, "main", None, datetime(2026, 10, 1, tzinfo=UTC), None),
         shard_id=0,
         tarball=str(tmp_path / "missing.tar.gz"),

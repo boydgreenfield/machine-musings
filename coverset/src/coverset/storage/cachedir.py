@@ -1,7 +1,7 @@
-"""The bounded local cache in front of the object store: what it holds, and least-recently-used eviction.
+"""The bounded local cache in front of the blob store: what it holds, and least-recently-used eviction.
 
-With ``COVERSET_BLOB_URL`` set, ``COVERSET_CACHE_DIR`` (default ``<data_dir>/cache``) holds copies
-that can always be fetched again:
+``COVERSET_CACHE_DIR`` (default ``<data_dir>/cache``) holds copies that can always be fetched again,
+from the blob store (files under the data directory, or a bucket) or by a clone:
 
 ``facts/repo=<id>/run=<id>/``
     a run's files as last pulled or published (``FactsStore``); used at each pull (the hidden
@@ -20,10 +20,9 @@ published (no ``.sync.json``, or files that differ from it), or a mirror whose f
 ``coverset gc`` (and so ``serve`` at start-up and every 24 h, ``orchestrator/history.collect_garbage``)
 calls it; ``coverset cache status|clear`` shows and empties the cache by hand. A removed run is
 pulled again on its next read (a reader's freshness check sees its ``.sync.json`` gone). Repository
-dictionaries are tiny and never evicted.
-
-With the local default nothing under the data directory is a cache: :func:`evict` and
-:func:`clear` do nothing and :func:`status` says so.
+dictionaries are tiny and never evicted. With the local blob store a published run's cached files
+are hard links to its objects (:mod:`coverset.storage.local`): they count toward the bound here,
+though removing them frees no disk until the store's objects go too.
 """
 
 from __future__ import annotations
@@ -65,7 +64,6 @@ class CacheStatus:
     """What ``coverset cache status`` prints."""
 
     directory: Path
-    remote: bool
     max_bytes: int
     total_bytes: int = 0
     by_kind: dict[str, tuple[int, int]] = field(default_factory=dict)
@@ -146,14 +144,6 @@ def _unpublished(run_dir: Path) -> bool:
     return any(name not in present for name in known)
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-    except ValueError:
-        return False
-    return True
-
-
 def _run_entries(facts_dir: Path) -> Iterator[CacheEntry]:
     if not facts_dir.is_dir():
         return
@@ -213,13 +203,13 @@ def _source_entries(sources_dir: Path) -> Iterator[CacheEntry]:
 
 
 def entries(settings: Settings) -> list[CacheEntry]:
-    """Every evictable entry of the cache (empty with the local default)."""
-    if not settings.blob_url or settings.cache_dir is None:
-        return []
-    cache_dir = settings.cache_dir
-    found = list(_run_entries(settings.facts_dir)) if _is_under(settings.facts_dir, cache_dir) else []
-    if _is_under(settings.mirrors_dir, cache_dir):
-        found += _mirror_entries(settings.mirrors_dir)
+    """Every evictable entry of the cache."""
+    assert settings.cache_dir is not None  # set by the validator
+    return _cache_entries(settings.cache_dir)
+
+
+def _cache_entries(cache_dir: Path) -> list[CacheEntry]:
+    found = [*_run_entries(cache_dir / "facts"), *_mirror_entries(cache_dir / "mirrors")]
     found += _source_entries(cache_dir / "sources")
     return found
 
@@ -228,10 +218,9 @@ def status(settings: Settings) -> CacheStatus:
     """The cache's size by kind, its bound and how many entries are in use."""
     from coverset.facts.cache import cache_max_bytes
 
-    directory = settings.cache_dir or settings.data_dir / "cache"
-    result = CacheStatus(directory=directory, remote=bool(settings.blob_url), max_bytes=cache_max_bytes())
-    if not result.remote:
-        return result
+    assert settings.cache_dir is not None  # set by the validator
+    directory = settings.cache_dir
+    result = CacheStatus(directory=directory, max_bytes=cache_max_bytes())
     result.total_bytes = _tree_bytes(directory) if directory.is_dir() else 0
     for entry in entries(settings):
         count, size = result.by_kind.get(entry.kind, (0, 0))
@@ -274,21 +263,16 @@ def _remove(entry: CacheEntry) -> bool:
 
 def evict(settings: Settings, *, max_bytes: int | None = None, dry_run: bool = False) -> EvictReport:
     """Remove least-recently-used entries until the cache fits ``max_bytes`` (default
-    ``COVERSET_CACHE_MAX_GB``); entries in use are skipped. Does nothing with the local default."""
-    from coverset.facts.cache import cache_max_bytes
-
-    if not settings.blob_url or settings.cache_dir is None:
-        return EvictReport(max_bytes=cache_max_bytes() if max_bytes is None else max_bytes)
-    return _evict(settings.cache_dir, entries(settings), max_bytes=max_bytes, dry_run=dry_run)
+    ``COVERSET_CACHE_MAX_GB``); entries in use are skipped."""
+    assert settings.cache_dir is not None  # set by the validator
+    return evict_dir(settings.cache_dir, max_bytes=max_bytes, dry_run=dry_run)
 
 
 def evict_dir(cache_dir: Path, *, max_bytes: int | None = None, dry_run: bool = False) -> EvictReport:
-    """:func:`evict` for a cache directory in the standard layout (``facts/``, ``mirrors/`` and
-    ``sources/`` below it, which is what ``Settings`` gives whenever a blob URL is set); used by the
-    facts store, which knows its cache directory but holds no settings."""
-    found = [*_run_entries(cache_dir / "facts"), *_mirror_entries(cache_dir / "mirrors")]
-    found += _source_entries(cache_dir / "sources")
-    return _evict(cache_dir, found, max_bytes=max_bytes, dry_run=dry_run)
+    """:func:`evict` for a cache directory (``facts/``, ``mirrors/`` and ``sources/`` below it, the
+    layout ``Settings`` gives); used by the facts store, which knows its cache directory but holds
+    no settings."""
+    return _evict(cache_dir, _cache_entries(cache_dir), max_bytes=max_bytes, dry_run=dry_run)
 
 
 def _evict(directory: Path, found: list[CacheEntry], *, max_bytes: int | None, dry_run: bool) -> EvictReport:

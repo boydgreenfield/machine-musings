@@ -22,7 +22,9 @@ This page is the map. Each part has its own page:
 | [docs/typescript.md](docs/typescript.md) | `coverset-vitest`: the TypeScript reporter that writes the neutral bundle |
 | [docs/getting-started.md](docs/getting-started.md) | onboarding a repository: `coverset doctor`, upload mode vs managed runs, the `[tool.coverset]` reference, environment sources, installing the project |
 | [docs/dev.md](docs/dev.md) | the developer loop: `coverset dev`, data directories, local sign-in, running without GitHub, tests, conventions |
-| [docs/deploy.md](docs/deploy.md) | hosting: Modal, Fly, a VM with Docker and Caddy; proxies, cookies, HSTS, backups, secret rotation, `coverset deploy check` |
+| [docs/deploy.md](docs/deploy.md) | hosting: a stateless app in front of Postgres and an S3-compatible bucket; recipes for Fly, ECS Fargate or App Runner with RDS and S3, one VM with compose, Modal, Railway and Render, an ngrok demo; migrations on deploy, secrets, backups, scaling with the leader lease, cost, `scripts/smoke_hosted.py`, `coverset deploy check` |
+| [docs/postgres.md](docs/postgres.md) | the database: Homebrew or compose for development, URL forms for hosted providers, pooling, migrations, the leader lease and the multi-replica rules, the test databases |
+| [docs/object-store.md](docs/object-store.md) | facts, uploads and uploaded sources in the blob store (files under the data directory or a bucket, one code path): keys, the per-run manifest, the cache, conditional writes on the id dictionary, consistency rules, IAM permissions, URL forms for S3, MinIO, R2 and Tigris |
 | [docs/auth.md](docs/auth.md) | GitHub sign-in, sessions, roles, repository access, API tokens, the audit log |
 | [docs/settings.md](docs/settings.md) | scoped settings (instance, org, repo, user): keys, precedence, who may edit, how policy reaches intake, planner and verdict, token pages |
 | [docs/upload.md](docs/upload.md) | upload mode: `coverset-ci upload`, `POST /v1/bundles`, shards per commit, what is computed with and without a mirror |
@@ -40,7 +42,8 @@ coverset is:
 - a webhook receiver and run queue (`src/coverset/forge/`, `src/coverset/orchestrator/`);
 - a test planner that orders tests by risk and splits them into shards (`src/coverset/analysis/`);
 - a pytest plugin that records per-test coverage and argument shapes inside the worker (`packages/pytest-coverset/`);
-- a facts store of immutable Parquet files queried with DuckDB (`src/coverset/facts/`);
+- a facts store of immutable Parquet files in an S3-compatible bucket (a directory on a laptop), read through a disposable local cache with DuckDB (`src/coverset/storage/`, `src/coverset/facts/`);
+- a control-plane database on Postgres, with a leader lease so replicas share the background work (`src/coverset/db/`);
 - a language-neutral model of semantic coverage, with an on-disk bundle format any test runner can produce and a validator for it (`packages/coverset-model/`);
 - a reporter that posts a check run and one sticky comment on the pull request (`src/coverset/forge/`);
 - a static report of one run for local use, built from the same renderers as the pages (`src/coverset/report/`);
@@ -79,8 +82,8 @@ flowchart LR
     VE["orchestrator/verdict.py<br/>patch, input classes,<br/>invariants, AI review"]
     AN["analysis/<br/>functions, scoring,<br/>sharding, shapes"]
     AI["ai/<br/>ReviewClient"]
-    DB[("db/: SQLite<br/>runs, tests, events")]
-    FA[("facts/: Parquet<br/>per run + DuckDB views")]
+    DB[("db/: Postgres<br/>runs, tests, events, settings")]
+    FA[("storage/ + facts/: Parquet per run<br/>in a bucket (or a directory),<br/>cached locally, DuckDB views")]
     UI["web UI<br/>(Quart + HTMX + SSE)"]
     MOD["coverset-model<br/>neutral bundle, shape keys,<br/>input-class catalogue"]
     REP["coverset report<br/>(static pages)"]
@@ -124,7 +127,7 @@ flowchart LR
   UI --> FA
 ```
 
-Source reaches a worker only as a `git archive` tarball written with `Worker.put_tree`. The control plane keeps a bare mirror per repository under `<data_dir>/mirrors/<repo_id>.git` (`src/coverset/orchestrator/repos.py`). Workers never run git against a remote and never receive forge credentials.
+Source reaches a worker only as a `git archive` tarball written with `Worker.put_tree`. The control plane keeps a bare mirror per repository under `<cache_dir>/mirrors/<repo_id>.git` (`src/coverset/orchestrator/repos.py`): the disposable cache, cloned again when missing. Workers never run git against a remote and never receive forge credentials.
 
 ## How a run works
 
@@ -150,7 +153,7 @@ Three run columns sit beside the timeline. `rank_coverset` is the first confirme
 
 Exit codes (`orchestrator/runner.py`, `exit_code_for`): the `done` event carries 0 for `success`, 1 for `failure` (collection errors included), 5 when no tests were collected, and 2 for everything else (`error`, `cancelled` and `abandoned` runs, and `neutral` conclusions such as an incomplete run or "budget exhausted"). `coverset-ci wait` exits 1 at the first `failure` verdict (the early one included); after any other verdict it reads on to the `done` event and exits with its code, and it never turns a non-`success` conclusion into 0 (`pytest_coverset/ci.py`).
 
-Background work while `serve` runs (`app.py`): the run dispatcher; the retention pass once at start-up and then every 24 h (`schedule_gc`, the same pass as `coverset gc`); and, when `COVERSET_EXECUTOR=modal`, the reaper every 60 s and the warm-pool maintainer every 30 s (`schedule_executor_upkeep`). At boot, `queued` runs left by a previous process are abandoned (or kept queued with `COVERSET_REQUEUE_ON_BOOT=true`), upload runs (trigger `upload`) are skipped entirely (the dispatcher never executes them), and a `running` run is taken over only when nothing executes it any more: an earlier `serve` on this host claimed it, its claiming process on this host is gone, nobody claimed it, or its heartbeat is older than 5 minutes; a live `coverset run` keeps its runs. With the Modal upkeep running, shutdown cancels re-snapshots in flight, drains the pool and closes the executors.
+Background work while `serve` runs (`app.py`): the run dispatcher; the retention pass once at start-up and then every 24 h (`schedule_gc`, the same pass as `coverset gc`); and, when `COVERSET_EXECUTOR=modal`, the reaper every 60 s and the warm-pool maintainer every 30 s (`schedule_executor_upkeep`). All of it runs only in the replica that holds the leader lease (`db/leader.py`: a session-level advisory lock, checked every 30 s; a follower takes over within one check when the leader stops, abandons only queued runs created before it started, and sweeps running runs with a stale heartbeat every 60 s). A single `serve` is always the leader. At boot, `queued` runs left by a previous process are abandoned (or kept queued with `COVERSET_REQUEUE_ON_BOOT=true`), upload runs (trigger `upload`) are skipped entirely (the dispatcher never executes them), and a `running` run is taken over only when nothing executes it any more: an earlier `serve` on this host claimed it, its claiming process on this host is gone, nobody claimed it, or its heartbeat is older than 5 minutes; a live `coverset run` keeps its runs. With the Modal upkeep running, shutdown cancels re-snapshots in flight, drains the pool and closes the executors.
 
 ## Glossary
 
@@ -188,8 +191,9 @@ These terms are used the same way in code, UI and docs.
 | `pytest_coverset/ci.py`, `ci_http.py`, `junit.py` | `coverset-ci wait` (stdlib only) | `main`, `exit_code_for` | `packages/pytest-coverset/tests/test_ci.py`, `tests/forge/test_forge_ci_wait.py` |
 | `src/coverset/config.py`, `logging.py` | Every `COVERSET_*` setting; secret redaction | `Settings`, `get_settings`, `redact`, `RedactingFilter`, `configure_logging` | `tests/test_config.py`, `tests/test_redaction.py` |
 | `src/coverset/app.py`, `cli.py`, `commands/` | App factory, security headers, background upkeep (gc, reaper, warm pool), the `coverset` CLI (`run`, `demo`, `serve`, `report`, `bundle validate\|info\|convert`, `facts tables\|explain\|test\|line\|export`, `invariants scan`, ...) | `create_app`, `schedule_gc`, `schedule_executor_upkeep`, `cli`, `register_commands`, `scan_invariants` | `tests/test_app.py`, `tests/orchestrator/test_commands.py`, `tests/orchestrator/test_pool_upkeep.py`, `tests/orchestrator/test_invariants_scan.py` |
-| `src/coverset/db/` | SQLAlchemy models, SQLite pragmas, Alembic migrations | the models in `db/models.py`, `Database`, `init_db` | `tests/test_models.py` |
-| `src/coverset/facts/` | Untrusted-bundle reading, per-shard Parquet ingest, run aggregates, DuckDB queries, retention | `read_python_bundle`, `extract_bundle`, `BundleLimits`, `FactsStore`, `ingest_shard`, `finalize_run`, `patch_coverage`, `tests_covering`, `treemap`, `shapes_for_function`, `ParquetPriorRun`, `expire_runs` | `tests/facts/` |
+| `src/coverset/db/` | SQLAlchemy models, the asyncpg engine (pool, pre-ping, UTC, a web statement timeout), database creation on first use, Alembic migrations under a migration lock, the shared upsert (rows written in key order), the leader lease, the per-test databases for the suite | the models in `db/models.py`, `Database`, `init_db`, `upsert`, `LeaderLease`, `check_database` | `tests/test_models.py`, `tests/db/` |
+| `src/coverset/storage/` | The `BlobStore` contract and its two implementations: local files and any S3-compatible bucket (boto3, multipart, conditional writes); `from_settings` picks one | `BlobStore`, `LocalBlobStore`, `S3BlobStore`, `check_store` | `tests/storage/` |
+| `src/coverset/facts/` | Untrusted-bundle reading, per-shard Parquet ingest, run aggregates, DuckDB queries over the local cache, retention; `FactsStore` writes every table to the cache, publishes it to the blob store (local files or a bucket alike; a local publish hard-links) and a per-run `MANIFEST.json` last (readers sync by its etag, never see a half-written run); the per-repository id dictionary is read-modify-written with `If-Match`; uploaded sources, upload archives and production windows share the store | `read_python_bundle`, `extract_bundle`, `BundleLimits`, `FactsStore`, `facts_store`, `ingest_shard`, `finalize_run`, `patch_coverage`, `tests_covering`, `treemap`, `shapes_for_function`, `ParquetPriorRun`, `expire_runs` | `tests/facts/` (parametrised over local files and S3 through moto), `tests/e2e/test_hosted_facts.py` |
 | `packages/coverset-model/src/coverset_model/` | The language-neutral model: the NeutralBundle dataclasses, the shape-key grammar, the input-class catalogue over type descriptors, the on-disk bundle's reader, writer, validator and JSON Schemas with hard limits | `NeutralBundle`, `parse`/`validate` (shape keys), `Catalogue`, `function_catalogue_from_types`, `descriptor`, `read_bundle`, `write_bundle`, `validate`, `SCHEMAS` | `packages/coverset-model/tests/`, `tests/model/`, `tests/plugin_conformance/` |
 | `src/coverset/lang/` | Language-neutral contracts, the Python adapter and the neutral adapter (any language whose bundle ships function regions) | `LanguageAdapter`, `PriorRun`, `PythonAdapter`, `NeutralAdapter`, `read_any_bundle`, `read_tool_config` | `tests/analysis/test_analysis_python_adapter.py`, `tests/facts/test_facts_neutral.py`, `tests/e2e/test_neutral_ingest.py` |
 | `src/coverset/analysis/` | Diff to changed functions, prior run, impact, scoring, wave 1, sharding, patch coverage, input classes, invariants | `run_git_diff`, `changed_functions`, `index_functions`, `select_prior_run`, `score_tests`, `change_covering_set`, `plan_shards`, `patch_report`, `Catalogue`, `load_invariants`, `evaluate` | `tests/analysis/` |
@@ -230,6 +234,7 @@ coverset runs code it does not trust and reads data that code wrote. The rule is
 | Webhook payloads | anyone, until the HMAC verifies | Nothing is parsed or stored before the signature check. After it, repositories are identified by `repository.id`, SHAs must be 40 hex characters, and `clone_url` is never read. |
 | `[tool.coverset]`, `invariants.yaml`, `.python-version`, `uv.lock` | the PR author | Parsed strictly: no symlinks, size caps, safe YAML, `check` expressions never evaluated (`lang/python.py`, `analysis/invariants.py`). |
 | AI review output | the model, which reads PR text | Schema-validated, redacted, advisory: it never changes pass or fail. |
+| Bucket credentials and the Postgres URL | the operator | Read from the environment on the control plane only; never enter a worker, a bundle or a page; keys are built from ids, never from paths a bundle supplies; the data directory (the local blob store: uploaded sources and upload archives) and the disposable cache directory (mirrors, fetched sources, the facts cache) are both mode 0700. |
 | `/v1` callers | CI jobs and strangers | Admin, a `cst_` token with read on the repository, a GitHub Actions OIDC token bound to the repository, or anonymous with a reduced, rate-limited view (`web/api.py`). |
 | A signed-in person | GitHub, through their own token | Sees only the `repo_access` rows recomputed from GitHub with their own token (read, write or admin), and a 404 for anything else; instance admins see everything. Sessions are server-side rows; the admin token's cookie is not. |
 | Uploaded bundles (`POST /v1/bundles`) | the repository's CI, which runs PR code | Authenticated as the repository (token, OIDC or admin), then read under the strict untrusted-bundle limits; results are self-reported; sources are stored only for paths the bundle lists, written once per commit; `pull_request_target` uploads are recorded untrusted. |
@@ -261,8 +266,9 @@ Each seam is a `typing.Protocol`. The how-to is [docs/extending.md](docs/extendi
 
 | Item | Where the seam is |
 |---|---|
-| Postgres for the control database | `COVERSET_DATABASE_URL` takes any SQLAlchemy async URL; only SQLite is exercised, and the migrations are written with `render_as_batch` for SQLite. |
-| DuckLake, content-addressed per-(test, blob) bitsets, Postgres with `pg_roaringbitmap` for facts | Everything reads facts through `FactsStore` and `facts/queries.py`; see [docs/data-model.md](docs/data-model.md#scale-out-path). |
+| DuckLake, content-addressed per-(test, blob) bitsets, Postgres with `pg_roaringbitmap` for facts | Everything reads facts through `FactsStore` and `facts/queries.py`; the compact bitset layout exists behind `COVERSET_FACTS_COMPACT=1`; see [docs/data-model.md](docs/data-model.md#scale-out-path). |
+| Native GCS and Azure clients | `BlobStore` in `storage/`; S3-compatible endpoints (GCS interoperability, R2, Tigris, MinIO) already work through `S3BlobStore`. |
+| LISTEN/NOTIFY wake-ups and a shared upload-processing lock across replicas | A run queued on a follower waits for the leader's 2 s poll (`orchestrator/queue.py`); the upload processing pass is serialised per process (`orchestrator/upload.py`). |
 | Modal Functions with memory snapshots as an executor | A second `Executor` implementation beside the Sandbox-based `ModalExecutor`. |
 | Daytona, E2B and Docker executors | `Executor` and `Worker` in `executors/base.py`, registered in `executors.get_executor`. |
 | GitLab and Bitbucket | `Forge` in `forge/base.py`, route names in `forge/registry.py`, and the `ForgeKind` literal in `db/models.py` (today `github`, `fake`, `local`). |

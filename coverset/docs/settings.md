@@ -98,7 +98,7 @@ Reads go through a per-process cache keyed by `(database engine, scope_kind, sco
 
 ## Deleting a repository or a user
 
-Repo and user scopes are keyed by `repos.id` and `users.id` without a foreign key, and SQLite gives a deleted row's id to the next insert. Whoever deletes a repository or a user calls `forget_scope(session, "repo" | "user", id)` in the same transaction (`coverset repo purge` does, in the transaction of its `Repo` delete). As a safety net, a repo-scope row last written before its repository's `created_at` counts as an orphan of a purged predecessor: reads ignore it (and log it), and setting the same value again at the new repository rewrites it. Without this, purging a fork and registering another repository could hand the newcomer the old one's `run_blocked_network` untrusted-PR policy or `public_report = true`.
+Repo and user scopes are keyed by `repos.id` and `users.id` without a foreign key, and an id can come back (a restored dump, a reset sequence). Whoever deletes a repository or a user calls `forget_scope(session, "repo" | "user", id)` in the same transaction (`coverset repo purge` does, in the transaction of its `Repo` delete). As a safety net, a repo-scope row last written before its repository's `created_at` counts as an orphan of a purged predecessor: reads ignore it (and log it), and setting the same value again at the new repository rewrites it. Without this, purging a fork and registering another repository could hand the newcomer the old one's `run_blocked_network` untrusted-PR policy or `public_report = true`.
 
 ## CLI
 

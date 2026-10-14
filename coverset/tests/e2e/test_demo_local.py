@@ -18,6 +18,7 @@ from sqlalchemy import select
 from coverset.config import Settings
 from coverset.db.models import ForgeCall, PullRequest, Run, RunEvent, TestCase, TestResult
 from coverset.db.session import init_db
+from coverset.db.testing import PostgresTestDatabases
 from coverset.demo.flow import format_table, run_demo
 from coverset.demo.seed import PR_OPENED_FIXTURE
 from coverset.forge.fake import FakeForge
@@ -39,7 +40,7 @@ REFUND = "tests/test_refund.py::test_refund_partial"
 
 
 @pytest.fixture(scope="module")
-def demo(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type-arg]
+def demo(tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases) -> dict:  # type: ignore[type-arg]
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("needs uv and git")
     import asyncio
@@ -47,7 +48,7 @@ def demo(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[type
     root = tmp_path_factory.mktemp("demo")
     settings = Settings.for_tests(
         data_dir=root / "data",
-        database_url=f"sqlite+aiosqlite:///{root / 'coverset.db'}",
+        database_url=postgres_databases.create(),
         github_webhook_secret=TEST_WEBHOOK_SECRET,
         local_allow_webhook_runs=True,
     )

@@ -61,7 +61,6 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
-from coverset.facts.dictionary import RepoDictionary
 from coverset.facts.schema import PROD_SCHEMAS, PROD_TABLES
 from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleError, CappedReader, open_regular
@@ -542,7 +541,7 @@ def _prod_lock(store: FactsStore, repo_id: int) -> Iterator[None]:
 
 def _batch_dirs(store: FactsStore, repo_id: int, service: str | None = None) -> list[Path]:
     root = prod_dir(store, repo_id)
-    store.pull_batches(root, marker="prod_windows.parquet")  # object store: whole batches, cached
+    store.pull_batches(root, marker="prod_windows.parquet")  # whole batches from the store, cached
     if not root.is_dir():
         return []
     found: list[Path] = []
@@ -633,7 +632,7 @@ def _write_batch(
     result: ImportResult,
 ) -> Path:
     keys = {row["s"] for p, _ in windows for row in p["rows"]}
-    ids = RepoDictionary.extend(store.repo_dir(repo_id), shapes=keys)
+    ids = store.extend_dictionary(repo_id, shapes=keys)
     tables: dict[str, list[dict[str, Any]]] = {name: [] for name in PROD_TABLES}
     for payload, sha in windows:
         window = {
@@ -741,7 +740,7 @@ def _write_batch(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    store.push_tree(final, last="prod_windows.parquet")  # object store: the marker table goes last
+    store.push_tree(final, last="prod_windows.parquet")  # to the store: the marker table goes last
     return final
 
 

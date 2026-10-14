@@ -91,13 +91,11 @@ def store() -> FactsStore:
 
 async def facts_for(run: Run) -> RunFacts:
     """The (cached) facts of ``run``: an :class:`IndexedRunFacts` (see the module docstring)."""
-    _restore_mirror_later(run.repo_id)  # object store: a replica without the mirror clones it
+    _restore_mirror_later(run.repo_id)  # a replica (or a cache) without the mirror clones it
     return await asyncio.to_thread(cached_run_facts, store(), run.repo_id, run.id)
 
 
 def _restore_mirror_later(repo_id: int) -> asyncio.Task[Path | None] | None:
-    if not app_settings().blob_url:  # the local default: a mirror is state, nothing to restore
-        return None
     from quart import current_app
 
     from coverset.forge.registry import forge_for_app
@@ -113,11 +111,11 @@ MIRROR_WAIT_S = 10.0
 async def diff_mirror(repo_id: int) -> Path:
     """The repository's mirror for a page's diff analysis (``pr_view.analyse_diff``).
 
-    With an object store a fresh replica (or one whose cache evicted the mirror) has none yet:
-    :func:`facts_for` has started the clone, and this waits for it up to :data:`MIRROR_WAIT_S`, so
-    the first PR page of a new replica shows its changed functions instead of an empty diff. A
-    clone that takes longer keeps running; the page renders without the diff (which is not cached)
-    and the next request has it. The local default returns the path at once.
+    A fresh replica (or one whose cache evicted the mirror) has none yet: :func:`facts_for` has
+    started the clone, and this waits for it up to :data:`MIRROR_WAIT_S`, so the first PR page of a
+    new replica shows its changed functions instead of an empty diff. A clone that takes longer
+    keeps running; the page renders without the diff (which is not cached) and the next request has
+    it. A mirror that is there is returned at once.
     """
     mirror = mirror_path(app_settings(), repo_id)
     if (mirror / "HEAD").is_file():
@@ -852,7 +850,7 @@ async def read_source(run: Run, path: str, facts: RunFacts) -> str | None:
         return None
     mirror = mirror_path(app_settings(), run.repo_id)
     text = None
-    if app_settings().blob_url and not (mirror / "HEAD").is_file():  # an evicted or never-cloned mirror
+    if not (mirror / "HEAD").is_file():  # an evicted or never-cloned mirror
         from quart import current_app
 
         from coverset.forge.registry import forge_for_app
@@ -868,7 +866,7 @@ async def read_source(run: Run, path: str, facts: RunFacts) -> str | None:
     if text is None:  # upload mode: sources sent with `coverset-ci upload --with-sources`
         from coverset.facts.sources import source_store
 
-        # Local files, or the object store through its cache (a miss fetches the one object).
+        # The blob store through its cache (a miss fetches the one object).
         blob = await asyncio.to_thread(source_store(app_settings()).read, run.repo_id, run.head_sha, path)
         text = blob.decode("utf-8", "replace") if blob is not None else None
     return text

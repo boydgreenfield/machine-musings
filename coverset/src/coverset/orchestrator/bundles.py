@@ -93,6 +93,10 @@ class IngestJob:
     """One shard bundle to convert and ingest (picklable: it crosses a process boundary)."""
 
     facts_dir: str
+    """The facts cache (``Settings.facts_dir``)."""
+    blob_url: str
+    """The blob store it caches (:func:`coverset.storage.blob_url_of`): the worker builds its
+    :class:`~coverset.facts.store.FactsStore` from the two."""
     ctx: RunContext
     shard_id: int
     tarball: str
@@ -194,13 +198,20 @@ class IngestOutcome:
     """Declared types the bundle shipped for the regions it owns (non-Python jobs only), by triple."""
 
 
+def _store(job: IngestJob) -> FactsStore:
+    """The job's facts store (one blob-store object per URL and process: :func:`store_from_url`)."""
+    from coverset.storage import store_from_url
+
+    return FactsStore(Path(job.facts_dir), store_from_url(job.blob_url))
+
+
 def ingest_one(job: IngestJob) -> IngestOutcome:
     """Extract, convert and ingest one shard bundle (runs in a pool worker)."""
     if job.cache_overrides:
         from coverset.facts.cache import configure
 
         configure(dict(job.cache_overrides))
-    store = FactsStore(Path(job.facts_dir))
+    store = _store(job)
     workdir = Path(tempfile.mkdtemp(prefix=f"coverset-ingest-{job.shard_id}-"))
     try:
         with _deadline(job.read_timeout_s):
@@ -340,7 +351,7 @@ def shared_ingest_pool(mode: PoolMode = "process") -> IngestPool:
 def _record_failure(job: IngestJob, reason: str) -> None:
     """Best-effort shard-failure record for a job whose worker never got to record one."""
     with contextlib.suppress(Exception):
-        record_shard_failure(FactsStore(Path(job.facts_dir)), job.ctx, job.shard_id, reason=reason)
+        record_shard_failure(_store(job), job.ctx, job.shard_id, reason=reason)
 
 
 def merge_sampling(rows: Sequence[FuncSampling]) -> dict[FuncTriple, FuncSampling]:

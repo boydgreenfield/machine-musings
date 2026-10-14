@@ -51,21 +51,21 @@ def cli() -> None:
 
 @cli.command("init-db")
 def init_db_command() -> None:
-    """Create the data directory and migrate the control-plane database to the latest revision."""
-    from coverset.config import secure_data_dirs
-    from coverset.db.session import check_database, init_db
+    """Create the data directory and the database (when missing), and migrate it to the latest revision.
+
+    Exits 2 with one line saying how to start Postgres when the server does not answer.
+    """
+    from coverset.commands.common import prepare_db
+    from coverset.db.session import check_database
 
     settings = load_settings()
-    secure_data_dirs(settings)
-    applied = asyncio.run(init_db(settings))
-    secure_data_dirs(settings)  # the database file init_db just created
+    applied = asyncio.run(prepare_db(settings))
     for revision in applied:
         click.echo(f"applied migration {revision}")
     url = make_url(settings.database_url).render_as_string(hide_password=True)
     state = f"{len(applied)} migration(s) applied" if applied else "already at the latest revision"
-    report = check_database(settings.database_url)  # the backend and its version, e.g. "Postgres 17.6"
-    backend = " ".join(part for part in (report.backend, report.server_version) if part)
-    click.echo(f"database ready ({state}): {url} ({backend})")
+    report = check_database(settings.database_url)  # the server version, e.g. "Postgres 17.6"
+    click.echo(f"database ready ({state}): {url} (Postgres {report.server_version or '?'})")
 
 
 @cli.command()
@@ -97,18 +97,16 @@ def migrate_before_serving(settings: Settings) -> Settings:
 
     Migrating here rather than only in the app's ``before_serving`` hook means a container start
     reports each applied migration (or the failure, with a non-zero exit) before the port opens,
-    so a platform's health check never sees a half-migrated app. ``COVERSET_SKIP_MIGRATIONS``
-    keeps its meaning: no migration anywhere.
+    so a platform's health check never sees a half-migrated app. The database is created first when
+    the server has none of its name; an unreachable server exits 2 with one line saying how to start
+    it. ``COVERSET_SKIP_MIGRATIONS`` keeps its meaning: no migration anywhere.
     """
     if settings.skip_migrations:
         return settings
     if settings.migrate_on_start:
-        from coverset.config import secure_data_dirs
-        from coverset.db.session import init_db
+        from coverset.commands.common import prepare_db
 
-        secure_data_dirs(settings)
-        applied = asyncio.run(init_db(settings))
-        secure_data_dirs(settings)  # the SQLite file init_db may just have created
+        applied = asyncio.run(prepare_db(settings))
         for revision in applied:
             click.echo(f"applied migration {revision}")
         url = make_url(settings.database_url).render_as_string(hide_password=True)

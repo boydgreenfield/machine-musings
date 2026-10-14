@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
-import sqlite3
 import statistics
 import time
 from collections.abc import Iterator
@@ -26,6 +25,7 @@ import pytest
 
 from coverset.app import create_app
 from coverset.config import Settings
+from coverset.db.testing import PostgresTestDatabases, run_sql
 
 pytestmark = pytest.mark.slow
 
@@ -44,7 +44,9 @@ class DemoData:
 
 
 @pytest.fixture(scope="module")
-def demo_data(tmp_path_factory: pytest.TempPathFactory) -> Iterator[DemoData]:
+def demo_data(
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases
+) -> Iterator[DemoData]:
     """The local demo, run once for this module (as ``tests/web/conftest.py`` does)."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
@@ -58,7 +60,7 @@ def demo_data(tmp_path_factory: pytest.TempPathFactory) -> Iterator[DemoData]:
 
     root = tmp_path_factory.mktemp("bench-demo")
     data_dir = root / "data"
-    db_url = f"sqlite+aiosqlite:///{root / 'coverset.db'}"
+    db_url = postgres_databases.create()
     settings = Settings.for_tests(
         data_dir=data_dir, database_url=db_url, github_webhook_secret=TEST_WEBHOOK_SECRET
     )
@@ -76,15 +78,12 @@ def demo_data(tmp_path_factory: pytest.TempPathFactory) -> Iterator[DemoData]:
 
     asyncio.run(scenario())
     clear_registered_secrets()
-    con = sqlite3.connect(root / "coverset.db")
-    try:
-        repo_id = con.execute("SELECT id FROM repos ORDER BY id LIMIT 1").fetchone()[0]
-        baseline = con.execute(
-            "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()[0]
-        pr_number = con.execute("SELECT number FROM pull_requests ORDER BY number LIMIT 1").fetchone()[0]
-    finally:
-        con.close()
+    repo_id = int(run_sql(db_url, "SELECT id FROM repos ORDER BY id LIMIT 1")[0][0])
+    baseline = run_sql(
+        db_url,
+        "SELECT id FROM runs WHERE pr_id IS NULL AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+    )[0][0]
+    pr_number = int(run_sql(db_url, "SELECT number FROM pull_requests ORDER BY number LIMIT 1")[0][0])
     yield DemoData(data_dir, db_url, repo_id, baseline, pr_number)
 
 

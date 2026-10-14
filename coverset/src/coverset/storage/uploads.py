@@ -1,14 +1,12 @@
-"""Upload archives in the object store: what lets any replica process an upload run.
+"""Upload archives in the blob store: what lets any replica (or a restarted one) process an upload run.
 
 ``POST /v1/bundles`` unpacks an upload into ``<runs_dir>/<run_id>/upload/shard-<id>/`` on the replica
-that received it. With the local default that directory is the archive's home until retention
-removes it. With an object store the runs directory is scratch (a restart or another replica does
-not have it), so the unpacked shard is also packed back into
-``uploads/<repo_id>/<sha>/<label>.tar.gz`` (:func:`archive_upload`), and a processing pass that finds
-a shard's directory missing restores it from there (:func:`restore_upload`), extracting under the
-same untrusted-bundle limits as the original request and checking the archive's recorded sha256
-against the one the shard row was registered with, so an older upload of the same label is never
-mistaken for the current one. Retention deletes a commit's archives with its uploaded sources
+that received it. The runs directory is scratch (a restart or another replica does not have it), so
+the unpacked shard is also packed back into ``uploads/<repo_id>/<sha>/<label>.tar.gz``
+(:func:`archive_upload`), and a processing pass that finds a shard's directory missing restores it
+from there (:func:`restore_upload`), extracting under the same untrusted-bundle limits as the
+original request and checking the archive's recorded sha256 against the one the shard row was
+registered with, so an older upload of the same label is never mistaken for the current one. Retention deletes a commit's archives with its uploaded sources
 (:func:`remove_uploads`), and ``coverset repo purge`` all of a repository's (:func:`purge_uploads`).
 
 Keys come from validated values only: the repository id (an integer), a 40-hex commit and a label

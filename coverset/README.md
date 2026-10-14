@@ -12,7 +12,7 @@ Medians of 5 runs on 2026-10-11 (the cold image build and the snapshot build are
 
 **Blue** lines ran, **vermilion** lines never ran (heavier edge), **dotted yellow** lines took one branch. In the shape grid a **filled square** is an input class some test exercised and a **hollow dashed square** is one no test ever passed in.
 
-What is here, in one list: a control plane that runs a PR's tests on Modal sandboxes before CI boots and posts one sticky comment and a check run; an **upload mode** that takes the same bundle from your existing CI job instead (`coverset-ci upload`); per-test line and branch coverage plus the **data-flow overlay** of argument shapes; a **test economy** that measures what each test buys (leverage, duplicates, a minimal covering set, the PR's test tax); **GitHub sign-in** with per-repository access and an audit log; settings at instance, organization, repository and user scope; an **MCP server** for AI agents; a static **report** for local use; the same model for TypeScript (Vitest) and Rust (nextest); and a production **probe** that reports which input classes production sees that no test does. [docs/getting-started.md](docs/getting-started.md) is the on-ramp; [docs/dev.md](docs/dev.md) the developer loop; [docs/deploy.md](docs/deploy.md) the hosting guide.
+What is here, in one list: a control plane that runs a PR's tests on Modal sandboxes before CI boots and posts one sticky comment and a check run; an **upload mode** that takes the same bundle from your existing CI job instead (`coverset-ci upload`); per-test line and branch coverage plus the **data-flow overlay** of argument shapes; a **test economy** that measures what each test buys (leverage, duplicates, a minimal covering set, the PR's test tax); **GitHub sign-in** with per-repository access and an audit log; settings at instance, organization, repository and user scope; an **MCP server** for AI agents; a static **report** for local use; the same model for TypeScript (Vitest) and Rust (nextest); a production **probe** that reports which input classes production sees that no test does; and state that lives in **Postgres and an S3-compatible bucket**, so the server is stateless and can run as replicas (local files stand in for the bucket on a laptop). [docs/getting-started.md](docs/getting-started.md) is the on-ramp; [docs/dev.md](docs/dev.md) the developer loop; [docs/deploy.md](docs/deploy.md) the hosting guide.
 
 ![The PR page for "Allow signups from company subdomains": PASS with gaps, the changed function's diff with coverage, its shape grid with two hollow email classes, and the flow ribbon from test files to parameters](docs/pr.jpg)
 
@@ -140,7 +140,7 @@ Everything downstream of a test run (the facts store, the input-class catalogue,
 
 ```sh
 uv sync
-uv run coverset demo                      # seed the demo repo, run its history and both PRs, serve on http://127.0.0.1:8000
+uv run coverset demo                      # seed the demo repo into the local Postgres, run its history and both PRs, serve on http://127.0.0.1:8000
 uv run coverset demo --executor modal     # the same on Modal Sandboxes (needs `modal setup`; spends a few cents)
 uv run coverset modal reap --all          # terminate the coverset sandboxes of this data directory
 uv run coverset modal reap --all --any-instance   # terminate coverset sandboxes from any data directory
@@ -160,26 +160,32 @@ On Modal the demo builds the environment image (cached after the first build), r
 
 ## Develop it
 
+Postgres is the one development requirement (`brew install postgresql@14 && brew services start postgresql@14`; 14 or newer). The default database URL is `postgresql+asyncpg://localhost/coverset`, created on first use; files stand in for the bucket until you point `COVERSET_BLOB_URL` at one.
+
 ```sh
-uv run coverset dev                       # seed the demo if the data dir is empty, serve with code and template reload, open the browser
-uv run coverset demo --fresh --no-serve   # wipe the data directory and rebuild the demo
+uv run coverset dev                       # create the database if needed, seed the demo if it is empty, serve with code and template reload, open the browser
+uv run coverset demo --fresh --no-serve   # drop and rebuild the demo
 make check                                # ruff, format check and the quick tests; `make test` is the whole suite, `make help` lists the rest
+make services && make dev-hosted          # Postgres 17 + MinIO in Docker (deploy/dev-compose.yml) and the app pointed at them: the hosted shape on a laptop
+make test-pg                              # the whole suite against the compose stack; the default runs it on the local server with one database per test
+uv run coverset dev --tunnel              # the ngrok recipe for a public demo from this machine (a public URL needs an admin token)
 ```
 
 With `COVERSET_DEV_LOGIN=true` in open mode (a loopback bind, no admin token, `COVERSET_ENV=dev`, the fake forge), the login page offers "Sign in as a local user" (a login, a role, and per-repository permissions) so the pages can be clicked through as a member without a GitHub App; such sessions and tokens are refused on any request where one of those conditions no longer holds. `coverset dev` prints whether the sign-in is on. [docs/dev.md](docs/dev.md) is the developer guide.
 
 ## Deploy it
 
-coverset runs on a public URL in three ways, all with the same image; [docs/deploy.md](docs/deploy.md) has the decision table, the measurements, secret rotation and troubleshooting.
+The hosted shape is a stateless app in front of **Postgres** (`COVERSET_DATABASE_URL`) and **an S3-compatible bucket** (`COVERSET_BLOB_URL`: S3, R2, Tigris, MinIO), with a disposable local cache (`COVERSET_CACHE_DIR`) for Parquet files and git mirrors. Several replicas may share one database: a leader lease on a Postgres advisory lock makes exactly one of them run the dispatcher, the retention pass, the reaper and the warm pool. [docs/deploy.md](docs/deploy.md) has the requirements table, the recipes, migrations on deploy, secrets, backups, scaling, cost and troubleshooting; [docs/postgres.md](docs/postgres.md) and [docs/object-store.md](docs/object-store.md) the two stores.
 
 ```sh
-uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py   # one always-on Modal container (about $0.76/day), data on a Volume
-fly launch --no-deploy && fly deploy        # Fly.io: deploy/fly/fly.toml, a volume at /data
-docker compose -f deploy/compose.yml up -d  # any VM: coverset + Caddy for HTTPS; deploy/aws/user-data.sh sets this up on Lightsail or EC2
-uv run coverset deploy check                # PASS / WARN / FAIL rows for the environment it runs in
+uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py   # Modal: one always-on container; the Secret holds the two URLs, the bucket credentials and the admin token
+fly launch --no-deploy && fly deploy        # Fly.io: deploy/fly/fly.toml with Neon or Fly Postgres and a Tigris bucket
+docker compose -f deploy/compose.yml up -d   # one VM: coverset, Postgres 17 and Caddy for HTTPS (--profile hosted adds MinIO for the blobs); deploy/aws/ has App Runner, ECS Fargate + RDS + S3 (IAM policy included) and Lightsail
+uv run python scripts/smoke_hosted.py       # against real URLs: migrate, seed, serve, fetch pages, upload a bundle, check the bucket and the rows; PASS/FAIL table
+uv run coverset deploy check                # PASS / WARN / FAIL rows: database, object store, cache, state, proxy, GitHub, ...
 ```
 
-The Modal path needs a Secret `coverset-web` with `COVERSET_ADMIN_TOKEN`, `COVERSET_SECRET_KEY` and `COVERSET_PUBLIC_URL`; the executor needs no Modal token there. The live SQLite database sits on the container's disk and is backed up to the Volume every 60 s when it changed and on shutdown (recovery point 60 s on a crash); facts and mirrors are written to the Volume directly. Behind Fly, Caddy or a load balancer set `COVERSET_TRUST_PROXY=true`, which trusts only the nearest hop. Streaming responses are not cut at Modal's 150 s request limit (measured: SSE streams of 210 s and 330 s completed), and a redeploy must use `--strategy recreate`, because a rolling deploy deadlocks with one container.
+Behind Fly, Caddy or a load balancer set `COVERSET_TRUST_PROXY=true`, which trusts only the nearest hop. On Modal, streaming responses are not cut at the 150 s request limit (measured: SSE streams of 210 s and 330 s completed), and a redeploy must use `--strategy recreate`. Conditional writes (`If-Match`) on the bucket are what keeps the per-repository id dictionary safe between replicas; S3, MinIO and R2 support them.
 
 ## Who sees what
 
@@ -256,8 +262,8 @@ Keys are ignored while typing in a form field and with Ctrl, Alt or Cmd held. Th
 
 ## How it is built
 
-- **Control plane**: Python 3.13, Quart 0.23.1 on Hypercorn 0.18.0, SQLAlchemy 2.1.4 with aiosqlite 0.22.1 and Alembic 1.20.0 (SQLite), click for the CLI, pydantic-settings for every `COVERSET_*` setting.
-- **Facts**: PyArrow 26.0.0 Parquet files per run and shard, queried by in-memory DuckDB 1.5.6, so readers never lock writers.
+- **Control plane**: Python 3.13, Quart 0.23.1 on Hypercorn 0.18.0, SQLAlchemy 2.1.4 with asyncpg on Postgres 14 or newer and Alembic 1.20.0, click for the CLI, pydantic-settings for every `COVERSET_*` setting; a leader lease on an advisory lock for the background work when replicas share a database.
+- **Facts and files**: PyArrow 26.0.0 Parquet files per run and shard in an S3-compatible bucket through boto3 (or a local directory), a per-run manifest written last so a reader never sees a half-written run, compare-and-swap on the per-repository id dictionary, a disposable local cache that DuckDB 1.5.6 reads in memory, so readers never lock writers (`storage/`, `facts/`).
 - **Model** (`packages/coverset-model`, no dependencies, Python 3.12+): the neutral bundle (reader, writer, validator, JSON Schemas), the shape-key grammar and the input-class catalogue over language-neutral type descriptors; the control plane and the plugin's conformance tests build on it.
 - **Worker plugin** (`packages/pytest-coverset`, Python 3.12+): coverage.py 7.16.2 with the ctrace core and one dynamic context per test, a `sys.monitoring` shape tracer on its own tool id, framed stdout events, `--coverset-neutral` for the neutral bundle, and `coverset-ci`, which needs only the standard library.
 - **Executors**: Modal 1.6.1 Sandboxes (env images, trusted filesystem snapshots, a warm pool, a reaper, cost guards) and a local subprocess executor.
@@ -280,13 +286,14 @@ coverset/
     agent/          the MCP server and the agent tools
     orchestrator/   intake, queue, planner, runner, verdict, bundles, pool, reaper, budget
     analysis/       diff to functions, prior run, scoring, wave 1, sharding, input classes, invariants
-    facts/          untrusted-bundle reading, Parquet ingest, DuckDB queries, retention
+    facts/          untrusted-bundle reading, Parquet ingest, the manifest and the cache, DuckDB queries, retention
+    storage/        the BlobStore contract: local files and any S3-compatible bucket
     executors/      the executor contract, LocalExecutor, ModalExecutor
     lang/           the language-adapter contract, the Python adapter and its environment sources, the Rust driver, NeutralAdapter
     ai/             review bundles, fake and Anthropic clients
     web/            pages, SSE, the /v1 API, sign-in, settings, uploads, the economy pages, templates, static files, SVG renderers
     report/         the static report (coverset report)
-    db/             SQLAlchemy models and the Alembic migration
+    db/             SQLAlchemy models, the Postgres engine, the leader lease, the Alembic migrations
     demo/           the seeded demo repository and the demo flow
     commands/       the coverset CLI (run, demo, dev, serve, report, doctor, deploy check, users, settings, tests, mcp, rust, flows, ...)
     settings_scopes.py   scoped settings: the catalogue, resolution, the policy the orchestrator reads
@@ -294,7 +301,7 @@ coverset/
   packages/pytest-coverset/   the worker plugin and coverset-ci
   packages/coverset-vitest/   the Vitest reporter (TypeScript) that writes the neutral bundle
   packages/coverset-probe/    the production probe (the shape tracer for long-running processes)
-  deploy/                     Dockerfile targets: compose + Caddy, Fly, AWS, the Modal web deployment
+  deploy/                     the dev services (Postgres + MinIO), compose + Caddy, Fly, AWS, the Modal web deployment
   examples/demo-app/          the ledger package the demo runs
   examples/bench-suite/       the synthetic 1,200-test benchmark suite
   examples/ts-app/            a TypeScript library and its Vitest suite, measured by coverset-vitest
@@ -304,7 +311,7 @@ coverset/
   docs/                       the pages below, numbers.json and the screenshots
 ```
 
-[ARCHITECTURE.md](ARCHITECTURE.md) is the map: components, trust boundaries, extension seams, and what is designed but not built. Then [getting started](docs/getting-started.md), [the developer loop](docs/dev.md), [deploying](docs/deploy.md), [sign-in and access](docs/auth.md), [settings](docs/settings.md), [upload mode](docs/upload.md), [test economy](docs/economy.md), [AI agents and MCP](docs/mcp.md), [production flows](docs/production-flows.md), [Rust](docs/rust.md), [instrumentation](docs/instrumentation.md), [data model](docs/data-model.md), [input classes](docs/input-classes.md), [invariants](docs/invariants.md), [orchestrator](docs/orchestrator.md), [Modal](docs/modal.md), [GitHub](docs/github.md), [AI review](docs/ai-review.md), [web UI](docs/ui.md), [security](docs/security.md), [extending](docs/extending.md), [benchmarks](docs/benchmarks.md), [the neutral bundle](docs/neutral-bundle.md), [TypeScript](docs/typescript.md) and [the static report](docs/report.md).
+[ARCHITECTURE.md](ARCHITECTURE.md) is the map: components, trust boundaries, extension seams, and what is designed but not built. Then [getting started](docs/getting-started.md), [the developer loop](docs/dev.md), [deploying](docs/deploy.md), [Postgres](docs/postgres.md), [the object store](docs/object-store.md), [sign-in and access](docs/auth.md), [settings](docs/settings.md), [upload mode](docs/upload.md), [test economy](docs/economy.md), [AI agents and MCP](docs/mcp.md), [production flows](docs/production-flows.md), [Rust](docs/rust.md), [instrumentation](docs/instrumentation.md), [data model](docs/data-model.md), [input classes](docs/input-classes.md), [invariants](docs/invariants.md), [orchestrator](docs/orchestrator.md), [Modal](docs/modal.md), [GitHub](docs/github.md), [AI review](docs/ai-review.md), [web UI](docs/ui.md), [security](docs/security.md), [extending](docs/extending.md), [benchmarks](docs/benchmarks.md), [the neutral bundle](docs/neutral-bundle.md), [TypeScript](docs/typescript.md) and [the static report](docs/report.md).
 
 ## Caveats
 
@@ -317,9 +324,10 @@ coverset/
 - Upload-mode results are self-reported by the repository's CI job, which runs the PR's code; coverset authenticates the repository, reads the bundle under the untrusted-bundle limits and stores sources only for the paths the bundle lists, but it cannot vouch for what the job measured.
 - Test-economy figures are candidates, not verdicts: identical lines, arcs and shape observations do not mean identical assertions, and signatures compare within one run. Test weights are Python-only (a Vitest or Rust test has value and redundancy but no weight).
 - The Rust path records lines, outcomes, regions and declared types; no branches (stable rustc records none) and no argument shapes. The probe is not on PyPI and is installed from this repository.
-- coverset keeps the data directory at mode 0700 and the database at 0600; keep `.env` private too (`chmod 600 .env`).
+- coverset keeps the data directory (the local blob store: uploaded sources and upload archives; unpacked uploads under `runs/`) and the cache directory (git mirrors, fetched sources, the facts cache) at mode 0700; keep `.env` private too (`chmod 600 .env`).
 - An untrusted PR's verdict is self-reported by the PR's own code, which shares a process with the plugin. Approval, a blocked network and validation of every event limit what it can do, not what it can claim about its own tests.
-- Storage is SQLite plus Parquet. Postgres, DuckLake and roaring-bitmap facts are documented as the scale-out path, not built.
+- Facts are Parquet files in a bucket (or a directory) read through a local cache; DuckLake and roaring-bitmap facts stay documented as the scale-out path, not built. Losing the cache costs one download per run that is opened again and one clone per repository mirror.
+- Replicas: the leader lease covers the dispatcher and the upkeep, upload registration takes a per-commit lock, and the id dictionary uses conditional writes; the processing pass of an upload run is serialised per process only, and a run queued on a follower waits up to two seconds for the leader's poll.
 - The benchmark numbers come from one Modal account on <!-- n:bench_date -->2026-10-11<!-- /n -->, on the Starter plan, which caps 100 concurrent containers. The cold path is a measured stand-in for a cold CI job: a fresh sandbox that installs dependencies and runs plain pytest. It is not GitHub Actions.
 - The fail-fast benefit is shown on one measured PR, the refunds PR of the demo, whose tests take only seconds. The run's file-order estimate is estimated from the first test: the time until the first test result (environment, collection and planning, which happen in either order) plus the median durations of the tests before the failing one; it counts no retry.
 - The bench suite is synthetic. Its `busy()` bodies calibrate under the tracer, so each test spends its drawn time whether or not coverage is on, and the fan-out numbers measure parallelism, not instrumentation overhead.

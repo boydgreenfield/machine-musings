@@ -500,7 +500,7 @@ DEV_S3_CREDENTIALS = ("minioadmin", "minioadmin")
 DEV_PG_CREDENTIALS = ("coverset", "coverset")
 DEV_HOSTED_DATA_DIR = Path("data") / "hosted-dev"
 """The data directory ``--hosted`` uses unless ``COVERSET_DATA_DIR`` is in the environment: only a
-cache then (mirrors, downloads, the demo's git repository), kept apart from the SQLite demo in ``data/``."""
+cache then (mirrors, downloads, the demo's git repository), kept apart from the local demo in ``data/``."""
 SERVICES_UP_TIMEOUT_S = 300.0
 """``docker compose up --wait`` may pull both images the first time."""
 SERVICE_PROBE_TIMEOUT_S = 2.0
@@ -806,16 +806,25 @@ def tunnel_lines(
 # -- the command -----------------------------------------------------------------------------------
 
 
+def prepare_database(settings: Settings) -> None:
+    """Create the database when the server has none of its name, migrate it, and say where it is;
+    an unreachable server exits 2 with one line saying how to start it."""
+    from sqlalchemy.engine import make_url
+
+    from coverset.commands.common import prepare_db
+
+    applied = asyncio.run(prepare_db(settings))
+    url = make_url(settings.database_url).render_as_string(hide_password=True)
+    state = f"{len(applied)} migration(s) applied" if applied else "at the latest revision"
+    click.echo(f"coverset dev: database {url} ({state})")
+
+
 def data_dir_has_repository(settings: Settings) -> bool:
-    """True when the database exists and holds at least one repository (the demo is then not seeded)."""
+    """True when the database holds at least one repository (the demo is then not seeded)."""
     from sqlalchemy import select
 
     from coverset.db.models import Repo
-    from coverset.db.session import Database, sqlite_file_path
-
-    database_file = sqlite_file_path(settings.database_url)
-    if database_file is not None and not database_file.is_file():
-        return False
+    from coverset.db.session import Database
 
     async def probe() -> bool:
         database = Database.from_url(settings.database_url)
@@ -875,6 +884,7 @@ def dev_command(bind: str, no_seed: bool, open_browser: bool, hosted: bool, tunn
             return
     settings = load_settings(bind=bind)
     click.echo(f"coverset dev: data directory {settings.data_dir}")
+    prepare_database(settings)
     if hosted and not settings.hosted:
         click.echo("coverset dev: warning: the settings are not hosted (Postgres + bucket) after --hosted")
     if settings.dev_login:

@@ -13,7 +13,6 @@ import pytest
 
 from coverset import storage
 from coverset.config import Settings
-from coverset.facts import cache
 from coverset.storage import (
     MULTIPART_THRESHOLD,
     BlobNotFound,
@@ -25,7 +24,6 @@ from coverset.storage import (
     check_key,
     check_prefix,
     check_store,
-    facts_remote,
     parse_blob_url,
     store_from_url,
 )
@@ -232,6 +230,42 @@ def test_local_store_never_follows_a_symlink(tmp_path: Path) -> None:
     assert [i.key for i in store.list("")] == []
 
 
+def test_local_put_file_shares_the_bytes_and_get_file_copies(tmp_path: Path) -> None:
+    """On one filesystem a stored file is a hard link (the facts cache and the store hold one copy):
+    private like every object, with the etag of that inode. A download is always a copy, so its
+    reader may set its mtime without touching the object."""
+    store = LocalBlobStore(tmp_path / "root")
+    source = tmp_path / "cache" / "runs_dim.parquet"
+    source.parent.mkdir()
+    source.write_bytes(b"facts")
+    etag = store.put_file("facts/repo=1/run=r/runs_dim.v1.0a1b2c3d.parquet", source)
+    stored = store.local_path("facts/repo=1/run=r/runs_dim.v1.0a1b2c3d.parquet")
+    assert stored.stat().st_ino == source.stat().st_ino and source.stat().st_nlink == 2
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o600
+    assert store.head("facts/repo=1/run=r/runs_dim.v1.0a1b2c3d.parquet").etag == etag  # type: ignore[union-attr]
+    copy = tmp_path / "elsewhere" / "runs_dim.parquet"
+    assert store.get_file("facts/repo=1/run=r/runs_dim.v1.0a1b2c3d.parquet", copy) == etag
+    assert copy.read_bytes() == b"facts" and copy.stat().st_ino != stored.stat().st_ino
+    os.utime(copy, ns=(1, 1))
+    assert store.head("facts/repo=1/run=r/runs_dim.v1.0a1b2c3d.parquet").etag == etag  # type: ignore[union-attr]
+
+
+def test_local_put_file_copies_across_filesystems(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import errno
+
+    def cross_device(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "link", cross_device)
+    store = LocalBlobStore(tmp_path / "root")
+    source = tmp_path / "file"
+    source.write_bytes(b"bytes")
+    store.put_file("a/b", source, if_none_match=True)
+    stored = store.local_path("a/b")
+    assert stored.read_bytes() == b"bytes" and stored.stat().st_ino != source.stat().st_ino
+    assert source.stat().st_nlink == 1 and stat.S_IMODE(stored.stat().st_mode) == 0o600
+
+
 def test_local_delete_prunes_empty_directories(tmp_path: Path) -> None:
     store = LocalBlobStore(tmp_path / "root")
     store.put_bytes("a/b/c/d", b"1")
@@ -292,24 +326,26 @@ def test_one_store_object_per_url_and_it_pickles() -> None:
 
 def test_settings_pick_the_backend(tmp_path: Path) -> None:
     local = Settings.for_tests(data_dir=tmp_path / "data")
-    assert isinstance(storage.from_settings(local), LocalBlobStore) and storage.remote_store(local) is None
+    found = storage.from_settings(local)
+    assert isinstance(found, LocalBlobStore) and found.root == local.data_dir
+    assert storage.blob_url_of(local) == local.data_dir.as_uri()
+    assert storage.from_settings(local) is found, "one store object per URL"
     url = fresh_blob_url()
     hosted = Settings.for_tests(data_dir=tmp_path / "data", blob_url=url)
     assert storage.from_settings(hosted) is storage.store_from_url(url)
 
 
-def test_facts_remote_follows_the_configured_cache_dir(tmp_path: Path) -> None:
-    url = fresh_blob_url()
-    settings = Settings.for_tests(data_dir=tmp_path / "data", blob_url=url)
-    assert facts_remote(settings.facts_dir) is None, "not configured yet: a plain local store"
-    cache.configure(settings.cache_overrides())
-    assert facts_remote(settings.facts_dir) is store_from_url(url)
-    assert facts_remote(tmp_path / "elsewhere" / "facts") is None, "another directory stays local"
+def test_a_data_dir_with_spaces_round_trips_through_its_url(tmp_path: Path) -> None:
+    settings = Settings.for_tests(data_dir=tmp_path / "my data ü")
+    store = storage.from_settings(settings)
+    assert isinstance(store, LocalBlobStore) and store.root == settings.data_dir
 
 
 def test_check_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     local = Settings.for_tests(data_dir=tmp_path / "data")
-    assert check_store(local)[0] == "pass"
+    status, detail = check_store(local)
+    assert status == "pass" and "conditional writes ok" in detail, "the same probe as a bucket's"
+    assert not list(LocalBlobStore(local.data_dir).list("_coverset/")), "the probe cleans up"
     url = fresh_blob_url("probe")
     status, detail = check_store(Settings.for_tests(data_dir=tmp_path / "data", blob_url=url))
     assert status == "pass", detail

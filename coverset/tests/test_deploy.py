@@ -1,18 +1,13 @@
-"""Deployment: proxy headers, the secret-key override, HSTS, ``coverset deploy check``, the Modal web
-module's SQLite volume backups, and (opt-in) the Docker image."""
+"""Deployment: proxy headers, the secret-key override, HSTS, ``coverset deploy check`` and (opt-in)
+the Docker image."""
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import os
 import shutil
-import sqlite3
 import subprocess
-import sys
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 import pytest
@@ -25,6 +20,7 @@ from coverset.commands import deploy_cmd
 from coverset.commands.deploy_cmd import Check, deployment_checks
 from coverset.config import Settings, get_settings
 from coverset.db.session import init_db
+from coverset.db.testing import PostgresTestDatabases
 from coverset.web.proxy import ProxyHeadersMiddleware, last_forwarded_value
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -193,11 +189,12 @@ def test_empty_secret_key_falls_back_to_the_key_file(settings: Settings) -> None
 
 
 @pytest.mark.security
-async def test_hsts_only_on_https_public_urls(tmp_path: Path, admin_token: str) -> None:
+async def test_hsts_only_on_https_public_urls(tmp_path: Path, admin_token: str, settings: Settings) -> None:
+    db = settings.database_url  # the test's own database, for both apps in turn
     https = Settings.for_tests(
-        data_dir=tmp_path / "a", public_url=PUBLIC_URL, admin_token=SecretStr(admin_token)
+        data_dir=tmp_path / "a", public_url=PUBLIC_URL, admin_token=SecretStr(admin_token), database_url=db
     )
-    plain = Settings.for_tests(data_dir=tmp_path / "b")
+    plain = Settings.for_tests(data_dir=tmp_path / "b", database_url=db)
     for settings, expected in ((https, HSTS_HEADER), (plain, None)):
         app = create_app(settings)
         async with app.test_app() as test_app:
@@ -328,14 +325,21 @@ def test_modal_container_detected_from_the_environment(tmp_path: Path, admin_tok
     assert "container runtime" in rows["executor"].detail
 
 
-def test_deploy_check_database_rows(tmp_path: Path) -> None:
-    """Sync on purpose: the check runs its own event loop, as the CLI does."""
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
-    missing = _rows(deployment_checks(settings, environ={}, prober=None, in_modal=False))["database"]
-    assert missing.status == "warn" and "does not exist yet" in missing.detail
-    asyncio.run(init_db(settings))
-    migrated = _rows(deployment_checks(settings, environ={}, prober=None, in_modal=False))["database"]
-    assert migrated.status == "pass", migrated.detail
+def test_deploy_check_database_rows(tmp_path: Path, postgres_databases: PostgresTestDatabases) -> None:
+    """Sync on purpose: the check runs its own event loop, as the CLI does. A database the server
+    does not have yet fails (the check never creates one) and names the command that does."""
+    url = postgres_databases.url_for(f"{postgres_databases.prefix}_deploy_check")
+    settings = Settings.for_tests(data_dir=tmp_path / "data", database_url=url)
+    try:
+        missing = _rows(deployment_checks(settings, environ={}, prober=None, in_modal=False))["database"]
+        assert missing.status == "fail" and "does not exist" in missing.detail
+        assert "coverset init-db" in missing.detail
+        asyncio.run(init_db(settings))
+        migrated = _rows(deployment_checks(settings, environ={}, prober=None, in_modal=False))["database"]
+        assert migrated.status == "pass", migrated.detail
+        assert "lease coverset:background: free" in migrated.detail, "the lease holder, as db status had it"
+    finally:
+        postgres_databases.drop(url)
 
 
 def test_deploy_check_reports_an_unwritable_data_dir(tmp_path: Path) -> None:
@@ -347,7 +351,7 @@ def test_deploy_check_reports_an_unwritable_data_dir(tmp_path: Path) -> None:
 
 
 def test_deploy_check_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_modal_profile: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_modal_profile: None, settings: Settings
 ) -> None:
     from coverset.cli import cli
 
@@ -355,6 +359,7 @@ def test_deploy_check_command(
     for key in [key for key in os.environ if key.startswith("COVERSET_")]:
         monkeypatch.delenv(key)
     monkeypatch.setenv("COVERSET_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("COVERSET_DATABASE_URL", settings.database_url)
     get_settings.cache_clear()
     try:
         result = CliRunner().invoke(cli, ["deploy", "check", "--offline"])
@@ -399,139 +404,6 @@ def test_probe_healthz_accepts_only_coverset(monkeypatch: pytest.MonkeyPatch) ->
     assert deploy_cmd.probe_healthz("https://x.example/healthz") == (True, "HTTP 200, coverset 9")
     monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Reply(b"<html>parked</html>"))
     assert deploy_cmd.probe_healthz("https://x.example/healthz")[0] is False
-
-
-# -- the Modal web module's SQLite backups ---------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def modal_web() -> ModuleType:
-    """``deploy/modal/coverset_web.py`` loaded by path (it defines the Modal App lazily, offline)."""
-    path = PROJECT_ROOT / "deploy" / "modal" / "coverset_web.py"
-    spec = importlib.util.spec_from_file_location("coverset_web_under_test", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _write(db: Path, value: str) -> None:
-    connection = sqlite3.connect(db)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
-    connection.execute("INSERT INTO t VALUES (?)", (value,))
-    connection.commit()
-    connection.close()
-
-
-def _values(db: Path) -> list[str]:
-    connection = sqlite3.connect(db)
-    try:
-        return [row[0] for row in connection.execute("SELECT v FROM t ORDER BY rowid")]
-    finally:
-        connection.close()
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 10, 13, 12, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-def test_backup_round_trip_and_dirty_tracking(modal_web: ModuleType, tmp_path: Path) -> None:
-    live, volume = tmp_path / "local" / "coverset.db", tmp_path / "volume" / "backup"
-    commits: list[int] = []
-    backup = modal_web.SQLiteVolumeBackup(live, volume, commit=lambda: commits.append(1), clock=Clock())
-    assert "empty database" in backup.restore()
-    _write(live, "a")
-    assert backup.backup_if_dirty() is True
-    assert backup.backup_if_dirty() is False, "unchanged since the last backup"
-    _write(live, "b")
-    assert backup.backup_if_dirty() is True
-    assert commits == [1, 1]
-    assert _values(backup.current) == ["a", "b"] and _values(backup.previous) == ["a"]
-    assert not Path(str(backup.current) + "-wal").exists(), "a self-contained file"
-    backup.close()
-
-    # A fresh container: the live file is gone, the volume is restored and not dirty.
-    shutil.rmtree(live.parent)
-    restored = modal_web.SQLiteVolumeBackup(live, volume, clock=Clock())
-    assert restored.restore().startswith("restored coverset.db")
-    assert _values(live) == ["a", "b"]
-    assert restored.backup_if_dirty() is False
-    restored.close()
-
-
-def test_backup_restore_skips_a_corrupt_generation(modal_web: ModuleType, tmp_path: Path) -> None:
-    live, volume = tmp_path / "local" / "coverset.db", tmp_path / "volume"
-    backup = modal_web.SQLiteVolumeBackup(live, volume, clock=Clock())
-    backup.restore()
-    _write(live, "good")
-    backup.backup_if_dirty()
-    _write(live, "newer")
-    backup.backup_if_dirty()
-    backup.close()
-    backup.current.write_bytes(b"this is not a database" * 100)
-    shutil.rmtree(live.parent)
-
-    again = modal_web.SQLiteVolumeBackup(live, volume, clock=Clock())
-    assert again.restore() == f"restored coverset.db.prev ({backup.previous.stat().st_size} bytes)"
-    assert _values(live) == ["good"]
-    assert list(volume.glob("coverset.db.corrupt-*")), "the bad file is kept aside, not rotated over"
-    again.close()
-
-
-def test_backup_keeps_dated_daily_copies(modal_web: ModuleType, tmp_path: Path) -> None:
-    clock = Clock()
-    live, volume = tmp_path / "local" / "coverset.db", tmp_path / "volume"
-    backup = modal_web.SQLiteVolumeBackup(live, volume, clock=clock)
-    backup.restore()
-    for day in range(modal_web.DAILY_KEEP + 3):
-        clock.now += timedelta(days=1)
-        _write(live, str(day))
-        backup.backup_if_dirty()
-    daily = sorted(path.name for path in (volume / "daily").glob("*.db"))
-    assert len(daily) == modal_web.DAILY_KEEP
-    assert daily[-1] == f"coverset-{clock.now:%Y%m%d}.db"
-    backup.close()
-
-
-async def test_backups_run_with_the_app_lifecycle(modal_web: ModuleType, settings: Settings) -> None:
-    """``before_serving`` starts the timer and ``after_serving`` takes a final backup."""
-    live = settings.data_dir.parent / "live" / "coverset.db"
-    settings = settings.model_copy(update={"database_url": f"sqlite+aiosqlite:///{live}"})
-    backup = modal_web.SQLiteVolumeBackup(live, settings.data_dir / "backup", clock=Clock())
-    backup.restore()
-    app = create_app(settings)
-    modal_web.install_backups(app, backup, interval_s=3600)
-    async with app.test_app():
-        pass  # migrations wrote the schema: the database is dirty
-    assert backup.backups == 1
-    assert backup.current.is_file()
-    connection = sqlite3.connect(backup.current)
-    try:
-        assert connection.execute("SELECT count(*) FROM alembic_version").fetchone()[0] == 1
-    finally:
-        connection.close()
-
-
-def test_ensure_instance_id_is_stable(modal_web: ModuleType, tmp_path: Path) -> None:
-    first = modal_web.ensure_instance_id(tmp_path)
-    assert modal_web.ensure_instance_id(tmp_path) == first
-    from coverset.executors.modal_ import instance_id
-
-    assert instance_id(tmp_path) == first, "the executor reads the same id"
-
-
-def test_container_environment_keeps_the_database_local(modal_web: ModuleType) -> None:
-    env = modal_web.container_environment()
-    assert env["COVERSET_DATABASE_URL"].endswith("/root/coverset-data/coverset.db")
-    assert env["COVERSET_DATA_DIR"] == "/data"
-    assert env["COVERSET_EXECUTOR"] == "modal"
-    assert env["COVERSET_TRUST_PROXY"] == "false", "Modal sets the client address itself"
 
 
 # -- the Docker image (opt-in) -------------------------------------------------------------------

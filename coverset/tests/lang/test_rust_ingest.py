@@ -16,10 +16,10 @@ import pytest
 
 from coverset.facts import queries
 from coverset.facts.ingest import RunContext, finalize_run
-from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang import adapter_for_language, read_any_bundle
 from coverset.orchestrator.bundles import IngestJob, adapter_for, ingest_one
+from coverset.storage.testing import local_blob_url, local_facts_store
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "bundles" / "neutral-rust"
 MONEY, DURATIONS = "src/money.rs", "src/durations.rs"
@@ -46,6 +46,7 @@ def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[
     )
     job = IngestJob(
         facts_dir=str(facts),
+        blob_url=local_blob_url(facts),
         ctx=ctx,
         shard_id=0,
         tarball=str(FIXTURE / "bundle.tar.gz"),
@@ -59,7 +60,7 @@ def ingested(tmp_path_factory: pytest.TempPathFactory) -> dict:  # type: ignore[
     outcome = ingest_one(job)
     assert outcome.ok, outcome.error
     bundle = read_any_bundle(FIXTURE / "bundle.tar.gz", head_paths=HEAD)
-    store = FactsStore(facts)
+    store = local_facts_store(facts)
     adapter = adapter_for_language("rust")
     finalized = finalize_run(store, ctx, expected_shards=1, catalogue=adapter.shape_catalogue())
     return {"store": store, "bundle": bundle, "outcome": outcome, "finalized": finalized, "job": job}

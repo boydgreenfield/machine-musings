@@ -1,18 +1,15 @@
-"""``coverset cache status|clear|seed``: the local cache in front of the object store.
+"""``coverset cache status|clear``: the local cache in front of the blob store.
 
-With ``COVERSET_BLOB_URL`` set, facts runs, git mirrors and uploaded sources are cached under
-``COVERSET_CACHE_DIR`` and bounded by ``COVERSET_CACHE_MAX_GB`` (:mod:`coverset.storage.cachedir`;
-``coverset gc`` evicts beyond the bound). ``status`` shows what is there; ``clear`` removes every
-entry not in use, which is always safe (everything comes back from the bucket, or by one clone per
-repository for a mirror) and is the fix for a cache directory that a disk-full or a hand edit left in
-a doubtful state. With the local default nothing is a cache, and both commands say so. ``seed
---from DIR`` publishes a local data directory's blobs to the bucket (:mod:`coverset.storage.migrate`).
+Facts runs, git mirrors and uploaded sources are cached under ``COVERSET_CACHE_DIR`` and bounded by
+``COVERSET_CACHE_MAX_GB`` (:mod:`coverset.storage.cachedir`; ``coverset gc`` evicts beyond the
+bound). ``status`` shows what is there; ``clear`` removes every entry not in use, which is always
+safe (everything comes back from the blob store, or by one clone per repository for a mirror) and is
+the fix for a cache directory that a disk-full or a hand edit left in a doubtful state.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import click
 
@@ -23,14 +20,14 @@ __all__ = ["cache_group"]
 
 @click.group(name="cache")
 def cache_group() -> None:
-    """The local cache of the object store (COVERSET_CACHE_DIR): status, clear, seed."""
+    """The local cache of the blob store (COVERSET_CACHE_DIR): status, clear."""
 
 
 @cache_group.command("status")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def cache_status(as_json: bool) -> None:
     """Size of the cache by kind, its bound and the entries in use."""
-    from coverset.storage import cachedir
+    from coverset.storage import blob_url_of, cachedir
 
     settings = load()
     found = cachedir.status(settings)
@@ -39,8 +36,7 @@ def cache_status(as_json: bool) -> None:
             json.dumps(
                 {
                     "directory": str(found.directory),
-                    "remote": found.remote,
-                    "blob_url": settings.blob_url or None,
+                    "blob_url": blob_url_of(settings),
                     "max_bytes": found.max_bytes,
                     "total_bytes": found.total_bytes,
                     "by_kind": {k: {"entries": n, "bytes": b} for k, (n, b) in sorted(found.by_kind.items())},
@@ -50,13 +46,7 @@ def cache_status(as_json: bool) -> None:
             )
         )
         return
-    if not found.remote:
-        click.echo(
-            f"local backend: facts, uploads and sources live under {settings.data_dir}; "
-            f"nothing is cached (COVERSET_BLOB_URL is unset)"
-        )
-        return
-    click.echo(f"cache {found.directory} for {settings.blob_url}")
+    click.echo(f"cache {found.directory} for {blob_url_of(settings)}")
     click.echo(
         f"  {found.total_bytes / 1e9:.2f} GB of {found.max_bytes / 1e9:.2f} GB (COVERSET_CACHE_MAX_GB)"
     )
@@ -74,9 +64,6 @@ def cache_clear(dry_run: bool, yes: bool) -> None:
     from coverset.storage import cachedir
 
     settings = load()
-    if not settings.blob_url:
-        click.echo("local backend: nothing to clear (the files under the data directory are the store)")
-        return
     if (
         not dry_run
         and not yes
@@ -89,29 +76,3 @@ def cache_clear(dry_run: bool, yes: bool) -> None:
         f"{prefix} {len(report.removed)} entries ({report.freed_bytes / 1e6:.1f} MB); "
         f"{report.skipped_busy} in use kept"
     )
-
-
-@cache_group.command("seed")
-@click.option(
-    "--from",
-    "source",
-    required=True,
-    type=click.Path(path_type=Path, file_okay=False, exists=True),
-    help="The local data directory (COVERSET_DATA_DIR of the laptop shape) to publish.",
-)
-def cache_seed(source: Path) -> None:
-    """Publish a local data directory's facts, sources and uploads to the object store.
-
-    The move from SQLite + files to Postgres + a bucket: `coverset db copy` moves the rows, this
-    moves the blobs (through this cache, with manifests readers accept; docs/object-store.md).
-    """
-    from coverset.storage.migrate import seed_from_local
-
-    settings = load()
-    try:
-        report = seed_from_local(source, settings)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from None
-    click.echo(report.line())
-    for problem in report.problems:
-        click.echo(f"  {problem}", err=True)

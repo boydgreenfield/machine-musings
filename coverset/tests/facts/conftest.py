@@ -1,9 +1,9 @@
 """Fixtures for the facts-store tests (helpers live in ``facts_helpers.py``).
 
-``store`` is parametrized: every test that takes it runs against the local default (``local``) and
-against an S3 object store with the directory as its cache (``s3``: moto in-process, or the store
-``COVERSET_TEST_BLOB_URL`` names, each test under its own key prefix; :mod:`coverset.storage.testing`).
-The two must answer every question the same way.
+``store`` is parametrized: every test that takes it runs with the directory as the cache of the
+local blob store (``local``: files in a sibling directory) and of an S3 object store (``s3``: moto
+in-process, or the store ``COVERSET_TEST_BLOB_URL`` names, each test under its own key prefix;
+:mod:`coverset.storage.testing`). The two must answer every question the same way.
 """
 
 from __future__ import annotations
@@ -33,15 +33,17 @@ def bundle_copy(minimal_bundle: Path, tmp_path: Path) -> Path:
 
 @pytest.fixture(params=["local", "s3"])
 def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[FactsStore]:
-    """An empty facts store: local files, or the cache of an S3 store (see the module docstring)."""
+    """An empty facts store over local files or an S3 store (see the module docstring)."""
+    from coverset.storage.testing import local_facts_store
+
     if request.param == "local":
-        yield FactsStore(tmp_path / "facts")
+        yield local_facts_store(tmp_path / "facts")
         return
     from coverset.storage import S3BlobStore
     from coverset.storage.testing import fresh_blob_url
 
     blobs = S3BlobStore.from_url(fresh_blob_url("facts"))
-    yield FactsStore(tmp_path / "facts", blobs=blobs)
+    yield FactsStore(tmp_path / "facts", blobs)
     blobs.delete([info.key for info in blobs.list()])  # this test's prefix only
 
 

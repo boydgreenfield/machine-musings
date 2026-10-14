@@ -63,7 +63,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import func, insert, select
-from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coverset.analysis.cover import CoverSet, change_covering_set
@@ -150,11 +150,9 @@ remedy. (A statement timeout, 57014, is not retried: repeating it would just tim
 
 
 def is_retryable(exc: BaseException) -> bool:
-    """Whether ``exc`` is a transient database failure worth one more attempt: SQLite's busy or
-    locked error (``OperationalError``), or a Postgres deadlock or serialization failure, which
-    SQLAlchemy's asyncpg dialect raises as a plain ``DBAPIError`` carrying the SQLSTATE."""
-    if isinstance(exc, OperationalError):
-        return True
+    """Whether ``exc`` is a transient database failure worth one more attempt: a deadlock or a
+    serialization failure, which SQLAlchemy's asyncpg dialect raises as a plain ``DBAPIError``
+    carrying the SQLSTATE."""
     return isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) in RETRYABLE_SQLSTATES
 
 
@@ -172,8 +170,8 @@ async def run_transaction[T](
     attempts: int = WRITE_ATTEMPTS,
     delay_s: float = WRITE_RETRY_DELAY_S,
 ) -> T:
-    """Run ``work(session)`` and commit, retrying with backoff while the database is busy (SQLite)
-    or the transaction lost a deadlock or a serialization conflict (Postgres; :func:`is_retryable`).
+    """Run ``work(session)`` and commit, retrying with backoff when the transaction lost a deadlock
+    or a serialization conflict (:func:`is_retryable`).
 
     ``work`` must be safe to repeat: a failed attempt is rolled back before the next one.
     """
@@ -186,7 +184,7 @@ async def run_transaction[T](
         except DBAPIError as exc:
             if attempt == attempts or not is_retryable(exc):
                 raise
-            log.warning("database busy (attempt %d of %d); retrying", attempt, attempts)
+            log.warning("transaction conflict (attempt %d of %d); retrying", attempt, attempts)
             await asyncio.sleep(delay_s * 2 ** (attempt - 1))
     raise AssertionError("unreachable")
 

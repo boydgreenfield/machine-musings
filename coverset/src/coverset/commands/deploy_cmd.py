@@ -3,16 +3,15 @@
 Run it where ``coverset serve`` will run (a container, a VM, ``modal container exec`` into the web
 container) with the same environment. Every row is ``PASS``, ``WARN`` or ``FAIL`` with the reason
 and, for anything not passing, what to change; the exit status is 1 when any row fails. The checks
-read configuration and local state, connect to the database (``check_database``: backend, version,
-migrated revision) and the object store (``check_store``: a write-read-list-delete of one small
+read configuration and local state, connect to the database (``check_database``: server version,
+migrated revision, the background-task lease holder) and the object store (``check_store``: a write-read-list-delete of one small
 probe object and a conditional write), plus one ``GET <public url>/healthz`` (skip it with
 ``--offline``), and never print a secret: tokens are reported by length and source, not value.
 
 Four rows describe where the state lives: ``database``, ``object store``, ``cache dir`` (the
-disposable local cache against its bound) and ``state``: *hosted* when the database is Postgres
-and a bucket is set (nothing under the data dir must survive a restart), a mixed shape that still
-needs a persistent disk for one half, or the laptop shape (SQLite + files), which warns behind a
-public URL.
+disposable local cache against its bound) and ``state``: *hosted* when a bucket is set (nothing
+under the data dir must survive a restart), or blobs as files under the data dir, which warns
+behind a public URL (that directory must then be a disk that survives restarts).
 
 The checks are a pure function of a :class:`~coverset.config.Settings`, an environment mapping and
 a URL prober (:func:`deployment_checks`), so tests drive them with hermetic settings.
@@ -124,9 +123,10 @@ def _resolve(result: Any) -> Any:
 
 
 def _database_check(settings: Settings, probe: DatabaseProbe | None = None) -> Check:
-    """Backend, server version, the migrated revision against the packaged head and the pool, from
-    :func:`coverset.db.session.check_database` (``probe`` replaces it in tests). It never creates a
-    SQLite file and reports an unreachable server as a failing row."""
+    """Server version, the migrated revision against the packaged head, the pool and the
+    background-task lease holder, from :func:`coverset.db.session.check_database` (``probe``
+    replaces it in tests). It never creates anything and reports an unreachable server or a
+    missing database as a failing row."""
     if probe is None:
         from coverset.db.session import check_database
 
@@ -140,9 +140,11 @@ def _database_check(settings: Settings, probe: DatabaseProbe | None = None) -> C
 
 
 def _store_check(settings: Settings, probe: StoreProbe | None = None) -> Check:
-    """The object store, from :func:`coverset.storage.check_store` (``probe`` replaces it in tests):
-    local files pass; a bucket is probed with a write-read-list-delete of one small object and a
+    """The blob store, from :func:`coverset.storage.check_store` (``probe`` replaces it in tests):
+    local files or a bucket, probed with a write-read-list-delete of one small object and a
     conditional write that must be refused (a store that ignores ``If-Match`` warns)."""
+    from coverset.storage import blob_url_of
+
     if probe is None:
         from coverset.storage import check_store
 
@@ -151,7 +153,7 @@ def _store_check(settings: Settings, probe: StoreProbe | None = None) -> Check:
         status, detail = _resolve(probe(settings))
     except Exception as exc:  # noqa: BLE001 - credentials, DNS, permissions: a row, not a crash
         return Check(
-            "object store", "fail", f"{settings.blob_url.split('?', 1)[0]}: {type(exc).__name__}: {exc}"
+            "object store", "fail", f"{blob_url_of(settings).split('?', 1)[0]}: {type(exc).__name__}: {exc}"
         )
     return Check("object store", status, detail)
 
@@ -187,7 +189,7 @@ def _cache_bound(settings: Settings) -> int | None:
 
 
 def _cache_check(settings: Settings) -> Check:
-    """The disposable local cache (object-store downloads, mirrors): writable, its size against its
+    """The disposable local cache (facts, fetched sources, mirrors): writable, its size against its
     bound (``COVERSET_CACHE_MAX_GB``, which gc and start-up evict to) and the free disk under it."""
     cache = settings.cache_dir or settings.data_dir / "cache"
     try:
@@ -205,7 +207,7 @@ def _cache_check(settings: Settings) -> Check:
     status: Status = "pass"
     if free < LOW_DISK_BYTES:
         status = "warn"
-    elif bound is not None and settings.blob_url and bound > size + free:
+    elif bound is not None and bound > size + free:
         status = "warn"
         detail += "; the bound is larger than the disk can hold (lower COVERSET_CACHE_MAX_GB)"
     return Check("cache dir", status, detail)
@@ -213,35 +215,20 @@ def _cache_check(settings: Settings) -> Check:
 
 def _state_check(settings: Settings) -> Check:
     """Where the state that must survive a restart lives, and whether that fits the public URL."""
-    postgres = settings.database_url.startswith("postgresql+")
-    public_host = urlsplit(settings.public_url).hostname
     if settings.hosted:
         return Check(
             "state",
             "pass",
             f"hosted: Postgres + object store; nothing under {settings.data_dir} must survive a restart",
         )
-    if postgres:
-        return Check(
-            "state",
-            "warn",
-            f"Postgres, but facts and uploads are files under {settings.data_dir}: keep it on a persistent "
-            "volume, or set COVERSET_BLOB_URL for a stateless app",
-        )
-    if settings.blob_url:
-        return Check(
-            "state",
-            "warn",
-            "object store, but the database is SQLite: keep its file on a persistent volume, or set "
-            "COVERSET_DATABASE_URL to Postgres for a stateless app",
-        )
-    if is_private_host(public_host):
-        return Check("state", "pass", f"laptop: SQLite + files under {settings.data_dir}")
+    if is_private_host(urlsplit(settings.public_url).hostname):
+        return Check("state", "pass", f"local: Postgres + blobs as files under {settings.data_dir}")
     return Check(
         "state",
         "warn",
-        f"SQLite + files under {settings.data_dir} behind the public {settings.public_url}: one process, "
-        "and that directory must be a disk that survives restarts; hosted = Postgres + S3 (docs/deploy.md)",
+        f"blobs are files under {settings.data_dir} behind the public {settings.public_url}: that "
+        "directory must be a disk that survives restarts; set COVERSET_BLOB_URL for a stateless app "
+        "(docs/deploy.md)",
     )
 
 

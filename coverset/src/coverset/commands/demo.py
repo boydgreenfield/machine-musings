@@ -1,8 +1,9 @@
 """``coverset seed-demo`` and ``coverset demo``: the end-to-end demo on the seeded ledger repository.
 
 ``coverset demo`` is idempotent: run twice, it adds runs to the same database. ``--fresh`` first
-empties the data directory (:func:`wipe_data_dir`, which refuses anything that does not look like
-a coverset data directory). ``coverset dev`` seeds through :func:`demo_settings` and
+starts the state over (:func:`start_fresh`): it drops and recreates the database (only on a local
+server), empties the object-store prefix when there is one, and empties the cache and the data
+directory (refusing a directory that does not look like a coverset data directory). ``coverset dev`` seeds through :func:`demo_settings` and
 :func:`seed_demo_data` when its data directory holds no repository.
 """
 
@@ -28,14 +29,16 @@ __all__ = [
     "demo_settings",
     "seed_demo_command",
     "seed_demo_data",
+    "start_fresh",
     "wipe_data_dir",
 ]
 
 log = logging.getLogger(__name__)
 
 STARTUP_WAIT_S = 30.0
-DATA_DIR_MARKER = "coverset.db"
-"""A directory holding this file (or nothing at all) is one ``--fresh`` may empty."""
+DATA_DIR_MARKER = "runs"
+"""A directory holding this directory (every coverset command creates it: ``Settings.runs_dir``), or
+nothing at all, is one ``--fresh`` may empty."""
 
 
 @click.command("seed-demo")
@@ -65,7 +68,10 @@ def seed_demo_command(out: Path | None) -> None:
 @click.option(
     "--fresh",
     is_flag=True,
-    help="Empty the data directory first (only one holding coverset.db, or nothing), then rebuild.",
+    help=(
+        "Start over first: drop and recreate the database (a local server only), empty the object-store "
+        "prefix, the cache and the data directory (only one holding runs/, or nothing), then rebuild."
+    ),
 )
 def demo_command(
     executor: str, port: int, no_serve: bool, no_report: bool, verbose: bool, fresh: bool
@@ -78,8 +84,8 @@ def demo_command(
             raise click.ClickException(f"the Modal executor is not available in this build: {exc}") from None
     settings = demo_settings(executor, port=port)
     if fresh:
-        removed = wipe_data_dir(settings)
-        click.echo(f"emptied {settings.data_dir} ({removed} entries removed)")
+        for line in start_fresh(settings):
+            click.echo(line)
     printer = StreamPrinter(verbose=verbose, quiet=not verbose)
     run_async(lambda: _demo(settings, executor, serve=not no_serve, report=not no_report, printer=printer))
 
@@ -103,37 +109,101 @@ def seed_demo_data(settings: Settings, *, report: bool = True, verbose: bool = F
     run_async(lambda: _demo(settings, settings.executor, serve=False, report=report, printer=printer))
 
 
-def wipe_data_dir(settings: Settings) -> int:
-    """Remove everything inside ``settings.data_dir`` (the directory itself stays); returns how
-    many top-level entries went.
+def start_fresh(settings: Settings) -> list[str]:
+    """``coverset demo --fresh``: the state ``settings`` name, emptied; returns what was done, one
+    line each.
 
-    Refuses (:class:`click.ClickException`) a directory that is neither empty nor holds
-    :data:`DATA_DIR_MARKER`, a data directory that is a symlink, and a SQLite database configured
-    outside the data directory (``COVERSET_DATABASE_URL``), which emptying the directory would
-    leave behind with rows pointing at deleted mirrors and facts. Symlinks inside are unlinked,
-    never followed. A missing directory is fine (nothing to remove).
+    Checks everything before touching anything: the data directory must look like coverset's
+    (:func:`wipe_data_dir`) and the database must be on a local server (loopback or a Unix socket),
+    because dropping a database somewhere else is never a demo's business. Then it drops the
+    database (``DROP DATABASE ... WITH (FORCE)``, ending its connections; the demo's ``prepare_db``
+    creates it again), deletes every object under ``COVERSET_BLOB_URL``'s prefix when one is set,
+    and empties the cache directory and the data directory.
     """
-    from coverset.db.session import sqlite_file_path
+    import asyncio
 
+    from sqlalchemy.engine import make_url
+
+    from coverset.config import is_loopback_host
+    from coverset.db.session import (
+        MAINTENANCE_DATABASE,
+        admin_execute,
+        connection_errors,
+        quote_database,
+        shown_url,
+    )
+    from coverset.storage import from_settings
+
+    url = make_url(settings.database_url)
+    host = url.host or ""
+    if host and not host.startswith("/") and not is_loopback_host(host):
+        raise click.ClickException(
+            f"--fresh refuses to drop {shown_url(url)}: it is not on this machine; empty it yourself"
+        )
+    name = url.database or ""
+    if name == MAINTENANCE_DATABASE:
+        raise click.ClickException(f"--fresh refuses to drop the server's maintenance database {name}")
+    try:
+        quoted = quote_database(name)
+    except ValueError as exc:
+        raise click.ClickException(f"--fresh refuses to drop it: {exc}") from None
+    check_data_dir(settings)
+    try:
+        asyncio.run(
+            admin_execute(
+                url.set(database=MAINTENANCE_DATABASE), [f"DROP DATABASE IF EXISTS {quoted} WITH (FORCE)"]
+            )
+        )
+    except Exception as exc:
+        problem = connection_errors(url)(exc)
+        if problem is None:
+            raise
+        from coverset.commands.common import DatabaseError
+
+        raise DatabaseError(str(problem)) from None
+    lines = [f"dropped database {name} on {host or 'the local socket'} (recreated below)"]
+    if settings.blob_url:
+        blobs = from_settings(settings)
+        keys = [info.key for info in blobs.list()]
+        blobs.delete(keys)
+        lines.append(f"deleted {len(keys)} objects under {blobs.url}")
+    cache = settings.cache_dir
+    if cache is not None and not cache.resolve().is_relative_to(settings.data_dir.resolve()):
+        removed = _empty(cache) if cache.is_dir() and not cache.is_symlink() else 0
+        lines.append(f"emptied the cache {cache} ({removed} entries removed)")
+    lines.append(f"emptied {settings.data_dir} ({wipe_data_dir(settings)} entries removed)")
+    return lines
+
+
+def check_data_dir(settings: Settings) -> None:
+    """Refuse (:class:`click.ClickException`) a data directory ``--fresh`` must not empty: a symlink,
+    something that is not a directory, or a non-empty directory without :data:`DATA_DIR_MARKER`."""
     data_dir = settings.data_dir
     if data_dir.is_symlink():
         raise click.ClickException(f"--fresh refuses {data_dir}: it is a symlink")
     if not data_dir.exists():
-        return 0
+        return
     if not data_dir.is_dir():
         raise click.ClickException(f"--fresh refuses {data_dir}: not a directory")
-    entries = list(data_dir.iterdir())
-    if entries and not (data_dir / DATA_DIR_MARKER).is_file():
+    if any(data_dir.iterdir()) and not (data_dir / DATA_DIR_MARKER).is_dir():
         raise click.ClickException(
-            f"--fresh refuses {data_dir}: it is not empty and holds no {DATA_DIR_MARKER}, so it does "
+            f"--fresh refuses {data_dir}: it is not empty and holds no {DATA_DIR_MARKER}/, so it does "
             "not look like a coverset data directory (check COVERSET_DATA_DIR)"
         )
-    database = sqlite_file_path(settings.database_url)
-    if database is None or not database.resolve().is_relative_to(data_dir.resolve()):
-        raise click.ClickException(
-            f"--fresh refuses to run: the database ({settings.database_url.split('://')[0]}) is not a "
-            f"SQLite file inside {data_dir}; empty it yourself or unset COVERSET_DATABASE_URL"
-        )
+
+
+def wipe_data_dir(settings: Settings) -> int:
+    """Remove everything inside ``settings.data_dir`` (the directory itself stays) after
+    :func:`check_data_dir`; returns how many top-level entries went. Symlinks inside are unlinked,
+    never followed. A missing directory is fine (nothing to remove)."""
+    check_data_dir(settings)
+    if not settings.data_dir.exists():
+        return 0
+    return _empty(settings.data_dir)
+
+
+def _empty(directory: Path) -> int:
+    entries = list(directory.iterdir())
     for entry in entries:
         if entry.is_symlink() or not entry.is_dir():
             entry.unlink()

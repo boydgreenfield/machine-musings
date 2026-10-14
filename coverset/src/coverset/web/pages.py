@@ -80,7 +80,7 @@ def parse_int(value: str | None, *, default: int | None = None, minimum: int = 0
 
 
 MAX_DB_ID = 2**63 - 1
-"""The largest id SQLite can hold; anything above it is a 404, never a database error."""
+"""The largest ``BIGINT`` id; anything above it is a 404, never a database error."""
 
 
 async def get_repo(rid: int) -> Repo:

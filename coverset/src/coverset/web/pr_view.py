@@ -8,8 +8,8 @@ from ``git cat-file``, :func:`~coverset.analysis.diff.changed_functions`) and ru
 (:func:`coverset.facts.cache.run_stamp`) changes whenever the run's facts do, so a re-ingested run
 is analysed again, and the key never depends on the identity of the facts object (an evicted
 object's ``id`` can be reused by a new one). An analysis made without the mirror, or one git failed,
-is returned but not cached (:func:`_final`): with an object store a fresh replica clones its mirror
-in the background while the first pages render. Synchronous: call through ``asyncio.to_thread``.
+is returned but not cached (:func:`_final`): a fresh replica (or an evicted cache) clones its
+mirror in the background while the first pages render. Synchronous: call through ``asyncio.to_thread``.
 """
 
 from __future__ import annotations

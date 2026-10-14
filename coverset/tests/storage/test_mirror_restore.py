@@ -1,4 +1,4 @@
-"""Mirrors in the object-store cache come back on demand; local mirrors are never re-cloned."""
+"""Mirrors live in the disposable cache and come back on demand, whatever holds the blobs."""
 
 from __future__ import annotations
 
@@ -48,17 +48,12 @@ def _repo(source: Path) -> Repo:
     )
 
 
-async def test_a_cache_mirror_is_cloned_again(tmp_path: Path, source: Path) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data", blob_url="s3://bucket")
+@pytest.mark.parametrize("blob_url", ["", "s3://bucket"])
+async def test_a_cache_mirror_is_cloned_again(tmp_path: Path, source: Path, blob_url: str) -> None:
+    settings = Settings.for_tests(data_dir=tmp_path / "data", blob_url=blob_url)
     mirror = await repos.restore_mirror(settings, 7, db=FakeDb({7: _repo(source)}), forge=None)
     assert mirror == settings.mirrors_dir / "7.git" and (mirror / "HEAD").is_file()
     assert settings.mirrors_dir.parent == settings.cache_dir
-
-
-async def test_the_local_default_never_clones_behind_the_operators_back(tmp_path: Path, source: Path) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data")
-    assert await repos.restore_mirror(settings, 7, db=FakeDb({7: _repo(source)}), forge=None) is None
-    assert not (settings.mirrors_dir / "7.git").exists()
 
 
 async def test_a_failed_clone_is_not_retried_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

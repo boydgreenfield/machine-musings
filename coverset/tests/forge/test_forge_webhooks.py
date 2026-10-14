@@ -95,9 +95,12 @@ async def test_tampered_body_is_403(client: Client, db: Database, fake_forge: Fa
 
 @pytest.mark.security
 @pytest.mark.parametrize("overrides", [{"github_webhook_secret": None}, {"github_webhook_secret": ""}])
-async def test_empty_secret_fails_closed(tmp_path: Any, overrides: dict[str, Any]) -> None:
-    settings = Settings.for_tests(data_dir=tmp_path / "data", **overrides)
-    app = create_app(settings)
+async def test_empty_secret_fails_closed(
+    tmp_path: Any, overrides: dict[str, Any], settings: Settings
+) -> None:
+    app = create_app(
+        Settings.for_tests(data_dir=tmp_path / "data", database_url=settings.database_url, **overrides)
+    )
     async with app.test_app():
         response = await post_fixture(app.test_client(), "pr_opened")
     assert response.status_code == 503
@@ -105,11 +108,15 @@ async def test_empty_secret_fails_closed(tmp_path: Any, overrides: dict[str, Any
 
 
 @pytest.mark.security
-async def test_test_secret_rejected_outside_test_env(tmp_path: Any) -> None:
-    settings = Settings.for_tests(
-        env="dev", data_dir=tmp_path / "data", github_webhook_secret=TEST_WEBHOOK_SECRET
+async def test_test_secret_rejected_outside_test_env(tmp_path: Any, settings: Settings) -> None:
+    app = create_app(
+        Settings.for_tests(
+            env="dev",
+            data_dir=tmp_path / "data",
+            github_webhook_secret=TEST_WEBHOOK_SECRET,
+            database_url=settings.database_url,
+        )
     )
-    app = create_app(settings)
     async with app.test_app():
         response = await post_fixture(app.test_client(), "pr_opened")
     assert response.status_code == 503

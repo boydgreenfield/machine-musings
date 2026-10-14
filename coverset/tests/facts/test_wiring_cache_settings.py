@@ -16,6 +16,7 @@ from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang.base import FunctionRegion
 from coverset.orchestrator.bundles import IngestJob, ingest_one
+from coverset.storage.testing import local_blob_url, local_facts_store
 
 
 @pytest.fixture(autouse=True)
@@ -71,16 +72,18 @@ def test_the_configured_compact_flag_reaches_the_ingest(
 
 
 def test_an_ingest_job_applies_its_overrides_in_the_worker(
-    store: FactsStore, minimal_bundle: Path, functions: list[FunctionRegion], tmp_path: Path
+    minimal_bundle: Path, functions: list[FunctionRegion], tmp_path: Path
 ) -> None:
     """A process-pool worker shares the parent's environment, not its configured registry: the job
     carries ``Settings.cache_overrides()`` and :func:`ingest_one` applies them first."""
+    store = local_facts_store(tmp_path / "facts")
     tarball = tmp_path / "bundle.tar.gz"
     with tarfile.open(tarball, "w:gz") as tar:
         for member in sorted(minimal_bundle.iterdir()):
             tar.add(member, arcname=member.name)
     job = IngestJob(
         facts_dir=str(store.root),
+        blob_url=local_blob_url(store.root),
         ctx=make_ctx("run-2"),
         shard_id=0,
         tarball=str(tarball),

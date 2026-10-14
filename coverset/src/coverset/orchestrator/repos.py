@@ -1,6 +1,6 @@
 """Repositories and their bare mirrors: the only place the control plane runs git against a source.
 
-Every repo has a bare mirror at ``<data_dir>/mirrors/<repo_id>.git``. For a local source (a bare or
+Every repo has a bare mirror at ``<cache_dir>/mirrors/<repo_id>.git`` (``Settings.mirrors_dir``). For a local source (a bare or
 working repository on disk) the mirror is a ``git clone --mirror`` of it, refreshed with ``git fetch
 --prune``. For a forge repository the mirror is fetched over HTTPS from the forge's canonical URL
 (never a URL from a webhook payload) with a short-lived token passed only as
@@ -15,13 +15,11 @@ complete mirror is never deleted.
 Local repositories are registered with ``forge='local'`` and ``external_id`` = sha256 of the
 resolved source path, so registering the same path twice finds the same row.
 
-With an object store (``COVERSET_BLOB_URL``) the mirrors live in the disposable cache,
-``<cache_dir>/mirrors`` (``Settings.mirrors_dir``): eviction or a new replica loses them, and a run
-re-clones in :func:`ensure_mirror` as always. Pages that read a mirror (the source view, a PR's
-diff) restore it on demand with :func:`restore_mirror` / :func:`schedule_mirror_restore` (one clone
-per repository, coalesced, a failure retried after five minutes), so a replica that never ran the
-repository still shows its sources. With the local default a mirror is state, never re-cloned
-behind the operator's back.
+The mirrors live in the disposable cache: eviction or a new replica loses them, and a run re-clones
+in :func:`ensure_mirror` as always. Pages that read a mirror (the source view, a PR's diff) restore
+it on demand with :func:`restore_mirror` / :func:`schedule_mirror_restore` (one clone per
+repository, coalesced, a failure retried after five minutes), so a replica that never ran the
+repository still shows its sources.
 
 The git helpers here are synchronous (callers in async code wrap them in ``asyncio.to_thread``) and
 run git with a minimal environment (:func:`git_env`: ``PATH``, ``HOME``, locale, ``TZ``, ``TMPDIR``,
@@ -336,15 +334,13 @@ _restore_tasks: set[asyncio.Task[Path | None]] = set()
 
 
 async def restore_mirror(settings: Settings, repo_id: int, *, db: Any, forge: Forge | None) -> Path | None:
-    """The repository's mirror, cloned again if the object-store cache lost it (see the module
-    docstring); None when it is missing and cannot be cloned now (or with the local default)."""
+    """The repository's mirror, cloned again if the cache lost it (see the module docstring); None
+    when it is missing and cannot be cloned now."""
     import time
 
     mirror = mirror_path(settings, repo_id)
     if (mirror / "HEAD").is_file():
         return mirror
-    if not settings.blob_url:
-        return None
     key = (str(settings.mirrors_dir), repo_id)
     loop = asyncio.get_running_loop()
     entry = _restore_locks.get(key)
@@ -371,9 +367,9 @@ async def restore_mirror(settings: Settings, repo_id: int, *, db: Any, forge: Fo
 def schedule_mirror_restore(
     settings: Settings, repo_id: int, *, db: Any, forge: Forge | None
 ) -> asyncio.Task[Path | None] | None:
-    """:func:`restore_mirror` in the background when the mirror is missing (object store only);
-    returns the task (a caller may wait for it a while), or None when there is nothing to do."""
-    if not settings.blob_url or (mirror_path(settings, repo_id) / "HEAD").is_file():
+    """:func:`restore_mirror` in the background when the mirror is missing; returns the task (a
+    caller may wait for it a while), or None when there is nothing to do."""
+    if (mirror_path(settings, repo_id) / "HEAD").is_file():
         return None
     task = asyncio.get_running_loop().create_task(restore_mirror(settings, repo_id, db=db, forge=forge))
     _restore_tasks.add(task)

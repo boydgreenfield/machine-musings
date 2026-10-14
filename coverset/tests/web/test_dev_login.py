@@ -19,7 +19,6 @@ import re
 import secrets
 from collections.abc import AsyncIterator
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -348,9 +347,9 @@ async def test_a_dev_users_api_token_is_refused_in_admin_token_mode(app: Quart, 
     assert (await bearer.get("/audit", headers={"Authorization": f"Bearer {github_raw}"})).status_code == 200
 
 
-async def test_off_in_admin_token_mode(tmp_path: Path) -> None:
+async def test_off_in_admin_token_mode(settings: Settings) -> None:
     """With an admin token the form would make any local caller an instance admin without it."""
-    async with dev_app(tmp_path, admin_token=TOKEN) as application:
+    async with dev_app(settings, admin_token=TOKEN) as application:
         problems = dev_login_problems(application.extensions["settings"])
         assert len(problems) == 1 and "COVERSET_ADMIN_TOKEN" in problems[0], problems
         client = application.test_client()
@@ -365,10 +364,10 @@ async def test_off_in_admin_token_mode(tmp_path: Path) -> None:
 class dev_app:  # noqa: N801 - used as ``async with dev_app(...)``
     """An app with the development sign-in flag on and ``env`` (default dev) set after construction."""
 
-    def __init__(self, tmp_path: Path, *, env: str = "dev", **overrides: Any) -> None:
+    def __init__(self, settings: Settings, *, env: str = "dev", **overrides: Any) -> None:
         values: dict[str, Any] = {
-            "data_dir": tmp_path / "data",
-            "database_url": f"sqlite+aiosqlite:///{tmp_path / 'coverset.db'}",
+            "data_dir": settings.data_dir,
+            "database_url": settings.database_url,  # the test's own database
             "dev_login": True,
         }
         values.update(overrides)
@@ -406,28 +405,28 @@ async def assert_no_dev_login(application: Quart, *, headers: dict[str, str] | N
         assert await db.scalar(select(User).where(User.login == "intruder")) is None
 
 
-async def test_enabled_baseline(tmp_path: Path) -> None:
-    async with dev_app(tmp_path) as application:
+async def test_enabled_baseline(settings: Settings) -> None:
+    async with dev_app(settings) as application:
         assert dev_login_problems(application.extensions["settings"]) == []
         response = await dev_sign_in(application.test_client(), "baseline")
         assert response.status_code == 303
 
 
-async def test_off_without_the_flag(tmp_path: Path) -> None:
-    async with dev_app(tmp_path, dev_login=False) as application:
+async def test_off_without_the_flag(settings: Settings) -> None:
+    async with dev_app(settings, dev_login=False) as application:
         await assert_no_dev_login(application)
 
 
 @pytest.mark.parametrize("env", ["prod", "test"])
-async def test_off_outside_the_dev_env(tmp_path: Path, env: str) -> None:
-    async with dev_app(tmp_path, env=env) as application:
+async def test_off_outside_the_dev_env(settings: Settings, env: str) -> None:
+    async with dev_app(settings, env=env) as application:
         await assert_no_dev_login(application)
 
 
-async def test_off_on_a_non_loopback_bind(tmp_path: Path) -> None:
+async def test_off_on_a_non_loopback_bind(settings: Settings) -> None:
     """Configuration refuses a non-loopback bind without a token, so the bind is changed after
     construction: this condition alone turns the sign-in off."""
-    async with dev_app(tmp_path) as application:
+    async with dev_app(settings) as application:
         application.extensions["settings"].bind = "0.0.0.0:8000"
         assert dev_login_problems(application.extensions["settings"]) == [
             "COVERSET_BIND=0.0.0.0:8000 is not a loopback address"
@@ -435,8 +434,8 @@ async def test_off_on_a_non_loopback_bind(tmp_path: Path) -> None:
         await assert_no_dev_login(application)
 
 
-async def test_off_behind_a_public_url(tmp_path: Path) -> None:
-    async with dev_app(tmp_path) as application:
+async def test_off_behind_a_public_url(settings: Settings) -> None:
+    async with dev_app(settings) as application:
         application.extensions["settings"].public_url = "https://coverset.example.com"
         problems = dev_login_problems(application.extensions["settings"])
         assert len(problems) == 1 and "COVERSET_PUBLIC_URL" in problems[0], problems
@@ -453,15 +452,15 @@ async def test_off_behind_a_public_url(tmp_path: Path) -> None:
     ],
     ids=["token", "token-with-fake-forge", "oauth-client", "app-id"],
 )
-async def test_off_with_real_forge_credentials(tmp_path: Path, credentials: dict[str, Any]) -> None:
-    async with dev_app(tmp_path, **credentials) as application:
+async def test_off_with_real_forge_credentials(settings: Settings, credentials: dict[str, Any]) -> None:
+    async with dev_app(settings, **credentials) as application:
         await assert_no_dev_login(application)
 
 
-async def test_off_for_a_non_loopback_host_header(tmp_path: Path) -> None:
+async def test_off_for_a_non_loopback_host_header(settings: Settings) -> None:
     """Reached under another name (a tunnel or proxy): no form. Open mode answers only its own host
     names, so the request-level check is also asserted on its own."""
-    async with dev_app(tmp_path) as application:
+    async with dev_app(settings) as application:
         await assert_no_dev_login(application, headers={"Host": "coverset.example.com"})
         from coverset.web.account import dev_login_enabled
 

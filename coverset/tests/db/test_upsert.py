@@ -1,5 +1,5 @@
-"""``coverset.db.upsert.upsert`` on the suite's backend (SQLite by default, Postgres under
-``make test-pg``): insert, update chosen columns, ignore pure-key conflicts, and concurrent writers."""
+"""``coverset.db.upsert.upsert``: insert, update chosen columns, ignore pure-key conflicts, and
+concurrent writers."""
 
 from __future__ import annotations
 
@@ -87,14 +87,14 @@ async def test_only_keys_means_insert_or_ignore(db: Database) -> None:
 
 
 async def test_concurrent_writers_of_one_key_both_succeed(db: Database) -> None:
-    """Two transactions racing on one primary key: on Postgres the second waits for the first and
-    then updates its row (no unique violation); on SQLite the busy timeout serialises them."""
+    """Two transactions racing on one primary key: the second waits for the first and then updates
+    its row (no unique violation)."""
 
     async def write(image: str) -> None:
         async with db.session() as session:
             row = {"env_hash": "shared", "python": "3.13", "image_id": image, "created_at": NOW}
             await upsert(session, Env, [row], keys=["env_hash"], update_columns=["image_id"])
-            await asyncio.sleep(0.05)  # hold the row lock (Postgres) / the write lock (SQLite)
+            await asyncio.sleep(0.05)  # hold the row lock
             await session.commit()
 
     await asyncio.gather(*(write(f"im-{n}") for n in range(4)))

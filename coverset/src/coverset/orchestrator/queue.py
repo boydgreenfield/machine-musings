@@ -112,7 +112,7 @@ class RunDispatcher:
     def _executor_gone(self, run: Run, *, shared: bool = False) -> bool:
         """Whether a ``running`` run has nobody executing it any more (see the module docstring).
 
-        ``shared`` is the leader-lease path (several replicas on one Postgres): a ``serve`` on this
+        ``shared`` is the leader-lease path (several replicas on one database): a ``serve`` on this
         host whose pid is alive is then another replica, or the previous leader still executing its
         runs after a transient loss of the lease, not an earlier incarnation of this process, so its
         runs are kept; only a dead pid, no claimant or a stale heartbeat counts.
@@ -133,7 +133,7 @@ class RunDispatcher:
             return heartbeat is None and now - run.created_at > timedelta(seconds=STALE_HEARTBEAT_S)
         mine = self.ctx.claimant.split("@", 1)[0]
         if role == "serve" and mine == "serve" and not shared:
-            return True  # an earlier serve of this host: one dispatcher per SQLite database
+            return True  # no lease: an earlier serve of this host, which is not running any more
         return not pid_text.isdigit() or not _pid_alive(int(pid_text))
 
     async def on_boot(self, *, created_before: datetime | None = None) -> list[str]:
@@ -430,7 +430,7 @@ def install_run_queue(app: Any, *, ctx: OrchestratorContext | None = None) -> Ru
         from coverset.db.leader import LEADER_EXTENSION, run_while_leader
 
         lease = app.extensions.get(LEADER_EXTENSION)
-        if lease is None or not lease.exclusive:  # SQLite: one process per database, as always
+        if lease is None:  # no lease installed (tests): this process dispatches
             await dispatcher.start()
             await resume_upload_runs(app)
             return

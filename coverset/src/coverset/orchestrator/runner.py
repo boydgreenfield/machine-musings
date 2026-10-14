@@ -116,7 +116,7 @@ from coverset.executors.base import EnvRef, Executor, ExecutorError, Resources, 
 from coverset.facts.convert import C_TRACERS
 from coverset.facts.economy import EconomyInputs, policy_from_scopes
 from coverset.facts.ingest import RunContext, finalize_run, record_shard_failure
-from coverset.facts.store import FactsStore
+from coverset.facts.store import FactsStore, facts_store
 from coverset.lang.base import LanguageAdapter
 from coverset.lang.python import PythonAdapter
 from coverset.logging import redact
@@ -155,6 +155,7 @@ from coverset.orchestrator.verdict import (
     post_summary,
     t0_of,
 )
+from coverset.storage import blob_url_of
 
 __all__ = [
     "EXIT_CODES",
@@ -257,7 +258,7 @@ class OrchestratorContext:
         return cls(
             settings=settings,
             db=db or Database.from_url(settings.database_url),
-            store=FactsStore(settings.facts_dir),
+            store=facts_store(settings),
             owns_db=owns,
             **overrides,
         )
@@ -271,7 +272,7 @@ class OrchestratorContext:
             existing = cls(
                 settings=settings,
                 db=app.extensions["db"],
-                store=FactsStore(settings.facts_dir),
+                store=facts_store(settings),
                 claimant=process_claimant("serve"),
                 warm_caches=True,
             )
@@ -1795,6 +1796,7 @@ class _Execution:
         jobs = [
             IngestJob(
                 facts_dir=str(self.ctx.store.root),
+                blob_url=blob_url_of(self.settings),
                 ctx=rctx,
                 shard_id=shard_id,
                 tarball=str(path),

@@ -86,10 +86,10 @@ state").
 | `kill_timeout = 30` | `serve` drains requests for 10 s, then drains the Modal warm pool. |
 | health check on `/healthz`, grace 60 s | Unauthenticated, cheap, and only 200 once the app serves (after the migration). |
 
-## The laptop shape on Fly
+## Files instead of a bucket on Fly
 
-To run SQLite + files instead (one Machine, nothing else to pay for), add a volume back and leave
-the two URLs unset:
+To keep the blobs as files instead of in Tigris (one Machine, still with Postgres), add a volume
+back and leave `COVERSET_BLOB_URL` unset:
 
 ```toml
 [[mounts]]

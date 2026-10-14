@@ -595,8 +595,8 @@ def _prepare(
     """Assign ids and build every (conformed) table of the shard, plus the run's ``functions``."""
     results = {row.nodeid: row.file for row in bundle.tests}
     test_files = {n: _test_file(n, results) for n in {*results, *bundle.coverage}}
-    ids = RepoDictionary.extend(
-        store.repo_dir(ctx.repo_id),
+    ids = store.extend_dictionary(
+        ctx.repo_id,
         paths={
             *bundle.static,
             *bundle.run_arcs,

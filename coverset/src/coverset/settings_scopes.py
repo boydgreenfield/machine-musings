@@ -506,9 +506,10 @@ async def load_scopes(
 
     ``not_before`` drops a scope's rows last written before the given instant. :func:`load_layers`
     passes the repository's ``created_at`` for its repo scope: repo scope is keyed by ``repos.id``
-    with no foreign key, and SQLite reuses the highest rowid, so rows a purged repository left
-    behind (when nobody called :func:`forget_scope`) would otherwise be inherited by the next
-    repository registered, silently relaxing its untrusted-PR policy. The filter is applied after
+    with no foreign key, and an id may come back (a database restored from a dump, a sequence
+    reset), so rows a purged repository left behind (when nobody called :func:`forget_scope`)
+    would otherwise be inherited by the next repository registered with that id, silently relaxing
+    its untrusted-PR policy. The filter is applied after
     the cache, so a stale cache entry from before a purge in another process is filtered too.
     """
     engine = _engine(session)
@@ -902,8 +903,8 @@ async def forget_scope(
 
     For whoever deletes the thing a scope names: ``coverset repo purge`` (repo scope; the
     repository's API tokens already cascade) and deleting a user (user scope). Neither scope id has
-    a foreign key, and SQLite hands a deleted row's id to the next insert, so without this the next
-    repository or user would inherit the old one's settings. By default the delete joins the
+    a foreign key, so without this a later repository or user given the same id (a sequence reset,
+    a restored dump) would inherit the old one's settings. By default the delete joins the
     caller's transaction (commit it with the parent row's delete). The cache entry is dropped after
     the flush; a reader that re-caches the old rows before the commit lands is harmless, because
     their repository is gone and the next one's ``created_at`` filters them (:func:`load_scopes`).

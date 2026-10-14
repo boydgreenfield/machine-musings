@@ -1,13 +1,12 @@
-"""``INSERT ... ON CONFLICT`` for SQLite and Postgres through one call.
+"""``INSERT ... ON CONFLICT`` through one call.
 
-Both backends spell an upsert the same way (``INSERT ... ON CONFLICT (keys) DO UPDATE SET col =
-excluded.col``), but SQLAlchemy builds it from each dialect's own ``insert`` construct. Callers that
-used to pick one (``orchestrator/history.py`` for ``test_stats``, the Modal executor for ``envs``)
-call :func:`upsert` instead, so nothing above the database layer names a dialect.
+Callers that write rows which may already exist (``orchestrator/history.py`` for ``test_stats`` and
+``test_attempts``, the Modal executor for ``envs``) call :func:`upsert` instead of building the
+statement themselves.
 
-The statement is atomic on both: on Postgres a concurrent insert of the same key under READ
-COMMITTED waits for the other transaction and then updates its row instead of raising a unique
-violation, which is what makes it safe for two replicas (or two runs) recording the same row.
+The statement is atomic: a concurrent insert of the same key under READ COMMITTED waits for the
+other transaction and then updates its row instead of raising a unique violation, which is what
+makes it safe for two replicas (or two runs) recording the same row.
 """
 
 from __future__ import annotations
@@ -17,21 +16,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sqlalchemy import Table
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = ["upsert"]
-
-
-def _insert_for(dialect: str) -> Any:
-    if dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert
-
-        return insert
-    if dialect == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert
-
-        return insert
-    return None
 
 
 def _table_of(target: Any) -> Table:
@@ -54,21 +42,11 @@ async def upsert(
 
     Rows are grouped by their set of columns and each group is one multi-row statement, its rows
     sorted by ``keys``: two transactions upserting overlapping rows then lock them in the same
-    order, so on Postgres they wait for each other instead of deadlocking. On a
-    dialect other than SQLite and Postgres the rows are merged one by one through the ORM (only
-    for mapped classes), which is correct but neither atomic nor fast.
+    order, so they wait for each other instead of deadlocking.
     """
     if not rows:
         return
     table = _table_of(target)
-    insert = _insert_for(session.get_bind().dialect.name)
-    if insert is None:  # pragma: no cover - coverset runs on SQLite and Postgres only
-        if table is target:
-            raise NotImplementedError(f"upsert into a bare Table on {session.get_bind().dialect.name}")
-        for row in rows:
-            await session.merge(target(**row))
-        await session.flush()
-        return
     groups: dict[tuple[str, ...], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         groups[tuple(sorted(row))].append(row)

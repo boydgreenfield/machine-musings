@@ -21,19 +21,20 @@ connection with :meth:`FactsStore.lease` instead of building views per query: th
 or a gc is seen by the next lease. Every connection gets the bounded ``memory_limit`` and thread
 count of :func:`~coverset.facts.cache.memory_limit` and :func:`~coverset.facts.cache.threads`.
 
-**Over an object store** (``FactsStore(cache_dir / "facts", blobs=...)``, built by
-:func:`facts_store` when ``COVERSET_BLOB_URL`` is set) the directory is a *cache* of the bucket and
-everything above still runs on local files: DuckDB, pyarrow, the stamps and the hidden-temp atomic
-writes are unchanged. What is added is a per-run ``MANIFEST.json`` object, the source of truth for
-what a run contains (each ``*.parquet`` name with its size, etag and mtime, and a version that only
-grows), and two transfers around the run lock:
+**Over a blob store.** The directory is a *cache* (``<cache_dir>/facts``) of a
+:class:`~coverset.storage.base.BlobStore`: files under the data directory
+(:class:`~coverset.storage.local.LocalBlobStore`, the default) or an S3-compatible bucket
+(``COVERSET_BLOB_URL``), one code path for both. Everything above still runs on local files: DuckDB,
+pyarrow, the stamps and the hidden-temp atomic writes. The store holds the truth through a per-run
+``MANIFEST.json`` object (each ``*.parquet`` name with its object key, size, etag and mtime, and a
+version that only grows), and two transfers around the run lock:
 
 * entering :meth:`FactsStore.run_lock` *pulls* the run (HEAD of the manifest; when its etag differs
   from the one this cache last saw, GET it and download every file whose etag changed, delete local
   files it no longer lists), so a writer always starts from the published state;
 * leaving it *publishes*: every local file that changed since the last pull or publish is uploaded
   (in parallel) as a **new object** (``<name minus .parquet>.v<version>.<random tag>.parquet``: an
-  object is never rewritten in place, so every version of a file the bucket holds is complete),
+  object is never rewritten in place, so every version of a file the store holds is complete),
   then the manifest is written **last**, mapping each file name to its object key, with ``If-Match``
   on the etag the writer started from (``If-None-Match: *`` for a new run), and only then are the
   objects the new manifest no longer references deleted. A reader therefore never sees a
@@ -51,13 +52,12 @@ A pull that fails (the store unreachable, a manifest naming an object that is go
 before the interval has passed either: a reader with a cached copy keeps reading it, one without
 gets the error again, so a broken run costs one attempt per interval, never one per request. A
 downloaded file gets the mtime its writer gave it, so the summaries' freshness rule
-(``queries.summary_is_fresh``) keeps its meaning. The fcntl run lock still serialises writers of a
-run on one machine (the ingest pool's processes share the cache directory); across machines the
-manifest's ``If-Match`` guards against lost updates, and the rule is that one process ingests a given
-run at a time, which the runner (one claimant per run) and the upload worker (one pass per run)
-already guarantee. With the local default (``blobs=None``) there is no transfer and no HEAD: reads
-keep their fast path, and the run lock only refreshes a local ``MANIFEST.json`` on exit (where the
-files are the objects, so an entry has no separate key).
+(``queries.summary_is_fresh``) keeps its meaning. Writers of a run on one machine (the ingest pool's
+processes share the cache directory) serialise on an ``fcntl`` lock file in the run's cache
+directory, and a thread that holds it never pulls under its own feet; across machines the
+manifest's ``If-Match`` guards against lost updates, and the rule is that one process ingests a
+given run at a time, which the runner (one claimant per run) and the upload worker (one pass per
+run) already guarantee.
 """
 
 from __future__ import annotations
@@ -93,8 +93,6 @@ from coverset.storage import (
     BlobStore,
     ObjectInfo,
     PreconditionFailed,
-    facts_remote,
-    register_facts_remote,
     transfer_pool,
 )
 
@@ -123,8 +121,7 @@ MANIFEST_FILE = "MANIFEST.json"
 _RECORD_FILE = ".sync.json"
 """What this cache last pulled or published for a run (hidden: never part of a stamp)."""
 _MANIFEST_FORMAT = 2
-"""Format 2 added each entry's object ``key`` and the run's ``created_at``; an entry without a key
-(format 1, and every local manifest) names an object called exactly like the file."""
+"""The manifest's format: every entry names its object ``key``, and the run carries ``created_at``."""
 _FILE_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.shard=\d+(\.attempt=\d+)?)?\.parquet$")
 """A run file name a manifest may list (it becomes a local path, so nothing else is accepted)."""
 _OBJECT_NAME = re.compile(r"^[a-z][a-z0-9_]*(\.shard=\d+(\.attempt=\d+)?)?\.v\d+\.[0-9a-f]{8}\.parquet$")
@@ -156,7 +153,7 @@ class SqlNotAllowed(ValueError):
 
 
 class RunWriteConflict(RuntimeError):
-    """Another writer published the run's manifest since this writer pulled it (object store only).
+    """Another writer published the run's manifest since this writer pulled it.
 
     Nothing is overwritten: the objects this writer uploaded are not referenced by the manifest, and
     the next pull discards its local copies. One process ingests a given run at a time, so this
@@ -164,7 +161,7 @@ class RunWriteConflict(RuntimeError):
     """
 
 
-# -- object-store bookkeeping ---------------------------------------------------------------------
+# -- blob-store bookkeeping -----------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -177,6 +174,8 @@ class _SyncState:
     """The last check found no manifest and no local record (nothing to keep in step with)."""
     error: Exception | None = None
     """The last check failed with this; not tried again before the sync interval has passed."""
+    record: str = ""
+    """A run's ``.sync.json`` in the cache (computed once: every lookup of the run checks it)."""
 
 
 _STATES: dict[tuple[str, ...], _SyncState] = {}
@@ -244,10 +243,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _local_etag(size: int, mtime_ns: int, ino: int) -> str:
-    return f"{ino:x}-{size:x}-{mtime_ns:x}"
-
-
 def _writer() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
@@ -258,10 +253,8 @@ def _object_name(name: str, version: int) -> str:
 
 
 def _entry_key(name: str, entry: Mapping[str, Any]) -> str:
-    """The object name a manifest entry refers to (the file's own name when it has none)."""
+    """The object name a manifest entry refers to."""
     key = entry.get("key")
-    if key is None:
-        return name
     stem = name[: -len(".parquet")] + "."
     if not isinstance(key, str) or not _OBJECT_NAME.match(key) or not key.startswith(stem):
         raise ValueError(f"unexpected object name {key!r} for {name} in a manifest")
@@ -269,9 +262,8 @@ def _entry_key(name: str, entry: Mapping[str, Any]) -> str:
 
 
 def _known_key(name: str, known: Mapping[str, Sequence[Any]]) -> str:
-    """The object name the local record holds for ``name`` (records before format 2 had none)."""
-    entry = known.get(name) or ()
-    return str(entry[4]) if len(entry) > 4 and entry[4] else name
+    """The object name the local record holds for ``name``."""
+    return str(known[name][4])
 
 
 def _created_at_of(runs_dim: Path) -> str | None:
@@ -328,53 +320,38 @@ def _log_rows(path: str, mtime_ns: int, size: int) -> tuple[tuple[int, str], ...
 
 
 class FactsStore:
-    """Immutable per-run Parquet facts under one directory (the store itself, or the local cache of
-    an object store when ``blobs`` is given: see the module docstring)."""
+    """Immutable per-run Parquet facts: ``facts_dir`` is the local cache DuckDB reads, ``blobs`` the
+    store that holds them (see the module docstring)."""
 
-    def __init__(self, facts_dir: Path, *, blobs: BlobStore | None = None) -> None:
+    def __init__(self, facts_dir: Path, blobs: BlobStore) -> None:
         self.root = Path(facts_dir)
-        if blobs is not None:
-            register_facts_remote(self.root, blobs)
-            self.blobs: BlobStore | None = blobs
-        else:
-            # A bare path is a cache when the process was configured for an object store and this
-            # is its cache directory (an ingest worker process gets only the path and the knobs).
-            self.blobs = facts_remote(self.root)
+        self.blobs = blobs
         self._root_key = str(self.root)
 
     def __repr__(self) -> str:
-        where = f", blobs={self.blobs!r}" if self.blobs is not None else ""
-        return f"FactsStore({str(self.root)!r}{where})"
-
-    @property
-    def remote(self) -> bool:
-        """True when the directory is a cache of an object store."""
-        return self.blobs is not None
+        return f"FactsStore({str(self.root)!r}, {self.blobs!r})"
 
     # -- layout ------------------------------------------------------------------------------
 
     def repo_dir(self, repo_id: int) -> Path:
         """The directory holding every run (and the dictionary) of ``repo_id``.
 
-        Over an object store the repo's ``dictionary.json`` is pulled first (rate-limited like every
-        pull), so code that reads the directory finds a current copy.
+        The repo's ``dictionary.json`` is pulled first (rate-limited like every pull), so code that
+        reads the directory finds a current copy.
         """
         path = self._repo_path(repo_id)
-        if self.blobs is not None:
-            self._ensure_dictionary(repo_id, path)
+        self._ensure_dictionary(repo_id, path)
         return path
 
     def run_dir(self, repo_id: int, run_id: str) -> Path:
         """The directory holding one run's tables.
 
-        Over an object store the run is pulled into the cache first (at most once per sync
-        interval; :meth:`_ensure`), so every caller that goes to the directory itself (stamps,
-        ``is_dir`` checks, the web's run-facts cache) sees the published run, also on a replica
-        whose cache has never seen it.
+        The run is pulled into the cache first (at most once per sync interval; :meth:`_ensure`),
+        so every caller that goes to the directory itself (stamps, ``is_dir`` checks, the web's
+        run-facts cache) sees the published run, also on a replica whose cache has never seen it.
         """
         path = self._run_path(repo_id, run_id)
-        if self.blobs is not None:
-            self._ensure(repo_id, run_id)
+        self._ensure(repo_id, run_id)
         return path
 
     def _repo_path(self, repo_id: int) -> Path:
@@ -460,8 +437,7 @@ class FactsStore:
         return visible
 
     def _names(self, repo_id: int, run_id: str) -> list[str]:
-        if self.blobs is not None:
-            self._ensure(repo_id, run_id)
+        self._ensure(repo_id, run_id)
         run_dir = self._run_path(repo_id, run_id)
         return [entry.name for entry in run_dir.iterdir()] if run_dir.is_dir() else []
 
@@ -482,18 +458,30 @@ class FactsStore:
     def dictionary(self, repo_id: int) -> RepoDictionary:
         """A snapshot of the repo's path, nodeid and shape-key ids."""
         repo_dir = self._repo_path(repo_id)
-        if self.blobs is not None:
-            self._ensure_dictionary(repo_id, repo_dir)
+        self._ensure_dictionary(repo_id, repo_dir)
         return RepoDictionary.load(repo_dir)
+
+    def extend_dictionary(
+        self,
+        repo_id: int,
+        *,
+        paths: Iterable[str] = (),
+        nodeids: Iterable[str] = (),
+        shapes: Iterable[str] = (),
+    ) -> RepoDictionary:
+        """Assign ids to any new values in the repo's dictionary (compare-and-swap on its object,
+        :meth:`RepoDictionary.extend`) and return the updated dictionary."""
+        return RepoDictionary.extend(
+            self._repo_path(repo_id), self.blobs, paths=paths, nodeids=nodeids, shapes=shapes
+        )
 
     @contextmanager
     def run_lock(self, repo_id: int, run_id: str) -> Iterator[None]:
         """Exclusive lock serialising writers (ingest, failure records, finalize) of one run.
 
-        Over an object store the run is pulled when the lock is taken and published when it is
-        released (see the module docstring); a publish failure after the block raised is logged and
-        the block's own error is the one that propagates. Locally, release refreshes the run's
-        ``MANIFEST.json``.
+        The run is pulled when the lock is taken and published when it is released (see the module
+        docstring); a publish failure after the block raised is logged and the block's own error is
+        the one that propagates.
         """
         run_dir = self._run_path(repo_id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -503,31 +491,23 @@ class FactsStore:
             fcntl.flock(lock, fcntl.LOCK_EX)
             held.add(key)
             try:
-                if self.blobs is not None:
-                    self._pull_run(repo_id, run_id, writer=True)
+                self._pull_run(repo_id, run_id, writer=True)
                 try:
                     yield
                 except BaseException:
                     try:
-                        self._commit(repo_id, run_id)
+                        self._push_run(repo_id, run_id)
                     except Exception:
                         log.exception("publishing run %s after a failed write failed", run_id)
                     raise
-                self._commit(repo_id, run_id)
+                self._push_run(repo_id, run_id)
             finally:
                 held.discard(key)
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
-    def _commit(self, repo_id: int, run_id: str) -> None:
-        """What leaving the run lock does: publish (object store) or refresh the local manifest."""
-        if self.blobs is not None:
-            self._push_run(repo_id, run_id)
-        else:
-            self._write_local_manifest(repo_id, run_id)
-
     def _after_write(self, repo_id: int, run_id: str) -> None:
-        """A write outside the run lock (tests, tools) is published at once over an object store."""
-        if self.blobs is None or (self._root_key, repo_id, run_id) in _held():
+        """A write outside the run lock (tools, tests) is published at once."""
+        if (self._root_key, repo_id, run_id) in _held():
             return
         run_dir = self._run_path(repo_id, run_id)
         key = (self._root_key, repo_id, run_id)
@@ -592,14 +572,13 @@ class FactsStore:
         return pa.concat_tables(parts) if parts else SCHEMAS[table].empty_table()
 
     def list_repos(self) -> list[int]:
-        """Every repo id with a directory in the store (over an object store: in the bucket's
-        listing, at most :func:`~coverset.facts.cache.sync_interval` old, or in the cache)."""
+        """Every repo id in the store's listing (at most :func:`~coverset.facts.cache.sync_interval`
+        old) or in the cache."""
         ids = set(self._local_repos())
-        if self.blobs is not None:
-            for name in self._listing(f"{_KEY_ROOT}/"):
-                prefix, _, value = name.partition("=")
-                if prefix == "repo" and value.isdigit():
-                    ids.add(int(value))
+        for name in self._listing(f"{_KEY_ROOT}/"):
+            prefix, _, value = name.partition("=")
+            if prefix == "repo" and value.isdigit():
+                ids.add(int(value))
         return sorted(ids)
 
     def _local_repos(self) -> list[int]:
@@ -613,15 +592,11 @@ class FactsStore:
         return ids
 
     def list_runs(self, repo_id: int) -> list[str]:
-        """Every run id stored for ``repo_id``, sorted.
-
-        Over an object store: the runs in the bucket's listing (cached for the sync interval) plus
-        runs this cache is writing that have no manifest yet; a cached run whose manifest is gone
-        (deleted by another replica) is dropped from the cache and from the answer.
+        """Every run id stored for ``repo_id``, sorted: the runs in the store's listing (cached for the
+        sync interval) plus runs this cache is writing that have no manifest yet; a cached run whose
+        manifest is gone (deleted by another replica) is dropped from the cache and from the answer.
         """
         local = self._local_runs(repo_id)
-        if self.blobs is None:
-            return sorted(local)
         remote = {
             value
             for name in self._listing(f"{_KEY_ROOT}/repo={repo_id}/")
@@ -652,45 +627,38 @@ class FactsStore:
         return runs
 
     def has_run(self, repo_id: int, run_id: str) -> bool:
-        """Whether the run exists (over an object store: its manifest, pulled into the cache)."""
+        """Whether the run exists (its manifest, pulled into the cache, or files being written here)."""
         run_dir = self._run_path(repo_id, run_id)
-        if self.blobs is None:
-            return run_dir.is_dir()
         self._ensure(repo_id, run_id)
         return run_dir.is_dir() and bool(_scan(run_dir))
 
     def run_modified(self, repo_id: int, run_id: str) -> datetime | None:
-        """When the run last changed: its directory's mtime, or over an object store its manifest's
-        (else its newest object's, for a run whose first publish never happened); None if absent."""
+        """When the run last changed: its manifest's modification time (else its newest object's, for
+        a run whose first publish never happened, else its cached directory's); None if absent."""
         run_dir = self._run_path(repo_id, run_id)
-        if self.blobs is not None:
-            info = self.blobs.head(self._run_key(repo_id, run_id, MANIFEST_FILE))
-            if info is not None:
-                return info.modified
-            newest = max(
-                (o.modified for o in self.blobs.list(self._run_prefix(repo_id, run_id))), default=None
-            )
-            if newest is not None:
-                return newest
+        info = self.blobs.head(self._run_key(repo_id, run_id, MANIFEST_FILE))
+        if info is not None:
+            return info.modified
+        newest = max((o.modified for o in self.blobs.list(self._run_prefix(repo_id, run_id))), default=None)
+        if newest is not None:
+            return newest
         try:
             return datetime.fromtimestamp(run_dir.stat().st_mtime, tz=UTC)
         except FileNotFoundError:
             return None
 
     def delete_run(self, repo_id: int, run_id: str) -> bool:
-        """Delete one run's directory (never the repo dictionary); returns whether it existed.
+        """Delete one run (never the repo dictionary); returns whether it existed.
 
-        The directory is first renamed to a hidden name so readers never see a half-deleted run.
-        Over an object store the manifest goes first (readers stop seeing the run at once), then
-        every object under the run's prefix, then the cached copy.
+        The manifest goes first (readers stop seeing the run at once), then every object under the
+        run's prefix, then the cached copy (renamed to a hidden name first, so a local reader never
+        sees half of it).
         """
-        existed = False
-        if self.blobs is not None:
-            manifest = self._run_key(repo_id, run_id, MANIFEST_FILE)
-            existed = self.blobs.head(manifest) is not None
-            self.blobs.delete([manifest])
-            existed = self.blobs.delete_prefix(self._run_prefix(repo_id, run_id)) > 0 or existed
-            self._forget_listing(repo_id)
+        manifest = self._run_key(repo_id, run_id, MANIFEST_FILE)
+        existed = self.blobs.head(manifest) is not None
+        self.blobs.delete([manifest])
+        existed = self.blobs.delete_prefix(self._run_prefix(repo_id, run_id)) > 0 or existed
+        self._forget_listing(repo_id)
         run_dir = self._run_path(repo_id, run_id)
         if not run_dir.is_dir():
             return existed
@@ -699,7 +667,7 @@ class FactsStore:
         shutil.rmtree(doomed)
         return True
 
-    # -- object store: keys, listings, pull and publish ---------------------------------------
+    # -- the blob store: keys, listings, pull and publish -------------------------------------
 
     def _run_prefix(self, repo_id: int, run_id: str) -> str:
         """``facts/repo=<id>/run=<id>/``: the run's objects."""
@@ -717,8 +685,7 @@ class FactsStore:
         return rel
 
     def _listing(self, prefix: str) -> list[str]:
-        """The bucket's "directories" below ``prefix``, cached for the sync interval."""
-        assert self.blobs is not None
+        """The store's "directories" below ``prefix``, cached for the sync interval."""
         key = (self._root_key, prefix)
         now = time.monotonic()
         found = _LISTINGS.get(key)
@@ -732,19 +699,27 @@ class FactsStore:
         _LISTINGS.pop((self._root_key, f"{_KEY_ROOT}/repo={repo_id}/"), None)
         _LISTINGS.pop((self._root_key, f"{_KEY_ROOT}/"), None)
 
-    def _fresh(self, state: _SyncState, record: Path) -> bool:
+    def _run_state(self, repo_id: int, run_id: str) -> _SyncState:
+        """The run's sync bookkeeping in this process (its record path filled in on first use)."""
+        state = _state(("run", self._root_key, str(repo_id), run_id))
+        if not state.record:
+            state.record = str(self._run_path(repo_id, run_id) / _RECORD_FILE)
+        return state
+
+    @staticmethod
+    def _fresh(state: _SyncState) -> bool:
         """Within the sync interval of the last check, and the cache still holds what it saw then
         (or that check found nothing, or failed: neither is tried again before the interval)."""
         if time.monotonic() - state.checked >= cache.sync_interval():
             return False
-        return state.absent or state.error is not None or record.exists()
+        return state.absent or state.error is not None or os.path.exists(state.record)
 
     @staticmethod
-    def _settled(state: _SyncState, record: Path) -> None:
+    def _settled(state: _SyncState) -> None:
         """A fresh state's answer: nothing, or the last check's error again when this cache holds no
         copy to read instead (a reader with a copy keeps reading it until the next check, which
         :meth:`_ensure` applies to the failed check itself too)."""
-        if state.error is not None and not record.exists():
+        if state.error is not None and not os.path.exists(state.record):
             raise state.error
 
     def _ensure(self, repo_id: int, run_id: str) -> None:
@@ -757,17 +732,15 @@ class FactsStore:
         key = (self._root_key, repo_id, run_id)
         if key in _held():
             return
-        run_dir = self._run_path(repo_id, run_id)
-        record = run_dir / _RECORD_FILE
-        state = _state(("run", self._root_key, str(repo_id), run_id))
-        if self._fresh(state, record):
-            self._settled(state, record)
+        state = self._run_state(repo_id, run_id)
+        if self._fresh(state):
+            self._settled(state)
             return
+        run_dir = self._run_path(repo_id, run_id)
         with state.lock:
-            if self._fresh(state, record):
-                self._settled(state, record)
+            if self._fresh(state):
+                self._settled(state)
                 return
-            assert self.blobs is not None
             try:
                 head: ObjectInfo | None | _Unset = _UNSET
                 if not run_dir.is_dir():
@@ -787,7 +760,7 @@ class FactsStore:
                         fcntl.flock(lock, fcntl.LOCK_UN)
             except Exception as exc:
                 state.error, state.checked = exc, time.monotonic()
-                if not record.exists():
+                if not os.path.exists(state.record):
                     raise
                 log.warning("run %s: checking its manifest failed, reading the cached copy: %s", run_id, exc)
                 return
@@ -795,13 +768,7 @@ class FactsStore:
 
     def _ensure_many(self, scope: Sequence[tuple[int, str]]) -> None:
         """:meth:`_ensure` for every run of a scope, the stale ones in parallel."""
-        stale = [
-            (repo, run)
-            for repo, run in scope
-            if not self._fresh(
-                _state(("run", self._root_key, str(repo), run)), self._run_path(repo, run) / _RECORD_FILE
-            )
-        ]
+        stale = [(repo, run) for repo, run in scope if not self._fresh(self._run_state(repo, run))]
         if len(stale) <= 1:
             for repo, run in stale:
                 self._ensure(repo, run)
@@ -813,7 +780,6 @@ class FactsStore:
     ) -> None:
         """Make the cached run exactly what its manifest says (the caller holds the run lock;
         ``head`` is the manifest's metadata when the caller just fetched it)."""
-        assert self.blobs is not None
         run_dir = self._run_path(repo_id, run_id)
         state = _state(("run", self._root_key, str(repo_id), run_id))
         manifest_key = self._run_key(repo_id, run_id, MANIFEST_FILE)
@@ -822,7 +788,7 @@ class FactsStore:
         info = self.blobs.head(manifest_key) if isinstance(head, _Unset) else head
         if info is None:
             if seen is not None:
-                # Deleted from the bucket (gc or purge on another replica): drop the cached copy.
+                # Deleted from the store (gc or purge on another replica): drop the cached copy.
                 for name in _scan(run_dir):
                     (run_dir / name).unlink(missing_ok=True)
                 (run_dir / _RECORD_FILE).unlink(missing_ok=True)
@@ -852,7 +818,6 @@ class FactsStore:
     ) -> bool:
         """Download what changed and swap it in; False (nothing changed) when an object's etag no
         longer matches the manifest (a newer publish replaced it after the manifest was read)."""
-        assert self.blobs is not None
         blobs = self.blobs
         manifest = json.loads(data)
         files: dict[str, dict[str, Any]] = manifest.get("files") or {}
@@ -947,7 +912,6 @@ class FactsStore:
         already uploaded are unreferenced (a lost race deletes them at once; after any other error
         the next publish uploads new ones and the run's deletion removes them all).
         """
-        assert self.blobs is not None
         blobs = self.blobs
         run_dir = self._run_path(repo_id, run_id)
         record = _read_json(run_dir / _RECORD_FILE) or {}
@@ -1019,7 +983,6 @@ class FactsStore:
     def _delete_objects(self, repo_id: int, run_id: str, names: list[str], what: str) -> None:
         """Best-effort deletion of run objects no manifest references (they only cost space until
         the run is deleted, whose prefix deletion removes everything)."""
-        assert self.blobs is not None
         if not names:
             return
         try:
@@ -1028,11 +991,9 @@ class FactsStore:
             log.warning("run %s: deleting %d %s objects failed", run_id, len(names), what, exc_info=True)
 
     def remote_manifest(self, repo_id: int, run_id: str) -> dict[str, Any] | None:
-        """The run's manifest as the bucket holds it right now, read with one GET and without
-        pulling the run (retention ages runs with it); None when there is none (an unpublished run,
-        or no run at all). With the local default, the local ``MANIFEST.json``."""
-        if self.blobs is None:
-            return _read_json(self._run_path(repo_id, run_id) / MANIFEST_FILE)
+        """The run's manifest as the store holds it right now, read with one GET and without pulling
+        the run (retention ages runs with it); None when there is none (an unpublished run, or no
+        run at all)."""
         try:
             data, _ = self.blobs.get_bytes(self._run_key(repo_id, run_id, MANIFEST_FILE))
         except BlobNotFound:
@@ -1040,41 +1001,13 @@ class FactsStore:
         manifest = json.loads(data)
         return manifest if isinstance(manifest, dict) else None
 
-    def _write_local_manifest(self, repo_id: int, run_id: str) -> None:
-        """The local default's ``MANIFEST.json``: the same document, with local etags, refreshed when
-        the run's files changed (one directory scan per release of the run lock)."""
-        run_dir = self._run_path(repo_id, run_id)
-        local = _scan(run_dir)
-        path = run_dir / MANIFEST_FILE
-        previous = _read_json(path) if local or path.exists() else None
-        if not local and previous is None:
-            return
-        files = {
-            name: {"size": st[0], "mtime_ns": st[1], "etag": _local_etag(*st)}
-            for name, st in sorted(local.items())
-        }
-        if previous is not None and previous.get("files") == files:
-            return
-        manifest = {
-            "format": _MANIFEST_FORMAT,
-            "repo_id": repo_id,
-            "run_id": run_id,
-            "version": int((previous or {}).get("version") or 0) + 1,
-            "written_at": datetime.now(UTC).isoformat(),
-            "writer": _writer(),
-            "files": files,
-        }
-        atomic_write_bytes(path, json.dumps(manifest, indent=1, sort_keys=True).encode())
-
     def manifest(self, repo_id: int, run_id: str) -> dict[str, Any] | None:
-        """The run's manifest as this cache (or the local store) last wrote or pulled it."""
-        if self.blobs is not None:
-            self._ensure(repo_id, run_id)
+        """The run's manifest as this cache last wrote or pulled it."""
+        self._ensure(repo_id, run_id)
         return _read_json(self._run_path(repo_id, run_id) / MANIFEST_FILE)
 
     def _ensure_dictionary(self, repo_id: int, repo_dir: Path) -> None:
         """Pull the repo's ``dictionary.json`` when it changed (at most once per sync interval)."""
-        assert self.blobs is not None
         state = _state(("dict", self._root_key, str(repo_id)))
         if time.monotonic() - state.checked < cache.sync_interval():
             return
@@ -1084,18 +1017,15 @@ class FactsStore:
             RepoDictionary.pull(repo_dir, self.blobs)
             state.checked = time.monotonic()
 
-    # -- object store: immutable directories (production batches) ----------------------------
+    # -- immutable directories (production batches) ------------------------------------------
 
     def pull_batches(self, directory: Path, *, marker: str) -> None:
-        """Mirror the immutable batch directories below ``directory`` from the bucket.
+        """Mirror the immutable batch directories below ``directory`` from the store.
 
         A batch (any directory holding ``marker``, uploaded last by :meth:`push_tree`) is downloaded
         whole into a hidden staging directory and renamed into place, so a reader sees all of it or
-        none; a cached batch the bucket no longer has is removed. At most once per sync interval.
-        A no-op for the local default.
+        none; a cached batch the store no longer has is removed. At most once per sync interval.
         """
-        if self.blobs is None:
-            return
         rel = self._rel(directory)
         state = _state(("tree", self._root_key, rel))
         if time.monotonic() - state.checked < cache.sync_interval():
@@ -1132,9 +1062,7 @@ class FactsStore:
             state.checked = time.monotonic()
 
     def push_tree(self, directory: Path, *, last: str | None = None) -> None:
-        """Upload every file below ``directory`` (``last`` after all the others); a no-op locally."""
-        if self.blobs is None:
-            return
+        """Upload every file below ``directory`` (``last`` after all the others)."""
         blobs = self.blobs
         rel = self._rel(directory)
         files = sorted(
@@ -1151,14 +1079,13 @@ class FactsStore:
         list(transfer_pool("io").map(upload, first))
         for path in final:
             upload(path)
-        for parent in Path(rel).parents:  # the next pull of any enclosing tree lists the bucket again
+        for parent in Path(rel).parents:  # the next pull of any enclosing tree lists the store again
             _state(("tree", self._root_key, parent.as_posix())).checked = float("-inf")
 
     def remove_tree(self, directory: Path) -> None:
-        """Delete a directory below the root: its objects first (over an object store), then the
-        local copy (renamed to a hidden name, then removed)."""
-        if self.blobs is not None:
-            self.blobs.delete_prefix(f"{_KEY_ROOT}/{self._rel(directory)}/")
+        """Delete a directory below the root: its objects first, then the local copy (renamed to a
+        hidden name, then removed)."""
+        self.blobs.delete_prefix(f"{_KEY_ROOT}/{self._rel(directory)}/")
         self._drop_local(Path(directory))
 
     @staticmethod
@@ -1236,8 +1163,7 @@ class FactsStore:
         """The stamps of every run in scope (see :mod:`coverset.facts.cache`): equal stamps mean
         every file a reader of the scope could see is byte-for-byte the same."""
         scope = self._scope(repo_id, run_id, run_ids)
-        if self.blobs is not None:
-            self._ensure_many(scope)
+        self._ensure_many(scope)
         return tuple((repo, run, cache.run_stamp(self._run_path(repo, run))) for repo, run in scope)
 
     @contextmanager
@@ -1327,11 +1253,8 @@ class FactsStore:
 
 
 def facts_store(settings: Settings) -> FactsStore:
-    """The facts store ``settings`` name: the object store's cache (``COVERSET_BLOB_URL`` set) or the
-    local facts directory. Every caller that has settings builds its store here."""
-    from coverset.storage import remote_store
+    """The facts store ``settings`` name: the cache ``Settings.facts_dir`` of the blob store
+    (:func:`coverset.storage.from_settings`). Every caller that has settings builds its store here."""
+    from coverset.storage import from_settings
 
-    blobs = remote_store(settings)
-    if blobs is None:
-        return FactsStore(settings.facts_dir)
-    return FactsStore(settings.facts_dir, blobs=blobs)
+    return FactsStore(settings.facts_dir, from_settings(settings))

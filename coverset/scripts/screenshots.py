@@ -31,13 +31,13 @@ import os
 import shutil
 import signal
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -97,10 +97,32 @@ def coverset_bin() -> str:
 
 
 def child_env(data_dir: Path, **extra: str) -> dict[str, str]:
-    """The environment for a coverset child: this one minus any COVERSET_* setting, plus ours."""
+    """The environment for a coverset child: this one minus any COVERSET_* setting but the database
+    (``COVERSET_DATABASE_URL``, which :func:`main` sets), plus ours."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("COVERSET_")}
+    env["COVERSET_DATABASE_URL"] = database_url()
     env.update({"COVERSET_DATA_DIR": str(data_dir), "COVERSET_EXECUTOR": "local", **extra})
     return env
+
+
+def database_url() -> str:
+    """The demo's database: ``COVERSET_DATABASE_URL`` (:func:`main` sets one when it is unset)."""
+    return os.environ["COVERSET_DATABASE_URL"]
+
+
+def sql(statement: str, params: dict[str, Any] | None = None) -> list[tuple[Any, ...]]:
+    """One statement on the demo's database (``:name`` parameters); its rows."""
+    from coverset.db.testing import run_sql
+
+    return run_sql(database_url(), statement, params)
+
+
+def has_demo() -> bool:
+    """Whether the demo's database holds a run of PR #1 already (else it is seeded)."""
+    try:
+        return bool(sql("SELECT 1 FROM runs r JOIN pull_requests p ON p.id = r.pr_id WHERE p.number = 1"))
+    except Exception:  # noqa: BLE001 - no database or no schema yet: not seeded
+        return False
 
 
 # -- the demo data ----------------------------------------------------------------------------------
@@ -129,33 +151,29 @@ def _ts(value: str | None) -> datetime | None:
 
 
 def demo_ids(data_dir: Path) -> DemoIds:
-    """Run ids, the replay freeze point and the pinned clock, from ``<data_dir>/coverset.db``."""
-    con = sqlite3.connect(data_dir / "coverset.db")
-    try:
+    """Run ids, the replay freeze point and the pinned clock, from the demo's database."""
 
-        def pr_run(number: int) -> tuple[str, dict[str, Any]]:
-            row = con.execute(
-                "SELECT r.id, r.timeline FROM runs r JOIN pull_requests p ON p.id = r.pr_id "
-                "WHERE p.number = ? ORDER BY r.created_at DESC LIMIT 1",
-                (number,),
-            ).fetchone()
-            if row is None:
-                raise SystemExit(f"no run of PR #{number} in {data_dir}: seed the demo first")
-            return str(row[0]), json.loads(row[1] or "{}")
+    def pr_run(number: int) -> tuple[str, dict[str, Any]]:
+        rows = sql(
+            "SELECT r.id, CAST(r.timeline AS TEXT) FROM runs r JOIN pull_requests p ON p.id = r.pr_id "
+            "WHERE p.number = :number ORDER BY r.created_at DESC LIMIT 1",
+            {"number": number},
+        )
+        if not rows:
+            raise SystemExit(f"no run of PR #{number} for {data_dir}: seed the demo first")
+        return str(rows[0][0]), json.loads(rows[0][1] or "{}")
 
-        pr1, timeline = pr_run(1)
-        pr2, _ = pr_run(2)
-        repo_id = int(con.execute("SELECT id FROM repos ORDER BY id LIMIT 1").fetchone()[0])
-        newest = con.execute("SELECT MAX(created_at) FROM runs").fetchone()[0]
-    finally:
-        con.close()
+    pr1, timeline = pr_run(1)
+    pr2, _ = pr_run(2)
+    repo_id = int(sql("SELECT id FROM repos ORDER BY id LIMIT 1")[0][0])
+    newest = sql("SELECT MAX(created_at) FROM runs")[0][0]
     t0 = _ts(timeline.get("webhook_received")) or _ts(timeline.get("queued"))
     verdict = _ts(timeline.get("verdict"))
     if t0 is None or verdict is None:
         raise SystemExit(f"PR #1's run {pr1} has no verdict in its timeline")
     freeze = round((verdict - t0).total_seconds() + 0.1, 2)
     # Pin "now" a few minutes after the newest run, on a whole minute: relative times read "N min ago".
-    last = datetime.fromisoformat(str(newest)).replace(tzinfo=UTC)
+    last = newest.astimezone(UTC)
     now = (last + timedelta(minutes=4)).replace(second=0, microsecond=0)
     return DemoIds(repo_id, pr1, pr2, freeze, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
@@ -471,15 +489,12 @@ def build_report_dir(data_dir: Path, ids: DemoIds) -> Path:
 def build_changes_dir(data_dir: Path, ids: DemoIds) -> Path:
     """``coverset report --run <PR #1 run> --compare-run <the main baseline at its base>`` into
     ``<data_dir>/report-changes-shots`` (rewritten each time)."""
-    con = sqlite3.connect(data_dir / "coverset.db")
-    try:
-        row = con.execute(
-            "SELECT b.id FROM runs r JOIN runs b ON b.repo_id = r.repo_id AND b.head_sha = r.base_sha "
-            "WHERE r.id = ? AND b.pr_id IS NULL ORDER BY b.created_at DESC LIMIT 1",
-            (ids.pr1_run,),
-        ).fetchone()
-    finally:
-        con.close()
+    rows = sql(
+        "SELECT b.id FROM runs r JOIN runs b ON b.repo_id = r.repo_id AND b.head_sha = r.base_sha "
+        "WHERE r.id = :run AND b.pr_id IS NULL ORDER BY b.created_at DESC LIMIT 1",
+        {"run": ids.pr1_run},
+    )
+    row = rows[0] if rows else None
     if row is None:
         raise SystemExit(f"PR #1's run {ids.pr1_run} has no baseline run at its base commit")
     out = data_dir / "report-changes-shots"
@@ -663,7 +678,12 @@ def to_jpeg(png: Path, out_dir: Path = DOCS) -> tuple[Path, int, int]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
-        "--data-dir", type=Path, help="demo data dir (seeded when it has no coverset.db; default: a temp dir)"
+        "--data-dir",
+        type=Path,
+        help=(
+            "demo data dir, its database COVERSET_DATABASE_URL or coverset's default (seeded when that "
+            "database has no demo; default: a temp dir and a temporary database on the local server)"
+        ),
     )
     parser.add_argument(
         "--only",
@@ -684,8 +704,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     temporary = args.data_dir is None
     data_dir = (args.data_dir or Path(tempfile.mkdtemp(prefix="coverset-shots-")) / "data").resolve()
+    temporary_db = temporary
+    if temporary_db:  # the demo creates it; dropped at the end unless --keep
+        name = f"coverset_shots_{uuid.uuid4().hex[:8]}"
+        os.environ["COVERSET_DATABASE_URL"] = f"postgresql+asyncpg://localhost/{name}"
+    else:  # a given data dir: its database is COVERSET_DATABASE_URL, else coverset's default
+        from coverset.config import DEFAULT_DATABASE_URL
+
+        os.environ.setdefault("COVERSET_DATABASE_URL", DEFAULT_DATABASE_URL)
     try:
-        if not (data_dir / "coverset.db").is_file():
+        if not has_demo():
             seed(data_dir)
         ids = demo_ids(data_dir)
         log(f"PR #1 run {ids.pr1_run} (freeze {ids.freeze_s} s), PR #2 run {ids.pr2_run}")
@@ -709,7 +737,24 @@ def main(argv: list[str] | None = None) -> int:
             shutil.rmtree(data_dir.parent, ignore_errors=True)
         elif temporary:
             log(f"kept {data_dir}")
+        if temporary_db and not args.keep:
+            drop_database(database_url())
+        elif temporary_db:
+            log(f"kept the database {database_url()}")
     return 0
+
+
+def drop_database(url: str) -> None:
+    """Drop the temporary database :func:`main` made (from the server's maintenance database)."""
+    import asyncio
+
+    from sqlalchemy.engine import make_url
+
+    from coverset.db.session import MAINTENANCE_DATABASE, admin_execute, quote_database
+
+    parsed = make_url(url)
+    statement = f"DROP DATABASE IF EXISTS {quote_database(parsed.database or '')} WITH (FORCE)"
+    asyncio.run(admin_execute(parsed.set(database=MAINTENANCE_DATABASE), [statement]))
 
 
 if __name__ == "__main__":

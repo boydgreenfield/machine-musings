@@ -11,8 +11,8 @@ from facts_helpers import MODULE_PATH, make_ctx
 from coverset.analysis.shapes import cap_hits
 from coverset.facts.convert import read_python_bundle, tracer_mismatch
 from coverset.facts.ingest import finalize_run, ingest_shard
-from coverset.facts.store import FactsStore
 from coverset.lang.base import FunctionRegion, NeutralBundle, func_key
+from coverset.storage.testing import local_facts_store
 
 
 @pytest.mark.security
@@ -32,7 +32,7 @@ def test_a_lost_tracer_is_a_tracer_mismatch() -> None:
 
 @pytest.mark.security
 def test_a_lost_tracer_is_recorded_in_the_ingest_log(minimal_bundle: Path, tmp_path: Path) -> None:
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     bundle = read_python_bundle(minimal_bundle)
     lost = dataclasses.replace(bundle, meta={**bundle.meta, "tracer_lost_at": "tests/t.py::test_x"})
     ingest_shard(store, make_ctx(), lost, 0)
@@ -53,7 +53,7 @@ def test_the_run_counts_cap_hits_once_over_its_shards(
 ) -> None:
     """Two shards that both capped ``classify`` (with the same callers, all sampled) hit the cap with
     one test over the run, as the verdict and the UI count it, not one per shard."""
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     bundle: NeutralBundle = read_python_bundle(minimal_bundle)
     ctx = make_ctx()
     ingest_shard(store, ctx, bundle, 0, functions)

@@ -50,8 +50,8 @@ def repo_purge_command(name: str, yes: bool) -> None:
 async def _purge(settings: Settings, name: str, *, yes: bool) -> None:
     """Delete the repository's rows and scoped settings in one transaction, then its files.
 
-    ``forget_scope`` runs in the Repo delete's transaction: repo-scope settings have no foreign key,
-    and SQLite hands a deleted id to the next repository (docs/settings.md). The files are the
+    ``forget_scope`` runs in the Repo delete's transaction: repo-scope settings have no foreign key
+    (docs/settings.md). The files are the
     facts, the mirror, the uploaded sources (``<data_dir>/sources/<repo_id>``) and the upload
     archives of the repository's runs (``<runs_dir>/<run_id>/upload``).
     """
@@ -78,7 +78,7 @@ async def _purge(settings: Settings, name: str, *, yes: bool) -> None:
             await session.commit()
     finally:
         await db.engine.dispose()
-    # Facts, mirror, uploaded sources, upload archives: objects and cached copies too (object store).
+    # Facts, mirror, uploaded sources, upload archives: the blobs and their cached copies.
     await asyncio.to_thread(purge_repo_files, settings, repo_id, run_ids)
     click.echo(f"purged {label} (repo {repo_id}): database rows, scoped settings, facts, mirror and uploads")
 

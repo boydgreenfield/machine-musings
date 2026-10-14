@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # coverset on one Ubuntu 24.04 VM (EC2 or Lightsail): Docker, then deploy/compose.yml (coverset +
-# Caddy for HTTPS), with the data dir on an attached EBS / block-storage disk when there is one.
+# Postgres + Caddy for HTTPS), with the data on an attached EBS / block-storage disk when there is one.
 # Paste as EC2 user data or a Lightsail launch script, or run it as root on a fresh instance. It is
 # idempotent: running it again pulls the latest source and restarts the stack. docs: deploy/aws/README.md
 #
@@ -15,12 +15,12 @@ REPO_SUBDIR="${REPO_SUBDIR:-coverset}"            # where the coverset project s
 MODAL_TOKEN_ID="${MODAL_TOKEN_ID:-}"              # modal.com > Settings > API Tokens (shards run in Modal Sandboxes)
 MODAL_TOKEN_SECRET="${MODAL_TOKEN_SECRET:-}"
 DATA_DEVICE="${DATA_DEVICE:-auto}"                # block device for /srv/coverset/data; "auto" = the one empty non-root disk, "none" = root disk
-COVERSET_STATE="${COVERSET_STATE:-files}"         # "files": SQLite + files in the data dir; "hosted": Postgres + MinIO on this VM (compose profile)
+COVERSET_STATE="${COVERSET_STATE:-files}"         # "files": blobs as files in the data dir; "hosted": blobs in MinIO on this VM (compose profile). Postgres runs either way
 
 DATA_DIR=/srv/coverset/data
 SRC=/opt/coverset/src
 ENV_FILE=/opt/coverset/coverset.env
-SERVICES_ENV_FILE=/opt/coverset/services.env      # hosted: the Postgres and MinIO passwords
+SERVICES_ENV_FILE=/opt/coverset/services.env      # the Postgres (and, hosted, MinIO) passwords
 APP_UID=10001                                     # the image's `coverset` user
 export DEBIAN_FRONTEND=noninteractive
 
@@ -113,36 +113,33 @@ EOF
   echo "$admin_token" > /root/coverset-admin-token
   log "admin token written to /root/coverset-admin-token (root only)"
 fi
-if [ "$COVERSET_STATE" = "hosted" ]; then
-  # Postgres and MinIO beside coverset, their data on the data disk; coverset's own /data is then
-  # only a cache plus the .env and App key /setup writes.
-  if [ ! -f "$SERVICES_ENV_FILE" ]; then
-    cat > "$SERVICES_ENV_FILE" <<EOF
+if [ ! -f "$SERVICES_ENV_FILE" ]; then
+  cat > "$SERVICES_ENV_FILE" <<EOF
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 MINIO_ROOT_USER=coverset
 MINIO_ROOT_PASSWORD=$(openssl rand -hex 24)
 EOF
-    log "Postgres and MinIO passwords written to $SERVICES_ENV_FILE (root only)"
-  fi
-  if ! grep -q '^COVERSET_DATABASE_URL=' "$ENV_FILE"; then
-    # shellcheck disable=SC1090
-    . "$SERVICES_ENV_FILE"
-    cat >> "$ENV_FILE" <<EOF
-COVERSET_DATABASE_URL=postgresql+asyncpg://coverset:$POSTGRES_PASSWORD@postgres:5432/coverset
+  log "Postgres and MinIO passwords written to $SERVICES_ENV_FILE (root only)"
+fi
+# shellcheck disable=SC1090
+. "$SERVICES_ENV_FILE"
+if ! grep -q '^COVERSET_DATABASE_URL=' "$ENV_FILE"; then
+  echo "COVERSET_DATABASE_URL=postgresql+asyncpg://coverset:$POSTGRES_PASSWORD@postgres:5432/coverset" >> "$ENV_FILE"
+fi
+if [ "$COVERSET_STATE" = "hosted" ] && ! grep -q '^COVERSET_BLOB_URL=' "$ENV_FILE"; then
+  # Blobs in MinIO beside coverset: coverset's own /data is then only a cache plus the .env and
+  # App key /setup writes.
+  cat >> "$ENV_FILE" <<EOF
 COVERSET_BLOB_URL=s3://coverset?endpoint_url=http://minio:9000&region=us-east-1
 AWS_ACCESS_KEY_ID=$MINIO_ROOT_USER
 AWS_SECRET_ACCESS_KEY=$MINIO_ROOT_PASSWORD
 EOF
-  fi
-  APP_DATA="$DATA_DIR/app"
-  mkdir -p "$APP_DATA" "$DATA_DIR/postgres" "$DATA_DIR/minio" "$DATA_DIR/backups"
-  chown "$APP_UID:$APP_UID" "$APP_DATA"
-  chmod 700 "$APP_DATA" "$DATA_DIR/backups"
-  PROFILES=hosted
-else
-  APP_DATA="$DATA_DIR"
-  PROFILES=
 fi
+APP_DATA="$DATA_DIR/app"
+mkdir -p "$APP_DATA" "$DATA_DIR/postgres" "$DATA_DIR/minio" "$DATA_DIR/backups"
+chown "$APP_UID:$APP_UID" "$APP_DATA"
+chmod 700 "$APP_DATA" "$DATA_DIR/backups"
+if [ "$COVERSET_STATE" = "hosted" ]; then PROFILES=hosted; else PROFILES=; fi
 umask 022
 
 # --- Run ----------------------------------------------------------------------------------------------
@@ -160,21 +157,12 @@ EOF
 docker compose --env-file /etc/coverset.compose.env up -d --build --remove-orphans
 
 # Nightly consistent copy of the database on the data disk (EBS snapshots then capture it too).
-if [ "$COVERSET_STATE" = "hosted" ]; then
-  cat > /etc/cron.daily/coverset-backup <<EOF
+cat > /etc/cron.daily/coverset-backup <<EOF
 #!/bin/sh
 cd $PROJECT/deploy && docker compose --env-file /etc/coverset.compose.env exec -T postgres \\
   pg_dump -U coverset -d coverset --format=custom > $DATA_DIR/backups/coverset-\$(date +%F).dump
 find $DATA_DIR/backups -name 'coverset-*.dump' -mtime +7 -delete
 EOF
-else
-  cat > /etc/cron.daily/coverset-backup <<EOF
-#!/bin/sh
-cd $PROJECT/deploy && docker compose --env-file /etc/coverset.compose.env exec -T coverset \\
-  python -c "import sqlite3, datetime; sqlite3.connect('/data/coverset.db').backup(sqlite3.connect('/data/coverset-' + datetime.date.today().isoformat() + '.backup.db'))"
-find $DATA_DIR -maxdepth 1 -name 'coverset-*.backup.db' -mtime +7 -delete
-EOF
-fi
 chmod 755 /etc/cron.daily/coverset-backup
 
 for _ in $(seq 1 60); do

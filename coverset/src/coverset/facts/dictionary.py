@@ -1,22 +1,19 @@
 """Dense per-repo ids for paths, test nodeids and shape keys (``repo=<id>/dictionary.json``).
 
 Ids are list positions, so they are stable once assigned and only ever appended. Test id 0 is
-reserved for ``<import>``. Extensions happen under an exclusive ``flock`` on ``dictionary.lock`` and
-are written atomically, so concurrent ingests of the same repo (in-process or from the CLI) never
-hand out the same id twice. Garbage collection never touches the dictionary.
+reserved for ``<import>``. Garbage collection never touches the dictionary.
 
-**Over an object store** (the repo directory is a cache of a bucket:
-:func:`coverset.storage.facts_remote`), the object ``facts/repo=<id>/dictionary.json`` is the
-dictionary and the local file only its cached copy. :meth:`RepoDictionary.extend` is then a
-compare-and-swap loop: GET the object and its etag, append the new values, PUT with ``If-Match`` on
-that etag (``If-None-Match: *`` for the first version); when another replica got there first the
-PUT fails with :class:`~coverset.storage.base.PreconditionFailed` and the loop starts again from the
-newer version, after a short random back-off. Two replicas therefore never hand out the same id:
-an id is only ever used after the PUT that assigned it succeeded. The local ``flock`` is still held
-around the loop, so processes on one machine queue instead of racing. :meth:`RepoDictionary.pull`
-refreshes the cached copy for readers; because the lists only grow, the copy is replaced only by a
-version with at least as many entries (a slow reader never puts back an older one), and its etag
-is kept in the hidden ``.dictionary.sync`` beside it.
+The object ``facts/repo=<id>/dictionary.json`` in the blob store is the dictionary, and the file in
+the facts cache only its copy. :meth:`RepoDictionary.extend` is a compare-and-swap loop: GET the
+object and its etag, append the new values, PUT with ``If-Match`` on that etag (``If-None-Match: *``
+for the first version); when another writer got there first the PUT fails with
+:class:`~coverset.storage.base.PreconditionFailed` and the loop starts again from the newer version,
+after a short random back-off. Two writers therefore never hand out the same id: an id is only ever
+used after the PUT that assigned it succeeded. An exclusive ``flock`` on ``dictionary.lock`` in the
+cache is held around the loop, so processes on one machine queue instead of racing.
+:meth:`RepoDictionary.pull` refreshes the cached copy for readers; because the lists only grow, the
+copy is replaced only by a version with at least as many entries (a slow reader never puts back an
+older one), and its etag is kept in the hidden ``.dictionary.sync`` beside it.
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ writer, so 50 means 50 other ingests landed in between)."""
 
 
 class DictionaryConflict(RuntimeError):
-    """The dictionary kept changing under :meth:`RepoDictionary.extend` (object store only)."""
+    """The dictionary kept changing under :meth:`RepoDictionary.extend`."""
 
 
 def remote_key(repo_dir: Path) -> str:
@@ -134,39 +131,6 @@ class RepoDictionary:
             _shapes=_Ids(list(data.get("shapes", []))),
         )
 
-    @classmethod
-    def extend(
-        cls,
-        repo_dir: Path,
-        *,
-        paths: Iterable[str] = (),
-        nodeids: Iterable[str] = (),
-        shapes: Iterable[str] = (),
-    ) -> RepoDictionary:
-        """Assign ids to any new values (under the repo lock) and return the updated dictionary.
-
-        Over an object store this is the compare-and-swap loop of the module docstring.
-        """
-        from coverset.storage import facts_remote
-
-        blobs = facts_remote(repo_dir.parent)
-        if blobs is not None:
-            return cls._extend_remote(repo_dir, blobs, paths=paths, nodeids=nodeids, shapes=shapes)
-        with _repo_lock(repo_dir):
-            current = cls.load(repo_dir)
-            changed = current._paths.extend(sorted(set(paths)))
-            changed |= current._nodeids.extend(sorted(set(nodeids)))
-            changed |= current._shapes.extend(sorted(set(shapes)))
-            if changed:
-                payload = {
-                    "version": _VERSION,
-                    "paths": current._paths.values,
-                    "nodeids": current._nodeids.values,
-                    "shapes": current._shapes.values,
-                }
-                atomic_write_bytes(repo_dir / DICTIONARY_FILE, json.dumps(payload).encode())
-            return current
-
     def _payload(self) -> dict[str, Any]:
         return {
             "version": _VERSION,
@@ -176,15 +140,17 @@ class RepoDictionary:
         }
 
     @classmethod
-    def _extend_remote(
+    def extend(
         cls,
         repo_dir: Path,
         blobs: BlobStore,
         *,
-        paths: Iterable[str],
-        nodeids: Iterable[str],
-        shapes: Iterable[str],
+        paths: Iterable[str] = (),
+        nodeids: Iterable[str] = (),
+        shapes: Iterable[str] = (),
     ) -> RepoDictionary:
+        """Assign ids to any new values and return the updated dictionary: the compare-and-swap loop
+        of the module docstring on the object in ``blobs``, under the cache's repo lock."""
         from coverset.storage.base import BlobNotFound, PreconditionFailed
 
         new_paths, new_nodeids, new_shapes = sorted(set(paths)), sorted(set(nodeids)), sorted(set(shapes))
@@ -220,9 +186,9 @@ class RepoDictionary:
 
     @staticmethod
     def pull(repo_dir: Path, blobs: BlobStore) -> None:
-        """Refresh the cached copy from the object store when its etag changed (readers).
+        """Refresh the cached copy from the blob store when its etag changed (readers).
 
-        A dictionary gone from the bucket (the repository was purged) takes its cached copy with it.
+        A dictionary gone from the store (the repository was purged) takes its cached copy with it.
         """
         key = remote_key(repo_dir)
         info = blobs.head(key)

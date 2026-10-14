@@ -25,11 +25,11 @@ import pytest
 
 from coverset.facts import queries
 from coverset.facts.ingest import RunContext, finalize_run
-from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang import read_any_bundle
 from coverset.lang.neutral import NeutralAdapter
 from coverset.orchestrator.bundles import IngestJob, ingest_one
+from coverset.storage.testing import local_blob_url, local_facts_store
 from coverset_model.catalogue import NEVER_EXERCISED, function_catalogue_from_types
 from coverset_model.io import pack, validate
 
@@ -105,6 +105,7 @@ def ingested(run: dict) -> dict:  # type: ignore[type-arg]
     )
     job = IngestJob(
         facts_dir=str(tmp / "facts"),
+        blob_url=local_blob_url(tmp / "facts"),
         ctx=ctx,
         shard_id=0,
         tarball=str(tarball),
@@ -116,7 +117,7 @@ def ingested(run: dict) -> dict:  # type: ignore[type-arg]
     )
     outcome = ingest_one(job)
     assert outcome.ok, outcome.error
-    store = FactsStore(tmp / "facts")
+    store = local_facts_store(tmp / "facts")
     finalized = finalize_run(
         store, ctx, expected_shards=1, catalogue=NeutralAdapter.from_bundle(bundle).shape_catalogue()
     )

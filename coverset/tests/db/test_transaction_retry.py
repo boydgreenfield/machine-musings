@@ -1,6 +1,5 @@
-"""``planner.run_transaction`` retries transient failures on both backends: SQLite's busy error and
-Postgres's deadlock and serialization failures (which arrive as a plain ``DBAPIError`` carrying the
-SQLSTATE), and nothing else."""
+"""``planner.run_transaction`` retries transient failures: deadlocks and serialization failures
+(which arrive as a plain ``DBAPIError`` carrying the SQLSTATE), and nothing else."""
 
 from __future__ import annotations
 
@@ -13,6 +12,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 
+from coverset.config import Settings
 from coverset.db.session import Database
 from coverset.orchestrator.planner import is_retryable, run_transaction
 
@@ -44,7 +44,7 @@ class _FakeDb:
     [
         (_error(DBAPIError, "40P01"), True),  # deadlock detected
         (_error(DBAPIError, "40001"), True),  # serialization failure
-        (_error(OperationalError, None), True),  # SQLite: database is locked
+        (_error(OperationalError, None), False),  # a connection failure is not a transaction conflict
         (_error(DBAPIError, "57014"), False),  # statement timeout: would only time out again
         (_error(IntegrityError, "23505"), False),  # a unique violation is an answer, not a blip
         (_error(DBAPIError, None), False),
@@ -77,7 +77,8 @@ async def test_the_last_attempt_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         await run_transaction(_FakeDb(), work, attempts=3, delay_s=0)  # type: ignore[arg-type]
 
 
-async def test_a_real_postgres_deadlock_is_retried(postgres_url: str) -> None:
+async def test_a_real_postgres_deadlock_is_retried(settings: Settings) -> None:
+    postgres_url = settings.database_url
     """Two transactions take the same two row locks in opposite orders: Postgres kills one with
     ``deadlock detected`` and ``run_transaction`` runs it again, so both finish."""
     db = Database.from_url(postgres_url)

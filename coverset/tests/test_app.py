@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import stat
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,7 +24,7 @@ from coverset.app import (
     is_upload_request,
 )
 from coverset.config import Settings
-from coverset.db.session import Database, sqlite_file_path
+from coverset.db.session import Database
 from coverset.db.testing import PostgresTestDatabases
 
 
@@ -79,19 +80,18 @@ async def test_serving_migrates_database(app: Quart) -> None:
     assert {"repos", "runs", "tests", "test_results", "run_events"} <= tables
 
 
-async def test_skip_migrations(settings: Settings, postgres_databases: PostgresTestDatabases | None) -> None:
-    """``skip_migrations`` leaves an empty database empty (on Postgres a database with no schema,
-    since the ``settings`` fixture's clone is already at head)."""
+async def test_skip_migrations(settings: Settings, postgres_databases: PostgresTestDatabases) -> None:
+    """``skip_migrations`` leaves an empty database empty (a database with no schema, since the
+    ``settings`` fixture's clone is already at head)."""
     update: dict[str, Any] = {"skip_migrations": True}
-    if postgres_databases is not None:  # its helpers run their own event loop: off this one
-        update["database_url"] = await asyncio.to_thread(postgres_databases.create, empty=True)
+    # its helpers run their own event loop: off this one
+    update["database_url"] = await asyncio.to_thread(postgres_databases.create, empty=True)
     try:
         app = create_app(settings.model_copy(update=update))
         async with app.test_app(), app.extensions["db"].engine.connect() as conn:
             tables = await conn.run_sync(lambda sync: inspect(sync).get_table_names())
     finally:
-        if postgres_databases is not None:
-            postgres_databases.retire(update["database_url"])
+        postgres_databases.retire(update["database_url"])
     assert tables == []
 
 
@@ -182,41 +182,33 @@ def test_random_secret_key_persisted_with_private_mode(settings: Settings) -> No
 
 
 @pytest.mark.security
-async def test_data_directories_are_private(
-    settings: Settings, postgres_databases: PostgresTestDatabases | None
-) -> None:
-    """Mirrors hold private source; the database and facts describe it: mode 0700 dirs, 0600 db."""
-    for path in (settings.data_dir, settings.mirrors_dir, settings.facts_dir):
-        path.mkdir(parents=True, exist_ok=True)
-        path.chmod(0o755)
-    app = create_app(settings)
-    for path in (settings.data_dir, settings.mirrors_dir, settings.facts_dir, settings.runs_dir):
-        assert stat.S_IMODE(path.stat().st_mode) == 0o700, path
-    async with app.test_app():
-        pass
-    db_file = sqlite_file_path(settings.database_url)
-    if postgres_databases is None:
-        assert db_file is not None and db_file.is_file() and stat.S_IMODE(db_file.stat().st_mode) == 0o600
-    else:
-        assert db_file is None  # Postgres: no database file under the data dir to protect
+async def test_data_directories_are_private(settings: Settings, tmp_path: Path) -> None:
+    """The data dir (uploaded sources, unpacked uploads) and the cache dir (mirrors, fetched
+    sources) hold private source: both are mode 0700, wherever the cache dir is."""
+    elsewhere = settings.model_copy(update={"cache_dir": tmp_path / "elsewhere" / "cache"})
+    for current in (settings, elsewhere):
+        assert current.cache_dir is not None
+        for path in (current.data_dir, current.cache_dir):
+            path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o755)
+        app = create_app(current)
+        for path in (current.data_dir, current.cache_dir):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o700, path
+        async with app.test_app():
+            pass
 
 
 @pytest.mark.security
-async def test_cli_prepare_db_makes_the_data_directory_private(
-    settings: Settings, postgres_databases: PostgresTestDatabases | None
-) -> None:
+async def test_cli_prepare_db_makes_the_data_directory_private(settings: Settings) -> None:
     from coverset.commands.common import prepare_db
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.data_dir.chmod(0o755)
     await prepare_db(settings)
+    assert settings.cache_dir is not None
     assert stat.S_IMODE(settings.data_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE(settings.mirrors_dir.stat().st_mode) == 0o700
-    db_file = sqlite_file_path(settings.database_url)
-    if postgres_databases is None:
-        assert db_file is not None and stat.S_IMODE(db_file.stat().st_mode) == 0o600
-    else:
-        assert db_file is None  # Postgres: no database file under the data dir to protect
+    assert stat.S_IMODE(settings.cache_dir.stat().st_mode) == 0o700
+    assert settings.runs_dir.is_dir(), "the mark of a coverset data directory (demo --fresh)"
 
 
 @pytest.mark.security

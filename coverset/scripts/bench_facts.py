@@ -55,8 +55,11 @@ from coverset.facts.ingest import RunContext, finalize_run, ingest_shard
 from coverset.facts.queries import line_tests, patch_coverage, shapes_for_function, treemap
 from coverset.facts.store import FactsStore
 from coverset.lang.base import FunctionRegion, func_key
+from coverset.storage.testing import local_facts_store
 
 REPO_ID = 1
+BENCH_DATABASE_URL = "postgresql+asyncpg://localhost/coverset_bench"
+"""The scratch control plane of ``--real`` (a database of its own on the local server)."""
 FUNCS_PER_FILE = 10
 MIN_FILES_PER_TEST = 4
 SHAPE_KEYS = 200
@@ -303,7 +306,7 @@ def bench(p: Params, work: Path) -> dict[str, object]:
     cells = [write_shard(p, repo, s, work / "bundles" / f"shard-{s}", rng) for s in range(p.shards)]
     generate_s = time.perf_counter() - start
     bundle_mb = dir_bytes(work / "bundles") / 1e6
-    store = FactsStore(work / "facts")
+    store = local_facts_store(work / "facts")
     base = datetime(2026, 10, 1, tzinfo=UTC)
     convert_s, ingest_s, finalize_s, run_mb = [], [], [], []
     for run in range(p.timed_runs):
@@ -656,11 +659,11 @@ async def _page_latencies(
     from urllib.parse import quote
 
     from coverset.app import create_app
-    from coverset.facts.store import FactsStore as Store
+    from coverset.facts.store import facts_store
     from coverset.web.facts_view import run_facts
 
     app = create_app(settings)  # type: ignore[arg-type]
-    store = Store(settings.facts_dir)  # type: ignore[attr-defined]
+    store = facts_store(settings)  # type: ignore[arg-type]
     facts = run_facts(store, repo_id, baseline)
     statics = facts.statics
     largest = max(statics.values(), key=lambda s: s.n_lines).path
@@ -743,22 +746,23 @@ def bench_real(
     pr_base: str | None,
     samples: int,
     pages_only: bool = False,
+    database_url: str = BENCH_DATABASE_URL,
 ) -> dict[str, object]:
     """Ingest a real bundle as ``baselines`` default-branch runs (and one PR run against
     ``pr_base``), then time every page. Returns the measurements as JSON-able data.
 
     With ``pages_only`` an existing scratch control plane in ``work`` (from an earlier call with
-    the same ``baselines`` and ``pr_base``) is measured again without ingesting."""
+    the same ``baselines`` and ``pr_base``) is measured again without ingesting. ``database_url`` is
+    the scratch control plane's database (created when the server has none of that name)."""
     from coverset.config import Settings
+    from coverset.facts.store import facts_store
 
     tarball = bundle_dir / "bundle.tar.gz"
     if not tarball.is_file():
         raise SystemExit(f"{tarball} not found: pass the pytest --coverset output directory")
     work.mkdir(parents=True, exist_ok=True)
-    settings = Settings.for_tests(
-        data_dir=work / "data", database_url=f"sqlite+aiosqlite:///{work / 'coverset.db'}"
-    )
-    store = FactsStore(settings.facts_dir)
+    settings = Settings.for_tests(data_dir=work / "data", database_url=database_url)
+    store = facts_store(settings)
     head = _git(repo_root, "rev-parse", "HEAD")
     branch = _git(repo_root, "symbolic-ref", "--short", "HEAD")
     base_time = datetime.now(UTC) - timedelta(days=1)
@@ -783,7 +787,7 @@ def bench_real(
     ingests: list[dict[str, object]] = []
     bundle = None
     if pages_only:
-        if not (work / "coverset.db").is_file():
+        if not store.list_runs(REPO_ID):
             raise SystemExit(f"--pages-only needs an earlier run's scratch control plane in {work}")
         specs_to_ingest: list[dict[str, object]] = []
     else:
@@ -840,9 +844,11 @@ def bench_cache_memory(work: Path, runs: int) -> dict[str, object]:
     """
     import gc
 
+    from coverset.config import Settings
+    from coverset.facts.store import facts_store
     from coverset.web import loaders
 
-    store = FactsStore(work / "data" / "facts")
+    store = facts_store(Settings.for_tests(data_dir=work / "data"))  # the facts only: no database
     source = store.list_runs(REPO_ID)
     if not source:
         raise SystemExit(f"--cache-memory needs an earlier --real scratch control plane in {work}")
@@ -929,7 +935,7 @@ def _ingest_archives(
     from coverset.facts.untrusted import BundleLimits, extract_bundle
     from coverset.lang import read_any_bundle
 
-    store = FactsStore(Path(facts_dir))
+    store = local_facts_store(Path(facts_dir))
     ctx = RunContext(REPO_ID, run_id, "0" * 40, None, "main", None, datetime(2026, 10, 2, tzinfo=UTC), None)
     limits = BundleLimits()
     phases = {"extract_s": 0.0, "read_s": 0.0, "ingest_s": 0.0}
@@ -1024,6 +1030,11 @@ def main_real(argv: list[str]) -> int:
     parser.add_argument("--real", type=Path, required=True, help="a pytest --coverset output directory")
     parser.add_argument("--repo-root", type=Path, required=True, help="the git checkout the tests ran in")
     parser.add_argument("--data-dir", type=Path, required=True, help="a new, empty scratch directory")
+    parser.add_argument(
+        "--database-url",
+        default=BENCH_DATABASE_URL,
+        help="the scratch control plane's database (created if missing; default: %(default)s)",
+    )
     parser.add_argument("--baselines", type=int, default=2, help="default-branch runs to ingest")
     parser.add_argument("--pr-base", help="a commit of the repo to diff a synthetic PR run against")
     parser.add_argument("--samples", type=int, default=20, help="requests per page after the first")
@@ -1053,6 +1064,7 @@ def main_real(argv: list[str]) -> int:
         pr_base=args.pr_base,
         samples=max(args.samples, 1),
         pages_only=args.pages_only,
+        database_url=args.database_url,
     )
     text = json.dumps(results, indent=2, default=str)
     print(text)

@@ -35,6 +35,7 @@ from coverset.facts.queries import (
 )
 from coverset.facts.store import FactsStore, SqlNotAllowed
 from coverset.lang.base import IMPORT_CONTEXT, FunctionRegion, PriorRun, func_key
+from coverset.storage.testing import local_facts_store
 
 INIT_PATH = "src/factspkg/__init__.py"
 CLASSIFY = func_key(MODULE_PATH, "classify", 0)
@@ -324,12 +325,12 @@ def test_two_ingests_of_the_same_bundle_give_identical_markdown(
     reordered = dataclasses.replace(bundle, shapes=tuple(reversed(bundle.shapes)))
     texts = []
     for name, variant in (("a", bundle), ("b", reordered)):
-        store = FactsStore(tmp_path / name)
+        store = local_facts_store(tmp_path / name)
         ingest_shard(store, make_ctx("run-1", day=1), variant, 0, functions)
         texts.append(_markdown(store, functions))
     assert texts[0] == texts[1]
     assert "| `n:positive` | yes | `1` |" in texts[0]  # "1" beats "5": same length, smaller repr
-    store = FactsStore(tmp_path / "a")
+    store = local_facts_store(tmp_path / "a")
     ingest_shard(store, make_ctx("run-2", day=2), reordered, 0, functions)  # the same bundle again
     assert _markdown(store, functions) == texts[0]
 

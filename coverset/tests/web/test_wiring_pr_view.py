@@ -11,6 +11,7 @@ import pytest
 
 from coverset.facts.schema import SCHEMAS
 from coverset.facts.store import FactsStore
+from coverset.storage.testing import local_facts_store
 from coverset.web import pr_view
 from coverset.web.facts_view import RunFacts
 from coverset.web.pr_view import DiffAnalysis, analyse_diff, cache_key
@@ -38,7 +39,7 @@ def _write_table(store: FactsStore, run_id: str, table: str = "file_cov") -> Non
 
 
 def test_a_new_facts_object_for_an_unchanged_run_hits_the_cache(tmp_path: Path, calls: list[Any]) -> None:
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     _write_table(store, "run-1")
     (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")  # tmp_path stands in for the mirror
     first = analyse_diff(tmp_path, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
@@ -51,7 +52,7 @@ def test_a_reingested_run_is_analysed_again_even_if_the_facts_id_is_reused(
 ) -> None:
     """The stale case the id key allowed: the cached object is dropped, a new one for the re-ingested
     run may get the same ``id``; the stamp differs, so the analysis is recomputed."""
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     _write_table(store, "run-1")
     facts = RunFacts(store, 1, "run-1")
     before = cache_key(tmp_path, None, HEAD, facts)
@@ -66,7 +67,7 @@ def test_a_reingested_run_is_analysed_again_even_if_the_facts_id_is_reused(
 
 
 def test_runs_and_stores_never_share_an_entry(tmp_path: Path, calls: list[Any]) -> None:
-    one, two = FactsStore(tmp_path / "one"), FactsStore(tmp_path / "two")
+    one, two = local_facts_store(tmp_path / "one"), local_facts_store(tmp_path / "two")
     for store in (one, two):
         _write_table(store, "run-1")
     _write_table(one, "run-2")
@@ -90,7 +91,7 @@ def test_facts_without_a_store_are_not_cached(tmp_path: Path, calls: list[Any]) 
 def test_an_analysis_without_the_mirror_is_not_cached(tmp_path: Path, calls: list[Any]) -> None:
     """A replica whose cache lost the mirror renders the PR page while the mirror is cloned again
     (object store): that page's empty analysis must not outlive the clone."""
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     _write_table(store, "run-1")
     mirror = tmp_path / "mirrors" / "1.git"
     analyse_diff(mirror, "b" * 40, HEAD, RunFacts(store, 1, "run-1"))
@@ -106,7 +107,7 @@ def test_an_analysis_git_failed_is_not_cached(
     tmp_path: Path, calls: list[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A commit the mirror has not fetched yet fails ``git diff``; the next request tries again."""
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     _write_table(store, "run-1")
     (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
     failing: list[str] = []

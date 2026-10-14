@@ -26,7 +26,7 @@ Both ways in below need a control plane that GitHub and your CI can reach. For a
 with its state in **Postgres and an S3-compatible bucket** (`COVERSET_DATABASE_URL`,
 `COVERSET_BLOB_URL`): the container is then stateless, so Fly.io, ECS Fargate, Modal, Railway,
 Render or one VM with compose all work, and `scripts/smoke_hosted.py` checks a new database and
-bucket end to end. For a trial, the laptop shape (SQLite and files, no service) behind an ngrok
+bucket end to end. For a trial, the laptop shape (the local Postgres and files) behind an ngrok
 tunnel is enough (`coverset dev --tunnel`). [docs/deploy.md](deploy.md) has the requirements, the
 recipes and the costs; [docs/dev.md](dev.md#hosted-like-development) the same Postgres + MinIO shape
 on your machine.

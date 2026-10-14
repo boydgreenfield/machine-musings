@@ -1,7 +1,5 @@
-"""One set of migration files serves both backends: the chain on a fresh Postgres database, the
-models compared with what it built ("alembic check"), down to base and up again, and two replicas
-migrating at once. Skipped without ``COVERSET_TEST_DATABASE_URL`` (``make test-pg``); the SQLite
-side is ``tests/test_models.py::test_migrations_match_models``."""
+"""The migration chain on a fresh database, the models compared with what it built ("alembic
+check"), down to base and up again, and two replicas migrating at once."""
 
 from __future__ import annotations
 
@@ -21,17 +19,15 @@ from coverset.db.testing import PostgresTestDatabases
 
 
 @pytest.fixture
-def empty_postgres(postgres_databases: PostgresTestDatabases | None) -> Iterator[str]:
-    """A Postgres database with no schema at all."""
-    if postgres_databases is None:
-        pytest.skip("needs Postgres: set COVERSET_TEST_DATABASE_URL (make test-pg)")
+def empty_postgres(postgres_databases: PostgresTestDatabases) -> Iterator[str]:
+    """A database with no schema at all."""
     url = postgres_databases.create(empty=True)
     yield url
     postgres_databases.drop(url)
 
 
 def _drift(sync: Connection) -> list[object]:
-    context = MigrationContext.configure(sync, opts={"compare_type": True, "render_as_batch": True})
+    context = MigrationContext.configure(sync, opts={"compare_type": True})
     return compare_metadata(context, Base.metadata)
 
 
@@ -98,7 +94,7 @@ async def test_postgres_column_types(empty_postgres: str) -> None:
     assert types["test_results.test_id"] == types["audit_log.id"] == "bigint"
     assert types["shards.shard_id"] == "integer"  # a position within a run, not an id
     assert types["runs.created_at"] == "timestamp with time zone"
-    assert types["runs.timeline"] == "json"  # sa.JSON, not JSONB: the same migrations on both backends
+    assert types["runs.timeline"] == "json"  # sa.JSON, not JSONB (docs/postgres.md)
     assert types["tests.nodeid_hash"] == "bytea"
     assert types["repos.private"] == "boolean"
     assert sequences == {"bigint"}

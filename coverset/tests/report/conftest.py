@@ -62,11 +62,11 @@ def fixture_out(tmp_path_factory: pytest.TempPathFactory) -> FixtureRun:
 
 @pytest.fixture(scope="session")
 def demo(
-    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases | None
+    tmp_path_factory: pytest.TempPathFactory, postgres_databases: PostgresTestDatabases
 ) -> Iterator[DemoData]:
-    """Run the local demo once (history, both PRs) into a temp data dir, on the suite's backends
-    (SQLite and local facts, or the Postgres database and object-store prefix the
-    ``COVERSET_TEST_*`` variables select; see ``tests/web/conftest.py``)."""
+    """Run the local demo once (history, both PRs) into a temp data dir and a database of its own,
+    on the suite's backends (local blobs, or the object-store prefix ``COVERSET_TEST_BLOB_URL``
+    selects; see ``tests/web/conftest.py``)."""
     if shutil.which("uv") is None or shutil.which("git") is None:
         pytest.skip("the demo needs uv and git")
     from coverset.config import Settings
@@ -81,9 +81,7 @@ def demo(
 
     root = tmp_path_factory.mktemp("report-demo")
     data_dir = root / "data"
-    db_url = f"sqlite+aiosqlite:///{root / 'coverset.db'}"
-    if postgres_databases is not None:
-        db_url = postgres_databases.create()  # dropped with the worker's other databases
+    db_url = postgres_databases.create()  # dropped with the worker's other databases
     blob_url = fresh_blob_url("report-demo") if test_blob_url() is not None else ""
     settings = Settings.for_tests(
         data_dir=data_dir,

@@ -1,5 +1,5 @@
-"""The uploaded-source store on both backends: the same rules, the first upload wins across
-replicas, reads go through the cache, retention and purge remove objects and cached copies."""
+"""The uploaded-source store over files and over S3 alike: the same rules, the first upload wins
+across replicas, reads go through the cache, retention and purge remove objects and cached copies."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 from coverset.facts import cache
 from coverset.facts.sources import MAX_SOURCE_FILE_BYTES, SourceStore, commit_dir
-from coverset.storage import S3BlobStore
+from coverset.storage import BlobStore, LocalBlobStore, S3BlobStore
 from coverset.storage.testing import fresh_blob_url
 
 SHA = "c" * 40
@@ -21,12 +21,13 @@ Replicas = Callable[[str], SourceStore]
 
 @pytest.fixture(params=["local", "s3"])
 def replicas(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Replicas]:
-    """``replicas(name)``: one data directory (local), or one prefix with a cache per replica (s3)."""
+    """``replicas(name)``: one blob store (files, or an S3 prefix) with a cache per replica."""
+    blobs: BlobStore
     if request.param == "local":
-        yield lambda name: SourceStore(tmp_path / "data")
-        return
-    blobs = S3BlobStore.from_url(fresh_blob_url("sources"))
-    yield lambda name: SourceStore(tmp_path / name / "data", blobs=blobs, cache_dir=tmp_path / name / "cache")
+        blobs = LocalBlobStore(tmp_path / "data")
+    else:
+        blobs = S3BlobStore.from_url(fresh_blob_url("sources"))
+    yield lambda name: SourceStore(blobs, tmp_path / name / "cache")
     blobs.delete([info.key for info in blobs.list()])
 
 
@@ -51,11 +52,10 @@ def test_store_read_list_and_checkout(replicas: Replicas, tmp_path: Path) -> Non
     assert reader.read(3, SHA, "../x") is None and reader.read(3, "HEAD", "pkg/a.py") is None
     checkout = reader.checkout(3, SHA)
     assert (checkout / "pkg" / "a.py").read_text() == "one"
-    if reader.blobs is not None:
-        assert checkout == commit_dir(reader.cache_dir, 3, SHA), "a replica reads its cache"
-        cached = checkout / "pkg" / "a.py"
-        assert stat.S_IMODE(cached.stat().st_mode) == 0o600
-        assert stat.S_IMODE(cached.parent.stat().st_mode) == 0o700
+    assert checkout == commit_dir(reader.cache_dir, 3, SHA), "a replica reads its cache"
+    cached = checkout / "pkg" / "a.py"
+    assert stat.S_IMODE(cached.stat().st_mode) == 0o600
+    assert stat.S_IMODE(cached.parent.stat().st_mode) == 0o700
 
 
 def test_the_first_upload_of_a_path_wins_on_every_replica(replicas: Replicas, tmp_path: Path) -> None:
@@ -70,8 +70,6 @@ def test_the_first_upload_of_a_path_wins_on_every_replica(replicas: Replicas, tm
 
 def test_a_cached_symlink_is_never_followed(replicas: Replicas, tmp_path: Path) -> None:
     store = replicas("reader")
-    if store.blobs is None:
-        pytest.skip("the local default's own symlink rules are tested in tests/web/test_uploads.py")
     replicas("writer").store(3, SHA, _uploaded(tmp_path / "up", {"a.py": "one"}), allowed={"a.py"})
     target = commit_dir(store.cache_dir, 3, SHA)
     target.mkdir(parents=True)
@@ -83,7 +81,6 @@ def test_a_cached_symlink_is_never_followed(replicas: Replicas, tmp_path: Path) 
 
 def _count(store: SourceStore, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """Count the store requests a replica makes."""
-    assert store.blobs is not None
     calls = {"head": 0, "get": 0, "list": 0}
     blobs = store.blobs
     head, get_file, listing = blobs.head, blobs.get_file, blobs.list
@@ -110,11 +107,9 @@ def test_checkout_is_one_listing_and_parallel_gets(
     replicas: Replicas, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     writer, reader = replicas("writer"), replicas("reader")
-    if reader.blobs is None:
-        pytest.skip("the local default has nothing to fetch")
     files = {f"pkg/m{n}.py": f"module {n}" for n in range(20)}
     writer.store(3, SHA, _uploaded(tmp_path / "up", files), allowed=set(files))
-    writer.blobs.put_bytes(f"sources/3/{SHA}/pkg/huge.py", b"x" * (MAX_SOURCE_FILE_BYTES + 1))  # type: ignore[union-attr]
+    writer.blobs.put_bytes(f"sources/3/{SHA}/pkg/huge.py", b"x" * (MAX_SOURCE_FILE_BYTES + 1))
     calls = _count(reader, monkeypatch)
     checkout = reader.checkout(3, SHA)
     assert sorted(p.name for p in (checkout / "pkg").iterdir()) == sorted(f"m{n}.py" for n in range(20))
@@ -126,8 +121,6 @@ def test_a_miss_is_remembered_for_the_sync_interval(
     replicas: Replicas, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     writer, reader = replicas("writer"), replicas("reader")
-    if reader.blobs is None:
-        pytest.skip("the local default has no bucket to ask")
     writer.store(3, SHA, _uploaded(tmp_path / "up", {"a.py": "one"}), allowed={"a.py"})
     cache.configure({cache.SYNC_INTERVAL_ENV: "3600"})
     calls = _count(reader, monkeypatch)

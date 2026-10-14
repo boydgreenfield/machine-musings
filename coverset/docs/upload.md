@@ -224,9 +224,9 @@ a minute per client address, counted before the view verifies the credential. Ac
   checks: the neutral bundle's `files` table lists them, plus `pyproject.toml` and the configured
   invariants file, and `git ls-files` reports them as tracked. Symlinks, missing files and files over
   2 MiB are skipped, and the client prints the count of each. The server applies the same rule
-  again: it stores only paths the shard's own bundle lists, plus those two config files, under
-  `<data_dir>/sources/<repo_id>/<sha>/` (directories 0700, files 0600, created with
-  `O_EXCL|O_NOFOLLOW`). A commit's files are written once, and a later upload cannot change them. A
+  again: it stores only paths the shard's own bundle lists, plus those two config files, as the blobs
+  `sources/<repo_id>/<sha>/<path>` (under the data directory, or in the bucket), checked in a private
+  staging directory first (directories 0700, files 0600, created with `O_EXCL|O_NOFOLLOW`). A commit's files are written once, and a later upload cannot change them. A
   member path with `..`, an absolute path or a link makes the whole archive fail with 400. The
   source view reads the store only for paths the run's facts list, and only after the mirror had no
   copy.
@@ -318,9 +318,9 @@ a local Hypercorn server (`tests/e2e/test_upload_e2e.py` setup, 3 runs):
   GitHub's own "Re-run" on the check still sends a `rerequested` event, which the intake turns into
   a managed `rerun` run.
 * Retention covers what upload mode stores: when `coverset gc` (or the per-PR rule) expires a run,
-  its shard archives (`<runs_dir>/<run_id>/upload/`) go, and so do the uploaded sources of its head
-  commit (`<data_dir>/sources/<repo_id>/<sha>/`) once no remaining run of the repository has that
-  head. `coverset repo purge` removes the repository's whole `sources/<repo_id>/` directory and the
-  upload archives of its runs.
+  its unpacked shards (`<runs_dir>/<run_id>/upload/`) go, and so do the uploaded sources and the
+  upload archives of its head commit (`sources/<repo_id>/<sha>/`, `uploads/<repo_id>/<sha>/`) once no
+  remaining run of the repository has that head. `coverset repo purge` removes the repository's
+  whole `sources/<repo_id>/` and `uploads/<repo_id>/` and the unpacked uploads of its runs.
 * The OIDC token's `sha` claim is not bound to `X-Coverset-Sha`: for pull requests it names the
   merge commit, not the head. A job can therefore upload for any commit of its own repository.

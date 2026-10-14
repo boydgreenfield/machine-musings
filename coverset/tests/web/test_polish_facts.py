@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 
 from coverset.facts.ingest import RunContext, finalize_run
-from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleLimits
 from coverset.lang import adapter_for_language
 from coverset.orchestrator.bundles import IngestJob, ingest_one
+from coverset.storage.testing import local_blob_url, local_facts_store
 from coverset.web.facts_view import FunctionView, RunFacts
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +32,7 @@ def ingest(tmp: Path, language: str) -> tuple[RunFacts, Path]:
     ctx = RunContext(REPO, RUN, "a" * 40, "b" * 40, "main", 3, datetime(2026, 10, 14, tzinfo=UTC), None)
     job = IngestJob(
         facts_dir=str(tmp),
+        blob_url=local_blob_url(tmp),
         ctx=ctx,
         shard_id=0,
         tarball=str(fixture / "bundle.tar.gz"),
@@ -44,7 +45,7 @@ def ingest(tmp: Path, language: str) -> tuple[RunFacts, Path]:
     )
     outcome = ingest_one(job)
     assert outcome.ok, outcome.error
-    store = FactsStore(tmp)
+    store = local_facts_store(tmp)
     finalize_run(store, ctx, expected_shards=1, catalogue=adapter_for_language(language).shape_catalogue())
     return RunFacts(store, REPO, RUN), tree
 

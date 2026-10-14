@@ -19,6 +19,7 @@ from coverset import settings_scopes as ss
 from coverset.config import Settings
 from coverset.db.models import AuditEvent, Repo, Run, ScopedSetting
 from coverset.db.session import Database, init_db
+from coverset.facts.store import facts_store
 from coverset.forge.github_events import parse_github_event
 from coverset.lang.python import CoversetConfig
 from coverset.orchestrator.intake import intake
@@ -53,9 +54,17 @@ async def db(settings: Settings) -> AsyncIterator[Database]:
     await database.engine.dispose()
 
 
-async def _repo(db: Database, full_name: str = "Acme/widgets", *, ai_column: bool = False) -> Repo:
+async def _repo(
+    db: Database, full_name: str = "Acme/widgets", *, ai_column: bool = False, repo_id: int | None = None
+) -> Repo:
     async with db.session() as session:
-        repo = Repo(forge="github", external_id=full_name, full_name=full_name, ai_review_enabled=ai_column)
+        repo = Repo(
+            id=repo_id,
+            forge="github",
+            external_id=full_name,
+            full_name=full_name,
+            ai_review_enabled=ai_column,
+        )
         session.add(repo)
         await session.commit()
         await session.refresh(repo)
@@ -466,7 +475,6 @@ def orch() -> Any:
 async def test_planner_applies_repository_policy(
     db: Database, settings: Settings, tmp_path: Path, orch: Any
 ) -> None:
-    from coverset.facts.store import FactsStore
     from coverset.orchestrator.planner import plan_run
     from coverset.orchestrator.repos import register_local_repo
 
@@ -489,7 +497,7 @@ async def test_planner_applies_repository_policy(
     plan = await plan_run(
         db,
         capped,
-        FactsStore(settings.facts_dir),
+        facts_store(settings),
         run,
         executor=executor,
         env_spec_builder=orch.fake_env_spec,
@@ -512,11 +520,11 @@ async def _purge(db: Database, repo_id: int) -> None:
         await session.commit()
 
 
-@pytest.mark.sqlite_only  # Postgres sequences never hand out a deleted id again
 async def test_orphaned_repo_rows_never_reach_the_next_repository_with_that_id(
     db: Database, settings: Settings
 ) -> None:
-    """SQLite reuses the highest rowid: a purged repository's policy must not relax the next one's."""
+    """An id can come back (a restored dump, a reset sequence): a purged repository's policy must not
+    relax the policy of the next repository given its id."""
     await _repo(db, "acme/first")
     gone = await _repo(db, "acme/public-new")
     await _set(db, "policy.untrusted_pr_policy", "run_blocked_network", "repo", gone.id)
@@ -524,8 +532,8 @@ async def test_orphaned_repo_rows_never_reach_the_next_repository_with_that_id(
     async with db.session() as session:  # warm the cache, as a running serve would have
         assert (await effective_policy(session, gone, settings)).public_report is True
     await _purge(db, gone.id)  # without forget_scope: the rows stay behind
-    newcomer = await _repo(db, "newco/unrelated")
-    assert newcomer.id == gone.id, "the precondition: SQLite handed out the same id"
+    newcomer = await _repo(db, "newco/unrelated", repo_id=gone.id)
+    assert newcomer.id == gone.id
     async with db.session() as session:
         policy = await effective_policy(session, newcomer, settings)
         stub = await ss.repo_stub(session, newcomer.id)

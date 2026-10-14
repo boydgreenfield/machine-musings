@@ -35,6 +35,7 @@ from coverset.app import create_app
 from coverset.config import Settings
 from coverset.db.models import ForgeCall, PullRequest, Run
 from coverset.db.session import Database, init_db
+from coverset.db.testing import PostgresTestDatabases
 from coverset.demo.flow import register_demo_repo
 from coverset.demo.seed import seed_demo_repo
 from coverset.forge.registry import forge_for_app
@@ -69,14 +70,14 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def server(tmp_path: Path) -> Iterator[Server]:
+def server(tmp_path: Path, postgres_databases: PostgresTestDatabases) -> Iterator[Server]:
     """coverset on Hypercorn with the demo repository registered and one repository token."""
     demo_git = tmp_path / "demo.git"
     shas = seed_demo_repo(demo_git)
     port = _free_port()
     settings = Settings.for_tests(
         data_dir=tmp_path / "data",
-        database_url=f"sqlite+aiosqlite:///{tmp_path / 'coverset.db'}",
+        database_url=postgres_databases.create(),
         admin_token=ADMIN,
         public_url=f"http://127.0.0.1:{port}",
         forge="fake",

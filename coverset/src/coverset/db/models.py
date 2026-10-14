@@ -4,7 +4,8 @@ Row counts here stay O(files) + O(tests) per run; per-line coverage and argument
 Parquet facts store. String enums are typed with ``Literal`` aliases and stored as ``VARCHAR(32)``;
 every datetime is aware UTC (:class:`coverset.db.types.UTCDateTime`); JSON columns are
 :data:`JSONDict` or :data:`JSONList` so in-place edits are saved. Every foreign-key column is the
-leading column of some index, because SQLite looks children up by it on every parent delete.
+leading column of some index, because every parent delete looks the children up by it and Postgres
+does not index a foreign key by itself.
 """
 
 from __future__ import annotations

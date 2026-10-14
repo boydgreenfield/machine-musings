@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -362,9 +361,11 @@ async def test_tokens_read_the_v1_api_for_their_repository(app: Quart, client: C
 
 
 @pytest.fixture
-def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CliRunner:
-    monkeypatch.setenv("COVERSET_DATA_DIR", str(tmp_path / "data"))
-    for name in ("COVERSET_DATABASE_URL", "COVERSET_ADMINS", "COVERSET_ADMIN_TOKEN"):
+def runner(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> CliRunner:
+    """The CLI on the ``settings`` fixture's data dir and database (what :func:`seed_cli_db` fills)."""
+    monkeypatch.setenv("COVERSET_DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("COVERSET_DATABASE_URL", settings.database_url)
+    for name in ("COVERSET_ADMINS", "COVERSET_ADMIN_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     from coverset.config import get_settings
 
@@ -373,10 +374,7 @@ def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CliRunner:
     get_settings.cache_clear()
 
 
-async def seed_cli_db(tmp_path: Path) -> Settings:
-    settings = Settings.for_tests(
-        data_dir=tmp_path / "data", database_url=f"sqlite+aiosqlite:///{tmp_path / 'data' / 'coverset.db'}"
-    )
+async def seed_cli_db(settings: Settings) -> Settings:
     await init_db(settings)
     db = Database.from_url(settings.database_url)
     try:
@@ -391,9 +389,9 @@ async def seed_cli_db(tmp_path: Path) -> Settings:
     return settings
 
 
-def test_cli_users_and_tokens(runner: CliRunner, tmp_path: Path) -> None:
+def test_cli_users_and_tokens(runner: CliRunner, settings: Settings) -> None:
     """Synchronous on purpose: the commands call ``asyncio.run`` themselves."""
-    settings = asyncio.run(seed_cli_db(tmp_path))
+    settings = asyncio.run(seed_cli_db(settings))
     assert "users" in cli.commands and not cli.commands["users"].hidden
     assert "Accounts, instance roles" in runner.invoke(cli, ["users", "--help"]).output
 

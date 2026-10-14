@@ -264,7 +264,7 @@ rebased branch can skew it.
 
 - **Control plane**: `finalize_run(store, ctx, ..., economy=EconomyInputs(...))` calls
   `write_economy` last, under the run lock. Sources come from the repository's bare mirror, which
-  `Settings` puts beside the facts directory (`<data_dir>/mirrors/<repo_id>.git`;
+  `Settings` puts beside the facts directory (`<cache_dir>/mirrors/<repo_id>.git`;
   `mirror_history`), read in a few batches: the test files, their conftests and the measured Python
   files at the head commit; then the helper modules those test files import (two rounds); at most
   5,000 files of at most 2 MB each. The base run's test files and the covered production files are

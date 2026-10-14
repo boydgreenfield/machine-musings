@@ -203,7 +203,7 @@ async def test_function_pages_share_the_lexed_source(
     url = f"/repos/{demo.repo_id}/functions/{key}?run={demo.pr2_run}"
     assert (await client.get(url)).status_code == 200
     first = len(calls)
-    assert first <= 1
+    assert first <= 1, calls
     assert (await client.get(url)).status_code == 200
     card = await client.get(f"/repos/{demo.repo_id}/prs/2/functions/{key}?run={demo.pr2_run}")
     assert card.status_code == 200

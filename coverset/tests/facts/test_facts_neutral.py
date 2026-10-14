@@ -11,7 +11,6 @@ from facts_helpers import FIXTURE_DIR, make_ctx
 
 from coverset.facts.ingest import finalize_run, ingest_shard
 from coverset.facts.queries import function_input_cov, run_summary
-from coverset.facts.store import FactsStore
 from coverset.facts.untrusted import BundleError, BundleLimits
 from coverset.lang import adapter_for_language, bundle_kind, read_any_bundle
 from coverset.lang.base import FuncSampling, FunctionRegion, LanguageAdapter
@@ -25,6 +24,7 @@ from coverset.lang.neutral import (
 )
 from coverset.lang.python import PythonAdapter
 from coverset.orchestrator.bundles import merge_sampling
+from coverset.storage.testing import local_facts_store
 from coverset_model.io import write_bundle
 
 NEUTRAL_TS = FIXTURE_DIR.parent / "neutral-ts"
@@ -115,7 +115,7 @@ def test_changed_functions_from_shipped_regions() -> None:
 
 
 def test_ingest_a_neutral_bundle(tmp_path: Path) -> None:
-    store = FactsStore(tmp_path / "facts")
+    store = local_facts_store(tmp_path / "facts")
     ctx = make_ctx("ts-1")
     bundle = read_any_bundle(NEUTRAL_TS / "bundle")
     result = ingest_shard(store, ctx, bundle, 0, bundle.functions, language="typescript")

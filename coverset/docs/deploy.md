@@ -4,26 +4,25 @@ coverset's control plane (the web UI, `/webhooks/github`, the `/v1` API, the run
 reaper and the warm-pool maintainer) is one Python process, built from one image. Shards run
 elsewhere: in Modal Sandboxes (`COVERSET_EXECUTOR=modal`) whichever host serves the control plane.
 
-It keeps its state in one of two shapes:
+Its rows are always in Postgres (`COVERSET_DATABASE_URL`, [postgres.md](postgres.md)); its blobs
+(facts, uploads, uploaded sources) are in one of two places:
 
-* **Hosted: Postgres + an S3-compatible bucket.** `COVERSET_DATABASE_URL` names Postgres and
-  `COVERSET_BLOB_URL` a bucket (AWS S3, MinIO, Cloudflare R2, Tigris). Nothing on the container's
-  disk has to survive a restart: the data directory is a disposable cache. Any platform that runs
-  a container can host it, a redeploy loses no run, fact or setting (the reaper's sandbox tag is
-  the one exception, see [Scaling](#scaling)), and a second replica can share the database
-  (the leader lease keeps the background loops in one of them). **This is the shape for anything
-  other people depend on.**
-* **Laptop: SQLite + files under `COVERSET_DATA_DIR`.** No service to run, which is what the demo,
-  the tests and `coverset dev` use. It works on a server too, as long as the data directory is a
-  disk that outlives the container and exactly one process uses it.
+* **Hosted: an S3-compatible bucket.** `COVERSET_BLOB_URL` names a bucket (AWS S3, MinIO,
+  Cloudflare R2, Tigris). Nothing on the container's disk has to survive a restart: the data
+  directory is a disposable cache. Any platform that runs a container can host it, a redeploy loses
+  no run, fact or setting (the reaper's sandbox tag is the one exception, see [Scaling](#scaling)),
+  and a second replica can share the database (the leader lease keeps the background loops in one
+  of them). **This is the shape for anything other people depend on.**
+* **Files under `COVERSET_DATA_DIR`.** No bucket to run, which is what the demo, the tests and
+  `coverset dev` use. It works on a server too, as long as the data directory is a disk that
+  outlives the container.
 
-`Settings.hosted` is true when both URLs are set, and `coverset deploy check` says which shape a
-deployment is in (the `state` row). The database layer is described in
-[postgres.md](postgres.md), the object store in [object-store.md](object-store.md); this page is
-how to run them.
+`Settings.hosted` is true when a blob URL is set, and `coverset deploy check` says which shape a
+deployment is in (the `state` row). The object store is described in
+[object-store.md](object-store.md); this page is how to run them.
 
 - [What the app needs](#what-the-app-needs)
-- [Laptop or hosted](#laptop-or-hosted)
+- [Files or a bucket](#files-or-a-bucket)
 - [Recipes](#recipes): [Fly.io](#flyio), [AWS (ECS Fargate, RDS, S3)](#aws-ecs-fargate-rds-s3),
   [one VM with compose](#one-vm-lightsail-or-ec2-with-compose), [Modal](#modal),
   [Railway and Render](#railway-and-render), [a demo from your laptop](#a-public-demo-from-your-laptop-ngrok)
@@ -43,41 +42,40 @@ was used tonight).
 
 | Need | Why | How |
 |---|---|---|
-| **One long-lived process, or a leader among replicas** | The run dispatcher, the retention gc, the sandbox reaper and the warm-pool maintainer run inside the web process, and webhooks must not wait for a cold start. On Postgres, a session advisory lock (the leader lease, `db/leader.py`) runs those loops in exactly one replica; the others serve requests. | Always on: `min_machines_running = 1` (Fly), a desired count of 1+ (ECS), `min_containers=1` (Modal). Not scale-to-zero, and not a platform that throttles the CPU between requests (AWS App Runner does; see the AWS recipe). |
+| **One long-lived process, or a leader among replicas** | The run dispatcher, the retention gc, the sandbox reaper and the warm-pool maintainer run inside the web process, and webhooks must not wait for a cold start. A session advisory lock (the leader lease, `db/leader.py`) runs those loops in exactly one replica; the others serve requests. | Always on: `min_machines_running = 1` (Fly), a desired count of 1+ (ECS), `min_containers=1` (Modal). Not scale-to-zero, and not a platform that throttles the CPU between requests (AWS App Runner does; see the AWS recipe). |
 | **An SSE-friendly proxy** | Run pages and `coverset-ci wait` stream events (`text/event-stream`); coverset sends `: ping` every 15 s. | No response buffering, an idle timeout well above 15 s (600 s here), no cap on a request's total duration below a few minutes. Caddy `flush_interval -1`; ALB idle timeout 600 s; Fly `idle_timeout = 600`. |
-| **Postgres** | Every row: runs, tests, results, events, tokens, settings. 17 is what the dev stack and the tests use. | A direct or session-mode connection string. Not a transaction-mode pooler (PgBouncer `pool_mode=transaction`, Neon's `-pooler` host, Supabase on 6543): the leader lease is a session lock and asyncpg prepares statements per connection. Each process opens a pool of 10 + 10 overflow (`coverset db status` prints it). |
-| **An S3-compatible bucket** | Facts (Parquet), run manifests, the per-repository dictionary, uploads and uploaded sources. | `COVERSET_BLOB_URL=s3://bucket[/prefix]?endpoint_url=...&region=...` (no `endpoint_url` for AWS S3). Credentials from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE` or an instance/task role. The store must honour conditional writes (`If-Match`, `If-None-Match`); `coverset deploy check` probes it. |
+| **Postgres 14+** | Every row: runs, tests, results, events, tokens, settings. The tests run on 14 and 17. | A direct or session-mode connection string. Not a transaction-mode pooler (PgBouncer `pool_mode=transaction`, Neon's `-pooler` host, Supabase on 6543): the leader lease is a session lock and asyncpg prepares statements per connection. Each process opens a pool of 10 + 10 overflow (`coverset deploy check` prints it). The database is created on first start when the URL's user may `CREATE DATABASE`; otherwise create it once. |
+| **An S3-compatible bucket** (hosted) | Facts (Parquet), run manifests, the per-repository dictionary, uploads and uploaded sources. | `COVERSET_BLOB_URL=s3://bucket[/prefix]?endpoint_url=...&region=...` (no `endpoint_url` for AWS S3). Credentials from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE` or an instance/task role. The store must honour conditional writes (`If-Match`, `If-None-Match`); `coverset deploy check` probes it. |
 | **A public `https` URL** | GitHub's webhooks, the App's callbacks, the OIDC audience of uploads, `Secure` cookies and HSTS all derive from `COVERSET_PUBLIC_URL`. | The platform's TLS (Fly, Modal, an ALB with ACM) or Caddy on a VM. A public URL requires `COVERSET_ADMIN_TOKEN` (32+ characters): open mode is refused. |
 | **A disposable local cache** | DuckDB and pyarrow read local files, so facts are downloaded once into `COVERSET_CACHE_DIR`; git mirrors live there too. | On the container's own disk (`/var/cache/coverset` in the image); bounded by `COVERSET_CACHE_MAX_GB` (10 by default; gc and start-up evict beyond it). Lose it and the next request re-downloads. |
 | **Secrets** | Admin token, cookie key, GitHub App credentials, the database URL, bucket credentials. | The platform's secret store, never the image. The App's private key as PEM text in `COVERSET_GITHUB_APP_PRIVATE_KEY`: the image's entrypoint writes it to the key path at start (nothing `/setup` writes to disk survives a restart in the hosted shape). |
 | **A Modal token** (optional) | The executor creates sandboxes. | `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`; not needed on Modal itself, where the container runtime authenticates. Upload mode needs no executor at all. |
 
-## Laptop or hosted
+## Files or a bucket
 
-| | Laptop demo: SQLite + files | Hosted: Postgres + S3 |
+| | Files under the data dir | Hosted: a bucket |
 |---|---|---|
-| Set with | nothing (the defaults) | `COVERSET_DATABASE_URL` + `COVERSET_BLOB_URL` (+ bucket credentials) |
-| Services to run | none | a Postgres and a bucket (managed, or the compose `hosted` profile on one VM) |
-| What must survive a restart | the whole data directory | the database and the bucket; the data dir and cache are disposable |
-| Replicas | exactly one process | one or more (the leader lease runs the background loops once) |
+| Set with | `COVERSET_DATABASE_URL` | `COVERSET_DATABASE_URL` + `COVERSET_BLOB_URL` (+ bucket credentials) |
+| Services to run | Postgres | Postgres and a bucket (managed, or the compose `hosted` profile on one VM) |
+| What must survive a restart | the database and the data directory | the database and the bucket; the data dir and cache are disposable |
+| Replicas | the ones that share the data directory's disk | one or more (the leader lease runs the background loops once) |
 | Deploys | in place, on the disk that holds the data | anywhere: a new container is as good as the old one |
-| Backups | copy the SQLite file (online backup API) and the data dir | provider snapshots / PITR + bucket versioning |
+| Backups | the database's, and the data dir's disk | provider snapshots / PITR + bucket versioning |
 | Good for | the demo, development, a public demo through ngrok, one person's server on one VM | anything a team or CI depends on; Fly, ECS, Modal, Railway, Render |
-| Develop against it | `make dev` | `make dev-hosted` (Postgres + MinIO in Docker, [dev.md](dev.md#hosted-like-development)) |
-| Move from one to the other | `coverset db copy --to postgresql://...` copies every table ([postgres.md](postgres.md)); the facts move with the object store's tools ([object-store.md](object-store.md)) | |
+| Develop against it | `make dev` (the local Postgres) | `make dev-hosted` (Postgres 17 + MinIO in Docker, [dev.md](dev.md#hosted-like-development)) |
 
 ## Recipes
 
-Every recipe below is stateless (Postgres + a bucket) except where it says otherwise, and runs
-the same image (`Dockerfile`; Modal builds the same contents natively).
+Every recipe below is stateless (Postgres + a bucket) except the VM without its `hosted` profile,
+and runs the same image (`Dockerfile`; Modal builds the same contents natively).
 
 | | **Fly.io** | **AWS: ECS Fargate** | **One VM + compose** | **Modal** | **Railway / Render** |
 |---|---|---|---|---|---|
-| Files | `deploy/fly/` | `deploy/aws/ecs-task-definition.json`, `iam-policy.json` | `deploy/compose.yml` (profile `hosted`), `deploy/aws/user-data.sh` | `deploy/modal/coverset_web.py` | the Dockerfile |
+| Files | `deploy/fly/` | `deploy/aws/ecs-task-definition.json`, `iam-policy.json` | `deploy/compose.yml` (Postgres; MinIO with profile `hosted`), `deploy/aws/user-data.sh` | `deploy/modal/coverset_web.py` | the Dockerfile |
 | Postgres | Fly Managed Postgres, or Neon | RDS for PostgreSQL | the `postgres` service on the VM | Neon, RDS, Supabase (direct), any | the platform's Postgres |
 | Bucket | Tigris (`fly storage create`) | S3 with the task role | the `minio` service on the VM | R2, S3, Tigris | R2 or S3 |
 | TLS and URL | `https://<app>.fly.dev` | ALB + ACM on your domain | Caddy + Let's Encrypt (`sslip.io` without a domain) | `https://<workspace>-coverset--coverset-web.<region>.modal.run` | the platform's |
-| Status | config only | config only | **verified locally** 2026-10-14: the `hosted` profile and the files shape each ran with Caddy (`tls internal`) | Volume mode **deployed** 2026-10-13; hosted mode tested with `modal` stubbed (`tests/test_deploy_hosted.py`), not deployed | notes only |
+| Status | config only | config only | the `hosted` profile **verified locally** 2026-10-14 with Caddy (`tls internal`); Postgres without the profile: config only | tested with `modal` stubbed (`tests/test_deploy_hosted.py`), not deployed in this shape | notes only |
 
 ### Fly.io
 
@@ -148,29 +146,30 @@ Fargate.
 ### One VM (Lightsail or EC2) with compose
 
 The cheapest always-on option keeps everything on one machine: [`deploy/compose.yml`](../deploy/compose.yml)
-runs coverset and Caddy, and its **`hosted` profile** adds Postgres 17 and MinIO (built by
-Chainguard; MinIO no longer publishes pullable `minio/minio` images) whose data sits on the VM's
-data disk. coverset's own container is then disposable, exactly as on a platform.
+runs coverset, Postgres 17 and Caddy, and its **`hosted` profile** adds MinIO (built by Chainguard;
+MinIO no longer publishes pullable `minio/minio` images) whose data sits on the VM's data disk.
+coverset's own container is then disposable, exactly as on a platform.
 
 ```sh
 cd deploy
 cp coverset.env.example coverset.env && cp services.env.example services.env   # fill both, chmod 600
 # coverset.env: COVERSET_DATABASE_URL=postgresql+asyncpg://coverset:<POSTGRES_PASSWORD>@postgres:5432/coverset
-#               COVERSET_BLOB_URL=s3://coverset?endpoint_url=http://minio:9000&region=us-east-1
+#   with the profile also COVERSET_BLOB_URL=s3://coverset?endpoint_url=http://minio:9000&region=us-east-1
 #               AWS_ACCESS_KEY_ID=<MINIO_ROOT_USER>  AWS_SECRET_ACCESS_KEY=<MINIO_ROOT_PASSWORD>
 COMPOSE_PROFILES=hosted COVERSET_DOMAIN=coverset.example.com docker compose up -d --build
 ```
 
 [`deploy/aws/user-data.sh`](../deploy/aws/user-data.sh) does all of it on a fresh Ubuntu 24.04
-instance with `COVERSET_STATE=hosted`: random passwords in `/opt/coverset/services.env`, the URLs
-appended to `/opt/coverset/coverset.env`, Postgres and MinIO data under `/srv/coverset/data/{postgres,minio}`
-on the attached disk, coverset's own (cache) data dir under `/srv/coverset/data/app`, and a nightly
-`pg_dump` into `/srv/coverset/data/backups` (7 days). The MinIO bucket is created with versioning
-on and a lifecycle rule that expires noncurrent versions after 30 days
-(`COVERSET_MINIO_NONCURRENT_DAYS`), so what gc and purge delete leaves the shared disk a month
-later instead of never. Neither service publishes a port; only Caddy does. Without the profile (the default,
-`COVERSET_STATE=files`) the VM runs SQLite + files on the data disk, as before. A 2 GB instance is
-tight for three services plus the image build: take 4 GB (Lightsail $24) for the `hosted` profile.
+instance: random passwords in `/opt/coverset/services.env`, the URLs appended to
+`/opt/coverset/coverset.env`, Postgres (and, with `COVERSET_STATE=hosted`, MinIO) data under
+`/srv/coverset/data/{postgres,minio}` on the attached disk, coverset's own data dir under
+`/srv/coverset/data/app`, and a nightly `pg_dump` into `/srv/coverset/data/backups` (7 days). The
+MinIO bucket is created with versioning on and a lifecycle rule that expires noncurrent versions
+after 30 days (`COVERSET_MINIO_NONCURRENT_DAYS`), so what gc and purge delete leaves the shared
+disk a month later instead of never. Neither service publishes a port; only Caddy does. Without the
+profile (the default, `COVERSET_STATE=files`) the blobs are files in coverset's data dir on the data
+disk. A 2 GB instance is tight for three services plus the image build: take 4 GB (Lightsail $24)
+for the `hosted` profile.
 
 Verified on this machine (2026-10-14, Docker Desktop, project name `coverset-pass-c`, Caddy with
 `tls internal` on ports 18088/18443): `COMPOSE_PROFILES=hosted docker compose up -d --build` started
@@ -178,8 +177,8 @@ Postgres, MinIO, the one-shot `minio-init` ("Bucket created successfully", "vers
 exit 0), then coverset once Postgres was healthy, then Caddy; `https://coverset.localhost:18443/healthz`
 answered through Caddy, and `coverset deploy check` in the container passed the `database`
 (Postgres 17.11 at head 0009), `object store` (conditional writes ok), `cache dir` and `state`
-(`hosted`) rows. The same file without the profile ran SQLite + files (`state`: laptop). The
-`user-data.sh` changes pass `bash -n`; they were not run on a VM.
+(`hosted`) rows. The compose file's Postgres-without-the-profile layout and the `user-data.sh`
+changes pass `docker compose config` and `bash -n`; they were not run on a VM.
 
 Operating it is unchanged ([deploy/aws/README.md](../deploy/aws/README.md)): `docker compose
 --env-file /etc/coverset.compose.env ps|logs|exec`. psql: `docker compose --env-file
@@ -187,51 +186,35 @@ Operating it is unchanged ([deploy/aws/README.md](../deploy/aws/README.md)): `do
 
 ### Modal
 
-`deploy/modal/coverset_web.py` serves the app from one always-on Modal container and chooses its
-layout from the Secret `coverset-web` at container start:
-
-* **Hosted mode** (the Secret has a Postgres `COVERSET_DATABASE_URL`, an `s3://` `COVERSET_BLOB_URL`
-  and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for the bucket): stateless. The Volume
-  restore/backup machinery is skipped entirely; the data dir, the cache and the working directory
-  are on the container's disk; `COVERSET_GITHUB_APP_PRIVATE_KEY` (PEM text in the Secret) is written
-  to `secrets/github-app.pem` there. Deploy with `COVERSET_WEB_STATE=hosted` in your shell so the
-  function mounts no Volume at all; a container that then finds no Postgres and bucket in its
-  Secret refuses to start instead of keeping its only database on a disk that disappears.
-  `COVERSET_WEB_MAX_CONTAINERS=2` (hosted only) lets Modal run a second container; the leader
-  lease keeps the background loops in one of them.
-* **Volume mode** (anything else, the fallback and what ran on 2026-10-13): SQLite on the
-  container's disk, restored from and backed up to the Volume `coverset-data` every 60 s
-  ([below](#the-live-modal-deployment)).
+`deploy/modal/coverset_web.py` serves the app from an always-on Modal container that keeps no
+state: the Secret `coverset-web` must hold a Postgres `COVERSET_DATABASE_URL`, an `s3://`
+`COVERSET_BLOB_URL`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for the bucket and
+`COVERSET_ADMIN_TOKEN`, or the container refuses to start with one line naming what is missing. The
+data dir, the cache and the working directory are on the container's disk (`/root/coverset-data`);
+`COVERSET_GITHUB_APP_PRIVATE_KEY` (PEM text in the Secret) is written to `secrets/github-app.pem`
+there. `COVERSET_WEB_MAX_CONTAINERS=2` (deploy time) lets Modal run a second container; the leader
+lease keeps the background loops in one of them.
 
 ```sh
 cat > /tmp/coverset-web.env <<'EOF'
 COVERSET_ADMIN_TOKEN=<64 hex>
 COVERSET_SECRET_KEY=<64 hex>
 COVERSET_PUBLIC_URL=https://<workspace>-coverset--coverset-web.<region>.modal.run
-COVERSET_TRUST_PROXY=false
-COVERSET_EXECUTOR=modal
-COVERSET_ENV=prod
 COVERSET_DATABASE_URL=postgresql://<user>:<password>@<host>/<db>?sslmode=require
 COVERSET_BLOB_URL=s3://<bucket>/coverset?endpoint_url=https://<account>.r2.cloudflarestorage.com&region=auto
 AWS_ACCESS_KEY_ID=<bucket key>
 AWS_SECRET_ACCESS_KEY=<bucket secret>
 EOF
 uv run modal secret create coverset-web --force --from-dotenv /tmp/coverset-web.env -e coverset && rm /tmp/coverset-web.env
-COVERSET_WEB_STATE=hosted uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py
+uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py
 uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && coverset deploy check'
 ```
 
-With `COVERSET_WEB_STATE=hosted` the image's environment carries the hosted layout
-(`COVERSET_DATA_DIR`, `COVERSET_CACHE_DIR` and the key path under `/root/coverset-data`), so an exec
-shell checks what the server uses; the `cd` makes the `.env` that `/setup` writes there count too.
-A hosted Secret deployed *without* `COVERSET_WEB_STATE=hosted` still runs stateless, but its exec
-shells see the Volume's `/data`: deploy with the variable. A restart loses no run, fact or setting;
-the one thing it does not carry over is the reaper's sandbox tag ([Scaling](#scaling)).
-
-To move the running Volume-mode deployment over: `coverset db copy --to <postgres url>` from a
-shell in the container (`modal container exec`) with the app stopped, the facts into the bucket
-([object-store.md](object-store.md)), then the Secret and the hosted deploy above. The Volume stays
-as it is until you delete it, so going back is a redeploy without `COVERSET_WEB_STATE`.
+The image's environment carries the container's layout (`COVERSET_DATA_DIR`, `COVERSET_CACHE_DIR`
+and the key path under `/root/coverset-data`, `COVERSET_EXECUTOR=modal`, `COVERSET_ENV=prod`,
+`COVERSET_TRUST_PROXY=false`), so an exec shell checks what the server uses; the `cd` makes the
+`.env` that `/setup` writes there count too. A restart loses no run, fact or setting; the one thing
+it does not carry over is the reaper's sandbox tag ([Scaling](#scaling)).
 
 ### Railway and Render
 
@@ -242,12 +225,12 @@ than a pooled one). Neither has an S3-compatible bucket of its own that coverset
 with: use Cloudflare R2 (no egress fees; `endpoint_url=https://<account>.r2.cloudflarestorage.com`,
 `region=auto`) or S3, with an access key scoped to that bucket. Set `COVERSET_PUBLIC_URL` to the
 service URL, `COVERSET_TRUST_PROXY=true`, the admin token and cookie key, and keep one instance
-(or more on Postgres). Render's free web services sleep when idle, which does not fit (webhooks
+(or more). Render's free web services sleep when idle, which does not fit (webhooks
 wait, the dispatcher stops); use a paid instance.
 
 ### A public demo from your laptop (ngrok)
 
-For a demo, the laptop shape is enough: run coverset on your machine and let a tunnel give it a
+For a demo, the laptop is enough: run coverset on your machine and let a tunnel give it a
 public `https` URL. coverset prints the recipe and does not start the tunnel itself:
 
 ```sh
@@ -278,7 +261,7 @@ half-migrated app answering its health check. The app's own startup migration is
 the first boot of a container against an empty database creates the schema, and every deploy that
 ships a new revision applies it.
 
-With **two or more replicas** starting together, each migrates: on Postgres the migration takes a
+With **two or more replicas** starting together, each migrates: the migration takes a
 transaction-scoped advisory lock (`coverset:migrate`), so they run one after the other and the
 second finds the schema at head. To migrate once per deploy instead, set
 `COVERSET_MIGRATE_ON_START=false` on the service and run `coverset init-db` in a release step: Fly's
@@ -286,7 +269,10 @@ second finds the schema at head. To migrate once per deploy instead, set
 `init-db` before updating the service, or `docker compose run --rm coverset init-db` on a VM. During
 a rolling deploy the old version briefly runs against the new schema, so a revision must keep the
 previous release working (add columns before using them; drop them a release later).
-`COVERSET_SKIP_MIGRATIONS=true` still means "never migrate" (tests).
+`COVERSET_SKIP_MIGRATIONS=true` still means "never migrate" (tests). The first start also creates
+the database when the server has none of its name and the URL's user may `CREATE DATABASE`
+([postgres.md](postgres.md#the-database-coverset-uses)); a server that does not answer stops the
+start with exit status 2.
 
 ## Secrets and rotation
 
@@ -296,7 +282,7 @@ previous release working (add columns before using them; drop them a release lat
 | cookie key (`COVERSET_SECRET_KEY`) | platform secrets | the same; signs every browser out |
 | database password | the URL in `COVERSET_DATABASE_URL` | create the new password (RDS: a second user or a password change during a deploy window), update the secret, restart the replicas, then revoke the old one |
 | bucket credentials | `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or none with a role | create a second access key, update the secret, restart, delete the old key. With a task or instance role there is nothing to rotate. |
-| GitHub App key / webhook secret | `COVERSET_GITHUB_APP_PRIVATE_KEY` + the App settings in secrets (hosted); `/data/.env` + `secrets/github-app.pem` (VM, Volume mode) | generate a new key in the App's settings, replace the secret, restart, delete the old key on GitHub |
+| GitHub App key / webhook secret | `COVERSET_GITHUB_APP_PRIVATE_KEY` + the App settings in secrets (hosted); `/data/.env` + `secrets/github-app.pem` (VM) | generate a new key in the App's settings, replace the secret, restart, delete the old key on GitHub |
 | Modal token | `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (none on Modal) | create a new token, update, restart, revoke the old one |
 
 `modal secret create --force` replaces the whole Secret, so keep its file (or your password manager)
@@ -307,8 +293,9 @@ copy them into the platform's secrets right after the App is created (step 4 of
 
 ## Backups
 
-What to back up is exactly what is not disposable: the database and the bucket. The cache, the
-mirrors and the data directory are rebuilt on demand.
+What to back up is exactly what is not disposable: the database and the blobs (the bucket, or the
+data directory's `facts/`, `sources/` and `uploads/` without one). The cache and the mirrors are
+rebuilt on demand.
 
 * **Postgres**: the provider's automated backups with point-in-time recovery (RDS: a retention
   period of 7+ days; Fly Managed Postgres and Neon keep their own history). On the VM, the nightly
@@ -325,9 +312,8 @@ mirrors and the data directory are rebuilt on demand.
 * **Consistency**: the database is the index of the bucket (runs point at facts). Restore both to
   roughly the same moment; facts newer than the database are ignored and later removed by gc, rows
   whose facts are missing show the run without its coverage.
-* **Laptop shape on a server**: `sqlite3.connect('/data/coverset.db').backup(...)` (the cron job in
-  `user-data.sh` does it nightly) plus disk snapshots; Modal's Volume mode keeps its own
-  generations (below).
+* **Files on a server**: the data disk's snapshots, taken after the nightly `pg_dump` so the two
+  match.
 
 ## Scaling
 
@@ -337,7 +323,7 @@ and to survive a host failure, not for throughput.
 * **Replicas share Postgres and the bucket.** The leader lease (a Postgres session advisory lock)
   runs the dispatcher, gc, reaper and warm-pool maintainer in exactly one replica; another takes
   over within about 30 s of the holder disappearing (17 s in the two-container check above).
-  `coverset db status` names the holder. Any replica may queue a run; the leader picks it up within
+  `coverset deploy check` names the holder in its `database` row. Any replica may queue a run; the leader picks it up within
   two seconds. Upload processing runs in the replica that received the upload.
 * **Conditional writes** keep replicas from overwriting each other's updates to the dictionary and
   run manifests; a store that ignores `If-Match` makes `coverset deploy check` warn, and then only
@@ -354,7 +340,6 @@ and to survive a host failure, not for throughput.
   configured rate.
 * **Connections**: each replica opens up to 20 connections to Postgres (pool 10 + 10 overflow) plus
   the leader's one; a `db.t4g.micro` allows about 100, so a few replicas fit.
-* **SQLite** stays one process: no lease is needed because nothing else can share the file.
 
 ## Cost
 
@@ -367,8 +352,8 @@ provider before relying on them.
 | Fly.io | shared-cpu-1x, 1 GB: $6-7 | Fly Managed Postgres basic from ~$38, or Neon from $0-19 | Tigris: $0.02/GB-month, no egress fees: cents | | $10-45 |
 | AWS Fargate | 0.5 vCPU + 1 GB ARM: ~$15 | RDS db.t4g.micro + 20 GB: ~$15 | S3: cents | ALB ~$18, Secrets Manager $2 | ~$50 |
 | One VM (Lightsail) | 4 GB instance: $24 | on the VM | MinIO on the VM | snapshots ~$1-3 | ~$25 |
-| One VM, laptop shape | 2 GB instance: $12 | SQLite | files | | ~$12 |
-| Modal (hosted mode) | 0.5 core + 1 GiB reserved: ~$23 (inside the Starter plan's credit) | Neon or another provider | R2: $0.015/GB-month, no egress fees | | $23-45 |
+| One VM, files | 2 GB instance: $12 | on the VM | files | | ~$12 |
+| Modal | 0.5 core + 1 GiB reserved: ~$23 (inside the Starter plan's credit) | Neon or another provider | R2: $0.015/GB-month, no egress fees | | $23-45 |
 | Railway / Render | from ~$5-7 | from ~$6-7 | R2 or S3: cents | | $15-30 |
 
 A scale-to-zero Postgres (Neon's free and usage plans) does not get to sleep: the leader lease keeps
@@ -408,9 +393,9 @@ stack (Postgres 17.11 + MinIO, a database and a key prefix of its own) in 33 s: 
 had 22 keys in the bucket (21 Parquet files and `MANIFEST.json`) and 99 test results in Postgres;
 `--clean-only` then left the prefix empty. A rerun with the `data dir` row passed 12 of 12 from a
 directory whose `data/` held a stand-in laptop demo, which it left byte for byte, and a second
-directory pointed at the same database was refused at `data dir`. On SQLite and files (no URLs set) it passed the same
-rows in 24 s (`state` is then a WARN: not hosted). `tests/test_smoke_hosted.py` runs it on the
-local backends.
+directory pointed at the same database was refused at `data dir`. Without `COVERSET_BLOB_URL` it
+runs the same rows with the blobs as files in its data directory (`state` is then a WARN: not
+hosted); `tests/test_smoke_hosted.py` runs it that way, on a database of each test's own.
 
 Rerun at integration (2026-10-14, after the Postgres, object-store and dev passes had landed, head
 `0010`), against a new database `coverset_smoke_int` and the prefix `s3://coverset/smoke-int`: 12 of
@@ -432,10 +417,10 @@ then the state rows:
 
 | Row | Says |
 |---|---|
-| `database` | backend and server version, the migrated revision against the packaged head, the connection pool; fails when it cannot connect, warns for a transaction-mode pooler host or a missing migration (`coverset.db.session.check_database`; a SQLite file is never created) |
-| `object store` | local files, or the bucket probed with one small object under `_coverset/probe/`: create with `If-None-Match`, a write with a wrong `If-Match` that must be refused, read back, list, delete (`coverset.storage.check_store`); warns when conditional writes are ignored |
+| `database` | the server version, the migrated revision against the packaged head, the connection pool and who holds the background-task lease; fails when it cannot connect or the database does not exist yet (it never creates one), warns for a transaction-mode pooler host or a missing migration (`coverset.db.session.check_database`) |
+| `object store` | the blob store, local files or a bucket, probed with one small object under `_coverset/probe/`: create with `If-None-Match`, a write with a wrong `If-Match` that must be refused, read back, list, delete (`coverset.storage.check_store`); warns when conditional writes are ignored |
 | `cache dir` | writable, its size against `COVERSET_CACHE_MAX_GB`, free disk under it; warns when the bound is larger than the disk |
-| `state` | `hosted` (nothing under the data dir must survive), a mixed shape (which half still needs a persistent disk), `laptop`, or a warning for SQLite + files behind a public URL |
+| `state` | `hosted` (a bucket: nothing under the data dir must survive), `local` (blobs as files under the data dir on a private URL), or a warning for files behind a public URL (that directory must be a disk that survives restarts) |
 
 then the executor and where the Modal client's credentials come from, GitHub App key and client
 credentials, webhook secret. `--json` prints one `{"name", "status", "detail"}` object per row.
@@ -446,8 +431,8 @@ credentials, webhook secret. `--json` prints one `{"name", "status", "detail"}` 
 git and the CA certificates, tini, non-root uid 10001, `HEALTHCHECK` on `/healthz`). Its
 entrypoint (`deploy/docker-entrypoint.sh`) writes `COVERSET_GITHUB_APP_PRIVATE_KEY` to the key path
 when it is set and then runs `coverset "$@"`, `serve --bind 0.0.0.0:8000` by default (so `docker run
-coverset init-db` works). `COVERSET_DATA_DIR=/data` is a volume and the working directory (the
-laptop shape keeps its state there); the cache is `COVERSET_CACHE_DIR=/var/cache/coverset` on the
+coverset init-db` works). `COVERSET_DATA_DIR=/data` is a volume and the working directory (without
+a bucket the blobs live there); the cache is `COVERSET_CACHE_DIR=/var/cache/coverset` on the
 container's own disk; `COVERSET_MIGRATE_ON_START=true`. 1.09 GB; a cold build takes about 2 min 45 s,
 a source-only rebuild seconds. The project is installed editable on purpose (the executors find
 `packages/pytest-coverset` and `uv.lock` relative to `src/coverset`), and `uv` stays in the image
@@ -456,18 +441,11 @@ a source-only rebuild seconds. The project is installed editable on purpose (the
 ```sh
 docker build -t coverset .
 docker run -d --name coverset -p 8000:8000 -v coverset-data:/data \
+  -e COVERSET_DATABASE_URL=postgresql://<user>:<password>@host.docker.internal:5432/coverset \
   -e COVERSET_ADMIN_TOKEN="$(openssl rand -hex 32)" -e COVERSET_PUBLIC_URL=http://localhost:8000 coverset
 curl localhost:8000/healthz
 docker exec coverset coverset deploy check --offline
 ```
-
-Verified locally before this change (2026-10-13): `/healthz`, `/login`, a bearer page, the Docker
-health status `healthy`, `coverset replay fixtures/webhooks/pr_opened.json` answered 202 (with
-`COVERSET_ENV=test` and the fixtures' secret; a second replay is `duplicate`), and after `docker
-restart` the repository and the delivery were still there. `docker compose` with Caddy (`tls
-internal`): HTTPS 200, HSTS, `http://` redirected to `https://`, the login redirect and `Secure`
-cookie on `https://`, and 22 failed logins with a different spoofed `X-Forwarded-For` each were
-still rate limited after 20 (coverset keys on the address Caddy saw).
 
 Verified on 2026-10-14 with this image (built in about 3 min) against the dev stack's Postgres and
 MinIO (`host.docker.internal`, no volume for `/data`): the container printed nine `applied
@@ -476,7 +454,7 @@ migration` lines and `database ready` before `serving on`, the key from
 deploy check --offline` inside it gave 11 PASS and 4 WARN (public URL local, local executor, no
 GitHub App, no webhook secret; `state`: hosted). After `docker restart` it said "already at the
 latest revision" and served again. A second container on the same database migrated nothing,
-served, and left the leader lease to the first (`coverset db status` named the holder); 17 s after
+served, and left the leader lease to the first (the lease query named the holder); 17 s after
 the first was stopped, the second logged "leader lease coverset:background acquired". The
 entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_hosted.py`.
 
@@ -499,8 +477,7 @@ entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_
 
 1. `coverset deploy check` inside the deployment should show only the GitHub rows as warnings.
    Modal: `uv run modal container list -e coverset`, then
-   `uv run modal container exec --no-pty <id> -- sh -c 'cd /data && coverset deploy check'` (hosted
-   mode: `cd /root/coverset-data`); Fly:
+   `uv run modal container exec --no-pty <id> -- sh -c 'cd /root/coverset-data && coverset deploy check'`; Fly:
    `fly ssh console -C "coverset deploy check"`; VM: `docker compose exec coverset coverset deploy check`.
 2. Sign in at `<url>/login` with the admin token. The `/setup` callback accepts an admin session
    behind a proxy (the "local operator" path needs a loopback connection without proxy headers).
@@ -508,8 +485,8 @@ entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_
    The manifest uses `COVERSET_PUBLIC_URL` for the webhook, the setup redirect and the sign-in
    callback (`/auth/github/callback`), so the public URL must be final before this step.
 4. coverset writes the private key to `secrets/github-app.pem` and the App's ids and secrets to
-   `.env` in its working directory. On a VM and in Modal's Volume mode that is the data volume, and
-   they persist. **In the hosted shape copy them into the platform's secrets now**:
+   `.env` in its working directory. On a VM that is the data volume, and they persist. **In the
+   hosted shape (Modal included) copy them into the platform's secrets now**:
    `COVERSET_GITHUB_APP_ID`, `COVERSET_GITHUB_APP_CLIENT_ID`, `COVERSET_GITHUB_APP_CLIENT_SECRET`,
    `COVERSET_GITHUB_WEBHOOK_SECRET`, `COVERSET_ALLOWED_OWNERS` from `.env`, and the PEM as
    `COVERSET_GITHUB_APP_PRIVATE_KEY` (`fly secrets set COVERSET_GITHUB_APP_PRIVATE_KEY=- < key.pem`
@@ -523,53 +500,28 @@ entrypoint and the migrate-at-start path are also covered by `tests/test_deploy_
 
 ## The live Modal deployment
 
-* **URL:** `https://boydgreenfield-coverset--coverset-web.us-east.modal.run` (Volume mode)
+* **URL:** `https://boydgreenfield-coverset--coverset-web.us-east.modal.run`
 * **Admin token:** `~/.config/coverset/modal-web-admin-token` on the machine it was deployed from
   (mode 600). Sign in at `/login`, or `curl -H "Authorization: Bearer $(cat ~/.config/coverset/modal-web-admin-token)" <url>/`.
-* **Stop it** (stops billing; the Volume and Secret stay): `uv run modal app stop coverset-web -e coverset`
+* **Stop it** (stops billing; the Secret stays): `uv run modal app stop coverset-web -e coverset`
 * **Start / upgrade it:** `uv run modal deploy --strategy recreate -e coverset deploy/modal/coverset_web.py`
+  (the Secret must name Postgres and a bucket, [above](#modal)).
 
 | Object | Name (environment `coverset`) | Holds |
 |---|---|---|
-| App | `coverset-web` | one function, `web`: `@modal.asgi_app`, `min_containers=1`, `max_containers=1` (hosted: `COVERSET_WEB_MAX_CONTAINERS`), `@modal.concurrent(max_inputs=256)`, 24 h per-request timeout |
-| Volume | `coverset-data` (v1), mounted at `/data` in Volume mode | `COVERSET_DATA_DIR`: facts, mirrors, runs, `instance_id`; `backup/` (database generations); the working directory, so `/setup`'s `.env` and `secrets/github-app.pem` persist |
-| Secret | `coverset-web` | `COVERSET_ADMIN_TOKEN`, `COVERSET_SECRET_KEY`, `COVERSET_PUBLIC_URL`, `COVERSET_TRUST_PROXY=false`, `COVERSET_EXECUTOR=modal`, `COVERSET_ENV=prod`; for hosted mode also the two URLs and the bucket keys |
+| App | `coverset-web` | one function, `web`: `@modal.asgi_app`, `min_containers=1`, `max_containers` from `COVERSET_WEB_MAX_CONTAINERS` (1 by default), `@modal.concurrent(max_inputs=256)`, 24 h per-request timeout |
+| Secret | `coverset-web` | `COVERSET_ADMIN_TOKEN`, `COVERSET_SECRET_KEY`, `COVERSET_PUBLIC_URL`, `COVERSET_DATABASE_URL`, `COVERSET_BLOB_URL`, the bucket keys |
 | App | `coverset-runner` (existing) | the shard sandboxes the web container creates |
 
 The image is `debian_slim` (Python 3.13) + git + uv 0.10.7 + `uv sync --frozen --no-dev` of the
 project (editable, as the Dockerfile does), with `.dockerignore` reused as the upload filter; the
 plugin wheel is pre-built into the image. Deploy-time knobs: `COVERSET_WEB_CPU` (default 0.5 cores),
-`COVERSET_WEB_MEMORY_MIB` (1024), `COVERSET_WEB_STATE` (`volume` or `hosted`) and
-`COVERSET_WEB_MAX_CONTAINERS` (hosted only).
+`COVERSET_WEB_MEMORY_MIB` (1024) and `COVERSET_WEB_MAX_CONTAINERS` (1).
 
-### Volume mode: why the database is not on the Volume
-
-Modal Volumes have explicit `commit()`/`reload()`, last-writer-wins semantics and, per the docs,
-no distributed file locking; the docs' only SQLite example builds the file on local disk and copies
-it to the Volume. Measured inside the container: `flock`, `lockf`, `O_EXCL` and `rename` work on the
-mounted Volume, **hard links fail with EPERM**, and WAL-mode SQLite runs there but 200 one-row
-commits took **235 ms vs 9 ms** on local disk. What a background commit captures of a database in
-mid-transaction is undocumented. So:
-
-1. The live database is `/root/coverset-data/coverset.db` on the container's disk
-   (`COVERSET_DATABASE_URL` is set by the module).
-2. At startup it is restored from `/data/backup/coverset.db` (or `coverset.db.prev` if the newest
-   fails `PRAGMA quick_check`; a bad file is renamed `*.corrupt-<time>`, never rotated over).
-3. Every 60 s, only if `PRAGMA data_version` moved, SQLite's online backup API copies it to a
-   self-contained file, which replaces `backup/coverset.db` (the old one becomes `.prev`) followed by
-   `volume.commit()`. One dated copy per UTC day is kept in `backup/daily/` (7 days). A 356 KB
-   database backs up in 0.7-1.0 s.
-4. The ASGI lifespan shutdown (container stop, redeploy) takes a final backup.
-
-**Recovery point:** 60 s for a crash, OOM kill or host loss; zero for a stop or a recreate deploy.
-Runs in flight when the container stops are marked abandoned at the next start (set
-`COVERSET_REQUEUE_ON_BOOT=true` in the Secret to re-queue them). GitHub redelivers webhooks that got
-no answer. The hosted mode has none of this: its recovery point is the database's and the bucket's.
-
-`/data/instance_id` (the reaper's sandbox tag) is created by the executor on first use. It tries
-`os.link` first and, when the Volume refuses it with EPERM (or a filesystem answers ENOTSUP), falls
-back to an exclusive `O_CREAT | O_EXCL` create, so concurrent processes still agree on one id
-(`executors/modal_.py`, `instance_id`).
+`<data_dir>/instance_id` (the reaper's sandbox tag) is created by the executor on first use. It
+tries `os.link` first and, when a filesystem refuses it (EPERM, ENOTSUP), falls back to an exclusive
+`O_CREAT | O_EXCL` create, so concurrent processes still agree on one id (`executors/modal_.py`,
+`instance_id`).
 
 ### Redeploys with one container must use `--strategy recreate`
 
@@ -577,9 +529,9 @@ With the default rolling strategy the new version waits for a container slot, an
 `max_containers=1` the healthy old container never frees it: on 2026-10-13 the URL answered nothing
 for 25 minutes ("waiting to be scheduled on a CPU worker") until the old container was stopped by
 hand (`modal container stop -y <id>`), after which the new one served in 14 s. `recreate` stops the
-old container first, which is also what makes the Volume mode's recovery point zero.
+old container first. With `COVERSET_WEB_MAX_CONTAINERS=2` a rolling deploy works too.
 
-### Measured on 2026-10-13 (modal 1.6.1, us-east, Volume mode)
+### Measured on 2026-10-13 (modal 1.6.1, us-east)
 
 | What | Result |
 |---|---|
@@ -587,20 +539,20 @@ old container first, which is also what makes the Volume mode's recovery point z
 | dashboard with a bearer token | 0.34 s |
 | `/login` (form, cookie `Secure`, redirect to `https://`), `/setup` with the token | 200 |
 | `POST /webhooks/github` with no secret configured | 503 `webhook_secret_unset` (fails closed) |
-| ASGI lifespan | Quart's `before_serving` runs at container start (migrations, dispatcher, gc, reaper, pool maintainer, backup timer); `after_serving` runs on stop ("warm pool drained", final backup) |
+| ASGI lifespan | Quart's `before_serving` runs at container start (migrations, dispatcher, gc, reaper, pool maintainer); `after_serving` runs on stop ("warm pool drained") |
 | a real run queued inside the container (`coverset run --repo <demo app> --head main --executor modal --no-wait`) | the dispatcher built the env image (11.2 s, first time), ran 97 tests in Modal sandboxes, **PASS**; its `/v1/runs/<id>/events` SSE stream delivered 97 `test` events and `done` in 26.6 s |
 | SSE through Modal's gateway | a 210 s stream with an event every 15 s and a 330 s stream with 110 s of silence between events both completed with HTTP 200; coverset's own run-page stream (replay at 0.07x) stayed open 216 s and ended with `done` |
 | request headers seen by the app | scope client = the caller's address, scheme `https`, `Via: 2.0 Caddy`; a client-sent `X-Forwarded-For: 6.6.6.6` was not passed through |
 | redeploy (code change) | image layers after the dependency sync rebuild in ~10 s; deploy 31-54 s; a `--strategy recreate` deploy answered `/healthz` again 23 s after the deploy command returned |
 | admin token rotation (new Secret, then a recreate deploy) | old token 401, new token 200, the earlier run still there |
-| container replaced | the earlier run was still there afterwards (restored from the Volume) |
 | where it runs | the container reported `MODAL_REGION=eu-west` while the URL's gateway is `us-east`; no region is pinned (`region=` on the function would pin it; Modal prices region selection separately) |
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| `COVERSET_DATABASE_URL must use the asyncpg driver` | the URL names another driver (`postgresql+psycopg://`, `postgresql+psycopg2://`): use `postgresql://` (normalised) or `postgresql+asyncpg://` |
+| `COVERSET_DATABASE_URL must be a Postgres URL for the asyncpg driver` | the URL names another database or driver (`sqlite+...`, `postgresql+psycopg://`): use `postgresql://` (normalised) or `postgresql+asyncpg://` |
+| `cannot reach Postgres at ...` (exit 2) at start | the server is down or not reachable from the container: check the host, port and network; `deploy check` shows the same in its `database` row |
 | `deploy check` database row: `looks like a transaction-mode pooler`, or random `prepared statement ... does not exist` / lost leader lease | a PgBouncer in `pool_mode=transaction` (Neon's `-pooler` host, Supabase's port 6543, RDS Proxy): use the direct or session-mode connection string |
 | `deploy check` database row: `cannot connect: ... ssl` | the provider requires TLS: keep its `?sslmode=require` in the URL (it becomes asyncpg's `ssl`); `channel_binding` is dropped |
 | `deploy check` object store row warns `ignores If-Match` | the store does not implement conditional writes (some older MinIO releases, some S3 look-alikes): run one replica, or use a store that does (S3, R2, Tigris, current MinIO) |
@@ -610,8 +562,8 @@ old container first, which is also what makes the Volume mode's recovery point z
 | `NoCredentialsError` / `Unable to locate credentials` | no `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AWS_PROFILE` or role in the container: on Fly they come from `fly storage create`, on ECS from the task role, elsewhere set them |
 | a hosted deployment lost its GitHub App after a restart | `/setup` wrote the key and `.env` to the container's disk: copy them into the platform's secrets (step 4 of the GitHub App setup) |
 | the first boot takes long or the health check fails during it | migrations run before the port opens: give the health check a grace period of 60 s for an empty database (`fly.toml`, the ECS `startPeriod`) |
-| two replicas, and `coverset db status` shows no leader | the lease holder lost its connection; another replica takes over within about 30 s. With a transaction-mode pooler it never holds: see above |
-| Modal hosted mode: `RuntimeError: this deployment has no Volume` | deployed with `COVERSET_WEB_STATE=hosted` but the Secret lacks the Postgres URL or the blob URL: fix the Secret, or redeploy without `COVERSET_WEB_STATE` |
+| two replicas, and `coverset deploy check` shows no lease holder | the lease holder lost its connection; another replica takes over within about 30 s. With a transaction-mode pooler it never holds: see above |
+| Modal: `RuntimeError: coverset-web needs in the Modal Secret 'coverset-web': ...` | the Secret lacks one of the state's settings it names: recreate the Secret with them ([Modal](#modal)), redeploy |
 | Modal URL times out after a deploy, logs say "waiting to be scheduled on a CPU worker" | a rolling deploy deadlocked on `max_containers=1`: `modal container list -e coverset`, then `modal container stop -y <old id>`; deploy with `--strategy recreate` |
 | Modal: `ASGI lifespan startup failed` with `PermissionError ... os.link` | an image built before the executor's exclusive-create fallback for `instance_id`: redeploy |
 | Modal: every link is `http://` / login loops | `COVERSET_PUBLIC_URL` does not match the URL Modal printed (it contains the region, e.g. `.us-east.modal.run`) |
@@ -624,4 +576,3 @@ old container first, which is also what makes the Volume mode's recovery point z
 | everyone shares one rate limit / login lockout | the proxy's address is the client: set `COVERSET_TRUST_PROXY=true` behind Caddy/Fly/an ALB/a tunnel (not on Modal) |
 | `coverset deploy check` FAIL executor | no Modal credentials: `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (Fly, ECS, VM) |
 | a run stays queued | `COVERSET_PAUSED=true`, the daily budget is spent (`COVERSET_MODAL_DAILY_BUDGET_USD`), or `COVERSET_MAX_CONCURRENT_RUNS` are busy; see the run page |
-| data seems to have rolled back on Modal (Volume mode) | a crash between backups loses up to 60 s; `modal volume ls coverset-data /backup -e coverset` shows the generations and `daily/` copies |
