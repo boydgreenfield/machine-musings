@@ -129,7 +129,22 @@ class Settings(BaseSettings):
     uploads_enabled: bool = Field(default=True, description="Accept bundles at POST /v1/bundles.")
     max_upload_bytes: int = Field(default=200 * MIB, gt=0, description="Largest accepted uploaded bundle.")
     data_dir: Path = Path("data")
-    database_url: str = Field(default="", description="SQLAlchemy URL; empty means <data_dir>/coverset.db.")
+    database_url: str = Field(
+        default="",
+        description="SQLAlchemy URL: empty means SQLite at <data_dir>/coverset.db; postgresql+asyncpg://... for Postgres.",
+    )
+    blob_url: str = Field(
+        default="",
+        description=(
+            "Where facts, uploads and uploaded sources are stored: empty means files under <data_dir>; "
+            "s3://bucket/prefix?endpoint_url=...&region=... for any S3-compatible store (credentials from "
+            "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY or the instance role)."
+        ),
+    )
+    cache_dir: Path | None = Field(
+        default=None,
+        description="Local cache of object-store files and git mirrors; empty means <data_dir>/cache.",
+    )
 
     github_webhook_secret: SecretStr | None = None
     github_app_id: int | None = None
@@ -272,6 +287,17 @@ class Settings(BaseSettings):
     def _derive_and_check(self) -> Self:
         if not self.database_url:
             self.database_url = f"sqlite+aiosqlite:///{self.data_dir / 'coverset.db'}"
+        if self.database_url.startswith(("postgresql://", "postgres://")):
+            # Normalise the common form to the async driver so hosted-Postgres URLs paste straight in.
+            self.database_url = "postgresql+asyncpg://" + self.database_url.split("://", 1)[1]
+        if self.database_url.startswith("postgresql+") and not self.database_url.startswith("postgresql+asyncpg://"):
+            raise ValueError("COVERSET_DATABASE_URL must use the asyncpg driver (postgresql+asyncpg://...)")
+        if self.blob_url and not self.blob_url.startswith("s3://"):
+            raise ValueError("COVERSET_BLOB_URL must be empty (local files) or an s3://bucket[/prefix] URL")
+        if self.cache_dir is None:
+            self.cache_dir = self.data_dir / "cache"
+        else:
+            self.cache_dir = self.cache_dir.expanduser().resolve()
         if not self.public_url:
             host, port = split_bind(self.bind)
             netloc = f"[{host}]" if ":" in host else host
@@ -359,6 +385,12 @@ class Settings(BaseSettings):
     def mirrors_dir(self) -> Path:
         """Bare git mirrors, one per repo: ``<data_dir>/mirrors/<repo_id>.git``."""
         return self.data_dir / "mirrors"
+
+    @property
+    def hosted(self) -> bool:
+        """True when the control plane keeps its state in Postgres and an object store (no local
+        state that must survive a restart; the data dir is then only a cache)."""
+        return self.database_url.startswith("postgresql+") and bool(self.blob_url)
 
     @property
     def facts_dir(self) -> Path:

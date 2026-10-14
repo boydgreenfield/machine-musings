@@ -29,6 +29,8 @@ dependencies = [
   "pytest-coverset",
   "coverset-model",
   "mcp>=2.3.0",
+  "asyncpg>=0.32.0",
+  "boto3>=1.43.113",
 ]
 
 [project.scripts]
@@ -45,6 +47,7 @@ dev = [
   "pillow>=11",
   "ruff>=0.14",
   "pytest-xdist>=3.8.0",
+  "moto[server]>=5.2.4",
 ]
 
 [tool.uv.workspace]
