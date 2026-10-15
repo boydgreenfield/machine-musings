@@ -1,0 +1,13 @@
+{"test":"<import>","file":"src/cart/pricing.ts","lines":[1,2,3,6,14,19]}
+{"test":"<import>","file":"src/shipping/rates.ts","lines":[3,5,11]}
+{"test":"<import>","file":"src/util/strings.ts","lines":[1,8,16]}
+{"test":"tests/pricing.test.ts > Cart > adds an item","file":"src/cart/pricing.ts","lines":[20,23,26]}
+{"test":"tests/pricing.test.ts > Cart > rejects a zero quantity","file":"src/cart/pricing.ts","lines":[20,23,24]}
+{"test":"tests/pricing.test.ts > applyDiscount > rounds half cents","file":"src/cart/pricing.ts","lines":[7,10,11]}
+{"test":"tests/pricing.test.ts > applyDiscount > takes 10% off","file":"src/cart/pricing.ts","lines":[7,10,11]}
+{"test":"tests/pricing.test.ts > formatPrice > formats euros","file":"src/cart/pricing.ts","lines":[15,16]}
+{"test":"tests/rates.test.ts > rateFor > charges extra weight above a kilogram","file":"src/shipping/rates.ts","lines":[6,7,8]}
+{"test":"tests/strings.test.ts > pad > pads decimals","file":"src/util/strings.ts","lines":[17]}
+{"test":"tests/strings.test.ts > parseQuantity > reads digits","file":"src/util/strings.ts","lines":[9,12,13]}
+{"test":"tests/strings.test.ts > parseQuantity > returns undefined for blank input","file":"src/util/strings.ts","lines":[9,10]}
+{"test":"tests/strings.test.ts > slugify > lower-cases and dashes","file":"src/util/strings.ts","lines":[2]}

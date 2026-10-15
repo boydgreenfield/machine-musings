@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'self' file:; img-src 'self' file: data:; base-uri 'none'; form-action 'none'">
+<title>{% block title %}{{ title }}{% endblock %} · coverset report</title>
+<link rel="stylesheet" href="{{ link('report.css') }}">
+<script src="{{ link('report.js') }}"></script>
+<script src="{{ link('search-index.js') }}" defer></script>
+</head>
+<body data-ready="0" data-root="{{ root }}" data-kind="{{ kind }}">
+<header class="top">
+  <a class="brand" href="{{ link('index.html') }}" aria-label="Report overview">
+    <svg viewBox="0 0 30 16" aria-hidden="true"><rect class="mark-filled" x="1" y="2" width="12" height="12" rx="2"/><rect class="mark-hollow" x="17" y="2.8" width="10.4" height="10.4" rx="1.5"/></svg>
+    coverset <span class="brand-tag">report</span>
+  </a>
+  <nav aria-label="Report">
+    <a href="{{ link('index.html') }}"{% if kind == 'index' %} aria-current="page"{% endif %}>Overview</a>
+    <a href="{{ link('index.html') }}#map">Map</a>
+    <a href="{{ link('index.html') }}#files"{% if kind == 'file' %} aria-current="page"{% endif %}>Files</a>
+    <a href="{{ link('index.html') }}#tests"{% if kind == 'test' %} aria-current="page"{% endif %}>Tests</a>
+    {% if changes %}<a href="{{ link('changes.html') }}"{% if kind == 'changes' %} aria-current="page"{% endif %}>Changes</a>
+    {% endif %}
+    {% if economy %}<a href="{{ link('economy.html') }}"{% if kind == 'economy' %} aria-current="page"{% endif %}>Economy</a>
+    {% endif %}
+    <a href="{{ link('about.html') }}"{% if kind == 'about' %} aria-current="page"{% endif %}>About</a>
+  </nav>
+  <div class="search" role="search">
+    <label class="sr" for="search">Search files, functions and tests</label>
+    <input id="search" type="search" placeholder="Search files, functions, tests  /" autocomplete="off" spellcheck="false" aria-controls="search-results" aria-expanded="false">
+    <ul id="search-results" class="search-results" role="listbox" hidden></ul>
+  </div>
+  <button type="button" id="theme-toggle" class="theme-toggle">Theme</button>
+</header>
+<main id="main">
+{% if notice %}<p class="sources-notice" role="note" data-sources-notice><strong>Sources not read.</strong> {{ notice }}</p>
+{% endif %}
+{% block main %}{% endblock %}
+</main>
+<footer><span class="where">static report{% if built %} built {{ built }}{% endif %} from {{ origin }}</span> · {{ title }} · no history, no PR diff (see the live pages for those) · press <kbd>?</kbd> for keys</footer>
+<div id="line-tests" class="popover" popover><div id="line-tests-body">No test selected.</div></div>
+<dialog id="keys-help" aria-labelledby="keys-title">
+  <h2 id="keys-title">Keys</h2>
+  {#- The live pages' keys dialog, row for row (report.js binds keys.js's table, as the live pages
+      do, less the pages the report does not have); tests/web/test_keys_table.py checks both. -#}
+  <table>
+    <tbody>
+      <tr data-scope="any" data-keys="?"><td><kbd>?</kbd></td><td>This help: the keys of this page</td></tr>
+      <tr data-scope="any" data-keys="Escape"><td><kbd>Esc</kbd></td><td>Close this help, the tests popover, the search results or the go-to hint</td></tr>
+      <tr data-scope="search" data-keys="/"><td><kbd>/</kbd></td><td>Search files, functions and tests (<kbd>Enter</kbd> opens the first match, <kbd>Esc</kbd> clears it)</td></tr>
+    </tbody>
+  </table>
+  <h3>Go to</h3>
+  <table>
+    <tbody>
+      <tr data-scope="go" data-go-row="o" data-keys="g-o"><td><kbd>g</kbd> <kbd>o</kbd></td><td><a data-go="o" href="{{ link('index.html') }}">Overview</a></td></tr>
+      <tr data-scope="go" data-go-row="t" data-keys="g-t"><td><kbd>g</kbd> <kbd>t</kbd></td><td><a data-go="t" href="{{ link('index.html') }}#tests">Tests</a></td></tr>
+      <tr data-scope="go" data-go-row="m" data-keys="g-m"><td><kbd>g</kbd> <kbd>m</kbd></td><td><a data-go="m" href="{{ link('index.html') }}#map">Coverage map</a></td></tr>
+    </tbody>
+  </table>
+  <h3>Source view</h3>
+  <table>
+    <tbody>
+      <tr data-scope="source" data-keys="j k"><td><kbd>j</kbd> <kbd>k</kbd></td><td>Next / previous line that never ran or took only one branch</td></tr>
+      <tr data-scope="source" data-keys="n N"><td><kbd>n</kbd> <kbd>N</kbd></td><td>Next / previous function with an input class no test passed in</td></tr>
+      <tr data-scope="source" data-keys="t"><td><kbd>t</kbd></td><td>Tests that ran the current line</td></tr>
+      <tr data-scope="source" data-keys="i"><td><kbd>i</kbd></td><td>Show or hide the current function's shape grid</td></tr>
+      <tr data-scope="source" data-keys="h"><td><kbd>h</kbd></td><td>Highlight every measured line, or only what never ran or took one branch</td></tr>
+      <tr data-scope="source" data-keys="."><td><kbd>.</kbd></td><td>Show or hide the input-class chips under def lines</td></tr>
+      <tr data-scope="files" data-keys="[ ]"><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next file</td></tr>
+    </tbody>
+  </table>
+  <h3>Coverage map</h3>
+  <table>
+    <tbody>
+      <tr data-scope="map" data-keys="m"><td><kbd>m</kbd></td><td>Next colour mode: Gap, Lines</td></tr>
+      <tr data-scope="modules" data-keys="M"><td><kbd>M</kbd></td><td>Next module-level code weight: full, thin, hidden</td></tr>
+    </tbody>
+  </table>
+  <p class="keys-note">Keys are ignored while typing in a field and with Ctrl, Alt or Cmd held. Rows for keys this page has no use for are hidden.</p>
+  <form method="dialog"><button class="btn secondary" type="submit" autofocus>Close</button></form>
+</dialog>
+{% if data %}<script type="application/json" id="report-data">{{ data }}</script>
+{% endif %}
+</body>
+</html>

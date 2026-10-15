@@ -1,0 +1,25 @@
+{# One form control per catalogue kind. ``row`` is a settings_pages.Row. #}
+{% macro control(row) -%}
+{%- set spec = row.spec -%}
+{%- set described = row.field_id ~ '-desc ' ~ row.field_id ~ '-inh' ~ (' ' ~ row.field_id ~ '-err' if row.error else '') ~ (' ' ~ row.field_id ~ '-lock' if row.locked else '') -%}
+{%- if spec.kind in ('enum', 'bool') -%}
+<select id="{{ row.field_id }}" name="{{ spec.name }}" aria-describedby="{{ described }}"{% if row.error %} aria-invalid="true"{% endif %}{% if row.locked %} disabled{% endif %}>
+  <option value=""{% if row.value == '' %} selected{% endif %}>Inherit ({{ row.inherited.display }})</option>
+  {%- if spec.kind == 'bool' %}
+  <option value="true"{% if row.value == 'true' %} selected{% endif %}>On</option>
+  <option value="false"{% if row.value == 'false' %} selected{% endif %}>Off</option>
+  {%- else %}
+  {%- for choice in spec.choices %}
+  <option value="{{ choice }}"{% if row.value == choice %} selected{% endif %}>{{ spec.choice_labels.get(choice, choice) }}</option>
+  {%- endfor %}
+  {%- endif %}
+</select>
+{%- else -%}
+<input id="{{ row.field_id }}" name="{{ spec.name }}" type="number" inputmode="{{ 'numeric' if spec.kind == 'int' else 'decimal' }}"
+  {%- if spec.minimum is not none %} min="{{ spec.format(spec.minimum) }}"{% endif %}
+  {%- if spec.maximum is not none %} max="{{ spec.format(spec.maximum) }}"{% endif %}
+  step="{{ '1' if spec.kind == 'int' else 'any' }}" value="{{ row.value }}"
+  placeholder="inherit: {{ row.inherited.display }}" aria-describedby="{{ described }}"
+  {%- if row.error %} aria-invalid="true"{% endif %}{% if row.locked %} disabled{% endif %}>
+{%- endif -%}
+{%- endmacro %}

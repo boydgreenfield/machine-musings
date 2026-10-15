@@ -1,0 +1,10 @@
+{#- Leverage: every test with its size and what it alone covers. The filter chips and the column
+    headers are plain links (the full page); with htmx the headers swap only the table. -#}
+<div class="map-tools eco-filters">
+  <span class="seg" role="group" aria-label="Show">
+    <a href="{{ page_url(tab='leverage', sort=sort if sort != 'leverage' else None, dir='rev' if reverse else None) }}" aria-current="{{ 'true' if not only else 'false' }}">All tests</a>
+    {% for key, (label, _keep) in filters.items() %}<a href="{{ page_url(tab='leverage', only=key, sort=sort if sort != 'leverage' else None, dir='rev' if reverse else None) }}" aria-current="{{ 'true' if only == key else 'false' }}">{{ label|capitalize }}</a>{% endfor %}
+  </span>
+  {% if only == 'removable' %}<span class="muted">{{ view.caveat }}</span>{% endif %}
+</div>
+{% include "economy/_tests_table.html" %}

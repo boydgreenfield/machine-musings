@@ -1,0 +1,964 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coverset.dev/schema/neutral/v1/functions.schema.json",
+  "title": "functions.jsonl: one function region",
+  "type": "object",
+  "required": [
+    "path",
+    "qualname",
+    "ordinal",
+    "def_line",
+    "body_start",
+    "end_line",
+    "body_hash",
+    "sig_hash",
+    "params",
+    "kind"
+  ],
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "qualname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "ordinal": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "def_line": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "body_start": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "end_line": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "body_hash": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "sig_hash": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "params": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "maxItems": 1024
+    },
+    "kind": {
+      "enum": [
+        "function",
+        "method",
+        "class",
+        "module"
+      ]
+    },
+    "types": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/descriptor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "descriptor": {
+      "description": "A type descriptor (docs/neutral-bundle.md, 'Type descriptors'), at most 32 levels deep.",
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_1"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_1"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_1"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_1"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_1"
+          }
+        }
+      }
+    },
+    "descriptor_1": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_2"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_2"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_2"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_2"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_2"
+          }
+        }
+      }
+    },
+    "descriptor_2": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_3"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_3"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_3"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_3"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_3"
+          }
+        }
+      }
+    },
+    "descriptor_3": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_4"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_4"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_4"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_4"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_4"
+          }
+        }
+      }
+    },
+    "descriptor_4": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_5"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_5"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_5"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_5"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_5"
+          }
+        }
+      }
+    },
+    "descriptor_5": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_6"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_6"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_6"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_6"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_6"
+          }
+        }
+      }
+    },
+    "descriptor_6": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_7"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_7"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_7"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_7"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_7"
+          }
+        }
+      }
+    },
+    "descriptor_7": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_8"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_8"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_8"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_8"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_8"
+          }
+        }
+      }
+    },
+    "descriptor_8": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_9"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_9"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_9"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_9"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_9"
+          }
+        }
+      }
+    },
+    "descriptor_9": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_10"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_10"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_10"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_10"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_10"
+          }
+        }
+      }
+    },
+    "descriptor_10": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_11"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_11"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_11"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_11"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_11"
+          }
+        }
+      }
+    },
+    "descriptor_11": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_12"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_12"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_12"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_12"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_12"
+          }
+        }
+      }
+    },
+    "descriptor_12": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_13"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_13"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_13"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_13"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_13"
+          }
+        }
+      }
+    },
+    "descriptor_13": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_14"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_14"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_14"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_14"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_14"
+          }
+        }
+      }
+    },
+    "descriptor_14": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_15"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_15"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_15"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_15"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_15"
+          }
+        }
+      }
+    },
+    "descriptor_15": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_16"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_16"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_16"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_16"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_16"
+          }
+        }
+      }
+    },
+    "descriptor_16": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_17"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_17"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_17"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_17"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_17"
+          }
+        }
+      }
+    },
+    "descriptor_17": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_18"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_18"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_18"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_18"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_18"
+          }
+        }
+      }
+    },
+    "descriptor_18": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_19"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_19"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_19"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_19"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_19"
+          }
+        }
+      }
+    },
+    "descriptor_19": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_20"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_20"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_20"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_20"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_20"
+          }
+        }
+      }
+    },
+    "descriptor_20": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_21"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_21"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_21"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_21"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_21"
+          }
+        }
+      }
+    },
+    "descriptor_21": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_22"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_22"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_22"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_22"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_22"
+          }
+        }
+      }
+    },
+    "descriptor_22": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_23"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_23"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_23"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_23"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_23"
+          }
+        }
+      }
+    },
+    "descriptor_23": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_24"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_24"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_24"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_24"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_24"
+          }
+        }
+      }
+    },
+    "descriptor_24": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_25"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_25"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_25"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_25"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_25"
+          }
+        }
+      }
+    },
+    "descriptor_25": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_26"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_26"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_26"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_26"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_26"
+          }
+        }
+      }
+    },
+    "descriptor_26": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_27"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_27"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_27"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_27"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_27"
+          }
+        }
+      }
+    },
+    "descriptor_27": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_28"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_28"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_28"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_28"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_28"
+          }
+        }
+      }
+    },
+    "descriptor_28": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_29"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_29"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_29"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_29"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_29"
+          }
+        }
+      }
+    },
+    "descriptor_29": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_30"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_30"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_30"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_30"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_30"
+          }
+        }
+      }
+    },
+    "descriptor_30": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_31"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_31"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_31"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_31"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_31"
+          }
+        }
+      }
+    },
+    "descriptor_31": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": {
+          "$ref": "#/$defs/descriptor_32"
+        },
+        "elems": {
+          "items": {
+            "$ref": "#/$defs/descriptor_32"
+          }
+        },
+        "key": {
+          "$ref": "#/$defs/descriptor_32"
+        },
+        "value": {
+          "$ref": "#/$defs/descriptor_32"
+        },
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/descriptor_32"
+          }
+        }
+      }
+    },
+    "descriptor_32": {
+      "$ref": "#/$defs/descriptor_body",
+      "properties": {
+        "elem": false,
+        "elems": {
+          "maxItems": 0
+        },
+        "key": false,
+        "value": false,
+        "arms": false
+      }
+    },
+    "descriptor_body": {
+      "description": "The fields of every type descriptor (docs/neutral-bundle.md, 'Type descriptors'); the descriptor_<n> definitions bound how deep children nest.",
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "elem": false
+          }
+        },
+        {
+          "properties": {
+            "elems": false
+          }
+        }
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "int",
+            "float",
+            "str",
+            "bool",
+            "bytes",
+            "none",
+            "list",
+            "set",
+            "frozenset",
+            "tuple",
+            "dict",
+            "union",
+            "literal",
+            "enum",
+            "object",
+            "any"
+          ]
+        },
+        "elem": {
+          "type": "object"
+        },
+        "elems": {
+          "type": "array",
+          "maxItems": 256
+        },
+        "key": {
+          "type": "object"
+        },
+        "value": {
+          "type": "object"
+        },
+        "arms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          "maxItems": 256
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

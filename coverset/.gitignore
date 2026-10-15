@@ -1,0 +1,27 @@
+.venv
+__pycache__
+*.pyc
+*.duckdb
+*.duckdb.wal
+data/
+!tests/lang/data/
+shots/
+node_modules
+dist
+build
+*.egg-info
+.DS_Store
+.env
+.env.*
+!.env.example
+!.env.hosted-dev.example
+secrets/
+*.pem
+*.key
+.pytest_cache
+.hypothesis
+.ruff_cache
+.coverset/
+# deployment settings and secrets (deploy/compose.yml, deploy/fly, deploy/aws)
+deploy/**/*.env
+!deploy/**/*.env.example

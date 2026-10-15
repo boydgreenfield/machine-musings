@@ -1,0 +1,17 @@
+# Caddy in front of coverset (deploy/compose.yml). Environment placeholders are substituted before
+# parsing, so COVERSET_CADDY_TLS may hold a whole directive ("tls internal") or nothing.
+# Let's Encrypt needs no account email; to get expiry notices add a global block with `email you@example.com`.
+
+{$COVERSET_DOMAIN} {
+	{$COVERSET_CADDY_TLS}
+	# Caddy replaces any client-sent X-Forwarded-For with the real peer and sets X-Forwarded-Proto;
+	# coverset trusts the last value only (COVERSET_TRUST_PROXY=true).
+	reverse_proxy coverset:8000 {
+		# Server-sent events (run pages, /v1/runs/<id>/events) must not be buffered.
+		flush_interval -1
+	}
+	# Request bodies above coverset's 25 MiB cap are refused here already (uploads go to /v1/bundles).
+	request_body {
+		max_size 210MB
+	}
+}

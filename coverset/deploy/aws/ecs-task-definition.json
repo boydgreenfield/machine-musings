@@ -1,0 +1,51 @@
+{
+  "family": "coverset",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {"cpuArchitecture": "ARM64", "operatingSystemFamily": "LINUX"},
+  "executionRoleArn": "arn:aws:iam::123456789012:role/coverset-execution",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/coverset-task",
+  "containerDefinitions": [
+    {
+      "name": "coverset",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/coverset:latest",
+      "essential": true,
+      "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
+      "environment": [
+        {"name": "COVERSET_ENV", "value": "prod"},
+        {"name": "COVERSET_PUBLIC_URL", "value": "https://coverset.example.com"},
+        {"name": "COVERSET_TRUST_PROXY", "value": "true"},
+        {"name": "COVERSET_BLOB_URL", "value": "s3://coverset-prod/coverset?region=us-east-1"},
+        {"name": "COVERSET_MIGRATE_ON_START", "value": "true"},
+        {"name": "COVERSET_EXECUTOR", "value": "modal"},
+        {"name": "COVERSET_MODAL_ENVIRONMENT", "value": "coverset"}
+      ],
+      "secrets": [
+        {"name": "COVERSET_DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:coverset/database-url"},
+        {"name": "COVERSET_ADMIN_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:coverset/admin-token"},
+        {"name": "COVERSET_SECRET_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:coverset/secret-key"},
+        {"name": "MODAL_TOKEN_ID", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:coverset/modal-token-id"},
+        {"name": "MODAL_TOKEN_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:coverset/modal-token-secret"}
+      ],
+      "healthCheck": {
+        "command": ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "stopTimeout": 30,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/coverset",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "coverset",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

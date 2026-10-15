@@ -1,0 +1,52 @@
+{% extends layout %}
+{% from "settings/_controls.html" import control %}
+{% block title %}{{ view.title }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('dashboard.index') }}">coverset</a> / settings{% if view.repo %} / <a href="{{ url_for('repos.repo', rid=view.repo.id) }}">{{ view.repo.full_name }}</a>{% endif %}</div>
+<div class="page-head"><h1>{{ view.title }}</h1></div>
+<div class="settings-layout">
+{% include "settings/_nav.html" %}
+<div class="settings-main">
+<form id="settings-form" class="settings-form" method="post" action="{{ view.action }}"
+      hx-post="{{ view.action }}" hx-target="#settings-form" hx-select="#settings-form" hx-swap="outerHTML">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {# Enter in a field submits with the form's first submit button: make that Save, not a Reset. #}
+  <button type="submit" class="sr" tabindex="-1" aria-hidden="true">Save</button>
+  <p class="muted set-intro">{{ view.inherit_note }}</p>
+  {% for group, rows in groups.items() %}
+  <fieldset class="panel set-group">
+    <legend>{{ 'View' if group == 'view' else 'Policy' }}</legend>
+    <p class="muted set-group-note">{% if group == 'view' %}How pages paint coverage. A reader's own preferences win over these.{% else %}What coverset does with a pull request. Users cannot override policy.{% endif %}</p>
+    {% for row in rows %}
+    <div class="set-row{% if row.error %} has-error{% endif %}{% if row.is_set %} is-set{% endif %}">
+      <div class="set-label">
+        <label for="{{ row.field_id }}">{{ row.spec.label }}</label>
+        <code class="set-key">{{ row.spec.name }}</code>
+        <p class="set-desc" id="{{ row.field_id }}-desc">{{ row.spec.description }}</p>
+      </div>
+      <div class="set-control">
+        {{ control(row) }}
+        <p class="set-inherit" id="{{ row.field_id }}-inh">
+          {% if row.is_set %}<span class="set-badge set-badge-here">Set here</span>{% else %}<span class="set-badge">Inherited</span>{% endif %}
+          {% if row.inherited.source == 'deferred' %}unset above, so the repository's <strong>{{ row.inherited.detail }}</strong> decides{% else %}inherited from {{ row.inherited.detail }}: <strong>{{ row.inherited.display }}</strong>{% endif %}
+        </p>
+        {% if row.locked %}<p class="set-locked" id="{{ row.field_id }}-lock">Read-only: {{ row.locked }}.</p>{% endif %}
+        {% if row.error %}<p class="set-error" id="{{ row.field_id }}-err"><span aria-hidden="true">✕ </span>{{ row.error }}</p>{% endif %}
+      </div>
+      <div class="set-actions">
+        {% if row.is_set and not row.locked %}<button type="submit" class="btn secondary set-reset" name="{{ reset_field }}" value="{{ row.spec.name }}" aria-label="Reset {{ row.spec.label }} to inherited ({{ row.inherited.display }})">Reset to inherited</button>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+  {# Sticky, so the outcome of a Save or a row's Reset is visible wherever the form is scrolled. #}
+  <div class="set-submit set-sticky">
+    <button class="btn" type="submit">Save</button>
+    {% if message %}<p class="set-status{% if failed %} is-error{% endif %}" role="{{ 'alert' if failed else 'status' }}">{{ message }}</p>
+    {% else %}<span class="muted">Empty or “Inherit” fields fall back to the scope above.</span>{% endif %}
+  </div>
+</form>
+</div>
+</div>
+{% endblock %}

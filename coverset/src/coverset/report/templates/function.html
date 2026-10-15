@@ -1,0 +1,55 @@
+{% extends "layout.html" %}
+{% from "_macros.html" import outcome, test_ref %}
+{% block title %}{{ fn.region.qualname }}{% endblock %}
+{% block main %}
+{% set view = fn.view %}
+{% set cov = view.cov %}
+<div class="crumbs"><a href="{{ link('index.html') }}">overview</a> / <a href="{{ link(entry.page) }}#L{{ fn.region.def_line }}">{{ fn.region.path }}</a> / function</div>
+<div class="page-head">
+  <h1><code>{{ fn.region.qualname }}</code></h1>
+  <p class="meta">
+    <span>{{ fn.region.path }}:{{ fn.region.def_line }}–{{ fn.region.end_line }}</span>
+    <span>lines {{ view.line_pct|pct }}</span>
+    <span>branches {{ view.branch_pct|pct }}</span>
+    <span>{{ fn.tests|length|plural('covering test') }}</span>
+    {% if cov.expected %}<span data-input-classes>input classes {{ cov.observed_expected }} of {{ cov.expected|length }}</span>{% endif %}
+  </p>
+</div>
+<p class="signature"><code>{{ signature }}</code>{% if not view.annotations or view.annotations.values()|select|list|length == 0 %} <span class="muted">· unannotated: expected classes come from the observed values only</span>{% endif %}</p>
+{% if since %}<p class="since-note" data-since><a href="{{ link('changes.html') }}">Since base</a>: {{ since.summary() }}</p>{% endif %}
+{% if cov.note %}<p class="sampling-note muted" data-sampling-note>{{ cov.note }}</p>{% endif %}
+<div class="detail-grid detail">
+  <div>
+    <section class="panel">
+      <h3>Body with coverage <span class="muted">· <a href="{{ link(entry.page) }}#L{{ fn.region.def_line }}" data-keep-view>open in the file</a></span> <button type="button" class="hl-toggle" data-highlight-toggle aria-pressed="false" title="Paint every measured line, or only what never ran or took one branch (key h)"><span class="hl-label hl-all">Highlight: all lines</span><span class="hl-label hl-missing">Highlight: missing only</span></button></h3>
+      {% if hunk is not none %}<div class="src-frame">{{ hunk }}</div>{% else %}<p class="empty">The source of this function is not available.</p>{% endif %}
+    </section>
+    <section class="panel">
+      <h3>Covering tests <span class="muted">· {% for name, n in outcomes %}{{ n }} {{ name }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not outcomes %}none{% endif %}</span></h3>
+      {% if covering %}
+      <ul class="test-list" data-covering>{% for nodeid, oc, href in covering %}<li>{{ outcome(oc) }}{{ test_ref(nodeid, link(href) if href else none) }}</li>{% endfor %}</ul>
+      {% if covering_more %}<p class="muted" data-more>+{{ covering_more }} more covering tests not listed (the first {{ covering|length }} by outcome, then id; search finds every test)</p>{% endif %}
+      {% else %}<p class="empty">No test calls this function.</p>{% endif %}
+    </section>
+  </div>
+  <div>
+    <section class="panel grid-panel">
+      {{ grid }}
+    </section>
+    <section class="panel">
+      <h3>Who calls it <span class="muted">· test files → callers → parameters</span></h3>
+      {{ ribbon }}
+    </section>
+    {% if suggestion %}
+    <section class="panel">
+      <h3>{{ 'Suggested Hypothesis test' if '@given' in suggestion else 'Suggested test' }} <span class="muted">· generated from the missing input classes</span></h3>
+      <div class="code-block"><pre id="suggest-{{ fn.region.func_key }}"><code>{{ suggestion }}</code></pre><button type="button" class="copy" data-copy-target="#suggest-{{ fn.region.func_key }}">Copy</button></div>
+    </section>
+    {% endif %}
+  </div>
+</div>
+<section class="panel" id="classes">
+  <div class="panel-head"><h2>Input classes</h2><span class="aside">{% if cov.missing %}{{ cov.missing|length }} {{ cov.missing_reason }}{% else %}every expected class was passed in{% endif %} · a hollow class means "never observed", not "buggy"</span></div>
+  {% with compact=false, uid=fn.region.func_key %}{% include "_classes.html" %}{% endwith %}
+</section>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% from "_macros.html" import test_link %}
+{#- Overview: the run's totals as tiles, the leverage histogram, the biggest tests that add nothing
+    alone, and the PR test tax for a PR run. Each tile links to the section that lists its tests. -#}
+{% set t = view.totals %}
+<div class="stats eco-tiles" role="list" id="eco-tiles">
+  <div class="stat" role="listitem" data-tile="tests"><div class="value">{{ t.tests }}</div><div class="label">tests · {{ t.measured_tests }} measured from source</div></div>
+  <a class="stat" role="listitem" data-tile="leverage" href="{{ page_url(tab='leverage') }}"><div class="value">{{ median|leverage }}</div><div class="label">median leverage · {{ t.unique_facts }} unique facts in all</div></a>
+  <div class="stat" role="listitem" data-tile="statements"><div class="value">{{ t.statements }}</div><div class="label">test statements · +{{ t.helper_statements }} in helpers · {{ t.asserts }} assertions</div></div>
+  <a class="stat" role="listitem" data-tile="minimal" href="{{ page_url(tab='redundant', _anchor='eco-minimal') }}"><div class="value">{{ t.minimal_set_size }} <span class="of">/ {{ t.tests }}</span></div><div class="label">tests keep every fact · {{ t.minimal_set_duration_ms|ms }} of {{ t.total_duration_ms|ms }}</div></a>
+  <a class="stat{{ ' eco-warn' if t.removable_candidates }}" role="listitem" data-tile="removable" href="{{ page_url(tab='leverage', only='removable') }}"><div class="value">{{ t.removable_candidates }}</div><div class="label">removable candidates · {{ t.removable_duration_ms|ms }} · cover nothing the others miss</div></a>
+  <a class="stat" role="listitem" data-tile="groups" href="{{ page_url(tab='redundant', _anchor='eco-groups') }}"><div class="value">{{ t.equivalence_groups }}</div><div class="label">groups of identical flows · {{ t.tests_in_groups }} tests · {{ t.dominated }} dominated</div></a>
+  <a class="stat" role="listitem" data-tile="families" href="{{ page_url(tab='families') }}"><div class="value">{{ t.collapsible_families }} <span class="of">/ {{ t.families }}</span></div><div class="label">parametrized families repeat a flow · {{ t.redundant_cases }} redundant cases</div></a>
+  <a class="stat{{ ' eco-warn' if t.assertion_free }}" role="listitem" data-tile="assertion-free" href="{{ page_url(tab='leverage', only='assertion_free') }}"><div class="value">{{ t.assertion_free }}</div><div class="label">tests with no assertion</div></a>
+  <a class="stat" role="listitem" data-tile="indirect" href="{{ page_url(tab='functions', _anchor='eco-indirect') }}"><div class="value">{{ t.indirect_only_functions }}</div><div class="label">functions only ever tested indirectly</div></a>
+  <a class="stat{{ ' eco-warn' if t.untested_functions }}" role="listitem" data-tile="untested" href="{{ page_url(tab='functions', _anchor='eco-untested') }}"><div class="value">{{ t.untested_functions }} <span class="of">/ {{ t.functions }}</span></div><div class="label">functions no test ran</div></a>
+  <a class="stat{{ ' eco-warn' if t.handlers_unexercised }}" role="listitem" data-tile="handlers" href="{{ page_url(tab='functions', _anchor='eco-handlers') }}"><div class="value">{% if t.handlers_total is none %}n/m{% else %}{{ t.handlers_unexercised }} <span class="of">/ {{ t.handlers_total }}</span>{% endif %}</div><div class="label">exception handlers no test ran</div></a>
+  <a class="stat{{ ' eco-warn' if t.stale_tests }}" role="listitem" data-tile="stale" href="{{ page_url(tab='leverage', only='stale') }}"><div class="value">{% if t.stale_tests is none %}n/m{% else %}{{ t.stale_tests }}{% endif %}</div><div class="label">stale tests · every function they cover changed since they did</div></a>
+</div>
+
+{% if tax %}{% include "economy/_tax_card.html" %}{% endif %}
+
+<div class="grid-2 eco-overview">
+  <section class="panel" aria-labelledby="eco-hist-h">
+    <div class="panel-head"><h2 id="eco-hist-h">Leverage</h2><span class="aside">median {{ median|leverage }} · tests per bin</span></div>
+    <div class="eco-hist-box">{{ histogram }}</div>
+    <p class="muted">Leverage is unique facts per test statement. A test at 0 covers nothing another test does not; low leverage is normal for a second test of a function, so read the extremes. <a href="{{ page_url(tab='leverage') }}">Every test, lowest leverage first</a>.</p>
+  </section>
+  <section class="panel" aria-labelledby="eco-zero-h">
+    <div class="panel-head"><h2 id="eco-zero-h">Biggest tests that add nothing alone</h2><span class="aside">no unique fact, most statements first</span></div>
+    {% if zero_big %}
+    <table class="eco-compact">
+      <thead><tr><th>Test</th><th class="num">Statements</th><th class="num">Asserts</th><th>Covered by</th></tr></thead>
+      <tbody>
+      {% for r in zero_big %}
+        <tr><td class="nodeid">{{ test_link(repo.id, r.nodeid, run.id) }}</td><td class="num">{{ r.statements }}{% if r.helper_statements %} <span class="muted">+{{ r.helper_statements }}</span>{% endif %}</td><td class="num">{{ r.asserts if r.asserts is not none else '–' }}</td>
+        <td>{% if r.dominated_by %}<span class="badge">subset</span> <span class="nodeid">{{ r.dominated_by|nodeid }}</span>{% elif r.group_id %}<span class="badge">same flow</span> as another test{% else %}<span class="muted">several tests together</span>{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted">{{ view.caveat }}</p>
+    {% else %}<p class="empty">Every measured test covers something no other test does.</p>{% endif %}
+  </section>
+</div>

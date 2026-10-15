@@ -1,0 +1,13 @@
+{
+  "headers": {
+    "Content-Type": "application/json",
+    "User-Agent": "GitHub-Hookshot/7b4c2a1",
+    "X-GitHub-Delivery": "22a1a4f3-a9e5-5dc9-a996-29b57b67bf74",
+    "X-GitHub-Event": "ping",
+    "X-GitHub-Hook-ID": "480001",
+    "X-GitHub-Hook-Installation-Target-ID": "1001",
+    "X-GitHub-Hook-Installation-Target-Type": "integration",
+    "X-Hub-Signature-256": "sha256=75d73b0d8b6147f6c1966c0887a99b3d93f002bf9668a95df0b4a189720053fa"
+  },
+  "body": "{\"zen\":\"Design for failure.\",\"hook_id\":480001,\"hook\":{\"type\":\"App\",\"id\":480001,\"name\":\"web\",\"active\":true,\"events\":[\"check_run\",\"check_suite\",\"pull_request\",\"push\"],\"config\":{\"content_type\":\"json\",\"insecure_ssl\":\"0\",\"url\":\"http://127.0.0.1:8000/webhooks/github\"},\"updated_at\":\"2026-10-01T12:00:00Z\",\"created_at\":\"2026-10-01T12:00:00Z\",\"app_id\":1001}}"
+}

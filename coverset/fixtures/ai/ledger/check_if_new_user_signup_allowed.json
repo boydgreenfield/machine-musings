@@ -1,0 +1,66 @@
+{
+  "description": "PR #2: subdomains of a customer domain now pass validate_email and slip past the exact-match check.",
+  "applies_to": {
+    "path": "src/ledger/accounts/signup.py"
+  },
+  "source": "fixture",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd_estimate": 0.0,
+  "requests": 0,
+  "notes": [
+    "canned demo review; not produced by a model"
+  ],
+  "result": {
+    "functions": [
+      {
+        "qualname": "check_if_new_user_signup_allowed",
+        "verdict": "partially_covered",
+        "confidence": "high",
+        "evidence": [
+          {
+            "test_id": "tests/test_signup.py::test_signup_allowed",
+            "what_it_exercises": "Table of eight cases: new domains allowed, customer domains refused, case-insensitive matching."
+          },
+          {
+            "test_id": "tests/test_signup.py::test_malformed_email_is_an_error",
+            "what_it_exercises": "Asserts ValueError for five malformed addresses."
+          }
+        ],
+        "missing_input_classes": [
+          {
+            "name": "email:multi-label-domain",
+            "description": "An address on a subdomain of a customer domain, e.g. bob@eng.acme.com with acme.com a customer.",
+            "why_likely": "validate_email now returns eng.acme.com, which is compared to customer domains by exact match, so subdomain addresses self-sign-up although the invariant says they must be invited.",
+            "example_value": "'bob@eng.acme.com'",
+            "severity": "high",
+            "hypothesis_strategy": "st.emails(domains=st.from_regex(r\"[a-z0-9]{1,10}(\\.[a-z0-9]{1,10}){1,2}\\.[a-z]{2,6}\", fullmatch=True))"
+          }
+        ],
+        "suggested_tests": [
+          {
+            "name": "test_subdomain_of_customer_must_be_invited",
+            "style": "example",
+            "code": "import pytest\n\nfrom ledger.accounts.signup import check_if_new_user_signup_allowed\n\n\n@pytest.mark.invariant(\"signup_rejects_existing_domain\")\ndef test_subdomain_of_customer_must_be_invited():\n    assert check_if_new_user_signup_allowed(\"bob@eng.acme.com\", {\"acme.com\"}) is False\n"
+          },
+          {
+            "name": "test_any_subdomain_of_a_customer_is_refused",
+            "style": "hypothesis",
+            "code": "import pytest\nfrom hypothesis import given, strategies as st\n\nfrom ledger.accounts.signup import check_if_new_user_signup_allowed\n\nLABELS = st.from_regex(r\"[a-z][a-z0-9]{0,9}\", fullmatch=True)\n\n\n@pytest.mark.invariant(\"signup_rejects_existing_domain\")\n@given(local=LABELS, subdomain=LABELS)\ndef test_any_subdomain_of_a_customer_is_refused(local, subdomain):\n    email = f\"{local}@{subdomain}.acme.com\"\n    assert check_if_new_user_signup_allowed(email, {\"acme.com\"}) is False\n"
+          }
+        ],
+        "invariant_findings": [
+          {
+            "invariant_id": "signup_rejects_existing_domain",
+            "status": "violated",
+            "evidence": "check_if_new_user_signup_allowed('bob@eng.acme.com', {'acme.com'}) returns True: the domain eng.acme.com is compared to customer domains by exact match, so subdomains are not refused."
+          }
+        ],
+        "abstain_reason": ""
+      }
+    ]
+  }
+}

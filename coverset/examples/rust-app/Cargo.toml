@@ -1,0 +1,12 @@
+[package]
+name = "ledger"
+version = "0.1.0"
+edition = "2021"
+description = "A small ledger library: coverset's Rust example (see docs/rust.md)"
+publish = false
+
+[dependencies]
+
+[profile.dev]
+# Line tables only: coverage needs no full debug info, and the test binaries stay small.
+debug = "line-tables-only"

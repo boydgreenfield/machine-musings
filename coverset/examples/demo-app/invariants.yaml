@@ -1,0 +1,98 @@
+# Behavioural rules for the ledger. Each entry is linked to tests through
+# @pytest.mark.invariant("<id>"); coverset reports every rule as satisfied,
+# violated, untested, stale or needs_review on each run.
+version: 1
+invariants:
+  - id: cents_conserved
+    scope:
+      kind: function
+      target: ledger.billing.allocate.allocate_cents
+    statement: >-
+      When allocate_cents splits an integer total across a non-empty list of
+      positive finite weights, the ledger shall return integer shares whose sum
+      equals the total exactly, for refunds (negative totals) as well as charges.
+    severity: error
+    verify:
+      - kind: test
+        marker: cents_conserved
+      - kind: property
+    examples:
+      - "allocate_cents(100, [1, 1, 1]) == [34, 33, 33]"
+      - "allocate_cents(7, [1, 1, 1, 1]) == [2, 2, 2, 1]"
+      - "sum(allocate_cents(-100, [1, 2])) == -100"
+    counterexamples:
+      - "allocate_cents(100, [1, 1, 1]) == [33, 33, 33] (a cent is lost)"
+      - "allocate_cents(-100, [1, 2]) == [-32, -66] (two cents appear from nowhere)"
+    rationale: >-
+      Invoice lines, discounts and refunds are reconciled against the payment
+      processor to the cent; a split that gains or loses a cent leaves the books
+      out of balance and shows up as an unexplained difference at month end.
+    owner: team-billing
+
+  - id: durations_consume_whole_input
+    scope:
+      kind: function
+      target: ledger.durations.parse.parse_duration
+    statement: >-
+      When parse_duration receives text that is not entirely a run of
+      <amount><unit> tokens with units s, m, h or d, the ledger shall raise
+      ValueError instead of returning the seconds of the tokens it recognised.
+    severity: error
+    verify:
+      - kind: property
+    examples:
+      - "parse_duration('1h30m') == 5400"
+      - "parse_duration(format_duration(n)) == n for every n >= 0"
+    counterexamples:
+      - "parse_duration('100ms') == 6000 (the 's' is ignored and 100 ms becomes 100 minutes)"
+      - "parse_duration('1.5h') == 18000 (the '1.' is skipped)"
+    rationale: >-
+      Expiry windows for invitations and payment holds are configured as duration
+      strings; silently reading part of a string turns a typo into a window that
+      is orders of magnitude too long or too short.
+    owner: team-platform
+
+  - id: merge_idempotent
+    scope:
+      kind: function
+      target: ledger.intervals.merge.merge_intervals
+    statement: >-
+      The ledger shall return from merge_intervals a list that merge_intervals
+      leaves unchanged, whatever the order, nesting or adjacency of the input
+      intervals.
+    severity: warning
+    verify:
+      - kind: property
+    examples:
+      - "merge_intervals(merge_intervals(x)) == merge_intervals(x)"
+      - "merge_intervals([(1, 5), (3, 8)]) == [(1, 8)]"
+    counterexamples:
+      - "a result such as [(1, 5), (3, 8)], which a second merge_intervals call folds into [(1, 8)]"
+    rationale: >-
+      Booking calendars merge slots on every save; a merge that is not a fixed
+      point keeps rewriting stored slots and makes availability depend on how
+      many times a calendar was saved.
+    owner: team-scheduling
+
+  - id: signup_rejects_existing_domain
+    scope:
+      kind: function
+      target: ledger.accounts.signup.check_if_new_user_signup_allowed
+    statement: >-
+      When a person tries to self-sign-up with an email address at a domain that
+      belongs to an existing customer, or at any subdomain of it, the ledger
+      shall refuse the signup so the customer's admin can invite them.
+    severity: error
+    verify:
+      - kind: test
+      - kind: review
+    examples:
+      - "check_if_new_user_signup_allowed('alice@example.com', {'acme.com'}) is True"
+      - "check_if_new_user_signup_allowed('dana@acme.com', {'acme.com'}) is False"
+    counterexamples:
+      - "check_if_new_user_signup_allowed('bob@eng.acme.com', {'acme.com'}) is True"
+    rationale: >-
+      A customer's people must land in the customer's account, where its admins
+      control seats, billing and data retention; a stray personal account holds
+      company data outside those controls.
+    owner: team-accounts

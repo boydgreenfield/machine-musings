@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "poetry-app"
+version = "0.1.0"
+description = "A Poetry project with a lock and no [project] table."
+authors = ["coverset <fixtures@example.invalid>"]
+packages = [{ include = "poetry_app" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+attrs = "^26.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.1"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coverset.dev/schema/neutral/v1/arcs.schema.json",
+  "title": "arcs.jsonl: the branch arcs executed in one file over the whole run",
+  "type": "object",
+  "required": [
+    "file",
+    "arcs"
+  ],
+  "properties": {
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "arcs": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": -1000000,
+          "maximum": 1000000
+        },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    }
+  },
+  "additionalProperties": false
+}

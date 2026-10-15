@@ -1,0 +1,24 @@
+[project]
+name = "entry-app"
+version = "0.3.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.entry-points."entry_app.plugins"]
+upper = "entry_app.plugins:upper"
+
+[project.scripts]
+entry-app = "entry_app.cli:main"
+
+[dependency-groups]
+test = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+entry_app = ["resources/*.txt"]

@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+{% block title %}About{% endblock %}
+{% block main %}
+<div class="page-head"><h1>About this report</h1><p class="meta"><span>{{ origin }}</span></p></div>
+<section class="panel">
+  <h2>Producer</h2>
+  <dl class="kv">{% for label, value in rows %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl>
+</section>
+{% if run_rows %}
+<section class="panel">
+  <h2>Run</h2>
+  <dl class="kv">{% for label, value in run_rows %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl>
+</section>
+{% endif %}
+<section class="panel" id="limits">
+  <h2>Caps and limits hit</h2>
+  {% if limits %}
+  <dl class="kv">{% for label, value in limits %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl>
+  {% else %}<p class="empty">No record was dropped and no limit was hit while reading the bundle.</p>{% endif %}
+  {% if capped %}
+  <p>{{ capped|length|plural('function') }} hit the shape tracer's sample cap, so their missing classes read "not observed in N sampled calls" instead of "never exercised":</p>
+  <ul>{% for fn in capped %}<li><a href="{{ link(fn.page) }}"><code>{{ fn.region.qualname }}</code></a> <span class="muted">{{ fn.view.cov.missing_reason or fn.view.cov.note }}</span></li>{% endfor %}</ul>
+  {% else %}<p class="muted">No function hit the sample cap: every missing input class reads "never exercised".</p>{% endif %}
+</section>
+<section class="panel">
+  <h2>What this report is</h2>
+  <p>A static view of one test run, built by <code>coverset report</code> from the run's bundle. It shows line and branch coverage per test and the input classes each function's tests passed in. It has no history (flakiness, durations over time) and no pull-request diff: the live pages of <code>coverset serve</code> have those.</p>
+</section>
+<section class="panel">
+  <h2>Bundle meta</h2>
+  <pre class="meta-dump">{{ dump }}</pre>
+</section>
+{% endblock %}

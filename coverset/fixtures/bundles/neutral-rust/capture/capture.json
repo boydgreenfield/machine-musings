@@ -1,0 +1,228 @@
+{
+ "format": "coverset-rust-capture",
+ "version": 1,
+ "root": "../repo",
+ "runner": "nextest",
+ "runner_version": "0.9.148",
+ "rustc": "1.98.1",
+ "created_at": "2026-10-13T12:00:00Z",
+ "jobs": 16,
+ "timings_s": {
+  "build_and_list": 0.786,
+  "run": 0.149,
+  "export_tests": 0.053,
+  "export_merged": 0.049,
+  "convert": 0.018,
+  "total": 1.099
+ },
+ "binaries": [
+  {
+   "binary_id": "ledger",
+   "kind": "lib",
+   "src_path": "src/lib.rs",
+   "package_root": "."
+  },
+  {
+   "binary_id": "ledger::ledger_flow",
+   "kind": "test",
+   "src_path": "tests/ledger_flow.rs",
+   "package_root": "."
+  }
+ ],
+ "tests": [
+  {
+   "binary_id": "ledger",
+   "name": "durations::tests::parses_days",
+   "ignored": true,
+   "outcome": "skipped",
+   "duration_s": null,
+   "message": null,
+   "fail_sig": null,
+   "start": null,
+   "stop": null,
+   "export": null
+  },
+  {
+   "binary_id": "ledger",
+   "name": "durations::tests::parses_hours_and_minutes",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.013,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.0,
+   "stop": 1791892800.013,
+   "export": "exports/tests/24c38ac4b0cb471b.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "durations::tests::rejects_a_bare_number",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.013,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.014,
+   "stop": 1791892800.027,
+   "export": "exports/tests/85ced77090d11307.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "emailcheck::tests::rejects_a_missing_at_sign",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.014,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.028,
+   "stop": 1791892800.042,
+   "export": "exports/tests/bce253daeda28102.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "emailcheck::tests::returns_the_lowercased_domain",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.013,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.043,
+   "stop": 1791892800.056,
+   "export": "exports/tests/c11d97ae488641b1.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "intervals::tests::largest_of_floats_and_ints",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.015,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.057,
+   "stop": 1791892800.072,
+   "export": "exports/tests/31ce5ab22ee4271e.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "intervals::tests::merges_overlaps_in_any_order",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.015,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.073,
+   "stop": 1791892800.088,
+   "export": "exports/tests/66a5b4a0d34e1acf.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "money::tests::allocates_by_weight",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.015,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.089,
+   "stop": 1791892800.104,
+   "export": "exports/tests/49aa6f20d04f6fb2.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "money::tests::allocates_the_remainder_to_the_largest_fractions",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.015,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.105,
+   "stop": 1791892800.12,
+   "export": "exports/tests/33008ab67c48af02.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "money::tests::formats_dollars_and_euros",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.014,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.121,
+   "stop": 1791892800.135,
+   "export": "exports/tests/2d2e4e1d30a49cf5.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "money::tests::refuses_to_overdraw",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.016,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.136,
+   "stop": 1791892800.152,
+   "export": "exports/tests/b10b5384eb699c1b.lcov"
+  },
+  {
+   "binary_id": "ledger",
+   "name": "money::tests::refuses_zero_weights",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.014,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.153,
+   "stop": 1791892800.167,
+   "export": "exports/tests/f15be473dbae872f.lcov"
+  },
+  {
+   "binary_id": "ledger::ledger_flow",
+   "name": "a_failed_transfer_reports_the_shortfall",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.015,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.168,
+   "stop": 1791892800.183,
+   "export": "exports/tests/035732f03198fd64.lcov"
+  },
+  {
+   "binary_id": "ledger::ledger_flow",
+   "name": "billing_windows_merge_and_durations_parse",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.015,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.184,
+   "stop": 1791892800.199,
+   "export": "exports/tests/ace90d6849bbb992.lcov"
+  },
+  {
+   "binary_id": "ledger::ledger_flow",
+   "name": "signup_rejects_a_bad_domain",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.014,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.2,
+   "stop": 1791892800.214,
+   "export": "exports/tests/60e9fd66231e3aa9.lcov"
+  },
+  {
+   "binary_id": "ledger::ledger_flow",
+   "name": "splits_an_invoice_and_posts_every_share",
+   "ignored": false,
+   "outcome": "passed",
+   "duration_s": 0.014,
+   "message": null,
+   "fail_sig": null,
+   "start": 1791892800.215,
+   "stop": 1791892800.229,
+   "export": "exports/tests/94f4d171b4ad306e.lcov"
+  }
+ ],
+ "merged": "exports/merged.lcov",
+ "functions": "exports/llvm-functions.json"
+}

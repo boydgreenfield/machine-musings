@@ -1,0 +1,2 @@
+{# Repository nav: "Repo settings" (distinct from the instance or preferences "Settings" of _nav_admin.html) for principals that may write nav_repo (settings_pages context). #}
+{% if settings_can_write is defined and settings_can_write(nav_repo) %}<a href="{{ url_for('settings_pages.repo_settings', rid=nav_repo.id) }}"{% if endpoint == 'settings_pages.repo_settings' %} aria-current="page"{% endif %}>Repo settings</a>{% endif %}

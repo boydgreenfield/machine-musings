@@ -1,0 +1,128 @@
+{% extends "layout.html" %}
+{% from "_macros.html" import outcome, test_ref, bar %}
+{% block title %}Overview{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>{{ title }}</h1>
+  <p class="meta"><span>{{ origin }}</span><span>{{ totals.files|plural('file') }}</span><span>{{ totals.tests|plural('test') }}</span></p>
+</div>
+{% if changes %}
+<a class="changes-tile" href="{{ link('changes.html') }}" data-changes-tile>
+  <strong>Changes since base:</strong> <span data-lines-lost>{{ changes.lines_lost|plural('line') }} lost</span>, <span data-classes-lost>{{ changes.classes_lost|plural('class', 'classes') }} lost</span>, <span data-tests-changed>{{ changes.tests_changed|plural('test') }} changed</span>
+  <span class="muted">· base {{ changes.base_origin }}{% if changes.base_only %} · {{ changes.base_only|length|plural('test') }} of the base did not run here{% endif %}</span>
+</a>
+{% endif %}
+{% if economy %}{% include "economy_tile.html" %}{% endif %}
+<div class="stats totals">
+  <div class="stat" data-stat="statements"><div class="value">{{ totals.statements }}</div><div class="label">statements</div></div>
+  <div class="stat" data-stat="run"><div class="value">{{ totals.run_pct|pct }}</div><div class="label">lines run · {{ totals.run }} of {{ totals.statements }}, {{ totals.missed }} never ran</div></div>
+  <div class="stat" data-stat="branches"><div class="value">{{ totals.branch_pct|pct }}</div><div class="label">branches · {{ totals.branches_taken }} of {{ totals.branches }} taken</div></div>
+  <div class="stat" data-stat="partial"><div class="value">{{ totals.partial }}</div><div class="label">partial lines (took one branch only)</div></div>
+  <div class="stat" data-stat="functions"><div class="value">{{ totals.functions }}</div><div class="label">functions · {{ totals.called }} called by a test</div></div>
+  <div class="stat" data-stat="never-exercised"><div class="value">{{ totals.never_exercised }}</div><div class="label">functions with input classes never exercised{% if totals.capped %} · {{ totals.capped }} more not observed in sampled calls{% endif %}</div></div>
+  <div class="stat" data-stat="tests"><div class="value">{{ totals.tests }}</div><div class="label">tests · {% for name, n in totals.outcomes %}<span class="oc oc-{{ name.replace(' ', '_') }}" data-outcome="{{ name }}">{{ n }} {{ name }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</div></div>
+</div>
+
+<section class="panel" id="map">
+  <div class="panel-head"><h2>Coverage map</h2><span class="aside">area = statements; click a function to open its source</span></div>
+  <div class="map-tools">
+    <span class="seg" role="group" aria-label="Colour by (key m)">
+      <button type="button" data-map="gap" aria-pressed="true">Gap</button><button type="button" data-map="lines" aria-pressed="false">Lines</button>
+    </span>
+    {% if map_variants %}
+    <span class="seg-label" id="modules-label">module-level code</span>
+    <span class="seg" role="group" aria-labelledby="modules-label" title="{{ module_why }} (key M)">
+      {% for w in module_weights %}<button type="button" data-map-modules="{{ w }}" aria-pressed="{{ 'true' if w == module_weight else 'false' }}">{{ {'full': 'Full', 'thin': 'Thin', 'hidden': 'Hidden'}[w] }}</button>{% endfor %}
+    </span>
+    {% endif %}
+    {% for (mode, weight), legend in legends.items() %}<span class="map-legend" data-map-legend="{{ mode }}" data-map-weight="{{ weight }}"{% if mode != 'gap' or weight != module_weight %} hidden{% endif %}>{{ legend }}</span>
+    {% endfor %}
+  </div>
+  <p class="muted" data-map-legend="gap">Gap = line coverage minus input-class coverage: the stronger a tile's colour, the more of it ran under tests that never tried whole kinds of input. Hatched tiles were never called; grey tiles expect no input classes.</p>
+  <p class="muted" data-map-legend="lines" hidden>Share of each function's statements that some test ran.</p>
+  <p class="muted map-note" data-module-note>Dashed tiles are module-level code, drawn at most a tenth of their file's function statements{% if map_variants %} (Full and Hidden switch that){% endif %}: {{ module_why|lower }}{% if not map_variants %} This report has {{ map_leaves }} tiles, so it ships the thin map only.{% endif %}</p>
+  <div data-tm-box>
+    <p class="tm-status" data-tm-status aria-hidden="true"><span class="tm-status-idle">hover a tile</span></p>
+    <div class="map-view" data-map-view="gap">{{ maps.gap }}</div>
+    <div class="map-view" data-map-view="lines" hidden>{{ maps.lines }}</div>
+  </div>
+  {% for (mode, weight), svg in map_variants.items() %}<template class="map-variant" data-map-variant="{{ mode }}:{{ weight }}">{{ svg }}</template>
+  {% endfor %}
+</section>
+
+<section class="panel lazy-panel" id="files">
+  <div class="panel-head"><h2>Files</h2><span class="aside">click a column to sort</span></div>
+  <div class="table-scroll">
+  <table class="sortable file-table">
+    <thead><tr>
+      <th><button type="button" data-sort="text">File</button></th>
+      <th class="num"><button type="button" data-sort="num">Statements</button></th>
+      <th class="num"><button type="button" data-sort="num">Run</button></th>
+      <th class="num"><button type="button" data-sort="num">Never ran</button></th>
+      <th class="num"><button type="button" data-sort="num">Partial</button></th>
+      <th class="num"><button type="button" data-sort="num">Tests</button></th>
+      <th class="num"><button type="button" data-sort="num" title="line % minus input-class %">Gap</button></th>
+    </tr></thead>
+    <tbody>
+    {% for f in files %}
+      <tr data-path="{{ f.path }}">
+        <td data-value="{{ f.path }}"><a href="{{ link(f.page) }}"><code>{{ f.path }}</code></a>{% if f.source is none %} <span class="muted">· source not available</span>{% endif %}</td>
+        <td class="num" data-value="{{ f.statements }}">{{ f.statements }}</td>
+        <td class="num" data-value="{{ '%.3f'|format(f.run_pct) if f.run_pct is not none else -1 }}">{{ bar(f.run_pct) }} {{ f.run_pct|pct }}</td>
+        <td class="num" data-value="{{ f.missed }}">{{ f.missed }}</td>
+        <td class="num" data-value="{{ f.partial }}">{{ f.partial }}</td>
+        <td class="num" data-value="{{ f.tests|length }}">{{ f.tests|length }}</td>
+        <td class="num" data-value="{{ '%.3f'|format(f.gap) if f.gap is not none else -1 }}">{% if f.gap is not none %}{{ '%.0f'|format(f.gap) }} pts{% else %}<span class="muted">–</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="panel lazy-panel" id="gaps">
+  <div class="panel-head"><h2>Input classes no test passed in</h2><span class="aside">functions whose tests never tried some expected kind of input, most first</span></div>
+  {% if gaps %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Function</th><th class="num">Lines</th><th class="num">Input classes</th><th>Missing</th></tr></thead>
+    <tbody>
+    {% for fn in gaps %}
+      <tr>
+        <td><a href="{{ link(fn.page) }}"><code>{{ fn.region.qualname }}</code></a> <span class="muted">{{ fn.region.path }}</span></td>
+        <td class="num">{{ fn.view.line_pct|pct }}</td>
+        <td class="num">{{ fn.view.cov.observed_expected }} of {{ fn.view.cov.expected|length }} {{ strip(fn) }}</td>
+        <td>{% for cls in fn.view.cov.missing %}<span class="chip chip-hollow" title="{{ cls.name }}: {{ fn.view.cov.missing_reason }}">{{ cls.name }}</span> {% endfor %}{% if not fn.never_exercised %}<span class="muted">{{ fn.view.cov.missing_reason }}</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="empty">Every called function's tests passed in every expected input class.</p>{% endif %}
+</section>
+
+<section class="panel lazy-panel" id="tests">
+  <div class="panel-head"><h2>Tests</h2><span class="aside">failures first; click a column to sort</span></div>
+  <div class="table-scroll">
+  <table class="sortable tests-table">
+    <thead><tr>
+      <th><button type="button" data-sort="text">Outcome</button></th>
+      <th><button type="button" data-sort="text">Test</button></th>
+      <th class="num"><button type="button" data-sort="num">Duration</button></th>
+      <th class="num"><button type="button" data-sort="num">Files touched</button></th>
+    </tr></thead>
+    <tbody>
+    {% for t in tests %}
+      <tr data-nodeid="{{ t.info.nodeid }}">
+        <td data-value="{{ loop.index0 }}">{{ outcome(t.info.outcome) }}</td>
+        <td class="nodeid" data-value="{{ t.info.nodeid }}">{{ test_ref(t.info.nodeid, link(t.page)) }}
+          {% if t.info.message %}<details class="msg"><summary>{{ t.info.failed_phase or 'message' }}</summary><pre class="longrepr">{{ t.info.message }}</pre></details>{% endif %}</td>
+        <td class="num" data-value="{{ t.info.duration_s if t.info.duration_s is not none else -1 }}">{{ t.info.duration_s|duration }}</td>
+        <td class="num" data-value="{{ t.files|length }}">{{ t.files|length }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endblock %}

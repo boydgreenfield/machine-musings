@@ -1,0 +1,50 @@
+{% extends layout %}
+{% from "_macros.html" import inv_chip, lens %}
+{% block title %}{{ region.qualname }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / <a href="{{ detail.source_url }}">{{ region.path }}</a> / function</div>
+<div class="page-head">
+  <h1><code>{{ region.qualname }}</code></h1>
+  <p class="meta"><span>{{ region.path }}:{{ region.def_line }}–{{ region.end_line }}</span><span>run <a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r"><code>{{ run.head_sha|sha }}</code></a></span><span>{{ detail.test_total }} covering test{{ '' if detail.test_total == 1 else 's' }}</span>
+    {#- the source view's toggle (key h): app.js flips <html data-highlight> and keeps aria-pressed in step.
+        Its first state is the mode layout.html resolved for <meta name="coverset-view"> (_hl: ?highlight= >
+        the scoped settings > all), so the button agrees with the painted lines before scripts run. -#}
+    <span><button type="button" class="hl-toggle" data-highlight-toggle aria-pressed="{{ 'true' if (_hl is defined and _hl[0] == 'missing') else 'false' }}" title="Paint every measured line, or only what never ran or took one branch (key h)"><span class="hl-label hl-all">Highlight: all lines</span><span class="hl-label hl-missing">Highlight: missing only</span></button></span></p>
+</div>
+{% if invariants %}
+<section class="panel">
+  <h2>Invariants on this function</h2>
+  {% for inv in invariants %}
+  <div class="inv-card"><div><span class="key">{{ inv.key }}</span><p class="statement">{{ inv.statement }}</p>{{ lens(inv.lens, inv.key) }}</div><div>{{ inv_chip(inv.status) }}</div></div>
+  {% endfor %}
+</section>
+{% endif %}
+{% if history %}
+{% set cur = history.current %}
+<section class="panel fn-history" id="history" aria-labelledby="history-h">
+  <div class="panel-head"><h2 id="history-h">History</h2>
+    <span class="aside">input classes {% if cur.expected is not none %}{{ cur.observed or 0 }} of {{ cur.expected }}{% else %}n/a{% endif %} · lines {{ cur.line_pct|pct }} · {{ history.baselines|plural('baseline') }} of <code>{{ repo.default_branch }}</code> {% if history.extra %}before this run, and this run{% else %}up to this one{% endif %}</span>
+  </div>
+  <div class="fn-history-body">
+    <div class="spark-row" data-points="{{ history.points|length }}">{{ history.spark }}{{ history.key }}</div>
+    <div class="history-block left">
+      <ol class="history fn-hist" aria-label="Input classes observed per run, oldest first">{% for sq in history.squares %}{% set pt = sq.point %}
+        {%- set state = 'absent' if not pt.present else ('none' if pt.expected is none else 'some') -%}
+        {%- set tip = sq.label ~ ' · ' ~ ('function not in this run' if state == 'absent' else ('no input classes recorded (no test passed it anything)' if state == 'none' else (pt.observed or 0) ~ ' of ' ~ pt.expected ~ ' input classes · lines ' ~ (pt.line_pct|pct) ~ ' · ' ~ (pt.tests_called|plural('test')))) -%}
+        <li class="fh-{{ state }}{{ ' is-current' if sq.current }}{{ ' fh-extra' if sq.extra }}">{% if sq.url %}<a href="{{ sq.url }}" title="{{ tip }}"{% if sq.current %} aria-current="page"{% endif %}>{% else %}<span title="{{ tip }}">{% endif %}<span aria-hidden="true">{{ (pt.observed or 0) if state == 'some' else ('–' if state == 'none' else '·') }}</span><span class="sr">{{ tip }}</span>{% if sq.url %}</a>{% else %}</span>{% endif %}</li>
+      {%- endfor %}</ol>
+      <span class="history-caption">input classes observed per run · oldest → newest{% if history.extra %} · the last square is this run{% endif %} · the number = classes observed · – = none recorded · dotted = not in that run</span>
+    </div>
+  </div>
+  {% if history.losses %}
+  <ul class="fn-lost">
+    {% for lost in history.losses %}
+    <li><span class="chip chip-hollow">{{ lost.name }}</span> missing now, not missing in run <a href="{{ url_for('files.function', rid=repo.id, func_key=region.func_key, run=lost.last_seen.run_id) }}"><code>{{ lost.last_seen.head_sha|sha }}</code></a> ({{ lost.last_seen.created_at|stamp }}){% if cur.tests_truncated %} <span class="muted">· {{ cur.tests_truncated|plural('test') }} hit the sample cap here, so it may only have gone unsampled</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  <p class="muted small fn-lost-note" data-inferred>Inferred from the stored gaps (only never-observed classes are stored), against earlier runs with the same signature and expected class count.</p>
+  {% endif %}
+</section>
+{% endif %}
+<section class="panel detail">{% include "_function_detail.html" %}</section>
+{% endblock %}

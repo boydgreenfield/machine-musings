@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coverset.dev/schema/neutral/v1/tests.schema.json",
+  "title": "tests.jsonl: one row per collected test",
+  "type": "object",
+  "required": [
+    "id",
+    "file",
+    "outcome"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "line": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "error",
+        "skipped",
+        "xfailed",
+        "xpassed",
+        null
+      ]
+    },
+    "duration_s": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "failed_phase": {
+      "enum": [
+        "setup",
+        "call",
+        "teardown",
+        null
+      ]
+    },
+    "fail_sig": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "markers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "invariants": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "property": {
+      "type": "boolean"
+    },
+    "start": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "stop": {
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,39 @@
+{#- Functions: what the tests reach only by accident, never, or never on the error path. -#}
+<section class="panel" id="eco-handlers" aria-labelledby="eco-handlers-h">
+  <div class="panel-head"><h2 id="eco-handlers-h">Exception handlers no test ran</h2><span class="aside">{{ handlers|length }} function{{ '' if handlers|length == 1 else 's' }} · the except line opens the source view</span></div>
+  {% if view.totals.handlers_total is none %}<p class="empty">Not measured: the production sources were not read for this run.</p>
+  {% elif handlers %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Function</th><th>Handler</th><th>Catches</th></tr></thead>
+    <tbody>
+    {% for f in handlers %}{% for h in f.handlers %}
+      <tr>
+        <td>{% if loop.first %}<a href="{{ url_for('files.function', rid=repo.id, func_key=f.func_key, run=run.id) if f.kind in ('function', 'method') else url_for('files.source', rid=repo.id, path=f.path, run=run.id) }}"><code>{{ f.qualname }}</code></a> <span class="muted">{{ f.path }}{% if f.kind not in ('function', 'method') %} · {{ f.kind }}{% endif %}</span>{% endif %}</td>
+        <td><a href="{{ url_for('files.source', rid=repo.id, path=f.path, run=run.id, _anchor='L' ~ h.line) }}">line {{ h.line }}</a> <span class="muted">body at {{ h.body_line }}</span></td>
+        <td>{% for name in h.types %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</td>
+      </tr>
+    {% endfor %}{% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="empty">Every exception handler in the measured sources ran under some test (or at import).</p>{% endif %}
+</section>
+
+<div class="grid-2">
+<section class="panel" id="eco-indirect" aria-labelledby="eco-indirect-h">
+  <div class="panel-head"><h2 id="eco-indirect-h">Only tested indirectly</h2><span class="aside">{{ indirect|length }}</span></div>
+  <p class="muted">Observed, but never called by a test or a test helper: only ever reached through other functions. Private helpers often are, legitimately.</p>
+  {% if indirect %}
+  <ul class="eco-list">{% for f in indirect %}<li><a href="{{ url_for('files.function', rid=repo.id, func_key=f.func_key, run=run.id) }}"><code>{{ f.qualname }}</code></a> <span class="muted">{{ f.path }} · reached by {{ f.indirect_tests }} test{{ '' if f.indirect_tests == 1 else 's' }}</span></li>{% endfor %}</ul>
+  {% else %}<p class="empty">Every observed function is called directly by some test.</p>{% endif %}
+  {% if not_sampled %}<p class="muted">{{ not_sampled }} covered function{{ '' if not_sampled == 1 else 's' }} had no sampled call, so direct or indirect cannot be told.</p>{% endif %}
+</section>
+<section class="panel" id="eco-untested" aria-labelledby="eco-untested-h">
+  <div class="panel-head"><h2 id="eco-untested-h">Untested</h2><span class="aside">{{ untested|length }} of {{ view.functions|length }}</span></div>
+  <p class="muted">No test ran a line of these functions or was observed calling them.</p>
+  {% if untested %}
+  <ul class="eco-list">{% for f in untested %}<li><a href="{{ url_for('files.function', rid=repo.id, func_key=f.func_key, run=run.id) }}"><code>{{ f.qualname }}</code></a> <span class="muted">{{ f.path }}</span></li>{% endfor %}</ul>
+  {% else %}<p class="empty">Every function ran under some test.</p>{% endif %}
+</section>
+</div>

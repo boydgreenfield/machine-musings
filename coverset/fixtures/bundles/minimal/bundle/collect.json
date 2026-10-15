@@ -1,0 +1,49 @@
+{
+ "errors": [],
+ "items": [
+  {
+   "nodeid": "tests/test_calc.py::test_add",
+   "file": "tests/test_calc.py",
+   "line": 10,
+   "markers": [],
+   "invariant_ids": [],
+   "hypothesis": false
+  },
+  {
+   "nodeid": "tests/test_calc.py::test_classify[neg]",
+   "file": "tests/test_calc.py",
+   "line": 20,
+   "markers": [
+    "parametrize"
+   ],
+   "invariant_ids": [],
+   "hypothesis": false
+  },
+  {
+   "nodeid": "tests/test_calc.py::test_classify[pos]",
+   "file": "tests/test_calc.py",
+   "line": 30,
+   "markers": [
+    "parametrize"
+   ],
+   "invariant_ids": [],
+   "hypothesis": false
+  },
+  {
+   "nodeid": "tests/test_calc.py::test_box_total",
+   "file": "tests/test_calc.py",
+   "line": 40,
+   "markers": [],
+   "invariant_ids": [],
+   "hypothesis": false
+  },
+  {
+   "nodeid": "tests/test_calc.py::test_zero_fails",
+   "file": "tests/test_calc.py",
+   "line": 50,
+   "markers": [],
+   "invariant_ids": [],
+   "hypothesis": false
+  }
+ ]
+}

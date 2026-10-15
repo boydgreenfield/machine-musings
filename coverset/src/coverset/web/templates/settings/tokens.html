@@ -1,0 +1,113 @@
+{% extends layout %}
+{% block title %}API tokens{% endblock %}
+{% macro token_status(t) -%}
+{%- if t.revoked_at %}<span class="tok-state tok-revoked">revoked {{ t.revoked_at|ago }}</span>
+{%- elif t.expires_at and t.expires_at <= now %}<span class="tok-state tok-expired">expired</span>
+{%- else %}<span class="tok-state tok-live">active</span>{% endif -%}
+{%- endmacro %}
+{% macro token_rows(rows, with_repo) -%}
+{% for t in rows %}
+<tr>
+  <td>{{ t.name }}</td>
+  {% if with_repo %}<td class="mono">{{ repo_names.get(t.repo_id, t.repo_id) }}</td>{% endif %}
+  <td class="mono">cst_{{ t.prefix }}…</td>
+  <td>{% for s in t.scopes %}<span class="badge">{{ s }}</span> {% endfor %}</td>
+  <td>{{ t.created_at|stamp }}</td>
+  <td>{{ t.expires_at|stamp if t.expires_at else 'never' }}</td>
+  <td>{{ t.last_used_at|ago }}</td>
+  <td>{{ token_status(t) }}</td>
+  <td>{% if not t.revoked_at %}
+    <form method="post" action="{{ url_for('settings_pages.revoke_token', tid=t.id) }}"
+          hx-post="{{ url_for('settings_pages.revoke_token', tid=t.id) }}" hx-target="#tokens" hx-select="#tokens" hx-swap="outerHTML"
+          hx-confirm="Revoke “{{ t.name }}”? Anything using it stops working.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn secondary" aria-label="Revoke {{ t.name }}">Revoke</button>
+    </form>
+  {% endif %}</td>
+</tr>
+{% endfor %}
+{%- endmacro %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('dashboard.index') }}">coverset</a> / settings / tokens</div>
+<div class="page-head"><h1>API tokens</h1></div>
+<div class="settings-layout">
+{% include "settings/_nav.html" %}
+<div class="settings-main" id="tokens">
+  {% if new_token %}
+  <section class="panel tok-new" role="status" aria-labelledby="tok-new-title">
+    <h2 id="tok-new-title">Your new token</h2>
+    <p>{{ message }}</p>
+    <label for="tok-raw" class="sr">New token</label>
+    <input id="tok-raw" class="tok-raw mono" type="text" readonly value="{{ new_token }}" autocomplete="off" spellcheck="false">
+    <p class="muted">Send it as <code>Authorization: Bearer &lt;token&gt;</code>. coverset stores only its hash.</p>
+  </section>
+  {% elif message %}<p class="set-status" role="status">{{ message }}</p>{% endif %}
+  {% if error %}<p class="set-status is-error" role="alert">{{ error }}</p>{% endif %}
+
+  <section class="panel" aria-labelledby="tok-personal">
+    <h2 id="tok-personal">Personal tokens</h2>
+    {% if not can_personal %}
+    <p class="muted">Personal tokens act as a signed-in user. The admin token and open mode have no user: create a repository token instead.</p>
+    {% elif personal %}
+    <div class="table-scroll"><table class="tok-table">
+      <thead><tr><th>Name</th><th>Token</th><th>Scopes</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th><th><span class="sr">Actions</span></th></tr></thead>
+      <tbody>{{ token_rows(personal, False) }}</tbody>
+    </table></div>
+    {% else %}<p class="empty">No personal tokens yet.</p>{% endif %}
+  </section>
+
+  <section class="panel" aria-labelledby="tok-repo">
+    <h2 id="tok-repo">Repository tokens</h2>
+    {% if repo_tokens %}
+    <div class="table-scroll"><table class="tok-table">
+      <thead><tr><th>Name</th><th>Repository</th><th>Token</th><th>Scopes</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th><th><span class="sr">Actions</span></th></tr></thead>
+      <tbody>{{ token_rows(repo_tokens, True) }}</tbody>
+    </table></div>
+    {% elif repos %}<p class="empty">No repository tokens yet.</p>
+    {% else %}<p class="muted">You cannot write to any repository, so you cannot hold its tokens.</p>{% endif %}
+  </section>
+
+  {% if can_personal or repos %}
+  <section class="panel" aria-labelledby="tok-create">
+    <h2 id="tok-create">Create a token</h2>
+    <form class="tok-form" method="post" action="{{ url_for('settings_pages.create_token') }}"
+          hx-post="{{ url_for('settings_pages.create_token') }}" hx-target="#tokens" hx-select="#tokens" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="tok-field">
+        <label for="tok-name">Name</label>
+        <input id="tok-name" name="name" type="text" maxlength="80" required value="{{ form.name }}" aria-describedby="tok-name-hint">
+        <p class="muted" id="tok-name-hint">What uses it, e.g. “CI upload” or “MCP on my laptop”.</p>
+      </div>
+      <fieldset class="tok-field">
+        <legend>Kind</legend>
+        {% if can_personal %}<label><input type="radio" name="kind" value="personal"{% if form.kind == 'personal' %} checked{% endif %}> Personal: acts as you, on the repositories you can see</label>{% endif %}
+        {% if repos %}<label><input type="radio" name="kind" value="repo"{% if form.kind == 'repo' or not can_personal %} checked{% endif %}> Repository: one repository only, no user</label>{% endif %}
+      </fieldset>
+      {% if repos %}
+      <div class="tok-field">
+        <label for="tok-repo-select">Repository (repository tokens)</label>
+        <select id="tok-repo-select" name="repo">
+          <option value="">Choose…</option>
+          {% for r in repos %}<option value="{{ r.id }}"{% if form.repo_id == r.id %} selected{% endif %}>{{ r.full_name }}</option>{% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      <fieldset class="tok-field">
+        <legend>Scopes</legend>
+        {% for s in scope_choices %}
+        <label><input type="checkbox" name="scopes" value="{{ s }}"{% if s in form.scopes %} checked{% endif %}> <code>{{ s }}</code>{% if s == 'read' %}: pages and the read API{% elif s == 'write' %}: approve, rerun, quarantine, settings{% elif s == 'upload' %}: upload bundles (CI){% elif s == 'admin' %}: everything you could do (personal only){% endif %}</label>
+        {% endfor %}
+      </fieldset>
+      <div class="tok-field">
+        <label for="tok-expiry">Expires</label>
+        <select id="tok-expiry" name="expiry">
+          {% for e in expiry_choices %}<option value="{{ e }}"{% if form.expiry == e %} selected{% endif %}>{{ 'never' if e == 'never' else 'in ' ~ e ~ ' days' }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="set-submit"><button class="btn" type="submit">Create token</button></div>
+    </form>
+  </section>
+  {% endif %}
+</div>
+</div>
+{% endblock %}

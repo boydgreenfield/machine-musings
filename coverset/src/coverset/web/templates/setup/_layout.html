@@ -1,0 +1,10 @@
+{# Setup pages carry no scripts at all (plain HTML forms; the CSP and the setup tests rely on it). #}
+{% set no_scripts = true %}
+{% extends "layout.html" %}
+{% block title %}Setup{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('dashboard.index') }}">coverset</a> / setup</div>
+<div class="setup">
+{% block content %}{% endblock %}
+</div>
+{% endblock %}

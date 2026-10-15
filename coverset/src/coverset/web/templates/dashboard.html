@@ -1,0 +1,88 @@
+{% extends layout %}
+{% from "_macros.html" import run_status, counts as count_line, run_name %}
+{% block title %}Dashboard{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <p class="meta"><span>{{ repos|length }} {{ 'repository' if repos|length == 1 else 'repositories' }}</span><span>as of {{ now|stamp }}</span></p>
+</div>
+
+<div class="stats" role="list">
+  <div class="stat" role="listitem"><div class="value">{{ numbers.runs }}</div><div class="label">runs recorded</div></div>
+  <div class="stat" role="listitem"><div class="value">{{ numbers.tests }}</div><div class="label">tests tracked</div></div>
+  <div class="stat" role="listitem"><div class="value">{{ numbers.first_test_median|secs }}</div><div class="label">median time to first test result</div></div>
+  <div class="stat" role="listitem"><div class="value">{{ numbers.first_failure_median|secs }}</div><div class="label">median time to first failure (failing runs)</div></div>
+  <div class="stat" role="listitem"><div class="value">{{ numbers.failing }}</div><div class="label">failing runs among the last {{ recent|length }}</div></div>
+</div>
+
+{% if not repos %}
+<section class="panel">
+  <h2>No repositories yet</h2>
+  <p>Run <code>uv run coverset demo</code> to seed the demo repository and its runs, or connect GitHub on the <a href="{{ url_for('setup.index') }}">setup page</a>.</p>
+</section>
+{% else %}
+<section class="panel">
+  <div class="panel-head"><h2>Repositories</h2></div>
+  <table>
+    <thead><tr><th>Repository</th><th>Default branch</th><th class="num">Open PRs</th><th class="num">Runs</th><th>Latest baseline</th><th>Views</th></tr></thead>
+    <tbody>
+    {% for r in repos %}
+      <tr>
+        <td><a href="{{ url_for('repos.repo', rid=r.id) }}"><strong>{{ r.full_name }}</strong></a> <span class="muted">{{ r.forge }}</span></td>
+        <td><code>{{ r.default_branch }}</code></td>
+        <td class="num">{{ open_prs.get(r.id, 0) }}</td>
+        <td class="num">{{ per_repo.get(r.id, 0) }}</td>
+        {% set tr = (repo_trends or {}).get(r.id) %}
+        <td class="dash-trend">{% if tr %}<span class="dash-pair"><span class="dash-name" title="statements run in the latest baseline">lines</span>{{ tr.sparks.lines }}</span><span class="dash-pair"><span class="dash-name" title="input classes observed ÷ expected in the latest baseline">input classes</span>{{ tr.sparks.inputs }}</span>{% else %}<span class="muted">no baseline yet</span>{% endif %}</td>
+        <td><a href="{{ url_for('repos.map_page', rid=r.id) }}">map</a> · <a href="{{ url_for('repos.tests_page', rid=r.id) }}">tests</a> · <a href="{{ url_for('repos.invariants_page', rid=r.id) }}">invariants</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head"><h2>Live runs</h2><span class="aside">queued, running or waiting for approval</span></div>
+  {% if live %}
+  <table class="run-list">
+    <tbody>
+    {% for run in live %}
+      <tr>
+        <td>{{ run_status(run) }}</td>
+        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}"{% if loop.first %} data-go="r"{% endif %}>{{ run_name(run, prs) }}</a></td>
+        <td>{{ count_line(counts.get(run.id)) }}</td>
+        <td class="num muted">{{ run.created_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Nothing is running. A pull request webhook starts a run here.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Recent runs</h2></div>
+  {% if recent %}
+  <table class="run-list">
+    <thead><tr><th>Verdict</th><th>Run</th><th>Head</th><th>Tests</th><th class="num">First failure</th><th class="num">Started</th></tr></thead>
+    <tbody>
+    {% for run in recent %}
+      {% set ff = first_failure_s(run) %}
+      <tr>
+        <td>{{ run_status(run) }}</td>
+        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}"{% if loop.first %} data-go="r"{% endif %}>{{ run_name(run, prs) }}</a>{% if run.pr_id and prs.get(run.pr_id) %} · <a href="{{ url_for('repos.pr_page', rid=run.repo_id, n=prs[run.pr_id].number) }}">PR page</a>{% endif %}</td>
+        <td><code>{{ run.head_sha|sha }}</code></td>
+        <td>{{ count_line(counts.get(run.id)) }}</td>
+        <td class="num">{% if ff is not none %}{{ ff|secs }}{% else %}<span class="muted">–</span>{% endif %}</td>
+        <td class="num muted">{{ run.created_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No runs yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

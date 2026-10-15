@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="htmx-config" content="{{ htmx_config }}">
+<title>{% block title %}coverset{% endblock %} · coverset</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='features.css') }}">
+{% block head %}{% endblock %}
+{#- View settings (docs/ui.md "View settings"): a query parameter, else what someone chose in the
+    scoped settings (view_prefs; a value at its built-in default counts as unset unless view_prefs
+    says where each value came from), else the default; app.js (synchronous, below) applies them,
+    or the reader's own localStorage choice when the source is "default", to <html> before the body
+    paints. Views that resolve a setting themselves pass it (highlight, highlight_from, map_view). -#}
+{%- set _vp = view_prefs if (view_prefs is defined and view_prefs is mapping) else {} %}
+{%- set _src = _vp.sources if (_vp.sources is defined and _vp.sources is mapping) else none %}
+{%- set _hp = _vp.get('view.highlight') %}
+{%- set _hp_set = (_src.get('view.highlight', 'default') != 'default') if _src is not none else _hp == 'missing' %}
+{%- set _th = _vp.get('view.theme') %}
+{%- set _th_set = (_src.get('view.theme', 'default') != 'default') if _src is not none else _th in ('light', 'dark') %}
+{%- set _hq = request.args.get('highlight') if request else none %}
+{%- if highlight is defined and highlight_from is defined %}{% set _hl = (highlight, highlight_from) %}
+{%- elif _hq in ('all', 'missing') %}{% set _hl = (_hq, 'query') %}
+{%- elif _hp_set and _hp in ('all', 'missing') %}{% set _hl = (_hp, 'prefs') %}
+{%- else %}{% set _hl = ('all', 'default') %}{% endif %}
+<meta name="coverset-view" content="" data-highlight="{{ _hl[0] }}" data-highlight-from="{{ _hl[1] }}"{% if _th_set and _th in ('light', 'dark', 'auto') %} data-theme="{{ _th }}" data-theme-from="prefs"{% endif %}{% if map_view is defined and map_view %} data-map-mode="{{ map_view.mode }}" data-map-mode-from="{{ map_view.mode_from }}" data-modules="{{ map_view.modules }}" data-modules-from="{{ map_view.modules_from }}"{% endif %}>
+{% if not no_scripts %}
+<script src="{{ url_for('static', filename='keys.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/htmx.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='vendor/idiomorph-ext.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='vendor/sse.min.js') }}" defer></script>
+{% endif %}
+</head>
+<body hx-ext="morph,sse" hx-headers='{"X-CSRF-Token": "{{ csrf_token() }}"}' data-ready="{{ '1' if no_scripts else '0' }}">
+{% set endpoint = request.endpoint or '' %}
+<header class="top">
+  <a class="brand" href="{{ url_for('dashboard.index') }}" aria-label="coverset dashboard">
+    <svg viewBox="0 0 30 16" aria-hidden="true"><rect class="mark-filled" x="1" y="2" width="12" height="12" rx="2"/><rect class="mark-hollow" x="17" y="2.8" width="10.4" height="10.4" rx="1.5"/></svg>
+    coverset
+  </a>
+  <nav aria-label="Main">
+    <a href="{{ url_for('dashboard.index') }}"{% if endpoint == 'dashboard.index' %} aria-current="page"{% endif %}>Dashboard</a>
+    {% for r in nav_repos %}
+    <a href="{{ url_for('repos.repo', rid=r.id) }}"{% if endpoint in ('repos.repo', 'repos.pr_page', 'repos.map_page', 'files.source', 'files.function') and nav_repo and nav_repo.id == r.id %} aria-current="page"{% endif %}>{{ r.full_name }}</a>
+    {% endfor %}
+    {% if nav_repo %}
+    <a href="{{ url_for('repos.tests_page', rid=nav_repo.id) }}"{% if endpoint == 'repos.tests_page' %} aria-current="page"{% endif %}>Tests</a>
+    <a href="{{ url_for('repos.invariants_page', rid=nav_repo.id) }}"{% if endpoint == 'repos.invariants_page' %} aria-current="page"{% endif %}>Invariants</a>
+    {% include "_nav_repo_economy.html" ignore missing %}
+    {% include "_nav_repo_settings.html" ignore missing %}
+    {% endif %}
+    {#- Outbox and Setup are instance-admin pages (everyone else gets a 403 there), so only admins see the links. #}
+    {% if principal and principal.instance_admin %}
+    <a href="{{ url_for('outbox.outbox') }}"{% if endpoint == 'outbox.outbox' %} aria-current="page"{% endif %}>Outbox</a>
+    <a href="{{ url_for('setup.index') }}"{% if endpoint.startswith('setup.') %} aria-current="page"{% endif %}>Setup</a>
+    {% endif %}
+    {% include "_nav_admin.html" ignore missing %}
+  </nav>
+  {% include "_nav_account.html" ignore missing %}
+  {% if not no_scripts %}<button type="button" id="theme-toggle" class="theme-toggle">Theme</button>{% endif %}
+</header>
+{% if settings_paused %}<div class="banner" role="status">coverset is paused: webhooks are stored, no runs start.</div>{% endif %}
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+<footer><span class="where">coverset serve</span> · live pages from the control plane · times shown in UTC{% if not no_scripts %} · press <kbd>?</kbd> for keys{% endif %}</footer>
+<div id="line-tests" class="popover" popover><div id="line-tests-body">Loading…</div></div>
+<dialog id="keys-help" aria-labelledby="keys-title">
+  <h2 id="keys-title">Keys</h2>
+  {#- One row per key keys.js and app.js bind (their KEYS tables); data-scope says on which pages it
+      applies and the script hides the other rows when the dialog opens. tests/web/test_keys_table.py
+      checks that these rows, docs/ui.md and the scripts agree. -#}
+  <table>
+    <tbody>
+      <tr data-scope="any" data-keys="?"><td><kbd>?</kbd></td><td>This help: the keys of this page</td></tr>
+      <tr data-scope="any" data-keys="Escape"><td><kbd>Esc</kbd></td><td>Close this help, the tests popover or the go-to hint</td></tr>
+      <tr data-scope="search" data-keys="/"><td><kbd>/</kbd></td><td>Focus the search or filter box (<kbd>Enter</kbd> opens the first match, <kbd>Esc</kbd> clears it)</td></tr>
+      <tr data-scope="run" data-keys="r"><td><kbd>r</kbd></td><td>Open the run this page shows (the latest baseline unless a run was picked)</td></tr>
+    </tbody>
+  </table>
+  {% if nav_repo %}
+  <h3>Go to</h3>
+  <table>
+    <tbody>
+      <tr data-scope="go" data-go-row="o" data-keys="g-o"><td><kbd>g</kbd> <kbd>o</kbd></td><td><a data-go="o" href="{{ url_for('repos.repo', rid=nav_repo.id) }}">Overview</a> of {{ nav_repo.full_name }}</td></tr>
+      <tr data-scope="go" data-go-row="t" data-keys="g-t"><td><kbd>g</kbd> <kbd>t</kbd></td><td><a data-go="t" href="{{ url_for('repos.tests_page', rid=nav_repo.id) }}">Tests</a></td></tr>
+      <tr data-scope="go" data-go-row="m" data-keys="g-m"><td><kbd>g</kbd> <kbd>m</kbd></td><td><a data-go="m" href="{{ url_for('repos.map_page', rid=nav_repo.id) }}">Coverage map</a></td></tr>
+      <tr data-scope="go" data-go-row="e" data-keys="g-e"><td><kbd>g</kbd> <kbd>e</kbd></td><td><span data-go="e" class="go-include">{% include "_nav_repo_economy.html" ignore missing %}</span></td></tr>
+      <tr data-scope="go" data-go-row="i" data-keys="g-i"><td><kbd>g</kbd> <kbd>i</kbd></td><td><a data-go="i" href="{{ url_for('repos.invariants_page', rid=nav_repo.id) }}">Invariants</a></td></tr>
+    </tbody>
+  </table>
+  {% endif %}
+  <h3>Source view</h3>
+  <table>
+    <tbody>
+      <tr data-scope="source" data-keys="j k"><td><kbd>j</kbd> <kbd>k</kbd></td><td>Next / previous line that never ran or took only one branch</td></tr>
+      <tr data-scope="source" data-keys="n N"><td><kbd>n</kbd> <kbd>N</kbd></td><td>Next / previous function with an input class no test passed in</td></tr>
+      <tr data-scope="source" data-keys="t"><td><kbd>t</kbd></td><td>Tests that ran the current line</td></tr>
+      <tr data-scope="source" data-keys="i"><td><kbd>i</kbd></td><td>Show or hide the current function's shape grid</td></tr>
+      <tr data-scope="source" data-keys="h"><td><kbd>h</kbd></td><td>Highlight every measured line, or only what never ran or took one branch</td></tr>
+      <tr data-scope="source" data-keys="."><td><kbd>.</kbd></td><td>Show or hide the input-class chips under def lines</td></tr>
+      <tr data-scope="files" data-keys="[ ]"><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next file</td></tr>
+    </tbody>
+  </table>
+  <h3>Coverage map</h3>
+  <table>
+    <tbody>
+      <tr data-scope="map" data-keys="m"><td><kbd>m</kbd></td><td>Next colour mode: Gap, Lines, Input classes</td></tr>
+      <tr data-scope="modules" data-keys="M"><td><kbd>M</kbd></td><td>Next module-level code weight: full, thin, hidden</td></tr>
+    </tbody>
+  </table>
+  <p class="keys-note">Keys are ignored while typing in a field and with Ctrl, Alt or Cmd held. Rows for keys this page has no use for are hidden.</p>
+  <form method="dialog"><button class="btn secondary" type="submit" autofocus>Close</button></form>
+</dialog>
+</body>
+</html>

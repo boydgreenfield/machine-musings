@@ -1,0 +1,73 @@
+{
+  "description": "PR #1: refund reuses allocate_cents with a negative total, which breaks cents conservation.",
+  "applies_to": {
+    "path": "src/ledger/billing/refund.py"
+  },
+  "source": "fixture",
+  "model": null,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd_estimate": 0.0,
+  "requests": 0,
+  "notes": [
+    "canned demo review; not produced by a model"
+  ],
+  "result": {
+    "functions": [
+      {
+        "qualname": "refund",
+        "verdict": "partially_covered",
+        "confidence": "high",
+        "evidence": [
+          {
+            "test_id": "tests/test_refund.py::test_refund_partial",
+            "what_it_exercises": "Asserts sum(refund(-100, [1, 2])) == -100; allocate_cents returns [-32, -66], so this assertion does not hold."
+          },
+          {
+            "test_id": "tests/test_refund.py::test_refund_splits_evenly_divisible_amounts",
+            "what_it_exercises": "Asserts an evenly divisible refund, where no remainder cent is distributed."
+          },
+          {
+            "test_id": "tests/test_refund.py::test_refund_rejects_positive_total",
+            "what_it_exercises": "Asserts ValueError for a positive total."
+          }
+        ],
+        "missing_input_classes": [
+          {
+            "name": "total_cents:zero",
+            "description": "A zero refund, e.g. 0.",
+            "why_likely": "Zero is accepted by the guard and allowed by the docstring but never tested.",
+            "example_value": "0",
+            "severity": "low",
+            "hypothesis_strategy": "st.just(0)"
+          },
+          {
+            "name": "weights:all-zero",
+            "description": "Only zero weights, e.g. [0, 0] for fully discounted lines.",
+            "why_likely": "The ZeroDivisionError from allocate_cents escapes refund unexplained.",
+            "example_value": "[0, 0]",
+            "severity": "medium",
+            "hypothesis_strategy": "st.lists(st.just(0), min_size=1)"
+          }
+        ],
+        "suggested_tests": [
+          {
+            "name": "test_refund_conserves_cents",
+            "style": "hypothesis",
+            "code": "import pytest\nfrom hypothesis import example, given, strategies as st\n\nfrom ledger.billing.refund import refund\n\n\n@pytest.mark.invariant(\"cents_conserved\")\n@given(\n    total_cents=st.integers(min_value=-10**7, max_value=0),\n    weights=st.lists(st.integers(min_value=1, max_value=1_000), min_size=1, max_size=8),\n)\n@example(total_cents=-100, weights=[1, 2])\ndef test_refund_conserves_cents(total_cents, weights):\n    shares = refund(total_cents, weights)\n    assert sum(shares) == total_cents\n    assert all(share <= 0 for share in shares)\n"
+          }
+        ],
+        "invariant_findings": [
+          {
+            "invariant_id": "cents_conserved",
+            "status": "violated",
+            "evidence": "refund(-100, [1, 2]) returns [-32, -66], which sums to -98: allocate_cents truncates negative shares toward zero and then adds the negative remainder as extra cents."
+          }
+        ],
+        "abstain_reason": ""
+      }
+    ]
+  }
+}

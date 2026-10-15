@@ -1,0 +1,80 @@
+{% extends layout %}
+{% from "_macros.html" import inv_chip, run_status, lens %}
+{% block title %}Invariants · {{ repo.full_name }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / invariants</div>
+<div class="page-head">
+  <h1>Invariants</h1>
+  <p class="meta"><span>{{ latest_spec|length }} declared in <code>invariants.yaml</code></span>{% if selected %}<span>statuses from {% if pr %}PR #{{ pr.number }}{% else %}{{ selected.trigger }} on {{ selected.branch }}{% endif %} run <a href="{{ url_for('runs.run_page', run_id=selected.id) }}"><code>{{ selected.head_sha|sha }}</code></a></span>{% endif %}</p>
+</div>
+{% if pr_runs %}
+<p class="meta">Compare a pull request run with its base:
+  {% for r in pr_runs %}<a href="{{ url_for('repos.invariants_page', rid=repo.id, run=r.id) }}"{% if selected and r.id == selected.id %} aria-current="page"{% endif %}><code>{{ r.head_sha|sha }}</code></a>{% endfor %}
+  {% if selected and selected.pr_id %}· <a href="{{ url_for('repos.invariants_page', rid=repo.id) }}">default branch</a>{% endif %}
+</p>
+{% endif %}
+
+{% if selected and selected.pr_id %}
+<section class="panel">
+  <div class="panel-head"><h2>Against the base</h2><span class="aside">{% if base_run %}base run <a href="{{ url_for('runs.run_page', run_id=base_run.id) }}"><code>{{ base_run.head_sha|sha }}</code></a>{% else %}no base run recorded{% endif %}</span></div>
+  <table>
+    <thead><tr><th>Invariant</th><th>Base</th><th>This PR</th><th>Coverage lens</th></tr></thead>
+    <tbody>
+    {% for row in selected_rows %}
+      <tr class="diff-row">
+        <td><code>{{ row.key }}</code>{% if row.removed_in_head %} <span class="badge">removed by this PR</span>{% endif %}</td>
+        <td>{% if base_status.get(row.key) %}{{ inv_chip(base_status[row.key]) }}{% else %}<span class="muted">–</span>{% endif %}</td>
+        <td>{{ inv_chip(row.status) }}{% if base_status.get(row.key) and base_status[row.key] != row.status %} <strong>changed</strong>{% endif %}</td>
+        <td>{{ lens(row.lens, row.key) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <h3 class="sub">Invariants changed by this PR</h3>
+  {% if changed %}
+  <ul>{% for c in changed %}<li><code>{{ c.id }}</code> {{ c.status }}{% if c.note %}: {{ c.note }}{% endif %}</li>{% endfor %}</ul>
+  {% else %}<p class="empty">This PR leaves invariants.yaml unchanged.</p>{% endif %}
+</section>
+{% endif %}
+
+{% if target_gaps %}
+<section class="panel" id="target-gaps">
+  <div class="panel-head"><h2>Never exercised in invariant targets</h2><span class="aside">functions this run did not change, checked because invariants target them: input classes no test passed in</span></div>
+  <table>
+    <thead><tr><th>Function</th><th>Input classes never exercised</th></tr></thead>
+    <tbody>
+    {% for function, classes in target_gaps %}
+      <tr><td><code>{{ function }}</code></td><td>{% for c in classes %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="panel">
+{% for key, spec in latest_spec.items() %}
+  {% set current = (selected_rows|selectattr('key', 'equalto', key)|list or [none])[0] %}
+  {% set s = spec.spec_json or {} %}
+  <div class="inv-card">
+    <div>
+      <span class="key">{{ key }}</span> <span class="muted">{{ s.get('severity', '') }} · {{ (s.get('scope') or {}).get('kind', '') }} <code>{{ (s.get('scope') or {}).get('target', '') }}</code> · verified by {{ (s.get('verify') or [])|map(attribute='kind')|join(', ') }}</span>
+      <p class="statement">{{ s.get('statement', '') }}</p>
+      {% if current %}{{ lens(current.lens, key) }}{% endif %}
+      {% if current and current.entries %}<p class="muted">{% for e in current.entries %}{{ e.get('kind') }}: {{ e.get('status') }}{% if e.get('linked') is not none %} ({{ e.get('ran', 0) }} of {{ e.get('linked') }} linked tests ran){% endif %}{% if e.get('reason') %}, {{ e.get('reason') }}{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+    </div>
+    <div>
+      {% if current %}{{ inv_chip(current.status) }}{% else %}<span class="muted">not evaluated</span>{% endif %}
+      {% set past = history.get(key, []) %}
+      {% if past %}
+      <div class="history-block">
+        <ol class="history" aria-label="Last {{ past|length }} statuses, oldest first">{% for result, run in past|reverse %}<li class="h-{{ result.status }}" title="{{ result.status.replace('_', ' ') }} · {{ run.trigger }} {{ run.head_sha|sha }} · {{ run.created_at|stamp }}"><span aria-hidden="true">{{ {'satisfied': '✓', 'violated': '✕', 'untested': '?', 'stale': '≈', 'needs_review': '…'}.get(result.status, '·') }}</span><span class="sr">{{ result.status.replace('_', ' ') }}</span></li>{% endfor %}</ol>
+        <span class="history-caption">oldest → newest</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <p class="empty">No invariants declared. Add an <code>invariants.yaml</code> to the repository.</p>
+{% endfor %}
+</section>
+{% endblock %}

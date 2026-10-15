@@ -1,0 +1,17 @@
+{"test":"ledger durations::tests::parses_hours_and_minutes","file":"src/durations.rs","lines":[6,7,9,10,14,19,20,21,22,24,25,26,27,28,29,30,31,32,35,37,38,39]}
+{"test":"ledger durations::tests::rejects_a_bare_number","file":"src/durations.rs","lines":[19,20,21,22,24,25,26,27,28,29,30,35,36,39]}
+{"test":"ledger emailcheck::tests::rejects_a_missing_at_sign","file":"src/emailcheck.rs","lines":[10,11,12,32]}
+{"test":"ledger emailcheck::tests::returns_the_lowercased_domain","file":"src/emailcheck.rs","lines":[10,11,12,13,14,15,16,17,19,20,21,22,24,25,26,27,30,31,32]}
+{"test":"ledger intervals::tests::largest_of_floats_and_ints","file":"src/intervals.rs","lines":[19,20,21,22,23,24,26,27]}
+{"test":"ledger intervals::tests::merges_overlaps_in_any_order","file":"src/intervals.rs","lines":[6,7,8,9,10,11,12,15,16]}
+{"test":"ledger money::tests::allocates_by_weight","file":"src/money.rs","lines":[19,20,21,23,24,25,26,27,28,29,30,31,32,33,34,37,38]}
+{"test":"ledger money::tests::allocates_the_remainder_to_the_largest_fractions","file":"src/money.rs","lines":[19,20,21,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38]}
+{"test":"ledger money::tests::formats_dollars_and_euros","file":"src/money.rs","lines":[41,42,43,44,45,46,49]}
+{"test":"ledger money::tests::refuses_to_overdraw","file":"src/error.rs","lines":[19,20,24,25,28]}
+{"test":"ledger money::tests::refuses_to_overdraw","file":"src/money.rs","lines":[59,60,61,64,65,66,67,68,69,70,71,72,73,74,75,78,79,80]}
+{"test":"ledger money::tests::refuses_zero_weights","file":"src/money.rs","lines":[19,20,21,22,38]}
+{"test":"ledger::ledger_flow a_failed_transfer_reports_the_shortfall","file":"src/money.rs","lines":[59,60,61,64,65,66,67,68,69,70,71,72,73,74,75,83,84,87]}
+{"test":"ledger::ledger_flow billing_windows_merge_and_durations_parse","file":"src/durations.rs","lines":[6,7,10,12,14,19,20,21,22,24,25,26,27,28,29,30,31,32,35,37,38,39]}
+{"test":"ledger::ledger_flow billing_windows_merge_and_durations_parse","file":"src/intervals.rs","lines":[6,7,8,9,10,11,12,15,16]}
+{"test":"ledger::ledger_flow signup_rejects_a_bad_domain","file":"src/emailcheck.rs","lines":[10,11,12,13,14,15,16,17,19,20,21,22,23,24,25,26,27,30,31,32]}
+{"test":"ledger::ledger_flow splits_an_invoice_and_posts_every_share","file":"src/money.rs","lines":[19,20,21,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,41,42,43,44,47,49,59,60,61,64,65,66,67,72,73,74,75,78,79,80]}

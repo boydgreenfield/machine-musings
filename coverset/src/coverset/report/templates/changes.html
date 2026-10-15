@@ -1,0 +1,161 @@
+{% extends "layout.html" %}
+{% from "_macros.html" import outcome, test_ref %}
+{% block title %}Changes since base{% endblock %}
+{% macro line_links(page, lines, cls) -%}
+{%- for n in lines[:max_lines] %}{% if page %}<a class="line-ref {{ cls }}" href="{{ link(page) }}#L{{ n }}">{{ n }}</a>{% else %}<span class="line-ref {{ cls }}">{{ n }}</span>{% endif %}{% if not loop.last %} {% endif %}{% endfor %}
+{%- if lines|length > max_lines %} <span class="muted">and {{ lines|length - max_lines }} more</span>{% endif -%}
+{%- endmacro %}
+{% macro fn_ref(f) -%}
+{%- set page = fn_page(f.func_key) %}{% if page %}<a href="{{ link(page) }}"><code>{{ f.qualname }}</code></a>{% else %}<code>{{ f.qualname }}</code>{% endif %} <span class="muted small">{{ f.path }}</span>
+{%- endmacro %}
+{% macro more(items) -%}
+{%- if items|length > max_rows %}<p class="muted" data-more>+{{ items|length - max_rows }} more not listed (the first {{ max_rows }})</p>{% endif -%}
+{%- endmacro %}
+{% block main %}
+<div class="crumbs"><a href="{{ link('index.html') }}">overview</a> / changes</div>
+<div class="page-head">
+  <h1>Changes since base</h1>
+  <p class="meta"><span>base: {{ c.base_origin }}</span><span>now: {{ c.now_origin }}</span></p>
+</div>
+{% if c.warnings %}
+<div class="compare-notice compare-warning" role="note" data-warnings>
+  {% for note in c.warnings %}<p><strong>Check the base.</strong> {{ note }}</p>{% endfor %}
+</div>
+{% endif %}
+{% if c.base_only %}
+<div class="compare-notice" role="note" data-test-sets>
+  <p><strong>Different test sets.</strong> {{ c.base_only|length|plural('test') }} that ran in the base did not run in this run{% if c.now_only %}, and {{ c.now_only|plural('test') }} ran here that did not run in the base{% endif %}. Only what both runs could have run is counted as lost: a line, input class or covering test whose base tests all are among the missing ones is listed as <em>not re-run</em>.</p>
+  <details><summary>The tests that ran in the base and not here</summary>
+    <ul class="test-list">{% for nodeid in c.base_only[:max_rows] %}<li>{{ test_ref(nodeid, none) }}</li>{% endfor %}</ul>{{ more(c.base_only) }}
+  </details>
+</div>
+{% endif %}
+<div class="stats totals compare-stats">
+  <div class="stat" data-stat="lines-lost"><div class="value">{{ c.lines_lost }}</div><div class="label">{{ 'line' if c.lines_lost == 1 else 'lines' }} newly uncovered{% if c.lines_not_rerun %} · {{ c.lines_not_rerun }} more not re-run{% endif %}</div></div>
+  <div class="stat" data-stat="lines-gained"><div class="value">{{ c.lines_gained }}</div><div class="label">{{ 'line' if c.lines_gained == 1 else 'lines' }} newly covered</div></div>
+  <div class="stat" data-stat="classes-lost"><div class="value">{{ c.classes_lost }}</div><div class="label">input {{ 'class' if c.classes_lost == 1 else 'classes' }} lost · {{ c.classes_gained }} gained</div></div>
+  <div class="stat" data-stat="tests-changed"><div class="value">{{ c.tests_changed }}</div><div class="label">{{ 'test' if c.tests_changed == 1 else 'tests' }} added, removed or with another outcome{% if c.tests_of('slower') %} · {{ c.tests_of('slower')|length }} slower{% endif %}</div></div>
+</div>
+{% if c.notes %}
+<ul class="compare-notes" data-notes>{% for note in c.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+{% endif %}
+
+<section class="panel" id="totals">
+  <div class="panel-head"><h2>Totals</h2><span class="aside">base → now (change)</span></div>
+  <div class="table-scroll">
+  <table class="delta-table">
+    <thead><tr><th>Measure</th><th class="num">Base → now (change)</th></tr></thead>
+    <tbody>
+    {% for row in c.totals %}
+      <tr data-total="{{ row.key }}"><td>{{ row.label }}</td><td class="num delta{{ ' moved' if row.delta }}">{{ row.text }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="panel" id="lines">
+  <div class="panel-head"><h2>Lines</h2><span class="aside">ran in the base and not now (lost), or the other way round; most lost first; click a line to open it</span></div>
+  {% if c.files %}
+  <div class="table-scroll">
+  <table class="sortable lines-table">
+    <thead><tr>
+      <th><button type="button" data-sort="text">File</button></th>
+      <th><button type="button" data-sort="text">Compared</button></th>
+      <th class="num"><button type="button" data-sort="num">Lost</button></th>
+      <th class="num"><button type="button" data-sort="num">Gained</button></th>
+      <th class="num"><button type="button" data-sort="num">Ran, base → now</button></th>
+      <th>Lines</th>
+    </tr></thead>
+    <tbody>
+    {% for f in c.files[:max_rows] %}
+      {% set page = file_page(f.path) %}
+      <tr data-file="{{ f.path }}" data-status="{{ f.status }}">
+        <td data-value="{{ f.path }}">{% if page %}<a href="{{ link(page) }}"><code>{{ f.path }}</code></a>{% else %}<code>{{ f.path }}</code>{% endif %}</td>
+        <td data-value="{{ f.status }}">
+          {% if f.status == 'added' %}<span class="chip">file added</span>
+          {% elif f.status == 'removed' %}<span class="chip chip-hollow">file removed</span>
+          {% elif f.status == 'changed' %}<span class="chip">file changed</span> <span class="muted small">{{ f.why }}; compared on {{ f.compared_fns|plural('unchanged function body', 'unchanged function bodies') }}{% if f.changed_fns %}, {{ f.changed_fns|plural('body', 'bodies') }} changed (counts below){% endif %}; {{ f.uncompared|plural('statement') }} not compared line by line</span>
+          {% else %}<span class="muted">line by line</span>{% endif %}
+        </td>
+        <td class="num" data-value="{{ f.lost|length }}">{{ f.lost|length }}</td>
+        <td class="num" data-value="{{ f.gained|length }}">{{ f.gained|length }}</td>
+        <td class="num" data-value="{{ f.now_run - f.base_run }}">{% if f.status == 'added' %}– → {{ f.now_run }} of {{ f.now_statements }}{% elif f.status == 'removed' %}{{ f.base_run }} of {{ f.base_statements }} → –{% else %}{{ f.base_run }} of {{ f.base_statements }} → {{ f.now_run }} of {{ f.now_statements }}{% endif %}</td>
+        <td class="line-refs">
+          {% if f.lost %}<div><span class="muted small">newly uncovered</span> {{ line_links(page, f.lost, 'since-lost') }}</div>{% endif %}
+          {% if f.gained %}<div><span class="muted small">newly covered</span> {{ line_links(page, f.gained, 'since-gained') }}</div>{% endif %}
+          {% if f.not_rerun %}<div><span class="muted small">not re-run (their base tests did not run here)</span> {{ line_links(page, f.not_rerun, 'not-rerun') }}</div>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {{ more(c.files) }}
+  {% else %}<p class="empty">No line ran in one run and not in the other, and no file was added or removed.</p>{% endif %}
+</section>
+
+<section class="panel" id="functions">
+  <div class="panel-head"><h2>Functions</h2><span class="aside">matched by path and qualname; input classes lost first</span></div>
+  {% if c.functions %}
+  <div class="table-scroll">
+  <table class="fn-delta-table">
+    <thead><tr><th>Function</th><th>Status</th><th>Body lines</th><th>Input classes</th><th>Covering tests</th></tr></thead>
+    <tbody>
+    {% for f in c.functions[:max_rows] %}
+      <tr data-func="{{ f.qualname }}" data-status="{{ f.status }}">
+        <td>{{ fn_ref(f) }}</td>
+        <td>{% if f.status == 'new' %}<span class="chip">new</span>{% elif f.status == 'removed' %}<span class="chip chip-hollow">removed</span>{% elif f.status == 'body changed' %}<span class="chip">body changed</span>{% elif f.status == 'body unchanged' %}<span class="muted">body unchanged, coverage changed</span>{% else %}<span class="muted">unchanged file</span>{% endif %}</td>
+        <td>
+          {% if f.status == 'removed' %}<span class="muted">{{ f.base_body[0] }} of {{ f.base_body[1] }} ran in the base</span>
+          {% elif f.status == 'new' %}<span class="muted">{{ f.now_body[0] }} of {{ f.now_body[1] }} ran</span>
+          {% else %}{{ f.base_body[0] }} of {{ f.base_body[1] }} → {{ f.now_body[0] }} of {{ f.now_body[1] }}{% endif %}
+          {% set page = file_page(f.path) %}
+          {% if f.lost_lines %}<div><span class="muted small">newly uncovered</span> {{ line_links(page, f.lost_lines, 'since-lost') }}</div>{% endif %}
+          {% if f.gained_lines %}<div><span class="muted small">newly covered</span> {{ line_links(page, f.gained_lines, 'since-gained') }}</div>{% endif %}
+        </td>
+        <td class="class-delta">
+          {% for name in f.classes_lost %}<span class="chip chip-hollow class-lost" data-class-lost title="observed in the base; now {{ f.missing_reason }}">− {{ name }}</span> {% endfor %}
+          {% for name in f.classes_gained %}<span class="chip class-gained" data-class-gained title="{{ 'observed now, not in the base' if f.status != 'new' else 'observed in this new function' }}">+ {{ name }}</span> {% endfor %}
+          {% for name in f.classes_not_rerun %}<span class="chip chip-hollow class-not-rerun" data-class-not-rerun title="observed in the base by tests that did not run here">? {{ name }}</span> {% endfor %}
+          {% for name in f.classes_dropped %}<span class="muted small" data-class-dropped>{{ name }} no longer expected</span> {% endfor %}
+        </td>
+        <td>{% if f.uncovered %}<span class="oc oc-failed" data-uncovered>no covering test any more</span>{% elif f.uncovered_not_rerun %}<span class="muted">its base tests did not run here</span>{% elif f.newly_called %}<span class="oc oc-passed">newly called by a test</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {{ more(c.functions) }}
+  <p class="muted small">Classes: − lost (observed in the base, not now, by tests that ran in both), + gained, ? not re-run (only tests that did not run here passed it in).</p>
+  {% else %}<p class="empty">No function gained or lost coverage, input classes or covering tests, and none was added or removed.</p>{% endif %}
+</section>
+
+<section class="panel" id="tests-changed">
+  <div class="panel-head"><h2>Tests</h2><span class="aside">added, removed, another outcome, or slower (more than {{ '%g'|format(slower_factor) }}× and {{ (slower_min * 1000)|int }} ms); not selected ones are listed, not counted</span></div>
+  {% set changed = c.tests_of('outcome') %}
+  {% set added = c.tests_of('added') %}
+  {% set removed = c.tests_of('removed') %}
+  {% set unselected = c.tests_of('not selected') %}
+  {% set slower = c.tests_of('slower') %}
+  {% if changed or added or removed or unselected or slower %}
+  <div class="table-scroll">
+  <table class="tests-delta">
+    <thead><tr><th>Change</th><th>Test</th><th>Outcome</th><th class="num">Duration</th></tr></thead>
+    <tbody>
+    {% for t in (changed + added + removed + slower + unselected)[:max_rows] %}
+      {% set href = test_link(t.nodeid) %}
+      <tr data-test-change="{{ t.kind }}" data-nodeid="{{ t.nodeid }}">
+        <td>{% if t.kind == 'outcome' %}outcome changed{% elif t.kind == 'slower' %}slower{% elif t.kind == 'not selected' %}<span title="not in this run's collection, though its file has tests here: deselected (-k) or deleted from the file">not selected</span>{% elif t.kind == 'removed' %}<span title="no test of its file is in this run: the file was removed, or not selected">removed</span>{% else %}{{ t.kind }}{% endif %}</td>
+        <td>{{ test_ref(t.nodeid, link(href) if href else none) }}</td>
+        <td>{% if t.kind == 'added' %}{{ outcome(t.now_outcome) }}{% elif t.kind in ('removed', 'not selected') %}{{ outcome(t.base_outcome) }} <span class="muted">in the base</span>{% else %}{{ outcome(t.base_outcome) }} → {{ outcome(t.now_outcome) }}{% endif %}</td>
+        <td class="num">{% if t.kind in ('outcome', 'slower') %}{{ t.base_s|duration }} → {{ t.now_s|duration }}{% elif t.kind == 'added' %}{{ t.now_s|duration }}{% else %}{{ t.base_s|duration }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {{ more(changed + added + removed + slower + unselected) }}
+  {% else %}<p class="empty">The same tests ran with the same outcomes, none much slower.</p>{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,3 @@
+{# "Settings": instance settings for admins; everyone else with preferences gets their own (settings_pages context). #}
+{% if settings_admin is defined and settings_admin %}<a href="{{ url_for('settings_pages.instance_settings') }}"{% if endpoint.startswith('settings_pages.') and endpoint != 'settings_pages.repo_settings' %} aria-current="page"{% endif %}>Settings</a>
+{% elif settings_has_prefs is defined and settings_has_prefs %}<a href="{{ url_for('settings_pages.account_settings') }}"{% if endpoint.startswith('settings_pages.') and endpoint != 'settings_pages.repo_settings' %} aria-current="page"{% endif %}>Settings</a>{% endif %}

@@ -1,0 +1,3 @@
+{"path":"src/cart/pricing.ts","n_lines":28,"statements":[1,2,3,6,7,8,10,11,14,15,16,19,20,22,23,24,26],"excluded":[],"branches":[[7,8],[7,10],[23,24],[23,26]]}
+{"path":"src/shipping/rates.ts","n_lines":13,"statements":[3,5,6,7,8,11,12],"excluded":[],"branches":[]}
+{"path":"src/util/strings.ts","n_lines":18,"statements":[1,2,8,9,10,12,13,16,17],"excluded":[],"branches":[[9,10],[9,12]]}

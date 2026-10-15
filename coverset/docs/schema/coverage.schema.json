@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coverset.dev/schema/neutral/v1/coverage.schema.json",
+  "title": "coverage.jsonl: the lines one test (or <import>) executed in one file",
+  "type": "object",
+  "required": [
+    "test",
+    "file",
+    "lines"
+  ],
+  "properties": {
+    "test": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "file": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000
+      }
+    },
+    "arcs": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": -1000000,
+          "maximum": 1000000
+        },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,14 @@
+{% from "_macros.html" import run_status %}
+<div class="run-head">
+  {% if verdict and verdict.get('conclusion') == 'failure' %}<span class="status s-fail big">FAIL</span>
+  {% elif verdict and verdict.get('conclusion') == 'success' %}<span class="status {{ 's-gaps' if verdict.get('label') == 'PASS with gaps' else 's-pass' }} big">{{ verdict.get('label') or 'PASS' }}</span>
+  {% elif verdict %}<span class="status s-neutral big">{{ (verdict.get('label') or verdict.get('conclusion') or '')|upper }}</span>
+  {% elif live %}<span class="status s-run big">running</span>
+  {% else %}{{ run_status(run, big=True) }}{% endif %}
+  {% set total = state.planned_tests or (state.progress.get('total') if state.progress else none) %}
+  <span class="progress-text"><strong>{{ state.reported }}</strong>{% if total %} of {{ total }}{% endif %} tests reported{% if failed_count %} · <strong>{{ failed_count }}</strong> failed{% endif %}{% if flaky_count %} · {{ flaky_count }} flaky{% endif %}</span>
+  {% if total %}
+  <span class="bar" role="img" aria-label="{{ state.reported }} of {{ total }} tests reported"><svg viewBox="0 0 220 8" width="220" height="8"><rect class="done" width="{{ (220 * state.reported / total)|round(1) }}" height="8"/>{% if failed_count %}<rect class="bad" width="{{ [3, (220 * failed_count / total)]|max|round(1) }}" height="8"/>{% endif %}</svg></span>
+  {% endif %}
+  {% if verdict %}<span class="muted">{{ verdict.get('reason') }}{% if verdict.get('early') %} (posted at the first confirmed failure){% endif %}{% if verdict.get('conclusion') == 'failure' and run.rank_file_order and run.t_first_failure_file_order_est is not none %} · file order would have run it {{ run.rank_file_order|ordinal }}, ~{{ run.t_first_failure_file_order_est|secs }} estimated from the first test{% endif %}</span>{% elif basis %}<span class="muted">scored against <code>{{ basis.head_sha|sha }}</code> ({{ basis_label }})</span>{% endif %}
+</div>

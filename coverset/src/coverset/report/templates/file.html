@@ -1,0 +1,61 @@
+{% extends "layout.html" %}
+{% block title %}{{ entry.path }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ link('index.html') }}">overview</a> / <a href="{{ link('index.html') }}#files">files</a> / source</div>
+<div class="source-shell">
+  <nav class="file-list" aria-label="Measured files">
+    {% set listed, before, after = files %}
+    <label class="filter-box"><span class="sr">Filter the measured files</span><input type="search" data-filter="#file-links > a" data-filter-count="#file-filter-count" placeholder="Filter files" autocomplete="off" spellcheck="false"></label>
+    <span id="file-filter-count" class="sr" aria-live="polite"></span>
+    {% if before %}<a href="{{ link('index.html') }}#files" class="muted">… {{ before }} more files</a>{% endif %}
+    <div id="file-links">{% for f, label in listed %}<a href="{{ link(f.page) }}" data-keep-view{% if f.path == entry.path %} aria-current="page"{% endif %} title="{{ f.path }}">{{ label }}</a>{% endfor %}</div>
+    {% if after %}<a href="{{ link('index.html') }}#files" class="muted">… {{ after }} more files</a>{% endif %}
+  </nav>
+  <div class="src-frame">
+    <div class="src-bar">
+      <span class="path">{{ entry.path }}</span>
+      {% if since %}<span data-since>since base: {{ since[0]|length }} lost, {{ since[1]|length }} gained · <a href="{{ link('changes.html') }}">changes</a></span>{% endif %}
+      <span class="src-summary" data-file-stats>{% for text, title in entry.summary.items() %}<span title="{{ title }}">{{ text }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</span>
+      <button type="button" class="hl-toggle" data-highlight-toggle aria-pressed="false" title="Paint every measured line, or only what never ran or took one branch (key h)"><span class="hl-label hl-all">Highlight: all lines</span><span class="hl-label hl-missing">Highlight: missing only</span></button>
+      <span class="muted">{% if prev_page %}<a href="{{ link(prev_page) }}" rel="prev" data-key-nav data-keep-view>previous file</a> <kbd>[</kbd>{% endif %} {% if next_page %}<a href="{{ link(next_page) }}" rel="next" data-key-nav data-keep-view>next file</a> <kbd>]</kbd>{% endif %} · <kbd>h</kbd> highlight · <kbd>?</kbd> keys</span>
+    </div>
+    {% if lens_tests and html is not none %}
+    <div class="lens-bar">
+      <label for="lens">Data-flow lens: what did this test touch?</label>
+      {#- the options come from the page's data block when the menu is first used (report.js): a file
+          that 4,000 tests touch would otherwise ship 4,000 options before its first line -#}
+      <select id="lens">
+        <option value="">All tests ({{ lens_tests|length }})</option>
+      </select>
+      <span id="lens-note" class="muted" aria-live="polite"></span>
+    </div>
+    {% endif %}
+    <ul class="legend src-legend">
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="4" height="14" class="lg-ran"/></svg>ran</li>
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="6" height="14" class="lg-miss"/><rect x="6" y="0" width="8" height="14" class="lg-miss-tint"/></svg>never ran (with the blank and comment lines inside the block)</li>
+      <li><svg class="sw" viewBox="0 0 14 14" aria-hidden="true"><rect x="0" y="0" width="14" height="14" class="lg-part"/></svg>took one branch only</li>
+      <li><span class="chip">class <b>n</b></span> input class some test passed in (sampled calls)</li>
+      <li><span class="chip chip-hollow">class <b>0</b></span> never exercised</li>
+      {% if changes %}
+      <li><span class="since-swatch since-lost" aria-hidden="true">▾</span>newly uncovered since base</li>
+      <li><span class="since-swatch since-gained" aria-hidden="true">▴</span>newly covered since base</li>
+      {% endif %}
+    </ul>
+    {% if html is not none %}
+    {{ html }}
+    {% else %}
+    <div class="no-source">
+      <p><strong>Source not available.</strong> <code>{{ entry.path }}</code> is listed in the bundle but {% if notice %}no source file was read for this report (see the notice above){% else %}could not be read under the repository root (missing, not a regular file, larger than 4 MiB, outside the root, or not tracked by git){% endif %}, so only its coverage summary is shown.</p>
+      <dl class="kv">
+        <dt>Statements</dt><dd>{{ entry.statements }} ({{ entry.run }} ran, {{ entry.run_pct|pct }})</dd>
+        <dt>Never ran</dt><dd>{{ missed_lines or 'none' }}</dd>
+        <dt>Partial branches</dt><dd>{% if partial_lines %}{% for line, targets in partial_lines %}line {{ line }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none{% endif %}</dd>
+        <dt>Tests</dt><dd>{{ entry.tests|length }}</dd>
+      </dl>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% for key, grid in grids %}<template class="grid-tpl" data-fn="{{ key }}">{{ grid }}</template>
+{% endfor %}
+{% endblock %}

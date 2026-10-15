@@ -1,0 +1,138 @@
+{% extends layout %}
+{% from "_macros.html" import run_status, counts as count_line %}
+{% block title %}{{ repo.full_name }}{% endblock %}
+{% block main %}
+<div class="page-head">
+  <h1>{{ repo.full_name }}</h1>
+  <p class="meta"><span>{{ repo.forge }}</span><span>default branch <code>{{ repo.default_branch }}</code></span><span>{{ tests }} tests</span></p>
+</div>
+<p class="meta">
+  <a class="btn secondary" href="{{ url_for('repos.map_page', rid=repo.id) }}">Coverage map</a>
+  <a class="btn secondary" href="{{ url_for('repos.tests_page', rid=repo.id) }}">Tests</a>
+  <a class="btn secondary" href="{{ url_for('repos.invariants_page', rid=repo.id) }}">Invariants</a>
+  {% if current %}<a class="btn secondary" href="{{ url_for('runs.run_page', run_id=current.id) }}" data-go="r">Latest baseline run</a>{% endif %}
+</p>
+
+<section class="panel overview" id="overview" aria-labelledby="overview-h">
+  {% set ov = overview %}
+  <div class="panel-head"><h2 id="overview-h">Overview</h2>
+    {% if ov %}<span class="aside">latest baseline of <code>{{ repo.default_branch }}</code> · <a href="{{ url_for('runs.run_page', run_id=ov.run_id) }}"><code>{{ ov.latest.head_sha|sha }}</code></a> · {{ ov.latest.created_at|ago }}</span>{% endif %}
+  </div>
+  {% if not ov %}
+  <p class="empty">No finished baseline of <code>{{ repo.default_branch }}</code> yet. A push to the default branch records one.</p>
+  {% else %}
+  {% set p = ov.latest %}
+  <div class="stats ov-tiles" role="list">
+    <div class="stat" role="listitem" data-tile="statements"><div class="value">{{ p.statements }}</div><div class="label">statements</div></div>
+    <div class="stat" role="listitem" data-tile="lines"><div class="value">{{ p.line_pct|pct }}</div><div class="label">lines run · {{ p.lines_run }} of {{ p.statements }}</div></div>
+    <div class="stat" role="listitem" data-tile="branches"><div class="value">{{ p.branch_pct|pct }}</div><div class="label">branches taken · {{ p.branches_taken }} of {{ p.branches_possible }}</div></div>
+    <div class="stat" role="listitem" data-tile="functions"><div class="value">{{ p.functions_called }} <span class="of">/ {{ p.functions_total }}</span></div><div class="label">functions called by a test</div></div>
+    <div class="stat" role="listitem" data-tile="classes"><div class="value">{{ p.classes_observed }} <span class="of">/ {{ p.classes_expected }}</span></div><div class="label">input classes observed · {{ p.input_pct|pct }}</div></div>
+    <div class="stat" role="listitem" data-tile="tests"><div class="value">{{ p.tests_total }}</div><div class="label">tests</div></div>
+  </div>
+  <div class="ov-grid">
+    <div class="ov-trend">
+      <h3>Trend <span class="muted" data-span>· {{ ov.trend|length|plural('baseline') }}{{ ',' if ov.trend|length == 1 }} {{ ov.span }}</span></h3>
+      <dl class="ov-sparks" data-points="{{ ov.trend|length }}">
+        <div class="spark-row"><dt>lines run</dt><dd>{{ ov.sparks.lines }}</dd></div>
+        <div class="spark-row"><dt>input classes</dt><dd>{{ ov.sparks.inputs }}</dd></div>
+      </dl>
+      <h3 class="ov-sub">Since the previous baseline</h3>
+      {% if ov.prior %}
+      {% macro pts(now, then) %}{% if now is none or then is none %}n/a{% else %}{{ '%+.1f'|format(now - then) }} pts{% endif %}{% endmacro %}
+      <p class="muted ov-delta">from <code>{{ ov.prior.head_sha|sha }}</code>: lines run {{ pts(p.line_pct, ov.prior.line_pct) }} · input classes {{ pts(p.input_pct, ov.prior.input_pct) }} ({{ '%+d'|format(p.classes_observed - ov.prior.classes_observed) }} observed, {{ '%+d'|format(p.classes_expected - ov.prior.classes_expected) }} expected) · tests {{ '%+d'|format(p.tests_total - ov.prior.tests_total) }}</p>
+      {% endif %}
+      {% if not ov.prior %}
+      <p class="empty" data-changes="none">This is the first baseline: nothing to compare yet.</p>
+      {% elif not ov.changes %}
+      <p class="empty" data-changes="none">No input class lost or gained and no body line newly uncovered since <code>{{ ov.prior.head_sha|sha }}</code>.</p>
+      {% else %}
+      <ul class="ov-changes" data-changes="{{ ov.changes|length }}">
+        {% for c in ov.changes %}
+        <li>
+          <a href="{{ url_for('files.function', rid=repo.id, func_key=c.func_key, run=ov.run_id) }}"><code>{{ c.qualname }}</code></a> <span class="muted">{{ c.path }}</span>
+          {% if c.lost %}<span class="delta delta-lost">missing now</span> {% for name in c.lost %}<span class="chip chip-hollow" title="{{ name }}: missing in {{ p.head_sha|sha }}, not missing in {{ ov.prior.head_sha|sha }} (inferred from the stored gaps)">{{ name }}</span> {% endfor %}{% elif c.lost_count %}<span class="delta delta-lost">lost</span> {{ c.lost_count|plural('class', 'classes') }} (no test passes it anything now){% endif %}
+          {% if c.gained %}<span class="delta delta-gained">no longer missing</span> {% for name in c.gained %}<span class="chip" title="{{ name }}: not missing in {{ p.head_sha|sha }}, missing in {{ ov.prior.head_sha|sha }} (inferred from the stored gaps)">{{ name }}</span> {% endfor %}{% elif c.gained_count %}<span class="delta delta-gained">gained</span> {{ c.gained_count|plural('class', 'classes') }} (newly called){% endif %}
+          {% if c.lost or c.gained %}<span class="muted small" data-inferred>· vs {{ ov.prior.head_sha|sha }}, inferred from the stored gaps</span>{% endif %}
+          {% if c.expected_changed or c.uncompared %}<span class="muted" data-uncompared>· {% if c.expected_changed %}expects {{ c.prior_expected }} → {{ c.expected }} classes{% else %}its signature changed{% endif %}: classes not compared</span>{% endif %}
+          {% if c.sampled and c.lost_count %}<span class="muted" data-sampled="1">· tests hit the sample cap: a lost class may only have gone unsampled</span>{% endif %}
+          {% if c.newly_uncovered %}<span class="delta delta-lines">lines no longer run</span> {{ c.newly_uncovered|join(', ') }}{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+    <div class="ov-map">
+      <h3>Gap map <span class="muted">· area = statements · <a href="{{ ov.map_url }}" class="ov-map-link">open the coverage map</a></span></h3>
+      <div class="ov-thumb" data-tm-box><p class="tm-status" data-tm-status aria-hidden="true"><span class="tm-status-idle">hover a tile</span></p>{{ ov.thumb }}</div>
+      {{ ov.legend }}
+    </div>
+  </div>
+  <h3 class="ov-sub">Largest gaps <span class="muted">· called functions with the most input classes no test passed in</span></h3>
+  {% if ov.gaps %}
+  <table class="ov-gaps">
+    <thead><tr><th>Function</th><th class="num">Never passed in</th><th class="num">Lines</th><th>Classes</th></tr></thead>
+    <tbody>
+    {% for g in ov.gaps %}
+      <tr>
+        <td><a href="{{ url_for('files.function', rid=repo.id, func_key=g.func_key, run=ov.run_id) }}"><code>{{ g.qualname }}</code></a> <span class="muted">{{ g.path }}:{{ g.def_line }}</span></td>
+        <td class="num">{{ g.missing }} <span class="muted">of {{ g.expected }}</span></td>
+        <td class="num">{{ g.line_pct|pct }}</td>
+        <td class="ov-classes">{% for name in g.classes[:6] %}<span class="chip chip-hollow" title="{{ name }}: {{ 'never exercised' if not g.tests_truncated else 'not observed in sampled calls' }}">{{ name }}</span> {% endfor %}{% if g.classes|length > 6 %}<span class="muted">+{{ g.classes|length - 6 }} more</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Every called function was passed every input class it expects.</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Pull requests</h2></div>
+  {% if prs %}
+  <table class="run-list">
+    <thead><tr><th>Verdict</th><th>Pull request</th><th>Head</th><th>Tests</th><th>Author</th><th class="num">Updated</th></tr></thead>
+    <tbody>
+    {% for pr in prs %}
+      {% set run = latest.get(pr.id) %}
+      <tr>
+        <td>{% if run %}{{ run_status(run) }}{% else %}<span class="status s-neutral">no run</span>{% endif %}</td>
+        <td><a href="{{ url_for('repos.pr_page', rid=repo.id, n=pr.number) }}"><strong>#{{ pr.number }}</strong> {{ pr.title }}</a>{% if pr.from_fork %} <span class="badge">fork</span>{% endif %}{% if pr.draft %} <span class="badge">draft</span>{% endif %}</td>
+        <td><code>{{ pr.head_sha|sha }}</code></td>
+        <td>{% if run %}{{ count_line(counts.get(run.id)) }}{% endif %}</td>
+        <td>{{ pr.author or '–' }}</td>
+        <td class="num muted">{{ pr.updated_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No pull requests yet. Runs start when GitHub sends a pull_request webhook.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Default-branch runs</h2><span class="aside">baselines refresh coverage, durations and failure history</span></div>
+  {% if baselines %}
+  <table class="run-list">
+    <thead><tr><th>Verdict</th><th>Run</th><th>Head</th><th>Tests</th><th class="num">Shards</th><th class="num">Started</th></tr></thead>
+    <tbody>
+    {% for run in baselines %}
+      <tr>
+        <td>{{ run_status(run) }}</td>
+        <td><a href="{{ url_for('runs.run_page', run_id=run.id) }}">{{ run.trigger }} · {{ run.reason or run.status }}</a></td>
+        <td><code>{{ run.head_sha|sha }}</code></td>
+        <td>{{ count_line(counts.get(run.id)) }}</td>
+        <td class="num">{{ run.shard_count }}</td>
+        <td class="num muted">{{ run.created_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No default-branch runs yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

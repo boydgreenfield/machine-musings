@@ -1,0 +1,364 @@
+{
+"functions": [
+{
+"binaries": 2,
+"closure": false,
+"col": 1,
+"count": 4,
+"end_line": 14,
+"file": "src/durations.rs",
+"instances": 1,
+"line": 6
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 1,
+"count": 4,
+"end_line": 39,
+"file": "src/durations.rs",
+"instances": 1,
+"line": 19
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 43,
+"count": 2,
+"end_line": 20,
+"file": "src/durations.rs",
+"instances": 1,
+"line": 20
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 48,
+"file": "src/durations.rs",
+"instances": 1,
+"line": 46
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 53,
+"file": "src/durations.rs",
+"instances": 1,
+"line": 51
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 0,
+"end_line": 59,
+"file": "src/durations.rs",
+"instances": 1,
+"line": 57
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 1,
+"count": 4,
+"end_line": 32,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 10
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 40,
+"count": 2,
+"end_line": 11,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 11
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 22,
+"count": 15,
+"end_line": 16,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 16
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 66,
+"count": 5,
+"end_line": 22,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 22
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 18,
+"count": 5,
+"end_line": 27,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 27
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 53,
+"count": 20,
+"end_line": 27,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 27
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 41,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 39
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 46,
+"file": "src/emailcheck.rs",
+"instances": 1,
+"line": 44
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 28,
+"file": "src/error.rs",
+"instances": 1,
+"line": 19
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 1,
+"count": 2,
+"end_line": 16,
+"file": "src/intervals.rs",
+"instances": 1,
+"line": 6
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 1,
+"count": 2,
+"end_line": 27,
+"file": "src/intervals.rs",
+"instances": 2,
+"line": 19
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 36,
+"file": "src/intervals.rs",
+"instances": 1,
+"line": 34
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 42,
+"file": "src/intervals.rs",
+"instances": 1,
+"line": 39
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 1,
+"count": 4,
+"end_line": 38,
+"file": "src/money.rs",
+"instances": 1,
+"line": 19
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 53,
+"count": 10,
+"end_line": 20,
+"file": "src/money.rs",
+"instances": 1,
+"line": 20
+},
+{
+"binaries": 2,
+"closure": true,
+"col": 30,
+"count": 5,
+"end_line": 33,
+"file": "src/money.rs",
+"instances": 1,
+"line": 33
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 1,
+"count": 3,
+"end_line": 49,
+"file": "src/money.rs",
+"instances": 1,
+"line": 41
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 5,
+"count": 3,
+"end_line": 61,
+"file": "src/money.rs",
+"instances": 1,
+"line": 59
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 5,
+"count": 7,
+"end_line": 75,
+"file": "src/money.rs",
+"instances": 1,
+"line": 64
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 5,
+"count": 3,
+"end_line": 80,
+"file": "src/money.rs",
+"instances": 1,
+"line": 78
+},
+{
+"binaries": 2,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 87,
+"file": "src/money.rs",
+"instances": 1,
+"line": 83
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 97,
+"file": "src/money.rs",
+"instances": 1,
+"line": 95
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 102,
+"file": "src/money.rs",
+"instances": 1,
+"line": 100
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 107,
+"file": "src/money.rs",
+"instances": 1,
+"line": 105
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 113,
+"file": "src/money.rs",
+"instances": 1,
+"line": 110
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 5,
+"count": 1,
+"end_line": 122,
+"file": "src/money.rs",
+"instances": 1,
+"line": 116
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 1,
+"count": 1,
+"end_line": 16,
+"file": "tests/ledger_flow.rs",
+"instances": 1,
+"line": 7
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 1,
+"count": 1,
+"end_line": 30,
+"file": "tests/ledger_flow.rs",
+"instances": 1,
+"line": 19
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 1,
+"count": 1,
+"end_line": 37,
+"file": "tests/ledger_flow.rs",
+"instances": 1,
+"line": 33
+},
+{
+"binaries": 1,
+"closure": false,
+"col": 1,
+"count": 1,
+"end_line": 43,
+"file": "tests/ledger_flow.rs",
+"instances": 1,
+"line": 40
+}
+]
+}

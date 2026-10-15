@@ -1,0 +1,95 @@
+{% extends layout %}
+{% from "_macros.html" import outcome, inv_chip, outcome_glyph, run_name %}
+{% block title %}{{ case.nodeid|test_label|visible }} · {{ repo.full_name }}{% endblock %}
+{% block main %}
+<div class="crumbs"><a href="{{ url_for('repos.repo', rid=repo.id) }}">{{ repo.full_name }}</a> / <a href="{{ url_for('repos.tests_page', rid=repo.id) }}">tests</a> / test</div>
+<div class="page-head">
+  <h1><code>{{ case.nodeid|test_label|visible }}</code></h1>
+  <p class="meta">
+    <span>{% if run %}run <a href="{{ url_for('runs.run_page', run_id=run.id) }}" data-go="r"><code>{{ run.head_sha|sha }}</code></a> · {{ run_name(run, prs) }} · {{ run.created_at|stamp }}{% else %}no completed run yet{% endif %}</span>
+    {% if case.quarantined %}<span class="badge">quarantined</span>{% endif %}
+  </p>
+</div>
+
+<div class="grid-2 test-top">
+<section class="panel" id="test-identity">
+  <h2>Identity</h2>
+  <dl class="facts-dl">
+    <dt>Node id</dt><dd class="nodeid">{{ case.nodeid|visible|nodeid }}</dd>
+    <dt>File</dt><dd><code>{{ test_path|visible }}</code>{% if decorations and decorations.line %}<span class="muted">:{{ decorations.line }}</span>{% endif %}</dd>
+    <dt>Markers</dt><dd>{% if decorations and decorations.markers %}{% for m in decorations.markers %}<span class="chip chip-more">{{ m|visible }}</span>{% if not loop.last %} {% endif %}{% endfor %}{% elif decorations %}<span class="muted">none</span>{% else %}<span class="muted">not read (the test's source is not in this run's facts)</span>{% endif %}</dd>
+    <dt>Property-based</dt><dd>{% if decorations is none %}<span class="muted">unknown</span>{% elif decorations.hypothesis %}yes, <code>@given</code> (Hypothesis){% else %}no{% endif %}</dd>
+    <dt>Invariants</dt><dd>
+      {% if invariants %}<ul class="plain-list">{% for inv in invariants %}<li>{{ inv_chip(inv.status) }} <a href="{{ url_for('repos.invariants_page', rid=repo.id, run=run.id if run and run.pr_id else none) }}"><code>{{ inv.key }}</code></a> <span class="muted">{{ inv.statement }}</span></li>{% endfor %}</ul>
+      {% elif decorations and decorations.invariant_ids %}{% for i in decorations.invariant_ids %}<code>{{ i|visible }}</code>{% if not loop.last %}, {% endif %}{% endfor %} <span class="muted">(marked in the source; no result in this run)</span>
+      {% else %}<span class="muted">none linked</span>{% endif %}
+    </dd>
+    {% if stats %}<dt>History</dt><dd>{{ stats.runs_n|plural('run') }} · fail rate {{ (100 * stats.fails_n / stats.runs_n)|pct if stats.runs_n else 'n/a' }}{% if stats.flaky_n %} · flaky {{ stats.flaky_n }}×{% endif %} · p50 {{ stats.p50_ms|ms }}</dd>{% endif %}
+  </dl>
+</section>
+
+<section class="panel" id="test-result">
+  <h2>In this run</h2>
+  {% if result %}
+  <p class="result-line">{{ outcome(result.outcome) }}{% if result.flaky %} <span class="badge">flaky: passed on retry</span>{% endif %}{% if result.quarantined %} <span class="badge">quarantined</span>{% endif %}
+    <span class="muted">{{ result.duration_ms|ms }}{% if result.failed_phase %} · failed in {{ result.failed_phase }}{% endif %} · {{ result.attempts }} attempt{{ '' if result.attempts == 1 else 's' }}{% if result.rank %} · ran {{ result.rank|ordinal }}{% endif %}{% if result.shard_id is not none %} · shard {{ result.shard_id }}{% endif %}</span></p>
+  {% if attempts|length > 1 %}<ol class="attempts">{% for a in attempts %}<li>{{ outcome(a.outcome) }} <span class="muted">{{ a.duration_ms|ms }}{% if a.shard_id is not none %} · shard {{ a.shard_id }}{% endif %}</span></li>{% endfor %}</ol>{% endif %}
+  {% if longrepr %}<pre class="longrepr">{{ longrepr|visible }}</pre>{% elif result.outcome in ('failed', 'error') %}<p class="empty">No failure text recorded.</p>{% endif %}
+  {% elif run %}<p class="empty">This test has no result in this run.</p>
+  {% else %}<p class="empty">No run selected.</p>{% endif %}
+  {% if history %}
+  <div class="history-block left">
+    <ol class="history" aria-label="Last {{ history|length }} results, oldest first">{% for res, r in history %}<li class="h-{{ 'flaky' if res.flaky else res.outcome }}{{ ' is-current' if run and r.id == run.id }}"><a href="{{ url_for('testpage.test_page', rid=repo.id, test_id=case.id, run=r.id) }}" title="{{ res.outcome.replace('_', ' ') }}{{ ' (flaky)' if res.flaky }} · {{ run_name(r, prs) }} {{ r.head_sha|sha }} · {{ r.created_at|stamp }}"{% if run and r.id == run.id %} aria-current="page"{% endif %}><span aria-hidden="true">{{ outcome_glyph(res.outcome, res.flaky) }}</span><span class="sr">{{ res.outcome.replace('_', ' ') }}{{ ' (flaky)' if res.flaky }}, {{ r.created_at|stamp }}</span></a></li>{% endfor %}</ol>
+    <span class="history-caption">last {{ history|length|plural('result') }} · oldest → newest · each square opens that run</span>
+  </div>
+  {% endif %}
+</section>
+</div>
+
+{% if run and facts_exists %}
+<section class="panel" id="test-flow">
+  <div class="panel-head"><h2>Data flow</h2><span class="aside">the test → callers in between → functions it called → parameters, from this run's sampled calls</span></div>
+  {{ flow }}
+</section>
+
+<section class="panel" id="test-functions">
+  <div class="panel-head"><h2>Functions it called</h2><span class="aside">{{ called }} function{{ '' if called == 1 else 's' }} in {{ files|length }} file{{ '' if files|length == 1 else 's' }}; a function counts when the test ran a line of its body</span></div>
+  <p class="strip-legend">
+    <span class="lg-item"><svg viewBox="0 0 10 10" class="sw" aria-hidden="true"><rect class="sg-filled sg-f2" x="0.5" y="0.5" width="9" height="9" rx="1.5"/></svg> <strong>this test</strong>: a class it passed in</span>
+    <span class="lg-item"><svg viewBox="0 0 10 10" class="sw" aria-hidden="true"><rect class="sg-hollow" x="0.75" y="0.75" width="8.5" height="8.5" rx="1"/></svg> a class no test passed in</span>
+    <span class="lg-item"><strong>any test</strong>: the function's whole picture (filled = some test passed it in)</span>
+  </p>
+  {% for f in files %}
+  <h3 class="sub"><code>{{ f.path|visible }}</code> <span class="muted">· {{ f.run_lines|length }} line{{ '' if f.run_lines|length == 1 else 's' }} run, {{ f.statements }} statement{{ '' if f.statements == 1 else 's' }}{% if f.source_url %} · <a href="{{ f.source_url }}">source view</a>{% endif %}</span></h3>
+  {% if f.functions %}
+  <div class="table-scroll">
+  <table class="test-fn-table">
+    <thead><tr><th>Function</th><th class="num">Body lines run</th><th>Lines</th><th>Input classes <span class="muted">this test · any test</span></th></tr></thead>
+    <tbody>
+    {% for fn in f.functions %}
+      <tr data-func-key="{{ fn.func_key }}">
+        <td><a href="{{ fn.url }}"><code>{{ fn.qualname|visible }}</code></a> <span class="muted">:{{ fn.def_line }}</span>{% if fn.via %}<br><span class="muted">via {% for v in fn.via %}<code>{{ v|visible }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}</td>
+        <td class="num">{{ fn.lines|length }} of {{ fn.body_statements }}</td>
+        <td class="line-ranges">{% for a, b in fn.ranges %}<a href="{{ fn.source_url.split('#')[0] }}#L{{ a }}">{{ a }}{% if b != a %}–{{ b }}{% endif %}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
+        <td>
+          {% for reach, mine, anyt, example in fn.strips %}
+          <div class="reach-row"><code class="reach-param">{{ reach.param|visible }}</code><span class="reach-strip" title="this test">{{ mine }}</span><span class="reach-strip any" title="any test">{{ anyt }}</span>
+            <span class="muted">{% if reach.reached %}{{ reach.reached|join(', ') }}{% else %}no class{% endif %}{% if reach.others_only %} · {{ reach.others_only }} more by other tests{% endif %}{% if example %} · e.g. <code>{{ example|visible }}</code>{% endif %}</span></div>
+          {% else %}<span class="muted">{{ fn.note or 'no input classes expected' }}</span>{% endfor %}
+          {% if fn.strips and fn.note %}<span class="muted">{{ fn.note }}</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  {% if f.module_ranges %}<p class="muted">Module- or class-level lines run: {% for a, b in f.module_ranges %}{{ a }}{% if b != a %}–{{ b }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+  {% else %}
+  <p class="empty">This test ran no line of a measured file in this run{% if result and result.outcome == 'skipped' %} (it was skipped){% endif %}.</p>
+  {% endfor %}
+</section>
+{% elif run %}
+<section class="panel"><p class="empty">Run <code>{{ run.head_sha|sha }}</code> has no facts (coverage was not ingested, or retention removed it): the data flow is not available.</p></section>
+{% endif %}
+{% endblock %}

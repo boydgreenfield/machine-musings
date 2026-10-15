@@ -1,0 +1,421 @@
+"""Every facts table's Arrow schema, in one place.
+
+Files under ``repo=<repo_id>/run=<run_id>/`` never store ``repo_id`` or ``run_id``: the DuckDB views
+add both from the Hive partition directories. *Shard tables* hold one shard bundle's rows and are
+written once per ingest attempt as ``<table>.shard=<n>.attempt=<k>.parquet`` (``ATTEMPT_TABLES``),
+except ``ingest_log.shard=<n>.parquet``, the shard's history and commit record; *run tables* are
+written once per run as ``<table>.parquet``.
+
+``tests_dim`` has one row per nodeid of the shard (``<import>`` included); ``has_lines`` says
+whether this shard's ``test_lines`` hold the test's coverage (a test whose coverage another shard
+recorded first keeps that coverage, see :func:`coverset.facts.ingest.ingest_shard`).
+
+``functions.types_json`` is the declared types a neutral bundle shipped for the function, as the
+JSON object ``{param: descriptor | null}`` of ``functions.jsonl``'s ``types`` (``return`` included),
+or null when nothing was shipped (a Python run reads the annotations from the head source instead).
+Files written before the column existed read it as null.
+
+``call_shapes.caller_key`` is the caller's ``func_key`` (``caller_kind = 'func'``, with the caller's
+path, qualname and first line alongside) or the calling test's nodeid (``caller_kind = 'test'``).
+
+Line numbers are int32 (coverage.py arcs use negative numbers for code-object entry and exit);
+``test_id`` 0 is the ``<import>`` pseudo test.
+"""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+__all__ = [
+    "ATTEMPT_TABLES",
+    "CALLABLE_KINDS",
+    "ECONOMY_TABLES",
+    "RUN_TABLES",
+    "SCHEMAS",
+    "SHARD_TABLES",
+    "SUMMARY_TABLES",
+    "TABLES",
+]
+
+CALLABLE_KINDS = ("function", "method")
+"""``functions.kind`` values that are callables (classes and modules are regions, not callees)."""
+
+_LINES = pa.list_(pa.int32())
+_TS = pa.timestamp("us", tz="UTC")
+
+SCHEMAS: dict[str, pa.Schema] = {
+    # -- shard tables ------------------------------------------------------------------------
+    "tests_dim": pa.schema(
+        [
+            ("test_id", pa.int32()),
+            ("nodeid", pa.string()),
+            ("file_id", pa.int32()),
+            ("outcome", pa.string()),
+            ("duration_s", pa.float64()),
+            ("shard_id", pa.int32()),
+            ("has_lines", pa.bool_()),
+        ]
+    ),
+    "files": pa.schema([("file_id", pa.int32()), ("path", pa.string())]),
+    "file_static": pa.schema(
+        [
+            ("commit_sha", pa.string()),
+            ("file_id", pa.int32()),
+            ("blob_sha", pa.string()),
+            ("n_lines", pa.int32()),
+            ("statements", _LINES),
+            ("excluded", _LINES),
+            ("branch_lines", _LINES),
+        ]
+    ),
+    "file_arcs_possible": pa.schema(
+        [
+            ("commit_sha", pa.string()),
+            ("file_id", pa.int32()),
+            ("from_line", pa.int32()),
+            ("to_line", pa.int32()),
+        ]
+    ),
+    "test_lines": pa.schema([("test_id", pa.int32()), ("file_id", pa.int32()), ("line", pa.int32())]),
+    "test_file_bits": pa.schema(
+        [("test_id", pa.int32()), ("file_id", pa.int32()), ("n_lines", pa.int32()), ("bits", pa.binary())]
+    ),
+    "run_arcs": pa.schema([("file_id", pa.int32()), ("from_line", pa.int32()), ("to_line", pa.int32())]),
+    "call_shapes": pa.schema(
+        [
+            ("func_key", pa.string()),
+            ("param", pa.string()),
+            ("shape_id", pa.int32()),
+            ("caller_kind", pa.string()),
+            ("caller_key", pa.string()),
+            ("caller_path", pa.string()),
+            ("caller_qualname", pa.string()),
+            ("caller_line", pa.int32()),
+            ("samples", pa.int64()),
+            ("test_ids", _LINES),
+            ("truncated", pa.bool_()),
+            ("example_test_id", pa.int32()),
+            ("example_repr", pa.string()),
+        ]
+    ),
+    "func_sampling": pa.schema(
+        [
+            ("func_key", pa.string()),
+            ("path", pa.string()),
+            ("qualname", pa.string()),
+            ("firstlineno", pa.int32()),
+            ("calls", pa.int64()),
+            ("tests_called", pa.int32()),
+            ("tests_truncated", pa.int32()),
+            ("truncated", pa.bool_()),
+            ("test_ids", _LINES),
+        ]
+    ),
+    "shapes": pa.schema([("shape_id", pa.int32()), ("shape_key", pa.string())]),
+    "ingest_log": pa.schema(
+        [
+            ("shard_id", pa.int32()),
+            ("attempt", pa.int32()),
+            ("bundle_sha256", pa.string()),
+            ("status", pa.string()),
+            ("ingested_at", _TS),
+            ("n_tests", pa.int32()),
+            ("n_test_lines", pa.int64()),
+            ("convert_json", pa.string()),
+        ]
+    ),
+    # -- run tables --------------------------------------------------------------------------
+    "functions": pa.schema(
+        [
+            ("commit_sha", pa.string()),
+            ("func_key", pa.string()),
+            ("file_id", pa.int32()),
+            ("path", pa.string()),
+            ("qualname", pa.string()),
+            ("ordinal", pa.int32()),
+            ("def_line", pa.int32()),
+            ("body_start", pa.int32()),
+            ("end_line", pa.int32()),
+            ("body_hash", pa.string()),
+            ("sig_hash", pa.string()),
+            ("params_json", pa.string()),
+            ("kind", pa.string()),
+            ("language", pa.string()),
+            ("types_json", pa.string()),
+        ]
+    ),
+    "runs_dim": pa.schema(
+        [
+            ("head_sha", pa.string()),
+            ("base_sha", pa.string()),
+            ("branch", pa.string()),
+            ("pr_number", pa.int64()),
+            ("created_at", _TS),
+            ("scoring_basis_run_id", pa.string()),
+            ("expected_shards", pa.int32()),
+            ("ingested_shards", pa.int32()),
+            ("coverage_complete", pa.bool_()),
+            ("finalized_at", _TS),
+        ]
+    ),
+    "file_cov": pa.schema(
+        [
+            ("file_id", pa.int32()),
+            ("path", pa.string()),
+            ("statements", pa.int32()),
+            ("covered", pa.int32()),
+            ("branches", pa.int32()),
+            ("branches_covered", pa.int32()),
+            ("partial_branches", pa.int32()),
+            ("percent", pa.float64()),
+        ]
+    ),
+    "func_input_cov": pa.schema(
+        [
+            ("func_key", pa.string()),
+            ("tests_called", pa.int32()),
+            ("tests_sampled", pa.int32()),
+            ("tests_truncated", pa.int32()),
+            ("blocks_expected", pa.int32()),
+            ("blocks_observed", pa.int32()),
+            ("missing_json", pa.string()),
+        ]
+    ),
+    # -- per-run summaries (coverset.facts.aggregates, written at finalize; docs/data-model.md) --
+    "func_body": pa.schema(
+        [
+            ("func_key", pa.string()),
+            ("statements", pa.int32()),
+            ("covered", pa.int32()),
+            ("lines", _LINES),
+            ("covered_lines", _LINES),
+        ]
+    ),
+    "tree_leaf": pa.schema(
+        [
+            ("file_id", pa.int32()),
+            ("func_key", pa.string()),
+            ("statements", pa.int32()),
+            ("covered", pa.int32()),
+        ]
+    ),
+    "line_hits": pa.schema(
+        [
+            ("file_id", pa.int32()),
+            ("line", pa.int32()),
+            ("tests", pa.int32()),
+            ("by_import", pa.bool_()),
+        ]
+    ),
+    # -- test economy run tables (coverset.facts.economy, written at finalize; docs/economy.md) --
+    "test_economy": pa.schema(
+        [
+            ("test_id", pa.int32()),
+            ("measured", pa.bool_()),
+            ("reason", pa.string()),
+            ("statements", pa.int32()),
+            ("asserts", pa.int32()),
+            ("helper_asserts", pa.int32()),
+            ("raises", pa.bool_()),
+            ("fixtures", pa.int32()),
+            ("helper_statements", pa.int32()),
+            ("file_lines", pa.int32()),
+            ("cases", pa.int32()),
+            ("lines", pa.int32()),
+            ("arcs", pa.int32()),
+            ("classes", pa.int32()),
+            ("observations", pa.int32()),
+            ("unique_lines", pa.int32()),
+            ("unique_arcs", pa.int32()),
+            ("unique_classes", pa.int32()),
+            ("unique_facts", pa.int32()),
+            ("leverage", pa.float64()),
+            ("duration_ms", pa.float64()),
+            ("cost_per_fact_ms", pa.float64()),
+            ("signature", pa.string()),
+            ("group_id", pa.string()),
+            ("dominated_by", pa.int32()),
+            ("in_minimal_set", pa.bool_()),
+            ("removable", pa.bool_()),
+            ("assertion_free", pa.bool_()),
+            ("stale", pa.bool_()),
+            ("empty", pa.bool_()),
+        ]
+    ),
+    "test_families": pa.schema(
+        [
+            ("family", pa.string()),
+            ("path", pa.string()),
+            ("cases", pa.int32()),
+            ("distinct_flows", pa.int32()),
+            ("distinct_signatures", pa.int32()),
+            ("redundant_cases", pa.int32()),
+            ("case_ids", _LINES),
+        ]
+    ),
+    "func_testing": pa.schema(
+        [
+            ("func_key", pa.string()),
+            ("path", pa.string()),
+            ("qualname", pa.string()),
+            ("kind", pa.string()),
+            ("covered", pa.bool_()),
+            ("observed", pa.bool_()),
+            ("direct_tests", pa.int32()),
+            ("indirect_tests", pa.int32()),
+            ("indirect_only", pa.bool_()),
+            ("untested", pa.bool_()),
+            ("handlers_total", pa.int32()),
+            ("handlers_unexercised", pa.int32()),
+            ("handler_lines", pa.string()),
+        ]
+    ),
+    "run_economy": pa.schema(
+        [
+            ("tests", pa.int32()),
+            ("measured_tests", pa.int32()),
+            ("statements", pa.int64()),
+            ("helper_statements", pa.int64()),
+            ("asserts", pa.int64()),
+            ("assertion_free", pa.int32()),
+            ("lines", pa.int64()),
+            ("arcs", pa.int64()),
+            ("classes", pa.int64()),
+            ("observations", pa.int64()),
+            ("unique_facts", pa.int64()),
+            ("total_duration_ms", pa.float64()),
+            ("minimal_set_size", pa.int32()),
+            ("minimal_set_duration_ms", pa.float64()),
+            ("removable_candidates", pa.int32()),
+            ("removable_duration_ms", pa.float64()),
+            ("equivalence_groups", pa.int32()),
+            ("tests_in_groups", pa.int32()),
+            ("dominated", pa.int32()),
+            ("empty_tests", pa.int32()),
+            ("families", pa.int32()),
+            ("collapsible_families", pa.int32()),
+            ("redundant_cases", pa.int32()),
+            ("stale_tests", pa.int32()),
+            ("functions", pa.int32()),
+            ("indirect_only_functions", pa.int32()),
+            ("untested_functions", pa.int32()),
+            ("handlers_total", pa.int32()),
+            ("handlers_unexercised", pa.int32()),
+            ("base_run_id", pa.string()),
+            ("base_sha", pa.string()),
+            ("base_exact", pa.bool_()),
+            ("added_test_statements", pa.int32()),
+            ("removed_test_statements", pa.int32()),
+            ("test_files_changed", pa.int32()),
+            ("newly_covered_lines", pa.int32()),
+            ("new_classes", pa.int32()),
+            ("new_tests", pa.int32()),
+            ("new_tests_unique_facts", pa.int64()),
+            ("test_tax", pa.float64()),
+            ("threshold", pa.float64()),
+            ("min_statements", pa.int32()),
+            ("flagged", pa.bool_()),
+            ("tax_message", pa.string()),
+            ("weights_json", pa.string()),
+            ("notes_json", pa.string()),
+            ("computed_ms", pa.float64()),
+        ]
+    ),
+}
+
+SHARD_TABLES: frozenset[str] = frozenset(
+    {
+        "tests_dim",
+        "files",
+        "file_static",
+        "file_arcs_possible",
+        "test_lines",
+        "test_file_bits",
+        "run_arcs",
+        "call_shapes",
+        "func_sampling",
+        "shapes",
+        "ingest_log",
+    }
+)
+ATTEMPT_TABLES: frozenset[str] = SHARD_TABLES - {"ingest_log"}
+ECONOMY_TABLES: tuple[str, ...] = ("test_economy", "test_families", "func_testing", "run_economy")
+"""The test-economy run tables: written by ``finalize_run`` (``coverset.facts.economy``), dropped
+with the other aggregates when a shard is re-ingested. ``test_economy.test_id``, ``dominated_by``
+and ``test_families.case_ids`` are dictionary test ids; ``docs/economy.md`` defines every column."""
+SUMMARY_TABLES: tuple[str, ...] = ("func_body", "tree_leaf", "line_hits")
+"""Per-run summaries of ``test_lines`` written by ``finalize_run`` (``coverset.facts.aggregates``)
+so pages read O(functions) rows instead of scanning every executed line: ``func_body`` is each
+callable's body by the function page's rule, ``tree_leaf`` the treemap's leaves, ``line_hits`` the
+distinct tests per executed line. Dropped with the other aggregates when a shard is re-ingested;
+readers fall back to ``test_lines`` for runs finalized before they existed."""
+RUN_TABLES: frozenset[str] = frozenset(
+    {"functions", "runs_dim", "file_cov", "func_input_cov", *ECONOMY_TABLES, *SUMMARY_TABLES}
+)
+TABLES: tuple[str, ...] = tuple(SCHEMAS)
+
+# -- production flows (coverset.facts.flows; docs/production-flows.md) -------------------------------
+# Kept out of SCHEMAS/TABLES: these files live under repo=<id>/prod/, never in a run directory, so
+# the run views, gc and the per-run inventories never see them.
+_WINDOW_COLS = [
+    ("window_start", _TS),
+    ("window_end", _TS),
+    ("service", pa.string()),
+    ("env", pa.string()),
+]
+_PROD_FUNC_COLS = [
+    ("func_key", pa.string()),
+    ("module", pa.string()),
+    ("qualname", pa.string()),
+    ("path", pa.string()),
+    ("line", pa.int32()),
+]
+PROD_SCHEMAS: dict[str, pa.Schema] = {
+    "prod_windows": pa.schema(
+        [
+            *_WINDOW_COLS,
+            ("release", pa.string()),
+            ("payload_sha256", pa.string()),
+            ("imported_at", _TS),
+            ("k", pa.int32()),
+            ("sample_rate", pa.float64()),
+            ("probe_json", pa.string()),
+        ]
+    ),
+    "prod_funcs": pa.schema(
+        [
+            *_WINDOW_COLS,
+            *_PROD_FUNC_COLS,
+            ("calls", pa.int64()),
+            ("sampled", pa.int64()),
+            ("capped", pa.bool_()),
+        ]
+    ),
+    "prod_shapes": pa.schema(
+        [
+            *_WINDOW_COLS,
+            *_PROD_FUNC_COLS,
+            ("param", pa.string()),
+            ("shape_id", pa.int32()),
+            ("calls", pa.float64()),
+            ("traces", pa.int64()),
+            ("k_ok", pa.bool_()),
+            ("callers_json", pa.string()),
+        ]
+    ),
+    "prod_calls": pa.schema(
+        [
+            *_WINDOW_COLS,
+            *_PROD_FUNC_COLS,
+            ("vector_json", pa.string()),
+            ("calls", pa.float64()),
+            ("traces", pa.int64()),
+            ("k_ok", pa.bool_()),
+        ]
+    ),
+    "prod_flows": pa.schema(
+        [*_WINDOW_COLS, ("funcs_json", pa.string()), ("traces", pa.int64()), ("k_ok", pa.bool_())]
+    ),
+}
+PROD_TABLES: tuple[str, ...] = tuple(PROD_SCHEMAS)
+__all__ += ["PROD_SCHEMAS", "PROD_TABLES"]
